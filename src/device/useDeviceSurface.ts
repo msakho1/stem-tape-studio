@@ -51,7 +51,8 @@ type Action =
   | { type: "release"; control: Control }
   | { type: "gesture"; gesture: Gesture }
   | { type: "perf"; intent: PerfIntent }
-  | { type: "faderCommit"; index: number; value: number };
+  | { type: "faderCommit"; index: number; value: number; claimed?: ContinuousChannel };
+
 
 function reducer(state: SurfaceState, action: Action): SurfaceState {
   switch (action.type) {
