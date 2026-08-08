@@ -10,18 +10,36 @@
 import type { ProbeResult, StemRole } from "./format";
 import type { StoredProject } from "./store";
 
+export interface DerivedCopy {
+  kind: "mono-downmix";
+  /** Key of the derived working blob (never replaces the original). */
+  derivedKey?: string;
+  sourceBlobKey?: string;
+  sourceContentHash?: string;
+  conversion?: { type: "mono-downmix"; sampleRate: number };
+  derivedSchemaVersion?: number;
+}
+
 export interface SessionStem {
   role: StemRole;
   filename: string;
   blob: Blob;
   probe: ProbeResult;
   provenance: "user-private" | "bundled-demo";
+  /** Exact retained decoded bytes (from the adopted AudioBuffer). */
   decodedBytes: number;
+  /** Encoded bytes of the original file. */
+  fileBytes: number;
+  estimate: PreDecodeEstimate | null;
+  decodeCount: number;
+  decodeMs: number | null;
   loaded: boolean;
   /** Deleted from the surface but recoverable until the project is compacted. */
   trashed: boolean;
   blobKey: string;
   contentHash: string;
+  /** Present when a Memory Saver working copy is in use. */
+  derived: DerivedCopy | null;
 }
 
 export interface SessionState {
@@ -31,8 +49,23 @@ export interface SessionState {
   saved: boolean;
   savedAt: number | null;
   source: "none" | "demo" | "upload" | "restored";
+  /** Hybrid BPM model: tempo-grid ?? manual ?? provisional 120. */
+  bpm: number;
+  bpmSource: BpmSource;
+  highMemoryMode: boolean;
   lastError: string | null;
 }
+
+export type BpmSource = "manual" | "tempo-grid" | "provisional";
+
+export const PROVISIONAL_BPM = 120;
+
+export function resolveBpm(tempoGridBpm: number | null, manualBpm: number | null): { bpm: number; source: BpmSource } {
+  if (tempoGridBpm != null && tempoGridBpm > 0) return { bpm: tempoGridBpm, source: "tempo-grid" };
+  if (manualBpm != null && manualBpm > 0) return { bpm: manualBpm, source: "manual" };
+  return { bpm: PROVISIONAL_BPM, source: "provisional" };
+}
+
 
 function emptySession(): SessionState {
   return {
