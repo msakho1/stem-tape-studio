@@ -33,6 +33,7 @@ import { FxRack, type FxRackSnapshot } from "./fx/rack";
 import { FX_FAMILIES, type FxFamily } from "@/machine/stemPerformance";
 import { RecordingController } from "./input/recorder";
 import { PerformanceRecorder } from "./export/performanceRecorder";
+import { emptyGrid, tapGrid, type GridState } from "./grid";
 
 export type EnginePreference = "node" | "worklet";
 
@@ -200,6 +201,10 @@ export class AudioEngine {
   lastDecodeMs: number | null = null;
   /** Published for the diagnostics panel. */
   readonly antiClickMatrix = ANTI_CLICK_MATRIX;
+  /** Phase 6 — frame-anchored tempo grid, learned by tap. */
+  grid: GridState = emptyGrid(48000);
+  lastGridTapFrame: number | null = null;
+  quantisePunch = false;
   /** Phase 6 — created lazily, only after the context exists. */
   private recorder: RecordingController | null = null;
   private perfRecorder: PerformanceRecorder | null = null;
