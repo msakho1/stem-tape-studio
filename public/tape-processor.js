@@ -605,11 +605,6 @@ class TapeProcessor extends AudioWorkletProcessor {
     this.rendered = true;
     return true;
   }
-
-
-    this.rendered = true;
-    return true;
-  }
 }
 
 registerProcessor("tape-processor", TapeProcessor);
