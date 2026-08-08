@@ -124,9 +124,9 @@ Safety: `navigator.storage.estimate()` shown as used/quota, `persist()` requeste
 6. Continuous control bus for live fader preview; reducer commit on pointer-up.
 7. Command consumers for play/restart/mute/master/track-delete + undo.
 8. Audio diagnostics block in the existing panel (requested vs actual state, drift, memory, storage, source provenance).
+9. `/bench` benchmark route (finalizes platform-specific memory thresholds).
+10. Offline + Playwright suites (including the ordered-command-stream cases), then the device matrix.
 
-7. `/bench` benchmark route.
-8. Offline + Playwright suites, then the device matrix.
 
 Acceptance: upload four WAVs on phone or desktop, press Play on the rendered SP-1, hear one synchronized song, mix with the four faders **with sound changing continuously during the drag**, mute/unmute, delete a track and undo it from the trash, stop and restart reliably, reload a saved local project, and confirm **no network request contains user-selected or user-recorded audio**. Bundled demo stems are ordinary app assets and will legitimately appear as network fetches; diagnostics label each audio source as `bundled-demo` or `user-private` so the two are never confused.
 
