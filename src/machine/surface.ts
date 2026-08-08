@@ -373,6 +373,46 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
   }
 }
 
+/** Raw press bookkeeping. FUNCTION + anything marks FUNCTION as a modifier. */
+export function pressControl(state: SurfaceState, control: Control): SurfaceState {
+  if (state.pressed.includes(control)) return state;
+  const pressed = [...state.pressed, control];
+  return {
+    ...state,
+    pressed,
+    functionHeld: control === "function" ? true : state.functionHeld,
+    fnModifierUsed:
+      control !== "function" && (state.functionHeld || control !== "function")
+        ? state.functionHeld || state.fnModifierUsed
+        : state.fnModifierUsed,
+    fnHoldReached: control === "function" ? false : state.fnHoldReached,
+    rocker:
+      control === "rocker-fwd" ? "forward" : control === "rocker-rwd" ? "rewind" : state.rocker,
+  };
+}
+
+/**
+ * Raw release bookkeeping. FUNCTION hold is the only power row in v2.6, and it
+ * commits here: past 450 ms AND never used as a modifier during that hold.
+ */
+export function releaseControl(state: SurfaceState, control: Control): SurfaceState {
+  const pressed = state.pressed.filter((c) => c !== control);
+  let next: SurfaceState = {
+    ...state,
+    pressed,
+    rocker: control.startsWith("rocker") ? "center" : state.rocker,
+  };
+  if (control !== "function") return next;
+
+  const shouldToggle = state.fnHoldReached && !state.fnModifierUsed;
+  next = { ...next, functionHeld: false, fnHoldReached: false, fnModifierUsed: false };
+  if (!shouldToggle) return next;
+  const power = state.power === "on" ? "off" : "on";
+  next = { ...next, power, playing: power === "off" ? false : next.playing };
+  return fire(next, "fn.power", `power ${power}`, performance.now());
+}
+
+
 /** Fader commit routing per v2.6: FN layer, heads layer, otherwise track volume. */
 export function applyFader(state: SurfaceState, index: number, value: number): SurfaceState {
   const t = performance.now();
