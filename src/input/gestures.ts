@@ -7,8 +7,8 @@ export interface RawInputEvent {
   phase: "down" | "up" | "cancel";
   pointerId: number | "keyboard";
   t: number;
-  x?: number;
-  y?: number;
+  x?: number | undefined;
+  y?: number | undefined;
 }
 
 export type Gesture =
