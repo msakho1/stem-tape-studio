@@ -75,9 +75,13 @@ function emptySession(): SessionState {
     saved: false,
     savedAt: null,
     source: "none",
+    bpm: PROVISIONAL_BPM,
+    bpmSource: "provisional",
+    highMemoryMode: false,
     lastError: null,
   };
 }
+
 
 type Listener = (s: SessionState) => void;
 
