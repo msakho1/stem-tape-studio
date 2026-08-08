@@ -108,6 +108,10 @@ export class ChordArbiter {
   /** Controls claimed by a chord: their base v2.6 gesture must be dropped. */
   private claimed = new Set<Control>();
   private listeners = new Set<(i: PerfIntent) => void>();
+  /** Volume held inside FX mode: macro repeat timers, per control. */
+  private macroTimers = new Map<Control, ReturnType<typeof setInterval> | ReturnType<typeof setTimeout>>();
+  /** Volume presses that became a macro hold — their release must not cycle. */
+  private macroFired = new Set<Control>();
 
   constructor(private view: () => ArbiterView) {}
 
@@ -134,6 +138,18 @@ export class ChordArbiter {
   reset() {
     this.down.clear();
     this.claimed.clear();
+    this.clearMacro();
+  }
+
+  private clearMacro(control?: Control) {
+    const controls = control ? [control] : [...this.macroTimers.keys()];
+    for (const c of controls) {
+      const timer = this.macroTimers.get(c);
+      if (timer != null) clearTimeout(timer as ReturnType<typeof setTimeout>);
+      if (timer != null) clearInterval(timer as ReturnType<typeof setInterval>);
+      this.macroTimers.delete(c);
+      this.macroFired.delete(c);
+    }
   }
 
   /** Feed every raw transition here, in order. */
@@ -159,43 +175,103 @@ export class ChordArbiter {
     return null;
   }
 
+  private startMacroHold(control: Control, dir: 1 | -1, stem: StemIndex, bank: BankIndex) {
+    this.clearMacro(control);
+    const fire = () => {
+      this.macroFired.add(control);
+      this.emit({ type: "fx.macro", stem, bank, dir }, [control], `macro ${dir > 0 ? "+" : "−"} on bank ${bank + 1}`);
+    };
+    const start = setTimeout(() => {
+      fire();
+      const repeat = setInterval(fire, this.timings.macroRepeatMs);
+      this.macroTimers.set(control, repeat);
+    }, this.timings.macroHoldMs);
+    this.macroTimers.set(control, start);
+  }
+
   private onDown(control: Control, t: number) {
     // A claim lives until the control is pressed again: clearing it on release
     // would let the base v2.6 tap (which fires on release) slip through.
     this.claimed.delete(control);
     this.down.set(control, t);
-    const { fxOverlay, activeStem } = this.view();
+    const { fxOverlay, activeStem, selectedBank } = this.view();
 
-    // Precedence 6 — bare FX-overlay track press starts a momentary effect.
     if (fxOverlay && isTrack(control)) {
-      const modifierHeld =
-        this.down.has("play") || this.down.has("function") || this.down.has("volume-minus") || this.down.has("volume-plus");
-      if (!modifierHeld) {
-        const family = FX_FAMILY_BY_TRACK[TRACK_INDEX[control]!]!;
+      const bank = bankOfButton(TRACK_INDEX[control]!);
+      const functionHeld = this.down.has("function");
+      const otherModifier = this.down.has("play") || this.down.has("volume-minus") || this.down.has("volume-plus");
+      if (functionHeld) {
+        // FUNCTION + bank claims the gesture and toggles the latch. No momentary.
+        this.claim(control, "function");
+        this.emit({ type: "fx.bank.select", stem: activeStem, bank }, [control], `bank ${bank + 1} selected`);
+        this.emit({ type: "fx.latch", stem: activeStem, bank }, [control, "function"], `latch toggle bank ${bank + 1}`);
+        return;
+      }
+      if (!otherModifier) {
+        // Zero hold latency: select AND sound on pointer-down.
         this.claim(control);
-        this.emit({ type: "fx.momentary.start", stem: activeStem, family }, [control], `momentary ${family} on stem ${activeStem + 1}`);
+        this.emit({ type: "fx.bank.select", stem: activeStem, bank }, [control], `bank ${bank + 1} selected`);
+        this.emit(
+          { type: "fx.momentary.start", stem: activeStem, bank },
+          [control],
+          `momentary bank ${bank + 1} on stem ${activeStem + 1}`,
+        );
       }
       return;
     }
 
-    // Play-first and FX-track-first chords are resolved on RELEASE (they need a
-    // duration), but the modifier itself is claimed as soon as the partner
-    // arrives so the base command never dispatches.
+    if (fxOverlay && isVolume(control)) {
+      const other: Control = control === "volume-minus" ? "volume-plus" : "volume-minus";
+      if (this.down.has(other)) {
+        // Vol− + Vol+ is the overlay/system chord — never a cycle or a macro.
+        this.clearMacro(other);
+        this.clearMacro(control);
+        this.claim(control, other);
+        return;
+      }
+      if (selectedBank != null) {
+        // Claimed BEFORE dispatch: no master-volume command is ever emitted.
+        this.claim(control);
+        this.startMacroHold(control, control === "volume-plus" ? 1 : -1, activeStem, selectedBank);
+        return;
+      }
+    }
+
+    // Play-first chords are resolved on RELEASE (they need a duration), but the
+    // modifier is claimed as soon as the partner arrives.
     if (isVolume(control) && this.modifierFresh("play", t)) this.claim("play");
     if (isTrack(control) && this.modifierFresh("play", t)) this.claim("play");
-    if (isVolume(control) && fxOverlay && this.activeFxTrackHeld()) this.claim(this.activeFxTrackHeld()!);
-    if (control === "function" && fxOverlay && this.activeFxTrackHeld()) this.claim(this.activeFxTrackHeld()!);
+
+    if (control === "function" && fxOverlay) {
+      const heldTrack = this.activeFxTrackHeld();
+      if (heldTrack) {
+        const allFour = (Object.keys(TRACK_INDEX) as Control[]).every((c) => this.down.has(c));
+        this.claim("function", heldTrack);
+        if (allFour) {
+          this.emit(
+            { type: "fx.clearLatches", stem: activeStem },
+            ["function", heldTrack],
+            "all four bank buttons + FUNCTION — latches cleared",
+          );
+        } else {
+          const bank = bankOfButton(TRACK_INDEX[heldTrack]!);
+          this.emit({ type: "fx.latch", stem: activeStem, bank }, ["function", heldTrack], `latch toggle bank ${bank + 1}`);
+        }
+      }
+    }
   }
 
   private onCancel(control: Control) {
     // Precedence 1 — safety. A lost pointer releases every claim on it.
     this.down.delete(control);
+    this.clearMacro(control);
     const { fxOverlay, activeStem } = this.view();
     if (fxOverlay && isTrack(control) && this.claimed.has(control)) {
-      const family = FX_FAMILY_BY_TRACK[TRACK_INDEX[control]!]!;
-      this.emit({ type: "fx.momentary.end", stem: activeStem, family }, [control], "pointer cancel — momentary released");
+      const bank = bankOfButton(TRACK_INDEX[control]!);
+      this.emit({ type: "fx.momentary.end", stem: activeStem, bank }, [control], "pointer cancel — momentary released");
     }
   }
+
 
   private onUp(control: Control, t: number) {
     const downAt = this.down.get(control);
