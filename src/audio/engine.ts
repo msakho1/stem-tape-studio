@@ -293,6 +293,10 @@ export class AudioEngine {
   /** Executes one ordered command and answers with an ack. */
   execute(cmd: AudioCommand): Ack {
     const p = cmd.payload;
+    // Before unlock there is no graph at all: say so instead of blaming the track.
+    if (!this.ctx && cmd.type.startsWith("track.")) {
+      return this.ack(cmd, "rejected", "audio not unlocked — enable audio, then repeat the gesture");
+    }
     try {
       switch (cmd.type) {
         case "transport.play": {
