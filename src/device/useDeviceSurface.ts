@@ -24,7 +24,7 @@ import {
   releaseControl,
   type SurfaceState,
 } from "@/machine/surface";
-import { controlBus } from "@/audio/controlBus";
+import { controlBus, type ContinuousChannel } from "@/audio/controlBus";
 
 
 
@@ -51,7 +51,8 @@ type Action =
   | { type: "release"; control: Control }
   | { type: "gesture"; gesture: Gesture }
   | { type: "perf"; intent: PerfIntent }
-  | { type: "faderCommit"; index: number; value: number };
+  | { type: "faderCommit"; index: number; value: number; claimed?: ContinuousChannel };
+
 
 function reducer(state: SurfaceState, action: Action): SurfaceState {
   switch (action.type) {
@@ -68,7 +69,7 @@ function reducer(state: SurfaceState, action: Action): SurfaceState {
       // Stem Tape mappings are dispatched here (phase 4).
       return applyGesture({ ...state, lastGesture: describeGesture(action.gesture) }, action.gesture);
     case "faderCommit":
-      return applyFader(state, action.index, action.value);
+      return applyFader(state, action.index, action.value, action.claimed);
   }
 }
 
@@ -80,7 +81,7 @@ export function useDeviceSurface() {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const capRefs = useRef<Record<number, SVGCircleElement | null>>({});
   const faderValuesRef = useRef<number[]>([0.78, 0.72, 0.65, 0.7]);
-  const dragRef = useRef<{ index: number; pointerId: number } | null>(null);
+  const dragRef = useRef<{ index: number; pointerId: number; channel: ContinuousChannel } | null>(null);
   const frameRef = useRef<number | null>(null);
   const pendingCyRef = useRef<{ index: number; cy: number; value: number } | null>(null);
   /** Latest state, read by imperative pointer handlers without re-binding them. */
@@ -230,6 +231,17 @@ export function useDeviceSurface() {
    * control bus, so the audio moves with the finger instead of waiting for
    * pointer-up. The SVG still never touches an AudioNode.
    */
+  /**
+   * The fader layer is resolved ONCE, at pointer-down, and owned by that
+   * gesture until it ends. HEADS+FUNCTION claims the fader as a scrub gesture,
+   * so a modifier released mid-drag cannot turn a scrub into a volume change.
+   */
+  const resolveChannel = useCallback((): ContinuousChannel => {
+    const layer = layerRef.current;
+    if (layer.heads) return layer.fn ? "headScrub" : "headLevel";
+    return layer.fn ? "window" : "fader";
+  }, []);
+
   const scheduleCap = useCallback((index: number, cy: number, value: number) => {
     pendingCyRef.current = { index, cy, value };
     if (frameRef.current != null) return;
@@ -239,12 +251,15 @@ export function useDeviceSurface() {
       if (!pending) return;
       const cap = capRefs.current[pending.index];
       if (cap) cap.setAttribute("cy", String(pending.cy));
-      const layer = layerRef.current;
+      const drag = dragRef.current;
       controlBus.send({
-        channel: layer.fn ? "window" : layer.heads ? "headScrub" : "fader",
+        channel: drag?.channel ?? "fader",
         index: pending.index,
         value: pending.value,
         committed: false,
+        pointerId: drag?.pointerId ?? -1,
+        phase: "move",
+        timestamp: performance.now(),
       });
     });
   }, []);
@@ -253,21 +268,39 @@ export function useDeviceSurface() {
     (control: Control, e: React.PointerEvent) => {
       e.preventDefault();
       if (!readyRef.current) return;
-      (e.currentTarget as Element).setPointerCapture(e.pointerId);
+      // Capture is an optimisation, never a gate: if the UA refuses it the
+      // gesture must still reach the engine.
+      try {
+        (e.currentTarget as Element).setPointerCapture(e.pointerId);
+      } catch {
+        /* capture unavailable for this pointer */
+      }
       const p = toUserSpace(e.clientX, e.clientY);
       engine.press(control, e.pointerId, performance.now(), p?.x, p?.y);
 
       if (control.startsWith("fader-")) {
         const index = Number(control.slice(-1)) - 1;
-        dragRef.current = { index, pointerId: e.pointerId };
+        const channel = resolveChannel();
+        dragRef.current = { index, pointerId: e.pointerId, channel };
+        const value = p ? cyToFaderValue(p.y) : (faderValuesRef.current[index] ?? 0);
+        // The gesture opens on the bus BEFORE any movement, so the engine can
+        // latch the head's current read position as the scrub origin.
+        controlBus.send({
+          channel,
+          index,
+          value,
+          committed: false,
+          pointerId: e.pointerId,
+          phase: "start",
+          timestamp: performance.now(),
+        });
         if (p) {
-          const value = cyToFaderValue(p.y);
           faderValuesRef.current[index] = value;
           scheduleCap(index, faderValueToCy(value), value);
         }
       }
     },
-    [engine, scheduleCap, toUserSpace],
+    [engine, resolveChannel, scheduleCap, toUserSpace],
   );
 
   const onControlPointerMove = useCallback(
@@ -293,14 +326,18 @@ export function useDeviceSurface() {
     if (!drag) return;
     dragRef.current = null;
     const value = faderValuesRef.current[drag.index] ?? 0;
-    const layer = layerRef.current;
     controlBus.send({
-      channel: layer.fn ? "window" : layer.heads ? "headScrub" : "fader",
+      channel: drag.channel,
       index: drag.index,
       value,
       committed: true,
+      pointerId: drag.pointerId,
+      phase: "end",
+      timestamp: performance.now(),
     });
-    dispatch({ type: "faderCommit", index: drag.index, value });
+    // The reducer is told which layer the gesture claimed, so a modifier
+    // released mid-drag cannot retarget the commit.
+    dispatch({ type: "faderCommit", index: drag.index, value, claimed: drag.channel });
   }, []);
 
   /**
@@ -312,13 +349,26 @@ export function useDeviceSurface() {
     const drag = dragRef.current;
     if (!drag) return;
     dragRef.current = null;
-    const layer = layerRef.current;
-    const channel = layer.fn ? "window" : layer.heads ? "headScrub" : "fader";
-    const committed = controlBus.reconcile(channel, drag.index, stateRef.current.tracks[drag.index]?.volume ?? 0);
+    if (drag.channel === "headScrub") {
+      // Cancelling a scrub restores the pre-gesture head position; there is no
+      // "last committed fader value" to ramp to.
+      controlBus.send({
+        channel: "headScrub",
+        index: drag.index,
+        value: faderValuesRef.current[drag.index] ?? 0,
+        committed: false,
+        pointerId: drag.pointerId,
+        phase: "cancel",
+        timestamp: performance.now(),
+      });
+      return;
+    }
+    const committed = controlBus.reconcile(drag.channel, drag.index, stateRef.current.tracks[drag.index]?.volume ?? 0);
     faderValuesRef.current[drag.index] = committed;
     const cap = capRefs.current[drag.index];
     if (cap) cap.setAttribute("cy", String(faderValueToCy(committed)));
   }, []);
+
 
   const onControlPointerUp = useCallback(
     (control: Control, e: React.PointerEvent) => {

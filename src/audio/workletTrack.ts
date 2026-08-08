@@ -92,6 +92,10 @@ export class WorkletTrack {
   status: MigrationStatus = "node";
   fallbackReason: string | null = null;
   lastAck: WorkletAck | null = null;
+  /** Most recent unsolicited scrub telemetry frame from the kernel. */
+  lastTelemetry: WorkletAck | null = null;
+  onTelemetry: ((t: WorkletTrack, ack: WorkletAck) => void) | null = null;
+
   lastSourceFrame: number | null = null;
   driftFrames: number | null = null;
   peakMigrationBytes = 0;
@@ -166,6 +170,14 @@ export class WorkletTrack {
   }
 
   private receive(ack: WorkletAck) {
+    if (ack.status === "telemetry") {
+      // Telemetry is unsolicited (seq -1) and must never resolve a pending
+      // command or displace the last command ack.
+      this.lastTelemetry = ack;
+      if (typeof ack.renderGapFrames === "number") this.renderGapFrames = ack.renderGapFrames;
+      this.onTelemetry?.(this, ack);
+      return;
+    }
     this.lastAck = ack;
     this.acks.unshift(ack);
     if (this.acks.length > 40) this.acks.length = 40;
@@ -178,6 +190,7 @@ export class WorkletTrack {
       fn(ack);
     }
   }
+
 
   /** Transfer PCM ownership and wait for the readiness handshake. */
   async adopt(buffer: AudioBuffer): Promise<WorkletAck> {
@@ -262,12 +275,24 @@ export class WorkletTrack {
     return this.send({ type: "setHeads", seq: this.nextSeq(), heads, cycleStart, cycleFrames });
   }
 
+  /** Audible head scrub lifecycle (start → preview* → end | cancel). */
+  async headScrub(args: {
+    head: number;
+    phase: "start" | "preview" | "end" | "cancel";
+    pointerId: number;
+    normalizedPosition: number;
+    deltaFrames: number;
+  }): Promise<WorkletAck> {
+    return this.send({ type: "headScrub", seq: this.nextSeq(), ...args });
+  }
+
   /** Copy one source range out of the processor (PRINT reads it this way). */
   async readRange(start: number, frames: number): Promise<{ ok: boolean; channels: Float32Array[]; detail: string }> {
     const ack = await this.send({ type: "readRange", seq: this.nextSeq(), start, frames });
     if (ack.status !== "applied" || !ack.channels) return { ok: false, channels: [], detail: ack.detail };
     return { ok: true, channels: ack.channels.map((b) => new Float32Array(b)), detail: ack.detail };
   }
+
 
 
   async forceError(inFrames = 0): Promise<WorkletAck> {

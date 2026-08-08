@@ -35,12 +35,41 @@ export type WorkletMessage =
       cycleFrames: number;
     }
   | { type: "readRange"; seq: number; start: number; frames: number }
+  | {
+      /**
+       * Audible head scrub. `deltaFrames` is signed and UNWRAPPED, so the
+       * kernel travels in the direction the finger moved rather than taking the
+       * shortest way round the cycle.
+       */
+      type: "headScrub";
+      seq: number;
+      head: number;
+      phase: "start" | "preview" | "end" | "cancel";
+      pointerId: number;
+      normalizedPosition: number;
+      deltaFrames: number;
+    }
+
   | { type: "dispose"; seq: number }
   | { type: "__forceError"; seq: number; inFrames: number };
 
+export interface ScrubTelemetryHead {
+  head: number;
+  pointerId: number;
+  actualFrame: number;
+  targetFrame: number;
+  /** Signed source frames per output frame. */
+  velocity: number;
+  gain: number;
+  mix: number;
+  previews: number;
+  releasing: boolean;
+}
+
 export interface WorkletAck {
   seq: number;
-  status: "ready" | "applied" | "rejected" | "failed";
+  status: "ready" | "applied" | "rejected" | "failed" | "telemetry";
+
   appliedAtContextFrame?: number;
   resultingSourceFrame?: number;
   detail: string;
@@ -53,7 +82,13 @@ export interface WorkletAck {
   /** readRange payload: transferred copies of the requested source range. */
   channels?: ArrayBuffer[];
   frames?: number;
+  /** Live scrub telemetry (status === "telemetry"). */
+  scrubHeads?: (ScrubTelemetryHead | null)[];
+  contextFrame?: number;
+  /** Output RMS measured by the kernel while a scrub is live. */
+  rms?: number;
 }
+
 
 
 export const PROCESSOR_NAME = "tape-processor";

@@ -743,12 +743,21 @@ export function applyHeadsFeedback(
 
 /** Fader commit routing: heads layer, FN layer, otherwise track volume. */
 
-export function applyFader(state: SurfaceState, index: number, value: number): SurfaceState {
+/**
+ * `claimed` is the layer the gesture latched at pointer-down. A modifier
+ * released mid-drag must not retarget a scrub into a level or a volume.
+ */
+export function applyFader(
+  state: SurfaceState,
+  index: number,
+  value: number,
+  claimed?: "headScrub" | "headLevel" | "window" | "fader",
+): SurfaceState {
   const t = performance.now();
   // Heads claims the fader layer before the v2.6 FN window/filter rows (§3.3).
-  if (state.headsMode && !state.perf.fxOverlay) {
-    if (state.functionHeld) {
-      // ABSOLUTE scrub: the head jumps to the fader position, deliberately.
+  if ((claimed === "headScrub" || claimed === "headLevel" || (!claimed && state.headsMode)) && !state.perf.fxOverlay) {
+    if (claimed === "headScrub" || (!claimed && state.functionHeld)) {
+      // Landing position of an audible scrub gesture (audio already travelled).
       const next = emit(
         { ...state, tracks: setTrack(state, index, { headPos: value }) },
         "heads.scrub",
@@ -766,7 +775,8 @@ export function applyFader(state: SurfaceState, index: number, value: number): S
     );
     return fire(next, "heads.level", `head ${index + 1} level → ${value.toFixed(3)}`, t);
   }
-  if (state.functionHeld) {
+  if (claimed === "window" || (!claimed && state.functionHeld)) {
+
     if (index === 3) {
       const mode = value > 0.58 ? "hp" : value < 0.42 ? "lp" : "off";
       const amount = mode === "off" ? 0 : Math.abs(value - 0.5) * 2;

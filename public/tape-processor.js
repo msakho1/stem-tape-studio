@@ -68,9 +68,46 @@ class TapeProcessor extends AudioWorkletProcessor {
      */
     this.heads = null;
 
+    /**
+     * Per-head phase anchor. `phi = phase - anchor`, so setting the anchor to
+     * the current phase makes a head read exactly `offset * cycleFrames` at
+     * that instant — this is how a released scrub resumes normal playback from
+     * the scrubbed position without touching the underlying transport.
+     */
+    this.headAnchors = [0, 0, 0, 0];
+    /**
+     * Per-head scrub voice. Non-null only while a pointer is scrubbing head i.
+     * Preallocated shape; no object is created inside process().
+     * @type {(null | {pointerId:number, target:number, actual:number, velocity:number, gain:number, mix:number, releasing:boolean, previews:number, savedOffset:number, savedAnchor:number})[]}
+     */
+    this.headScrubs = [null, null, null, null];
+    this.scrubLag = Math.max(1, 0.03 * sampleRate);
+    this.scrubXfadeFrames = Math.max(1, Math.round(0.012 * sampleRate));
+    this.maxScrubRate = 32;
+    this.scrubSilenceRate = 0.02;
+    /** Telemetry accumulators (read by the diagnostics panel). */
+    this.telemetryCountdown = 0;
+    this.rmsAcc = 0;
+    this.rmsFrames = 0;
 
     this.port.onmessage = (e) => this.onMessage(e.data);
   }
+
+  /** Current derived read position (absolute source frames) of head i. */
+  headReadFrame(i) {
+    if (!this.heads) return this.readPosition;
+    const cf = this.heads.cycleFrames;
+    const cs = this.heads.cycleStart;
+    const hd = this.heads.heads[i];
+    if (!hd) return this.readPosition;
+    let phase = (this.readPosition - cs - this.headAnchors[i]) % cf;
+    if (phase < 0) phase += cf;
+    const off = hd.offset * cf;
+    let p = hd.reverse ? (off - phase) % cf : (off + phase) % cf;
+    if (p < 0) p += cf;
+    return cs + p;
+  }
+
 
   // ------------------------------------------------------------- protocol
 
@@ -127,6 +164,7 @@ class TapeProcessor extends AudioWorkletProcessor {
       }
       case "setHeads": {
         // Immediate: heads config is a routing layer, not a transport change.
+        const hadHeads = this.heads != null;
         this.heads = msg.heads
           ? {
               cycleStart: Number(msg.cycleStart) || 0,
@@ -134,6 +172,22 @@ class TapeProcessor extends AudioWorkletProcessor {
               heads: msg.heads,
             }
           : null;
+        if (!this.heads) {
+          // Leaving heads ends every scrub safely before the tracks return.
+          for (let i = 0; i < 4; i++) {
+            this.headScrubs[i] = null;
+            this.headAnchors[i] = 0;
+          }
+        } else if (!hadHeads) {
+          for (let i = 0; i < 4; i++) this.headAnchors[i] = 0;
+        } else {
+          // A live scrub owns its head's offset; the engine's table must not
+          // yank the travelling pointer back under the finger.
+          for (let i = 0; i < 4; i++) {
+            const sc = this.headScrubs[i];
+            if (sc && this.heads.heads[i]) this.heads.heads[i].offset = sc.savedOffset;
+          }
+        }
         this.reply(
           msg.seq,
           "applied",
@@ -143,6 +197,74 @@ class TapeProcessor extends AudioWorkletProcessor {
         );
         return;
       }
+      case "headScrub": {
+        if (!this.heads) {
+          this.reply(msg.seq, "rejected", "headScrub while heads mode is off", currentFrame, this.readPosition);
+          return;
+        }
+        const i = msg.head | 0;
+        const hd = this.heads.heads[i];
+        if (!hd) {
+          this.reply(msg.seq, "rejected", `head ${i + 1} does not exist`, currentFrame, this.readPosition);
+          return;
+        }
+        const cf = this.heads.cycleFrames;
+        const cs = this.heads.cycleStart;
+        if (msg.phase === "start") {
+          const at = this.headReadFrame(i);
+          this.headScrubs[i] = {
+            pointerId: msg.pointerId | 0,
+            target: at,
+            actual: at,
+            velocity: 0,
+            gain: 0,
+            mix: 0,
+            releasing: false,
+            previews: 0,
+            savedOffset: hd.offset,
+            savedAnchor: this.headAnchors[i],
+          };
+          this.reply(msg.seq, "applied", `scrub start head ${i + 1} at source frame ${at.toFixed(1)}`, currentFrame, at);
+          return;
+        }
+        const sc = this.headScrubs[i];
+        if (!sc) {
+          this.reply(msg.seq, "rejected", `no active scrub on head ${i + 1}`, currentFrame, this.readPosition);
+          return;
+        }
+        if (msg.phase === "preview") {
+          // Unwrapped travel: direction always follows the finger.
+          sc.target += Number(msg.deltaFrames) || 0;
+          sc.previews++;
+          this.reply(msg.seq, "applied", `scrub preview ${sc.previews} head ${i + 1}`, currentFrame, sc.actual);
+          return;
+        }
+        if (msg.phase === "end") {
+          // Exact absolute landing, chosen as the nearest unwrapped equivalent
+          // so the last leg of travel keeps the direction it already had.
+          const want = cs + ((((Number(msg.normalizedPosition) || 0) % 1) + 1) % 1) * cf;
+          let t = want;
+          const k = Math.round((sc.target - want) / cf);
+          t = want + k * cf;
+          sc.target = t;
+          sc.releasing = true;
+          hd.offset = (((want - cs) / cf) % 1 + 1) % 1;
+          // Anchor so normal playback resumes exactly from the landing frame.
+          let phase = (this.readPosition - cs) % cf;
+          if (phase < 0) phase += cf;
+          this.headAnchors[i] = phase;
+          this.reply(msg.seq, "applied", `scrub end head ${i + 1} → source frame ${want.toFixed(3)} (${sc.previews} previews)`, currentFrame, want);
+          return;
+        }
+        // cancel: crossfade back to normal playback at the pre-scrub position.
+        hd.offset = sc.savedOffset;
+        this.headAnchors[i] = sc.savedAnchor;
+        sc.releasing = true;
+        sc.target = this.headReadFrame(i);
+        this.reply(msg.seq, "applied", `scrub cancel head ${i + 1} → restored pre-scrub position`, currentFrame, sc.target);
+        return;
+      }
+
       case "readRange": {
         // Copy a source range out for PRINT rendering. Copies are made here
         // because the PCM itself is owned by this processor after adopt.
@@ -344,6 +466,37 @@ class TapeProcessor extends AudioWorkletProcessor {
         }
       }
 
+      // ---- per-frame scrub integration (once per frame, not per channel) ----
+      if (this.heads) {
+        const cf0 = this.heads.cycleFrames;
+        const mixStep = 1 / this.scrubXfadeFrames;
+        for (let h = 0; h < 4; h++) {
+          const sc = this.headScrubs[h];
+          if (!sc) continue;
+          // Bounded chase: velocity is the clamped, one-pole-smoothed distance
+          // to the target divided by the documented lag.
+          let desired = (sc.target - sc.actual) / this.scrubLag;
+          if (desired > this.maxScrubRate) desired = this.maxScrubRate;
+          else if (desired < -this.maxScrubRate) desired = -this.maxScrubRate;
+          sc.velocity += (desired - sc.velocity) * 0.004;
+          sc.actual += sc.velocity;
+          // `actual` and `target` stay unwrapped so the distance (and therefore
+          // the direction of travel) is exact; wrapping happens at read time,
+          // inside the active heads cycle only.
+          void cf0;
+
+          // A stationary tape is silent: fade the scrub voice with |velocity|.
+          const speed = sc.velocity < 0 ? -sc.velocity : sc.velocity;
+          let gTarget = speed / this.scrubSilenceRate;
+          if (gTarget > 1) gTarget = 1;
+          sc.gain += (gTarget - sc.gain) * 0.002;
+          const mixTarget = sc.releasing ? 0 : 1;
+          if (sc.mix < mixTarget) sc.mix = Math.min(mixTarget, sc.mix + mixStep);
+          else if (sc.mix > mixTarget) sc.mix = Math.max(mixTarget, sc.mix - mixStep);
+          if (sc.releasing && sc.mix <= 0) this.headScrubs[h] = null;
+        }
+      }
+
       for (let c = 0; c < outChannels; c++) {
         const src = this.channels[srcChannels === 1 ? 0 : Math.min(c, srcChannels - 1)];
         let v;
@@ -353,16 +506,26 @@ class TapeProcessor extends AudioWorkletProcessor {
           // underlying pointer stays phase-correct when heads mode exits.
           const cf = this.heads.cycleFrames;
           const cs = this.heads.cycleStart;
-          let phase = (this.readPosition - cs) % cf;
-          if (phase < 0) phase += cf;
           v = 0;
           for (let h = 0; h < this.heads.heads.length; h++) {
             const hd = this.heads.heads[h];
             if (hd.muted || hd.level <= 0) continue;
+            let phase = (this.readPosition - cs - this.headAnchors[h]) % cf;
+            if (phase < 0) phase += cf;
             const off = hd.offset * cf;
             let p = hd.reverse ? (off - phase) % cf : (off + phase) % cf;
             if (p < 0) p += cf;
-            v += this.sampleAt(src, cs + p) * hd.level;
+            const normal = this.sampleAt(src, cs + p);
+            const sc = this.headScrubs[h];
+            if (sc) {
+              let srel = (sc.actual - cs) % cf;
+              if (srel < 0) srel += cf;
+              const scrubbed = this.sampleAt(src, cs + srel) * sc.gain;
+
+              v += (normal * (1 - sc.mix) + scrubbed * sc.mix) * hd.level;
+            } else {
+              v += normal * hd.level;
+            }
           }
           if (v > 1) v = 1;
           else if (v < -1) v = -1;
@@ -371,7 +534,12 @@ class TapeProcessor extends AudioWorkletProcessor {
           if (b > 0) v += this.sampleAt(src, tailPos) * b;
         }
         out[c][i] = v;
+        if (c === 0) {
+          this.rmsAcc += v * v;
+          this.rmsFrames++;
+        }
       }
+
 
 
       this.readPosition += this.rate * this.rateScale * this.direction;
@@ -385,6 +553,53 @@ class TapeProcessor extends AudioWorkletProcessor {
           this.wrapCount++;
         }
       }
+    }
+
+    // Scrub telemetry: only while a scrub is live, ~every 8 quanta. Nothing is
+    // allocated in the per-frame loop; this object is built after it.
+    let anyScrub = false;
+    for (let h = 0; h < 4; h++) if (this.headScrubs[h]) anyScrub = true;
+
+    if (anyScrub) {
+      this.telemetryCountdown -= 1;
+      if (this.telemetryCountdown <= 0) {
+        this.telemetryCountdown = 8;
+        const rms = this.rmsFrames > 0 ? Math.sqrt(this.rmsAcc / this.rmsFrames) : 0;
+        this.rmsAcc = 0;
+        this.rmsFrames = 0;
+        const heads = [];
+        for (let h = 0; h < 4; h++) {
+          const sc = this.headScrubs[h];
+          heads.push(
+            sc
+              ? {
+                  head: h,
+                  pointerId: sc.pointerId,
+                  actualFrame: sc.actual,
+                  targetFrame: sc.target,
+                  velocity: sc.velocity,
+                  gain: sc.gain,
+                  mix: sc.mix,
+                  previews: sc.previews,
+                  releasing: sc.releasing,
+                }
+              : null,
+          );
+        }
+        this.port.postMessage({
+          seq: -1,
+          status: "telemetry",
+          detail: "scrub",
+          trackId: this.trackId,
+          contextFrame: currentFrame,
+          rms,
+          renderGapFrames: this.renderGapFrames,
+          scrubHeads: heads,
+        });
+      }
+    } else if (this.rmsFrames > 4096) {
+      this.rmsAcc = 0;
+      this.rmsFrames = 0;
     }
 
     this.rendered = true;

@@ -28,6 +28,26 @@ export function useAudioEngine(commands: AudioCommand[]) {
     setStatus(engine.status());
   }, [engine]);
 
+  /**
+   * Browser verification fixture. A harness cannot hear the output, so the
+   * engine's own scrub truth is published read-only on the window: live
+   * trackers, the kernel's telemetry (actual frame, velocity, gain, mix, RMS)
+   * and the ordered gesture log. Read-only — it exposes no way to fake a
+   * gesture, so what a harness reads is what the audio path actually did.
+   */
+  useEffect(() => {
+    const w = window as unknown as { __stemTapeScrub?: () => unknown };
+    w.__stemTapeScrub = () => {
+      const d = engine.status();
+      return { scrub: d.scrub, heads: d.heads, headsSummary: d.headsSummary, engineReady: engine.ready };
+    };
+    return () => {
+      delete w.__stemTapeScrub;
+    };
+  }, [engine]);
+
+
+
 
   // --- ordered command drain (never a snapshot diff) -----------------------
 
@@ -54,20 +74,36 @@ export function useAudioEngine(commands: AudioCommand[]) {
     setStatus(engine.status());
   }, [commands, engine]);
 
-  // --- continuous control bus → AudioParam --------------------------------
+  // --- continuous control bus → AudioParam / scrub kernel -----------------
   useEffect(() => {
     const off = controlBus.subscribe((e) => {
+      const head = e.index as 0 | 1 | 2 | 3;
+      if (e.channel === "headScrub") {
+        // The whole gesture is audible: start latches the origin, every
+        // rAF-coalesced move travels the tape, release lands it exactly.
+        const ts = e.timestamp ?? performance.now();
+        if (e.phase === "start") engine.beginHeadScrub(head, e.pointerId ?? -1, e.value, ts);
+        else if (e.phase === "cancel") engine.cancelHeadScrub(head);
+        else if (e.committed || e.phase === "end") engine.endHeadScrub(head, e.value);
+        else engine.previewHeadScrub(head, e.value, ts);
+        return;
+      }
+      if (e.channel === "headLevel") {
+        if (e.phase !== "start") engine.applyHeadLevel(head, e.value);
+        return;
+      }
       if (e.channel !== "fader") return;
-      // In heads mode the faders are the head layer: level/scrub arrive as
-      // ordered commands, so the continuous bus must not move the track fader.
+      // In heads mode the faders are the head layer: level/scrub arrive on
+      // their own channels, so the continuous bus must not move the track fader.
       if (engine.heads.active) return;
-      engine.applyTrackGain(e.index as 0 | 1 | 2 | 3, e.value);
+      engine.applyTrackGain(head, e.value);
     });
 
     return () => {
       off();
     };
   }, [engine]);
+
 
   // --- lifecycle: suspension, backgrounding, route changes ----------------
   useEffect(() => {
