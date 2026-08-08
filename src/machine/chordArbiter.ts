@@ -94,7 +94,10 @@ function isVolume(c: Control): c is "volume-minus" | "volume-plus" {
 export interface ArbiterView {
   activeStem: StemIndex;
   fxOverlay: boolean;
+  /** Which bank owns Volume ± right now. null = base master volume. */
+  selectedBank: BankIndex | null;
 }
+
 
 /**
  * Stateful, framework-free. Fed raw transitions BEFORE the gesture engine's
