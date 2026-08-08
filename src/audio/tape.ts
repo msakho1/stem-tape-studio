@@ -13,6 +13,8 @@
  */
 
 import { integratedDistance, rateAt, settled, timeForDistance, type GlideSegment } from "./glide";
+import { inertiaDistance, inertiaRateAt, type InertiaSegment } from "./inertia";
+
 
 export interface LoopWindow {
   /** Normalized 0..1 of buffer duration — portable across 44.1/48 kHz. */
@@ -63,6 +65,12 @@ export class TapeTimeline {
   private anchorPos = 0;
   private rate = 1;
   private glide: GlideSegment | null = null;
+  /**
+   * Workstream 2: a finite transport-inertia ramp. It takes precedence over the
+   * glide segment while in flight — the playhead integrates the SAME curve the
+   * audio is playing, so wind-up / wind-down never desynchronise the position.
+   */
+  private inertia: InertiaSegment | null = null;
 
   constructor(rate = 1) {
     this.rate = rate;
@@ -72,6 +80,12 @@ export class TapeTimeline {
   anchor(ctxTime: number, position: number) {
     this.anchorPos = position;
     this.anchorCtx = ctxTime;
+    if (this.inertia) {
+      const r = this.rateAtTime(ctxTime);
+      const remaining = Math.max(0.01, this.inertia.startAt + this.inertia.durationS - ctxTime);
+      this.inertia = { ...this.inertia, startAt: ctxTime, from: r, durationS: remaining };
+      return;
+    }
     if (this.glide) {
       // Restart the glide from its instantaneous value so the integral stays continuous.
       const r = this.rateAtTime(ctxTime);
@@ -84,15 +98,55 @@ export class TapeTimeline {
   }
 
   targetRate(): number {
+    if (this.inertia) return this.inertia.to;
     return this.glide ? this.glide.to : this.rate;
   }
 
+  /** The rate the tape returns to once inertia finishes (the musical rate). */
+  musicalRate(): number {
+    return this.glide ? this.glide.to : this.rate;
+  }
+
+  inertiaSegment(): InertiaSegment | null {
+    return this.inertia;
+  }
+
+  /** True while a wind-up / wind-down ramp is still in flight. */
+  inertiaActive(ctxTime: number): boolean {
+    return this.inertia != null && ctxTime < this.inertia.startAt + this.inertia.durationS;
+  }
+
+  /**
+   * Start a finite inertia ramp at `ctxTime`. The glide segment is folded into
+   * the anchor first so no distance is lost.
+   */
+  startInertia(ctxTime: number, seg: InertiaSegment) {
+    this.anchorPos = this.positionAt(ctxTime);
+    this.anchorCtx = ctxTime;
+    this.glide = null;
+    this.inertia = { ...seg, startAt: ctxTime };
+  }
+
+  /** Ramp finished (or was superseded): settle on a constant rate. */
+  endInertia(ctxTime: number, rate: number) {
+    this.anchorPos = this.positionAt(ctxTime);
+    this.anchorCtx = ctxTime;
+    this.inertia = null;
+    this.rate = rate;
+  }
+
   private rateAtTime(ctxTime: number): number {
+    if (this.inertia) {
+      const dt = ctxTime - this.inertia.startAt;
+      if (dt < this.inertia.durationS) return inertiaRateAt(this.inertia, dt);
+      return this.inertia.to;
+    }
     if (!this.glide) return this.rate;
     const dt = ctxTime - this.glide.startAt;
     if (settled(this.glide, dt)) return this.glide.to;
     return rateAt(this.glide, dt);
   }
+
 
   /**
    * Begin a glide to `to`. Re-anchors at `ctxTime` so everything scheduled
