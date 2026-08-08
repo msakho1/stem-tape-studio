@@ -228,6 +228,20 @@ export class AudioEngine {
   quantisePunch = false;
   /** Phase 6 — created lazily, only after the context exists. */
   private recorder: RecordingController | null = null;
+  /** §2.2 — track held for recording before input exists; armed once granted. */
+  pendingInputTrack: TrackId | null = null;
+
+  /** Called by the input UI after permission lands: honours the pending hold. */
+  resolvePendingInput(): { ok: boolean; detail: string } {
+    const id = this.pendingInputTrack;
+    if (id == null) return { ok: false, detail: "no pending input request" };
+    const rec = this.recording();
+    if (!rec?.model.inputEnabled) return { ok: false, detail: "input still not enabled" };
+    rec.arm(id);
+    this.pendingInputTrack = null;
+    return { ok: true, detail: `pending hold honoured — track ${id + 1} armed: ${rec.model.lastAck}` };
+  }
+
   private perfRecorder: PerformanceRecorder | null = null;
 
   /** Phase 6 capture/overdub runtime. Null until the context is unlocked. */
