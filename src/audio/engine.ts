@@ -1812,6 +1812,71 @@ export class AudioEngine {
   // --------------------------------------------------------------- commands
 
 
+  /** Abort any in-flight wind ramp so a reversal rebases from the real rate. */
+  private cancelWind() {
+    if (this.windTimer !== null) {
+      clearTimeout(this.windTimer);
+      this.windTimer = null;
+    }
+  }
+
+  /**
+   * Workstream 2: schedule one finite tape-inertia ramp across the node
+   * sources, the worklet kernels and the integrated timeline, so the audible
+   * rate and the reported playhead never disagree.
+   */
+  private beginWind(kind: "windUp" | "windDown", startAt: number) {
+    if (!this.ctx || !this.inertiaEnabled) return null;
+    const musical = this.timeline.targetRate();
+    const current =
+      this.transportPhase === "stopped"
+        ? INERTIA_MIN_RATE
+        : Math.max(INERTIA_MIN_RATE, this.timeline.currentRate(this.ctx.currentTime));
+    const seg = makeInertiaSegment({
+      startAt,
+      currentRate: kind === "windUp" ? current : Math.max(INERTIA_MIN_RATE, this.timeline.currentRate(startAt)),
+      targetRate: kind === "windUp" ? musical : INERTIA_MIN_RATE,
+      preset: INERTIA_PRESETS[this.inertiaPreset],
+      kind,
+    });
+    if (seg.durationS <= 0.011) return null;
+    this.transportPhase = kind === "windUp" ? "windingUp" : "windingDown";
+    this.timeline.startInertia(startAt, seg);
+    const curve = inertiaCurve(seg);
+    for (const t of this.tracks)
+      for (const s of t.sources) {
+        s.node.playbackRate.cancelScheduledValues(startAt);
+        s.node.playbackRate.setValueCurveAtTime(curve, startAt, seg.durationS);
+      }
+    this.fanout((_t, at) => ({
+      type: "inertia",
+      from: seg.from,
+      to: seg.to,
+      k: seg.k,
+      durationFrames: Math.round(seg.durationS * this.ctx!.sampleRate),
+      applyAtContextFrame: at,
+    }));
+    // Seams derived on the old curve are invalid the moment the rate moves.
+    this.invalidateSeams();
+    return seg;
+  }
+
+  /** Tape-inertia preset. Rhythmic operations never receive inertia. */
+  setInertiaPreset(name: InertiaPresetName | "off"): { ok: boolean; detail: string } {
+    if (name === "off") {
+      this.inertiaEnabled = false;
+      return { ok: true, detail: "tape inertia disabled — instant start/stop" };
+    }
+    this.inertiaEnabled = true;
+    this.inertiaPreset = name;
+    const p = INERTIA_PRESETS[name];
+    return { ok: true, detail: `inertia ${p.label} — up ${p.startS * 1000} ms / down ${p.stopS * 1000} ms` };
+  }
+
+  transportPhaseNow(): TransportPhase {
+    return this.transportPhase;
+  }
+
   execute(cmd: AudioCommand): Ack {
     const p = cmd.payload;
     if (!this.ctx && (cmd.type.startsWith("track.") || cmd.type.startsWith("loop.") || cmd.type.startsWith("tape."))) {
