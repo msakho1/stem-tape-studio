@@ -296,7 +296,12 @@ export function SystemPage({ engine, status, acks, unlockNote, ...diag }: Props)
               <div className="st-sys-quad__c">
                 <p className="st-sys-cell__k">latency</p>
                 <p className="st-sys-cell__v">
-                  {snap?.latency?.totalMs != null ? `${snap.latency.totalMs.toFixed(1)} ms` : "—"}
+                  {snap?.latency
+                    ? `${(
+                        (snap.latency.baseLatencyS + snap.latency.outputLatencyS + snap.latency.inputLatencyS) * 1000 +
+                        snap.latency.manualOffsetMs
+                      ).toFixed(1)} ms`
+                    : "—"}
                 </p>
               </div>
             </div>
