@@ -2,6 +2,20 @@ import { COMMAND_LOG_LIMIT, makeCommand, type AudioCommand, type AudioCommandTyp
 import type { Control, TrackIndex } from "@/device/geometry";
 import { TEMPO_TAP_IDLE_MS, type Gesture } from "@/input/gestures";
 import { V26_ROW_BY_ID } from "@/machine/v26map";
+import type { PerfIntent } from "@/machine/chordArbiter";
+import {
+  FX_FAMILIES,
+  clearLatches,
+  initialStemPerformance,
+  isFxActive,
+  patchSlot,
+  selectStem,
+  setVariation,
+  toggleLink,
+  toggleSolo,
+  type FxFamily,
+  type StemPerformanceState,
+} from "@/machine/stemPerformance";
 
 export type LedPattern = "dark" | "faint" | "solid" | "pulse" | "blink" | "breathe" | "chase";
 
@@ -95,6 +109,9 @@ export interface SurfaceState {
    * diffs: repeats, optimistic taps and rollbacks would be lost.
    */
   commands: AudioCommand[];
+
+  /** Phase 5C stem-performance layer (serializable, no audio objects). */
+  perf: StemPerformanceState;
 
   fired: FiredRow[];
   coverage: Record<string, number>;
@@ -194,6 +211,8 @@ export function initialSurfaceState(): SurfaceState {
     maxTakeSeconds: 480,
 
     commands: [],
+
+    perf: initialStemPerformance(),
 
     fired: [],
     coverage: {},
@@ -607,6 +626,107 @@ export function applyFader(state: SurfaceState, index: number, value: number): S
 }
 
 /**
+ * Phase 5C — ONE semantic command per resolved chord.
+ *
+ * The arbiter has already suppressed the base Play / Volume / Track command, so
+ * nothing here is emitted-then-undone.
+ */
+export function applyPerfIntent(state: SurfaceState, intent: PerfIntent): SurfaceState {
+  const t = performance.now();
+  let next = { ...state };
+  const perf = state.perf;
+  const stemOf = (i: number) => i;
+
+  switch (intent.type) {
+    case "stem.select": {
+      const p = selectStem(perf, intent.dir);
+      next = { ...next, perf: p, activeTrack: p.activeStem as TrackIndex };
+      next = emit(next, "stem.select", { stem: p.activeStem }, { rowId: "stem.select", t });
+      return fire(next, "stem.select", `active stem → ${p.activeStem + 1}`, t);
+    }
+    case "stem.solo": {
+      const p = toggleSolo(perf, intent.stem);
+      const on = p.tracks[intent.stem]!.soloed;
+      next = emit({ ...next, perf: p }, "stem.solo", { track: stemOf(intent.stem), on }, { rowId: "stem.solo", t });
+      return fire(next, "stem.solo", `stem ${intent.stem + 1} solo ${on ? "on" : "off"} (overlap ${intent.overlapMs.toFixed(0)} ms)`, t);
+    }
+    case "stem.link": {
+      const p = toggleLink(perf, intent.stem);
+      const linked = p.tracks[intent.stem]!.linked;
+      next = emit({ ...next, perf: p }, "stem.link", { track: stemOf(intent.stem), on: linked }, { rowId: "stem.link", t });
+      return fire(next, "stem.link", `stem ${intent.stem + 1} ${linked ? "linked" : "unlinked"} (overlap ${intent.overlapMs.toFixed(0)} ms)`, t);
+    }
+    case "fx.overlay": {
+      next = emit({ ...next, perf: { ...perf, fxOverlay: intent.on } }, "fx.overlay", { on: intent.on }, { rowId: "fx.overlay.toggle", t });
+      return fire(next, "fx.overlay.toggle", `FX overlay ${intent.on ? "open" : "closed"} — tape audio continues`, t);
+    }
+    case "system.pairing":
+      return fire(next, "system.pairing", "Bluetooth pairing gesture (stock)", t);
+    case "system.noop":
+      return fire(next, "system.volumechord.ambiguous", intent.detail, t);
+    case "fx.momentary.start":
+    case "fx.momentary.end": {
+      const on = intent.type === "fx.momentary.start";
+      const p = patchSlot(perf, intent.stem, intent.family, (slot) => ({ ...slot, momentary: on }));
+      const slot = p.tracks[intent.stem]!.fx[intent.family];
+      next = emit(
+        { ...next, perf: p },
+        intent.type,
+        { track: intent.stem, family: intent.family, variation: slot.variation, latched: slot.latched },
+        { rowId: `fx.${intent.family}.momentary`, t },
+      );
+      return fire(next, `fx.${intent.family}.momentary`, `stem ${intent.stem + 1} ${intent.family} ${on ? "engaged" : "released"}`, t);
+    }
+    case "fx.variation": {
+      const p = setVariation(perf, intent.stem, intent.family, intent.dir);
+      const slot = p.tracks[intent.stem]!.fx[intent.family];
+      next = emit(
+        { ...next, perf: p },
+        "fx.variation",
+        { track: intent.stem, family: intent.family, variation: slot.variation, latched: slot.latched },
+        { rowId: `fx.${intent.family}.variation`, t },
+      );
+      return fire(next, `fx.${intent.family}.variation`, `stem ${intent.stem + 1} ${intent.family} variation ${slot.variation}/4`, t);
+    }
+    case "fx.latch": {
+      const p = patchSlot(perf, intent.stem, intent.family, (slot) => ({ ...slot, latched: !slot.latched }));
+      const slot = p.tracks[intent.stem]!.fx[intent.family];
+      next = emit(
+        { ...next, perf: p },
+        "fx.latch",
+        { track: intent.stem, family: intent.family, on: slot.latched, variation: slot.variation, latched: slot.latched },
+        { rowId: `fx.${intent.family}.latch`, t },
+      );
+      return fire(next, `fx.${intent.family}.latch`, `stem ${intent.stem + 1} ${intent.family} ${slot.latched ? "latched" : "unlatched"}`, t);
+    }
+    case "fx.clearLatches": {
+      const p = clearLatches(perf, intent.stem);
+      next = emit({ ...next, perf: p }, "fx.clearLatches", { track: intent.stem }, { rowId: "fx.clearLatches", t });
+      return fire(next, "fx.clearLatches", `stem ${intent.stem + 1} latches cleared`, t);
+    }
+  }
+}
+
+/**
+ * Phase 5C LED priority table (corrections 9 and 10). No handler writes LEDs:
+ * every frame is derived here, and the winner always states why it won.
+ *
+ *   error > recording (Phase 6 reserved) > momentary FX > latched FX >
+ *   soloed > unlinked > active > muted > base
+ */
+export const LED_PRIORITY = {
+  error: 98,
+  recording: 90,
+  momentaryFx: 82,
+  latchedFx: 78,
+  soloed: 74,
+  unlinked: 70,
+  active: 66,
+  muted: 30,
+  base: 10,
+} as const;
+
+/**
  * LED arbitration — v2.6 LIGHTS block is the base layer:
  * dark = empty · faint = muted content · pulse = playing (own loop wrap) ·
  * song row: solid = song, blink = bank. Input feedback sits above it and every
@@ -623,6 +743,21 @@ export function deriveLeds(state: SurfaceState): LedFrame {
       frame[id] = { pattern: "dark", reason: "powered off (FUNCTION hold)", priority: 100 };
     } else if (state.grid.rejected) {
       frame[id] = { pattern: "blink", reason: "grid far off — all four blink, nothing moves (v2.6)", priority: 98 };
+    } else if (state.perf.fxOverlay) {
+      // Overlay on: track LEDs show STEM state, not v2.6 track content.
+      const st = state.perf.tracks[i]!;
+      const isActive = state.perf.activeStem === i;
+      if (st.soloed) {
+        frame[id] = { pattern: "solid", reason: "soloed stem (overlay)", priority: LED_PRIORITY.soloed };
+      } else if (!st.linked) {
+        frame[id] = { pattern: "blink", reason: "unlinked stem — double pulse (overlay)", priority: LED_PRIORITY.unlinked };
+      } else if (isActive) {
+        frame[id] = { pattern: "breathe", reason: "active stem (overlay)", priority: LED_PRIORITY.active };
+      } else if (state.perf.tracks.some((x) => x.soloed)) {
+        frame[id] = { pattern: "faint", reason: "non-solo stem (overlay)", priority: LED_PRIORITY.base };
+      } else {
+        frame[id] = { pattern: "faint", reason: "stem idle (overlay)", priority: LED_PRIORITY.base };
+      }
     } else if (state.pressed.includes(control)) {
       frame[id] = { pattern: "solid", reason: "button held (input feedback)", priority: 95 };
     } else if (track.content === "printing") {
@@ -646,7 +781,20 @@ export function deriveLeds(state: SurfaceState): LedFrame {
   for (let i = 0; i < 4; i++) {
     const id = `side-led-${i + 1}` as LedId;
     if (off) frame[id] = { pattern: "dark", reason: "powered off", priority: 100 };
-    else if (state.bankJumpArmed && i === state.bank)
+    else if (state.perf.fxOverlay) {
+      // Side LEDs 1–4 = Filter / Echo / Reverb / Beat Repeat for the ACTIVE stem.
+      const family = FX_FAMILIES[i] as FxFamily;
+      const slot = state.perf.tracks[state.perf.activeStem]!.fx[family];
+      if (slot.rejected)
+        frame[id] = { pattern: "blink", reason: `${family} rejected: ${slot.rejected}`, priority: LED_PRIORITY.error };
+      else if (slot.arming)
+        frame[id] = { pattern: "blink", reason: `${family} arming — buffering one full division`, priority: LED_PRIORITY.error - 1 };
+      else if (slot.momentary)
+        frame[id] = { pattern: "breathe", reason: `${family} momentary (held)`, priority: LED_PRIORITY.momentaryFx };
+      else if (slot.latched)
+        frame[id] = { pattern: "solid", reason: `${family} latched`, priority: LED_PRIORITY.latchedFx };
+      else frame[id] = { pattern: "dark", reason: `${family} inactive`, priority: LED_PRIORITY.base };
+    } else if (state.bankJumpArmed && i === state.bank)
       frame[id] = { pattern: "blink", reason: "blink = bank (v2.6 song row)", priority: 40 };
     else if (i === state.song % 4)
       frame[id] = { pattern: "solid", reason: "solid = song (v2.6 song row)", priority: 20 };
@@ -661,6 +809,8 @@ export function deriveLeds(state: SurfaceState): LedFrame {
 
   frame["function-led-1"] = off
     ? { pattern: "dark", reason: "powered off", priority: 100 }
+    : state.perf.fxOverlay
+    ? { pattern: "pulse", reason: "FX overlay open — FUNCTION LEDs alternate-pulse", priority: LED_PRIORITY.momentaryFx }
     : state.functionHeld
       ? { pattern: "solid", reason: "function held", priority: 60 }
       : state.headsMode
@@ -669,6 +819,8 @@ export function deriveLeds(state: SurfaceState): LedFrame {
 
   frame["function-led-2"] = off
     ? { pattern: "dark", reason: "powered off", priority: 100 }
+    : state.perf.fxOverlay
+    ? { pattern: "blink", reason: "FX overlay open — FUNCTION LEDs alternate-pulse", priority: LED_PRIORITY.momentaryFx }
     : state.pressed.some((c) => c.startsWith("rocker"))
       ? { pattern: "blink", reason: "rocker engaged", priority: 50 }
       : state.grid.bpm != null
