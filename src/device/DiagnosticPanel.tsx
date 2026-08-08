@@ -2,6 +2,8 @@ import { useEffect, useRef } from "react";
 import { CONTROL_LABELS, FADER_X, type Control } from "@/device/geometry";
 import type { LedFrame, LedId, SurfaceState } from "@/machine/surface";
 import type { RawInputEvent } from "@/input/gestures";
+import { V26_GROUP_LABEL, V26_MAP } from "@/machine/v26map";
+import { HitZoneAudit } from "@/device/HitZoneAudit";
 
 const LED_ORDER: LedId[] = [
   "track-led-1",
@@ -20,7 +22,9 @@ interface Props {
   rawLog: RawInputEvent[];
   gestureLog: { id: number; text: string; t: number }[];
   faderValuesRef: React.MutableRefObject<number[]>;
+  svgRef: React.RefObject<SVGSVGElement | null>;
 }
+
 
 /** Live fader readout, driven by rAF off the same ref the drag loop writes. */
 function FaderReadout({ faderValuesRef }: { faderValuesRef: React.MutableRefObject<number[]> }) {
