@@ -1,49 +1,135 @@
-# Stem Tape — Phase 1: Feasibility Investigation (report only)
+# Stem Tape — Browser Prototype Implementation Plan
 
-Scope confirmed: build the in-app technical assessment only. Simulator, dashboard trackers and importer prototype come later. Data persists in Lovable Cloud. All claims are sourced and labelled.
+Goal: prove the creative concept (four stems that are simultaneously one song and four independent tape tracks) in the browser before any SP-1 firmware work. No implementation until approved.
 
-## What the research already establishes
+## 1. Feasibility verdict
 
-Fetched from the repos/wikis you listed. Every claim below is quoted or derived from those pages, and the app will carry the same evidence labels.
+**Straightforward** — four-file decode to `AudioBuffer`; one `AudioContext` as the authoritative clock; sample-accurate start of four `AudioBufferSourceNode`s; four faders/mute/solo/master via `GainNode`; per-track meters via `AnalyserNode`; per-track `loopStart`/`loopEnd`/`loop`; tape varispeed via `playbackRate` (speed and pitch move together — the native node behaviour *is* tape behaviour); canvas waveforms from worker-computed peaks; localStorage/IndexedDB settings.
 
-- **DOCUMENTED — SoC:** nRF52840, Cortex-M4 @ 64 MHz, 1 MB flash, **256 kB RAM** (SP-1-dev wiki, Hardware overview).
-- **DOCUMENTED — Storage:** Toshiba/Kioxia THGBMNG5D1LBAIL 4 GB eMMC on a **1-bit** bus (CLK/CMD/DAT0/RST_n). Tape Looper drives data via SPIM3 DMA at 32 MHz.
-- **DOCUMENTED — No filesystem:** 8192-byte sectors; sector 0 is album metadata; audio starts at 0x2000. Album header magic `ALBUM_PRESENT`, 4-byte length, 1-byte song count, 64-byte title; per-song entries carry start sector, length, 64-byte artist, 64-byte title.
-- **DOCUMENTED — Audio format:** 24-bit / 48 kHz / **8 channels (4 stereo stems)**, 340 frames per sector, 24-byte frames, plus per-sector timing/tempo/LED bytes, with non-sequential 0,2,1,3 block interleave and an unconventional per-stem 6-byte L/R byte order.
-- **DOCUMENTED — Stock USB:** wired for **charging + CDC-ACM serial only**. No USB Audio, no MSC, no USB MIDI on stock. Stem loading today goes over **Web Serial** via solderless.engineering (Chrome/Edge only).
-- **DOCUMENTED — Tape Looper:** Zephyr v4.3.1 / SDK 0.17.4, MIT licensed. Files: `firmware/src/main.c`, `firmware/src/sp1_emmc.c`, `boards/teenageengineering/stem_player/stem_player.dts`, `zephyr-patches/uac2-windows-fs-feedback.patch`. Threads: `audio_thread` (per 256-frame I2S block, mixes 4 tracks + USB monitor), `streamer_thread` (sole flash owner), `midi_thread`.
-- **DOCUMENTED — Tape Looper USB audio:** UAC2, **Full-Speed, 48 kHz, 16-bit, STEREO (2 ch), host→device only**. There is no capture direction and no multichannel path in any open repo.
-- **DOCUMENTED — Bootloader constraints:** app at 0x20000, max ~0xDF000, 5 s watchdog, no reset pin (firmware must reach SYSTEM_OFF), RESETREAS must be cleared.
-- **UNVERIFIED:** stock stem-upload byte protocol (wiki stub, Solderless tool closed-source); Advanced Mode semantics; exact MIDI clock / PO sync framing; user reports of slow upload (not found in these sources).
+**Technically challenging** — click-free loop boundaries (native looping offers no crossfade; needs dual-source ping-pong scheduling or a worklet); reverse-while-playing without disturbing other tracks; keeping four independent playheads exact once each has its own rate and loop; WAV export.
 
-### The two findings that reshape the concept
+**Browser-dependent** — codec support (WAV/MP3 everywhere; M4A/AAC generally on Chrome/Edge/Safari; **AIFF reliable only on Safari** — we runtime-probe each file and report honestly rather than promising a format); `MediaRecorder` output type (Chrome/Edge give WebM/Opus, not WAV; Safari gives MP4); autoplay unlock requires a gesture; mobile memory caps.
 
-1. **The fast importer is not a stock-firmware feature — it requires custom firmware.** Stock USB is CDC-ACM only. A 4-channel audio import path only exists inside a Stem Tape firmware that extends Tape Looper's UAC2 node from 2 to 4 channels. The report will state this plainly rather than implying a browser can stream into a stock SP-1.
-2. **Bandwidth is probably not the binding constraint; RAM and eMMC are.** 4 mono ch @ 48 kHz/16-bit = 384 kB/s ≈ 3.07 Mbit/s, inside USB Full-Speed isochronous headroom (~8.2 Mbit/s). But the native store is 24-bit 8-channel ≈ 1.15 MB/s sustained onto a 1-bit eMMC, against 256 kB total RAM for all ring buffers. The report treats **sustained eMMC write + RAM budget** as risk #1, and stereo-in (8 ch) as a distinctly later experiment. Note also: a real-time streaming import of a 5-minute song takes ~5 minutes by definition — the stated target is met by the transport being real-time, not by being fast.
+**Better postponed** — multiple playback heads; BPM/grid snapping; PWA install; touch layout.
 
-## Report structure to build
+**Not realistic in-browser** — guaranteed glitch-free playback under arbitrary system load, and true sub-buffer latency; both are host-scheduler dependent and we will measure rather than claim.
 
-Routes under `/` (overview) with sections as separate routes so each is linkable and gets its own head metadata:
+## 2. Recommended architecture — staged, not worklet-first
 
-- `/` — project overview, thesis, non-goals, legal/licensing stance, evidence-label legend.
-- `/capability-matrix` — rows = capabilities from your brief (stock set + Tape Looper set + Stem Tape additions), columns = Stock SP-1 / Tape Looper 2.0 / Proposed Stem Tape, each cell tagged Documented / Inferred / Unverified / Needs hardware, with a source link per row.
-- `/architecture` — system diagram: companion importer (Web Serial + WebAudio) → USB transport (UAC2 4ch vs CDC bulk, both shown as candidate paths) → firmware audio engine (audio_thread / streamer_thread / midi_thread) → 4-track mixer → eMMC sector writer → album index → global transport + per-track state → MIDI/PO sync → codec output. Rendered as inline SVG/CSS, no diagram library.
-- `/firmware-plan` — subsystem table keyed to real Tape Looper paths (`main.c` audio_thread, `sp1_emmc.c` writer, `stem_player.dts` uac2 node, the Windows feedback patch), each with change description, difficulty, owner (Claude Code / embedded dev / hardware test).
-- `/experiments` — the nine critical hardware experiments, each with hypothesis, method, pass criteria, blocking dependencies, and status (all `not started`).
-- `/risks` — register with likelihood/impact/mitigation, seeded with the twelve risks in your brief plus the RAM/eMMC finding above.
-- `/roadmap` — eleven phases from research to open-source release, with the gating experiment for each.
-- `/sources` — every repo, wiki page and tool, with license (both key repos are MIT) and attribution requirements.
+Phase A uses standard Web Audio nodes. They already give per-track loop windows, per-track rate and a shared clock, which covers the entire MVP. Phase B introduces a custom `StemTapeProcessor` AudioWorklet only where nodes genuinely fall short: bidirectional reading, sample-accurate loop crossfades, and multiple heads. Building the worklet immediately would delay the creative question by weeks for no MVP capability.
 
-Each section also states **ownership**: firmware vs companion app vs Claude Code vs physical SP-1 vs "simulated in this Lovable project". A persistent banner marks the app as an R&D planning tool with no hardware connection implemented.
+```text
+File input ──► decode (decodeAudioData, off main thread where possible)
+                  │
+                  ├─► peaks worker ──► canvas waveform renderers
+                  │
+                  ▼
+            AudioBuffer x4 (+ reversed copies, lazy)
+                  │
+   TransportClock (single AudioContext.currentTime)
+                  │
+   ┌──────────────┴──────────────┐
+   │  TrackEngine x4             │   each: source node (recreated on
+   │  pos / loop / dir / rate    │   seek, loop-change, reverse) →
+   └──────────────┬──────────────┘   trackGain → panner? (no) → meter
+                  ▼
+        Mixer: 4 trackGain → soloBus → masterGain
+                  ├─► destination (speakers)
+                  └─► recorder tap (worklet) ─► worker ─► WAV Blob
+                  │
+            IndexedDB (settings, optional audio blobs)
+```
 
-## Technical details
+## 3. Synchronization strategy
 
-- Stack as-is: TanStack Start, file routes, Tailwind v4 tokens in `src/styles.css`.
-- **Lovable Cloud** enabled. Tables: `capabilities`, `experiments`, `risks`, `firmware_subsystems`, `roadmap_phases`, `sources`, `open_questions`. Each row carries `evidence_label` (documented/inferred/unverified/needs_hardware) and `source_url`. Migration includes schema, GRANTs, RLS, and literal INSERTs seeding the full researched content so the report renders complete on first load.
-- Phase 1 is read-mostly: public anon SELECT so the report is shareable; authenticated write policies are created now for the later dashboard, no auth UI yet.
-- Design: restrained technical instrument language — near-monochrome neutrals, one signal accent, monospace numerics and labels, hairline rules, dense tabular layout. No TE logos, product renders or protected graphics.
-- Wording rules enforced throughout: no claim of working hardware transfer; every capability cell carries its evidence label.
+- **One clock.** A single `AudioContext`. No `<audio>` elements anywhere. All scheduling uses absolute `ctx.currentTime + lookahead` values.
+- **Same frame start.** Compute `startAt = ctx.currentTime + 0.08` once, then call `source.start(startAt, offset)` on all four. Identical `startAt` = identical first rendered frame.
+- **No accumulating drift.** Playhead is never incremented by a timer. It is *derived*: `pos = anchorPos + (ctx.currentTime - anchorCtxTime) * rate * dir`. Every rate/direction/loop change writes a new `(anchorPos, anchorCtxTime)` pair, so error cannot compound. `requestAnimationFrame` only reads this for drawing.
+- **Pause/resume.** Freeze each track's derived position, stop the sources, and on resume restart all four at one shared future `startAt` with their frozen offsets. Linked tracks share one offset; unlinked keep their own.
+- **Seek.** Global seek rewrites every linked track's anchor and restarts them at a common `startAt`. Unlinked tracks are untouched.
+- **Going independent.** Unlinking is purely a state flag plus its own anchor pair; the track keeps playing from its current derived position with no restart.
+- **Relink.** Snap the track's position to the global transport's current derived position modulo the shared loop, restart it at the next shared `startAt`, and reset its loop to the shared window. This is an audible jump by design; the UI will say so.
+- **Verification.** The diagnostics panel compares each track's derived position against the same value recomputed from a reference track and reports drift in ms and samples.
 
-## Not in this phase
+## 4. State model
 
-Four-track simulator, dashboard trackers (build history, device inventory, community feedback), and the companion importer prototype — planned next once the assessment is agreed.
+Two clearly separated layers. React state is UI-authoritative and re-renders; the engine holds real-time values that must never trigger renders.
+
+```ts
+// ---- UI / persisted state (React + IndexedDB) ----
+type StemRole = 'vocals' | 'drums' | 'bass' | 'instruments';
+interface LoopRegion { startSec: number; endSec: number; enabled: boolean }
+interface PlaybackHead { id: string; offsetSec: number; gain: number; reversed: boolean } // phase 9
+interface TrackState {
+  id: string; role: StemRole; label: string;
+  file: { name: string; durationSec: number; channels: number; sampleRate: number } | null;
+  gain: number; muted: boolean; soloed: boolean;
+  linked: boolean; selected: boolean;
+  loop: LoopRegion; reversed: boolean; rate: number; startOffsetSec: number;
+  heads: PlaybackHead[];
+}
+interface TransportState { playing: boolean; positionSec: number; durationSec: number; rate: number; sharedLoop: LoopRegion }
+interface MixerState { masterGain: number; anySolo: boolean }
+interface RecordingState { status: 'idle'|'recording'|'encoding'; startedAtSec: number|null; elapsedSec: number }
+interface ProjectState { id: string; name: string; artist: string; tracks: TrackState[]; transport: TransportState; mixer: MixerState; createdAt: string }
+
+// ---- realtime engine state (refs only, never in React state) ----
+interface TrackRuntime {
+  buffer: AudioBuffer | null; reversedBuffer: AudioBuffer | null;
+  source: AudioBufferSourceNode | null; gainNode: GainNode; analyser: AnalyserNode;
+  anchorPos: number; anchorCtxTime: number; rate: number; dir: 1 | -1;
+}
+```
+
+## 5. Component and service structure
+
+```text
+src/audio/            AudioEngine.ts (facade)  TransportClock.ts  TrackEngine.ts
+                      Mixer.ts  LoopScheduler.ts  Recorder.ts  decode.ts  wav.ts
+src/workers/          peaks.worker.ts  wavEncoder.worker.ts
+src/worklets/         recorder-tap.js   (phase B: stem-tape-processor.js)
+src/state/            useProject.ts (zustand-style store)  persistence.ts
+src/components/       FileLoader  TransportBar  StemMixer  TrackStrip  Timeline
+                      LoopEditor  RecordingControls  ProjectMenu  DiagnosticsPanel
+src/routes/           index.tsx (the instrument)  diagnostics.tsx  about.tsx
+```
+
+`AudioEngine` is a plain class instantiated once and held in a ref/context. Components call imperative methods and subscribe to a 60 Hz snapshot for meters and playheads. No audio object ever lives in React state.
+
+## 6. Reverse, varispeed, looping, recording — the specific answers
+
+- **Reverse (MVP):** keep a lazily-built reversed copy of the buffer. Flipping direction stops that one source and starts a new one on the reversed buffer at the mirrored offset `duration - pos`, with mirrored loop points, at the next block boundary. Cost: one extra buffer copy in RAM per reversed track. Other tracks are untouched. **Phase B** replaces this with a bidirectional read pointer in the worklet, removing the duplicate buffer and the restart.
+- **Varispeed:** `source.playbackRate`, which resamples and therefore moves pitch with speed — correct tape behaviour, no pitch-preservation node wanted. Range 0.5–1.5×, with an exact snap-to-1.0 control (not a float near 1). Changes use `setTargetAtTime` over ~30 ms to avoid zipper noise, and rewrite the anchor pair.
+- **Looping:** native `loop`/`loopStart`/`loopEnd` for the first playable build, then upgrade to **ping-pong scheduling** — two sources per track, the next one scheduled to start a few ms before the current ends, with 5–10 ms equal-power gain ramps — to remove boundary clicks. Free (non-quantised) loops first; BPM snapping later.
+- **Recording:** `MediaRecorder` is rejected for the deliverable because Chrome/Edge cannot emit WAV. Instead an AudioWorklet tap on the master bus posts Float32 blocks to a worker that writes 16- or 24-bit PCM WAV incrementally and returns a Blob for download. Start/stop never touches the playback graph.
+- **Waveforms:** no wavesurfer.js or peaks.js — each owns its own media/context and would fight our clock. We compute min/max peak pyramids in a worker and draw to canvas ourselves.
+- **Persistence:** settings and project JSON in IndexedDB. Audio is **not** uploaded and by default not stored; on reload we restore all controls and prompt to re-pick the files (browsers cannot silently reopen local files; Chrome's File System Access handles can be persisted but Safari has no equivalent, so the prompt is the baseline path). Optional opt-in "embed audio" stores blobs in IndexedDB, and a downloadable `.stemtape` file holds settings plus either references or embedded audio.
+
+## 7. Implementation phases (each ships and is checkable)
+
+1. **Four synchronized files** — load 4 files, play/pause/stop/seek. *Accept:* diagnostics shows <1 sample drift between tracks after 10 min.
+2. **Mixer** — faders, mute, solo, hold-to-solo, master, meters. *Accept:* solo isolates instantly, no clicks, meters track audible level.
+3. **Shared loop** — draggable region on the main timeline, move-without-resize. *Accept:* all four loop identically and stay in phase for 100+ passes.
+4. **Independent loops** — track selection, per-track loop edit, reset-to-shared, relink. *Accept:* drums 1 beat, bass 3 beats, others 4 bars, all continuous.
+5. **Reverse** — per selected track. *Accept:* one stem reverses with no interruption to the other three.
+6. **Varispeed** — global and per-track, exact 1.0 reset. *Accept:* smooth sweeps, pitch follows speed, no zipper noise.
+7. **Recording/export** — WAV download. *Accept:* exported file matches what was heard, correct length ±10 ms.
+8. **Persistence** — session restore + `.stemtape` file. *Accept:* reload restores every control; audio re-attaches via prompt.
+9. **Multiple heads** (worklet) — 2–4 heads/track with offset, gain, direction. *Accept:* stated CPU ceiling enforced with graceful degradation.
+10. **Touch/PWA** — responsive layout, manifest, offline shell.
+
+## 8. Testing plan
+
+Automated where possible (Vitest + an OfflineAudioContext harness): 10-minute drift run; unequal-length files padded from time zero; 100× play/pause; seek storm; shared-loop phase check; four different loop lengths; single-track reverse; global and per-track rate changes; loop-boundary click detection via sample-delta threshold on rendered output; recording length/content accuracy. Manual matrix: Chrome, Edge, Safari desktop, iOS Safari (memory and autoplay), with results recorded in-app.
+
+**Diagnostics panel** (route `/diagnostics`, also a toggleable overlay): `AudioContext.currentTime` and `baseLatency`, each track's derived playhead in sec and samples, pairwise drift in ms/samples, source restart count, dropped-frame/underrun counter from the worklet tap, active head count, and rAF frame timing as a rendering-load proxy. Where a metric is not measurable in a browser, the panel says so instead of showing a fake number.
+
+## 9. Known risks and decisions
+
+Codec gaps (AIFF outside Safari) → probe and report per file. Autoplay policy → explicit "enable audio" gesture on first load. Mobile memory → a 5-min stereo 48 k stem is ~55 MB decoded; four stems plus reversed copies can exceed 400 MB, so mobile gets a size warning and reversed buffers are built lazily and freed. Safari inconsistencies → feature-detected, degraded, and surfaced. AudioWorklet needs same-origin module serving and a secure context — fine here, noted for the eventual companion app. Click-free loops are the highest-risk audio detail and are why ping-pong scheduling is scheduled in Phase 3, not deferred. Export is WAV via our own encoder specifically to dodge `MediaRecorder` format limits. Audio stays local; nothing is uploaded. Keyboard control (space, arrows, 1–4 track select, R record) and visible focus states are built in from Phase 1, not retrofitted.
+
+## 10. First implementation recommendation
+
+**Phases 1–7, no AudioWorklet except the recorder tap.** That single cycle delivers: upload four stems, perfectly synchronized playback, four-fader mixing, one shared loop, per-stem loop lengths, one reversed stem, global varispeed, and a downloadable WAV of the performance — which is exactly the set of things that answers "is this creatively valuable?". The custom four-track processor, multiple heads and grid snapping follow only if the answer is yes.
+
+**Design language:** restrained instrument aesthetic — neutral graphite/bone panel, single signal accent for armed/selected states, monospace numerics, hairline dividers, physical-feeling fader tracks. Original work throughout; no TE logos, trade dress or product graphics.
