@@ -199,6 +199,14 @@ export interface EngineStatus {
   /** Phase 6 heads/PRINT truth, straight from the engine. */
   heads: HeadsState;
   headsSummary: string;
+  /** Live scrub evidence: open gestures, kernel telemetry, emitted events. */
+  scrub: {
+    open: ({ head: number; pointerId: number; previews: number; lastVelocity: number } | null)[];
+    telemetry: { contextFrame: number; rms: number; heads: (ScrubTelemetryHead | null)[] } | null;
+    events: ScrubEvent[];
+  };
+
+
 
   lastDecodeMs: number | null;
   enginePreference: EnginePreference;
