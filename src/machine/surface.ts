@@ -314,13 +314,10 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
         if (!fn) return fire({ ...next, playing: true }, "play.restart", "restart from the top", t);
         return next;
       }
-      if (c === "function" && g.duration === 450) {
-        next = { ...next, power: "off", playing: false };
-        return fire(next, "fn.power", "power off", t);
-      }
       if (c.startsWith("track-button")) {
         const i = trackIndexOf(c);
-        const slice = state.tracks[i]!;
+        const slice = next.tracks[i]!;
+
         if (state.headsMode) {
           const printing = slice.content === "empty";
           next = { ...next, tracks: setTrack(next, i, { content: printing ? "printing" : slice.content }) };
