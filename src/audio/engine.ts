@@ -29,6 +29,8 @@ import { DEFAULT_WINDOW, resolveLoop, TapeTimeline, type LoopWindow } from "./ta
 import { estimateMigration } from "./workletBudget";
 import { pairwiseDrift, sharedApplyFrame, type WorkletAck } from "./workletProtocol";
 import { preflightWorklet, WorkletTrack, type MigrationStatus, type PreflightResult } from "./workletTrack";
+import { FxRack, type FxRackSnapshot } from "./fx/rack";
+import { FX_FAMILIES, type FxFamily } from "@/machine/stemPerformance";
 
 export type EnginePreference = "node" | "worklet";
 
@@ -59,7 +61,18 @@ export interface TrackRuntime {
   /** Deleted buffers go here, recoverable until the project is compacted. */
   trash: AudioBuffer | null;
   input: GainNode;
+  /** Post-filter unity tap feeding the permanent FX rack input. */
+  preFx: GainNode;
+  /** Phase 5C per-stem FX rack. Its input node is never re-parented. */
+  fxRack: FxRack | null;
+  /** Post-FX fader — it rides the FX tails, so mute never lives here. */
   gain: GainNode;
+  /** Separate, smoothed solo gain. Solo never mutates saved mute state. */
+  soloGain: GainNode;
+  soloed: boolean;
+  linked: boolean;
+  fxVariation: Record<FxFamily, number>;
+  fxActive: Record<FxFamily, boolean>;
   dry: GainNode;
   wet: GainNode;
   filter: BiquadFilterNode;
@@ -139,6 +152,13 @@ export interface EngineStatus {
     renderGapFrames: number | null;
     lastWorkletAck: string | null;
   }[];
+  fx: (FxRackSnapshot | null)[];
+  effectiveBpm: number[];
+  bpmSource: "grid" | "manual" | "provisional";
+  baseBpm: number;
+  soloMask: string;
+  linkMask: string;
+  lastFxRejection: string | null;
   decodedBytes: number;
   reverseBytes: number;
   budget: MemoryBudget;
@@ -256,12 +276,20 @@ export class AudioEngine {
       filter.type = "lowpass";
       filter.frequency.value = 20000;
 
+      const preFx = ctx.createGain();
+      const soloGain = ctx.createGain();
+      soloGain.gain.value = 1;
+
       input.connect(dry);
       input.connect(filter);
       filter.connect(wet);
-      dry.connect(gain);
-      wet.connect(gain);
-      gain.connect(analyser);
+      dry.connect(preFx);
+      wet.connect(preFx);
+      // Phase 5C: preFx → FxRack → fader → solo → analyser → master.
+      const fxRack = new FxRack(ctx, gain);
+      preFx.connect(fxRack.input);
+      gain.connect(soloGain);
+      soloGain.connect(analyser);
       analyser.connect(this.master!);
       gain.gain.value = [0.78, 0.72, 0.65, 0.7][i] ?? 0.7;
 
@@ -270,7 +298,14 @@ export class AudioEngine {
         reversed: null,
         trash: null,
         input,
+        preFx,
+        fxRack,
         gain,
+        soloGain,
+        soloed: false,
+        linked: true,
+        fxVariation: { filter: 1, echo: 1, reverb: 1, beatRepeat: 1 },
+        fxActive: { filter: false, echo: false, reverb: false, beatRepeat: false },
         dry,
         wet,
         filter,
@@ -623,7 +658,8 @@ export class AudioEngine {
     if (!t) return;
     t.level = level;
     if (!this.ctx) return;
-    this.setGain(t.gain.gain, t.muted ? 0 : level);
+    // Post-FX fader: it never gates, so it can be swept while tails ring out.
+    this.setGain(t.gain.gain, level);
   }
 
   applyMasterGain(level: number) {
@@ -646,10 +682,20 @@ export class AudioEngine {
     }
     const target = mode === "off" ? 0 : 1;
     const curve = (x: number) => measuredDryWet(target === 1 ? x : 1 - x, correlation);
-    t.dry.gain.cancelScheduledValues(now);
-    t.wet.gain.cancelScheduledValues(now);
-    t.dry.gain.setValueCurveAtTime(sampleCurve(curve, "a"), now, FILTER_FADE_S);
-    t.wet.gain.setValueCurveAtTime(sampleCurve(curve, "b"), now, FILTER_FADE_S);
+    if (t.fxRack) {
+      // Correction 4: the rack is the SINGLE automation owner for cutoff/type/Q.
+      // The legacy 5A biquad stays in the graph but is held at true dry.
+      t.dry.gain.cancelScheduledValues(now);
+      t.wet.gain.cancelScheduledValues(now);
+      t.dry.gain.setValueAtTime(1, now);
+      t.wet.gain.setValueAtTime(0, now);
+      t.fxRack.setTapeFilter(mode, cutoff, correlation);
+    } else {
+      t.dry.gain.cancelScheduledValues(now);
+      t.wet.gain.cancelScheduledValues(now);
+      t.dry.gain.setValueCurveAtTime(sampleCurve(curve, "a"), now, FILTER_FADE_S);
+      t.wet.gain.setValueCurveAtTime(sampleCurve(curve, "b"), now, FILTER_FADE_S);
+    }
     t.filterMode = mode;
   }
 
@@ -934,6 +980,118 @@ export class AudioEngine {
     }
   }
 
+  // ------------------------------------------------- Phase 5C stem + FX
+
+  /** BPM source hierarchy: grid → manual → provisional 120. */
+  baseBpm = 120;
+  bpmSource: "grid" | "manual" | "provisional" = "provisional";
+  /** Diagnostics: last rejected FX activation. */
+  lastFxRejection: string | null = null;
+
+  setBaseBpm(bpm: number, source: "grid" | "manual") {
+    if (Number.isFinite(bpm) && bpm > 0) {
+      this.baseBpm = bpm;
+      this.bpmSource = source;
+    }
+  }
+
+  /** Per-stem effective BPM (correction 5): baseBpm × |rate of that stem|. */
+  effectiveBpm(id: TrackId): number {
+    const now = this.ctx?.currentTime ?? 0;
+    const rate = Math.abs(this.timeline.currentRate(now)) || 1;
+    return this.baseBpm * rate;
+  }
+
+  private anySolo(): boolean {
+    return this.tracks.some((t) => t.soloed);
+  }
+
+  /**
+   * Correction 3. Solo never mutates saved mute state:
+   *   audibleBySolo = anySolo ? track.soloed : true
+   *   inputOpen     = audibleBySolo && (!track.muted || track.soloed)
+   */
+  applyAudibility(id: TrackId) {
+    const t = this.tracks[id];
+    if (!t || !this.ctx) return;
+    const audibleBySolo = this.anySolo() ? t.soloed : true;
+    const open = audibleBySolo && (!t.muted || t.soloed);
+    t.fxRack?.setInputOpen(open);
+    this.setGain(t.soloGain.gain, audibleBySolo ? 1 : 0);
+  }
+
+  private applyAudibilityAll() {
+    for (let i = 0; i < this.tracks.length; i++) this.applyAudibility(i as TrackId);
+  }
+
+  /** Re-apply one FX family from the current slot flags. */
+  private async applyFx(id: TrackId, family: FxFamily, latched: boolean): Promise<{ ok: boolean; detail: string }> {
+    const t = this.tracks[id];
+    if (!t?.fxRack) return { ok: false, detail: "audio not unlocked" };
+    const active = t.fxActive[family];
+    const vi = Math.max(0, Math.min(3, t.fxVariation[family] - 1));
+    switch (family) {
+      case "filter":
+        t.fxRack.setFxFilter(active ? vi : null, latched);
+        if (active && latched) t.fxRack.commitFilterLatch();
+        return { ok: true, detail: `filter ${active ? `variation ${vi + 1}` : "released to the underlying tape filter"}` };
+      case "echo":
+        t.fxRack.setEcho(active, vi, this.effectiveBpm(id));
+        return {
+          ok: true,
+          detail: `echo ${active ? "on" : "released (tail decaying)"} · ${t.fxRack.echoDelayFor(vi, this.effectiveBpm(id)).toFixed(4)}s @ ${this.effectiveBpm(id).toFixed(2)} BPM`,
+        };
+      case "reverb":
+        t.fxRack.setReverb(active, vi);
+        return { ok: true, detail: `reverb ${active ? "on" : "released (tail decaying)"} · variation ${vi + 1}` };
+      case "beatRepeat": {
+        const res = await t.fxRack.setBeatRepeat(active, vi, this.effectiveBpm(id));
+        if (!res.ok) this.lastFxRejection = res.detail;
+        return res;
+      }
+    }
+  }
+
+  /** Momentary / latched activation for one FX family on one stem. */
+  setFxActive(id: TrackId, family: FxFamily, active: boolean, latched = false): Promise<{ ok: boolean; detail: string }> {
+    const t = this.tracks[id];
+    if (!t) return Promise.resolve({ ok: false, detail: `no track ${id}` });
+    t.fxActive[family] = active;
+    return this.applyFx(id, family, latched);
+  }
+
+  setFxVariation(id: TrackId, family: FxFamily, variation: number, latched = false): Promise<{ ok: boolean; detail: string }> {
+    const t = this.tracks[id];
+    if (!t) return Promise.resolve({ ok: false, detail: `no track ${id}` });
+    t.fxVariation[family] = Math.max(1, Math.min(4, variation));
+    return this.applyFx(id, family, latched);
+  }
+
+  setSolo(id: TrackId, soloed: boolean) {
+    const t = this.tracks[id];
+    if (!t) return;
+    t.soloed = soloed;
+    this.applyAudibilityAll();
+  }
+
+  /** Unlink/relink is phase-continuous: no source is stopped or restarted. */
+  setLinked(id: TrackId, linked: boolean) {
+    const t = this.tracks[id];
+    if (t) t.linked = linked;
+  }
+
+  /** Song switch / stem replacement: clear momentary DSP history everywhere. */
+  flushAllFx() {
+    for (const t of this.tracks) {
+      for (const f of FX_FAMILIES) t.fxActive[f] = false;
+      t.fxRack?.flushTails();
+    }
+  }
+
+  fxSnapshots(): (FxRackSnapshot | null)[] {
+    return this.tracks.map((t) => t.fxRack?.snapshot() ?? null);
+  }
+
   // --------------------------------------------------------------- commands
 
 
@@ -991,7 +1149,9 @@ export class AudioEngine {
           if (!t) return this.ack(cmd, "rejected", `no track ${id}`);
           if (!t.buffer) return this.ack(cmd, "rejected", `track ${id + 1} has no audio loaded`);
           t.muted = cmd.type === "track.mute";
-          if (this.ctx) this.setGain(t.gain.gain, t.muted ? 0 : t.level);
+          // Correction 3: mute closes the FX rack inputs only. The fader stays
+          // where the user left it and the echo/reverb tails decay naturally.
+          if (this.ctx) this.applyAudibility(id);
           return this.ack(cmd, "completed", `track ${id + 1} ${t.muted ? "muted" : "unmuted"} (buffer retained)`);
         }
         case "track.gain": {
@@ -1195,6 +1355,9 @@ export class AudioEngine {
         }
         case "song.load": {
           if (this.ctx) {
+            // Lifecycle (correction 8): momentary state cleared, DSP history
+            // faded out, Beat Repeat rings dropped. Stored FX config survives.
+            this.flushAllFx();
             this.stopSources();
             this.requestedPlaying = false;
             this.timeline.setRate(this.ctx.currentTime, this.timeline.targetRate());
@@ -1215,13 +1378,61 @@ export class AudioEngine {
           if (mask.length === this.tracks.length) {
             this.tracks.forEach((t, i) => {
               t.muted = mask[i] === "1";
-              if (this.ctx) this.setGain(t.gain.gain, t.muted ? 0 : t.level);
+              if (this.ctx) this.applyAudibility(i as TrackId);
             });
           }
           return this.ack(
             cmd,
             "completed",
             `rolled back ${String(p["control"])} ×${String(p["toCount"])}${mask ? ` · mutes=${mask}` : ""}`,
+          );
+        }
+        case "stem.solo": {
+          const id = Number(p["track"]) as TrackId;
+          if (!this.tracks[id]) return this.ack(cmd, "rejected", `no track ${id}`);
+          this.setSolo(id, Boolean(p["on"]));
+          return this.ack(
+            cmd,
+            "completed",
+            `stem ${id + 1} solo ${p["on"] ? "on" : "off"} — mute state untouched (${this.tracks[id]!.muted ? "still muted" : "unmuted"})`,
+          );
+        }
+        case "stem.link": {
+          const id = Number(p["track"]) as TrackId;
+          if (!this.tracks[id]) return this.ack(cmd, "rejected", `no track ${id}`);
+          this.setLinked(id, Boolean(p["on"]));
+          return this.ack(cmd, "completed", `stem ${id + 1} ${p["on"] ? "linked" : "unlinked"} — phase-continuous, no restart`);
+        }
+        case "stem.select":
+          return this.ack(cmd, "completed", `active stem → ${Number(p["stem"]) + 1}`);
+        case "fx.overlay":
+          return this.ack(cmd, "completed", `FX overlay ${p["on"] ? "open" : "closed"} — tape audio unaffected`);
+        case "fx.momentary.start":
+        case "fx.momentary.end":
+        case "fx.latch":
+        case "fx.variation":
+        case "fx.clearLatches": {
+          const id = Number(p["track"]) as TrackId;
+          const t = this.tracks[id];
+          if (!t) return this.ack(cmd, "rejected", `no track ${id}`);
+          if (!this.ctx) return this.ack(cmd, "rejected", "audio not unlocked");
+          if (cmd.type === "fx.clearLatches") {
+            for (const f of FX_FAMILIES) void this.setFxActive(id, f, false);
+            return this.ack(cmd, "completed", `stem ${id + 1} latches cleared`);
+          }
+          const family = String(p["family"]) as FxFamily;
+          if (!FX_FAMILIES.includes(family)) return this.ack(cmd, "rejected", `unknown FX family ${String(p["family"])}`);
+          const latched = Boolean(p["latched"]);
+          if (cmd.type === "fx.variation") {
+            void this.setFxVariation(id, family, Number(p["variation"]), latched);
+            return this.ack(cmd, "completed", `stem ${id + 1} ${family} variation → ${Number(p["variation"])}`);
+          }
+          const active = cmd.type === "fx.latch" ? Boolean(p["on"]) : cmd.type === "fx.momentary.start";
+          void this.setFxActive(id, family, active, latched);
+          return this.ack(
+            cmd,
+            "completed",
+            `stem ${id + 1} ${family} ${active ? "engaged" : "released"}${latched ? " (latched)" : ""}`,
           );
         }
         default:
@@ -1284,6 +1495,13 @@ export class AudioEngine {
             : null,
         };
       }),
+      fx: this.fxSnapshots(),
+      effectiveBpm: this.tracks.map((_t, i) => this.effectiveBpm(i as TrackId)),
+      bpmSource: this.bpmSource,
+      baseBpm: this.baseBpm,
+      soloMask: this.tracks.map((t) => (t.soloed ? "1" : "0")).join(""),
+      linkMask: this.tracks.map((t) => (t.linked ? "1" : "0")).join(""),
+      lastFxRejection: this.lastFxRejection,
       decodedBytes: this.decodedTotalBytes,
       reverseBytes: this.reverseTotalBytes,
       budget: this.budget,
@@ -1323,6 +1541,8 @@ export class AudioEngine {
 
   dispose() {
     for (const t of this.tracks) {
+      t.fxRack?.dispose();
+      t.fxRack = null;
       void t.worklet?.dispose();
       t.worklet = null;
       t.engineMode = "node";

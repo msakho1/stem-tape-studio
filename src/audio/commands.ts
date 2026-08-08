@@ -27,6 +27,16 @@ export type AudioCommandType =
   | "tape.reverse"
   | "filter.set"
   | "song.load"
+  // Phase 5C — stem performance layer. Same ordered command + ack path.
+  | "stem.select"
+  | "stem.solo"
+  | "stem.link"
+  | "fx.overlay"
+  | "fx.momentary.start"
+  | "fx.momentary.end"
+  | "fx.variation"
+  | "fx.latch"
+  | "fx.clearLatches"
   | "rollback";
 
 

@@ -4,6 +4,10 @@ import type { LedFrame, LedId, SurfaceState } from "@/machine/surface";
 import type { RawInputEvent } from "@/input/gestures";
 import { V26_GROUP_LABEL, V26_MAP } from "@/machine/v26map";
 import { HitZoneAudit } from "@/device/HitZoneAudit";
+import { FX_FAMILIES } from "@/machine/stemPerformance";
+import { STEM_TAPE_V1_MAP, exportMapJson } from "@/machine/stemTapeV1Map";
+import type { ChordArbiter } from "@/machine/chordArbiter";
+import type { EngineStatus } from "@/audio/engine";
 
 const LED_ORDER: LedId[] = [
   "track-led-1",
@@ -27,6 +31,8 @@ interface Props {
   gestureLog: { id: number; text: string; t: number }[];
   faderValuesRef: React.MutableRefObject<number[]>;
   svgRef: React.RefObject<SVGSVGElement | null>;
+  arbiter: ChordArbiter;
+  audio: EngineStatus;
 }
 
 
@@ -77,6 +83,8 @@ export function DiagnosticPanel({
   gestureLog,
   faderValuesRef,
   svgRef,
+  arbiter,
+  audio,
 }: Props) {
   const satisfied = (r: (typeof V26_MAP)[number]) => (state.coverage[r.id] ?? 0) > 0 || observed[r.id] != null;
   const covered = V26_MAP.filter(satisfied).length;
@@ -106,6 +114,109 @@ export function DiagnosticPanel({
             </span>
           </div>
         </div>
+      </section>
+
+      <section className="st-section" data-testid="phase5c-diagnostics">
+        <h2 className="st-section__title">stem performance + fx (phase 5c)</h2>
+        <div className="st-grid">
+          <div className="st-kv">
+            <span className="st-kv__k">layer</span>
+            <span className="st-kv__v" data-testid="fx-layer">{state.perf.fxOverlay ? "fx-overlay" : "tape"}</span>
+          </div>
+          <div className="st-kv">
+            <span className="st-kv__k">active stem</span>
+            <span className="st-kv__v" data-testid="active-stem">{state.perf.activeStem + 1}</span>
+          </div>
+          <div className="st-kv">
+            <span className="st-kv__k">solo mask</span>
+            <span className="st-kv__v">{state.perf.tracks.map((t) => (t.soloed ? "1" : "0")).join("")}</span>
+          </div>
+          <div className="st-kv">
+            <span className="st-kv__k">link mask</span>
+            <span className="st-kv__v">{state.perf.tracks.map((t) => (t.linked ? "1" : "0")).join("")}</span>
+          </div>
+          <div className="st-kv">
+            <span className="st-kv__k">tape target</span>
+            <span className="st-kv__v">
+              {state.perf.tracks[state.perf.activeStem]?.linked
+                ? `linked group [${state.perf.tracks.flatMap((t, i) => (t.linked ? [i + 1] : [])).join(" ")}]`
+                : `stem ${state.perf.activeStem + 1} only`}
+            </span>
+          </div>
+          <div className="st-kv">
+            <span className="st-kv__k">bpm source</span>
+            <span className="st-kv__v">{audio.baseBpm.toFixed(1)} ({audio.bpmSource})</span>
+          </div>
+          <div className="st-kv">
+            <span className="st-kv__k">engine source</span>
+            <span className="st-kv__v">{audio.enginePreference} · worklet tracks {audio.workletTrackCount}</span>
+          </div>
+          <div className="st-kv">
+            <span className="st-kv__k">rejected activation</span>
+            <span className="st-kv__v">{audio.lastFxRejection ?? "none"}</span>
+          </div>
+        </div>
+
+        <table className="st-table" data-testid="fx-slots">
+          <thead>
+            <tr>
+              <th>stem</th>
+              {FX_FAMILIES.map((f) => (
+                <th key={f}>{f}</th>
+              ))}
+              <th>eff. bpm</th>
+            </tr>
+          </thead>
+          <tbody>
+            {state.perf.tracks.map((t, i) => (
+              <tr key={i}>
+                <td>{i + 1}</td>
+                {FX_FAMILIES.map((f) => {
+                  const slot = t.fx[f];
+                  const rack = audio.fx[i];
+                  const extra =
+                    f === "echo" && rack ? ` ${rack.echo.delayS.toFixed(4)}s` :
+                    f === "beatRepeat" && rack ? ` ${rack.beatRepeat.sliceFrames}fr${rack.beatRepeat.arming ? " ARMING" : ""}` :
+                    f === "reverb" && rack ? ` ${rack.reverb.variation}` :
+                    f === "filter" && rack ? ` ${rack.filter.layer}` : "";
+                  return (
+                    <td key={f}>
+                      {slot.momentary ? "MOM" : slot.latched ? "LATCH" : "—"} v{slot.variation}
+                      {extra}
+                    </td>
+                  );
+                })}
+                <td>{audio.effectiveBpm[i]?.toFixed(2) ?? "—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+
+        <h3 className="st-section__title">recognised ordered chords</h3>
+        <ul className="st-log">
+          {arbiter.log.slice(0, 12).map((r, i) => (
+            <li key={i} className="st-log__line">
+              {r.intent} · [{r.controls.join(" + ")}] · suppressed [{r.suppressed.join(" ")}] · {r.detail}
+            </li>
+          ))}
+          {arbiter.log.length === 0 && <li className="st-log__line">no chord recognised yet</li>}
+        </ul>
+
+        <button
+          className="st-step"
+          type="button"
+          onClick={() => {
+            const blob = new Blob([exportMapJson()], { type: "application/json" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = "stem-tape-v1-map.json";
+            a.click();
+            URL.revokeObjectURL(url);
+          }}
+        >
+          export mapping registry ({STEM_TAPE_V1_MAP.length} rows)
+        </button>
       </section>
 
       <section className="st-section">
