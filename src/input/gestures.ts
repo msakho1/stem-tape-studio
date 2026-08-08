@@ -196,6 +196,14 @@ export class GestureEngine {
       return;
     }
 
+    // A fader that was actually dragged is a continuous edit, not a tap.
+    if (isContinuousControl(control) && rec.moved) {
+      this.clearTaps(control);
+      return;
+    }
+
+
+
     // Optimistic tap: fire now, revise upward if more taps arrive.
     const prev = this.taps.get(control);
     const within = prev != null && t - prev.lastReleaseAt <= this.timings.multiTapGapMs;
