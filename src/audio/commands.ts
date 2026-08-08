@@ -41,10 +41,22 @@ export type AudioCommandType =
   | "rec.arm"
   | "rec.tap"
   | "rec.undoPass"
+  | "rec.requestInput"
+  | "rec.cancelInput"
+  | "rec.recover"
   | "grid.tap"
   | "grid.quantise"
+  // Heads mode is a first-class Stem Tape v1 feature, not a reserved gesture.
+  | "heads.enter"
+  | "heads.exit"
+  | "heads.source"
+  | "heads.level"
+  | "heads.mute"
+  | "heads.reverse"
+  | "heads.scrub"
   | "heads.print"
   | "rollback";
+
 
 
 export interface AudioCommand {
