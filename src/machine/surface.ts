@@ -210,26 +210,40 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
       }
 
       if (c === "function") {
-        const times = [...state.fnTapTimes, t].slice(-4);
-        next = { ...next, fnTapTimes: times, fnTapCount: g.count };
-        if (g.count === 4 && times.length === 4) {
+        // Tempo tapping is NOT multi-tap: at 120 BPM the gap is 500 ms, far
+        // outside the 300 ms multi-tap window, so the engine's `count` is
+        // always 1 here. Count the taps ourselves over a musical window
+        // (40–240 BPM => 250–1500 ms between taps).
+        const prev = state.fnTapTimes;
+        const inRhythm = prev.length > 0 && t - prev[prev.length - 1]! <= 1500;
+        const times = (inRhythm ? [...prev, t] : [t]).slice(-4);
+        const count = times.length;
+        next = { ...next, fnTapTimes: times, fnTapCount: count };
+        if (count === 4) {
           const gaps = times.slice(1).map((v, i) => v - times[i]!);
           const mean = gaps.reduce((a, b) => a + b, 0) / gaps.length;
           const bpm = 60000 / mean;
           const farOff = state.grid.bpm != null && Math.abs(bpm - state.grid.bpm) / state.grid.bpm > 0.25;
           if (farOff) {
             next = { ...next, grid: { ...state.grid, rejected: true } };
-            return fire(next, "fn.gridReject", `tapped ${bpm.toFixed(1)} vs grid ${state.grid.bpm!.toFixed(1)} — all four blink, nothing moves`, t);
+            return fire(
+              next,
+              "fn.gridReject",
+              `tapped ${bpm.toFixed(1)} vs grid ${state.grid.bpm!.toFixed(1)} — all four blink, nothing moves`,
+              t,
+            );
           }
           next = { ...next, grid: { bpm, rejected: false, source: "tapped" } };
           return fire(next, "fn.tempoGrid", `grid = ${bpm.toFixed(1)} BPM`, t);
         }
-        if (state.grid.bpm != null && g.count >= 1) {
+        if (state.grid.bpm != null) {
           next = { ...next, grid: { ...state.grid, source: "beatmatched", rejected: false } };
           return fire(next, "fn.beatmatch", `re-tap over loops · ${state.grid.bpm.toFixed(1)} BPM held`, t);
         }
         return next;
       }
+
+
 
       if (c.startsWith("track-button")) {
         const i = trackIndexOf(c);
