@@ -99,9 +99,22 @@ export class AudioEngine {
   private requestedPlaying = false;
   private masterLevel = 0.7;
   private listeners = new Set<Listener>();
-  budget: MemoryBudget = defaultBudget();
+  budget: MemoryBudget = SSR_BUDGET;
+  /** Explicit opt-in; only meaningful above the standard threshold. */
+  highMemoryMode = false;
   lastError: string | null = null;
   lastDecodeMs: number | null = null;
+
+  /** Resolve the real platform budget after hydration (SSR must not guess). */
+  resolveBudget(): MemoryBudget {
+    this.budget = defaultBudget();
+    return this.budget;
+  }
+
+  setHighMemoryMode(on: boolean) {
+    this.highMemoryMode = on;
+  }
+
 
   onAck(fn: Listener) {
     this.listeners.add(fn);
