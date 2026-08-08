@@ -185,6 +185,10 @@ export interface EngineStatus {
   highMemoryMode: boolean;
   memoryStatement: string;
   lastError: string | null;
+  /** Phase 6 heads/PRINT truth, straight from the engine. */
+  heads: HeadsState;
+  headsSummary: string;
+
   lastDecodeMs: number | null;
   enginePreference: EnginePreference;
   workletSupported: boolean;
