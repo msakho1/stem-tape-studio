@@ -391,6 +391,13 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
         }
 
         if (g.count === 2) {
+          if (slice.content === "loaded" || slice.content === "recording") {
+            // Phase 6: double-tap on recorded content is a non-destructive
+            // undo of the newest overdub pass, never a delete.
+            next = { ...next, activeTrack: i };
+            next = emit(next, "rec.undoPass", { track: i }, { rowId: "rec.undo.doubleTap", t });
+            return fire(next, "rec.undoPass", `track ${i + 1} — last overdub pass undone (redo available)`, t);
+          }
           next = { ...next, tracks: setTrack(next, i, { content: "empty" }), activeTrack: i };
           // Recoverable trash: the surface loses the track immediately (gesture
           // fidelity) but the engine keeps the buffer and the blob survives.
@@ -400,9 +407,11 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
         next = { ...next, activeTrack: i };
         if (slice.content === "recording" || slice.content === "armed") {
           next = { ...next, tracks: setTrack(next, i, { content: "loaded" }) };
+          next = emit(next, "rec.tap", { track: i }, { rowId: "rec.tap.stop", t });
           return fire(next, "track.tap", `track ${i + 1} — stop the take`, t);
         }
         if (slice.content === "empty") return fire(next, "track.tap", `track ${i + 1} empty — nothing to stop or mute`, t);
+
         const muted = slice.content === "muted";
         next = { ...next, tracks: setTrack(next, i, { content: muted ? "loaded" : "muted" }) };
         next = emit(next, muted ? "track.unmute" : "track.mute", { track: i }, { rowId: "track.tap", t });
@@ -476,9 +485,11 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
         if (state.headsMode) {
           const printing = slice.content === "empty";
           next = { ...next, tracks: setTrack(next, i, { content: printing ? "printing" : slice.content }) };
+          next = emit(next, "heads.print", { track: i, printing }, { rowId: "print.reserved", t });
           return fire(next, "heads.print", `track ${i + 1} ${printing ? "PRINT" : "tape (loaded)"}`, t);
         }
         next = { ...next, tracks: setTrack(next, i, { content: "armed" }), activeTrack: i };
+        next = emit(next, "rec.arm", { track: i }, { rowId: "rec.arm.hold", t });
         next = fire(next, "track.record", `track ${i + 1} armed — records on your first sound`, t);
         // v2.6 songs.length: takes run to 8:00 · longer with the tape slowed.
         const maxTakeSeconds = 480 / next.speed;

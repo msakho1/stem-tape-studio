@@ -30,6 +30,13 @@ export interface StemTapeRow {
   led: string;
   provenance: Provenance;
   family?: FxFamily;
+  /** Phase 6 tutorial metadata — drives the Guide without duplicating the map. */
+  tutorial?: {
+    plainLanguage: string;
+    /** Ordered controls the Guide highlights on the twin. */
+    highlight: string[];
+    expected: string;
+  };
 }
 
 /** The stock v2.6 rows, unchanged, projected into the registry shape. */
@@ -177,11 +184,141 @@ export const FX_ROWS: StemTapeRow[] = [
   },
 ];
 
+/** Phase 6 — recording, grid, heads/PRINT and export rows (binding map §M5). */
+export const RECORDING_ROWS: StemTapeRow[] = [
+  {
+    id: "rec.arm.hold",
+    layer: "stem",
+    controls: ["track-n"],
+    thresholdMs: 450,
+    command: "rec.arm track=n (empty → arm; content → overdub-arm)",
+    suppresses: ["take.stop", "stem.mute.toggle"],
+    rollback: "txn-snapshot",
+    led: "armed track pulses ~2 Hz while waiting for sound",
+    provenance: "extension",
+    tutorial: {
+      plainLanguage: "Hold a track button for about half a second to arm it. Nothing records until it hears sound.",
+      highlight: ["track-n"],
+      expected: "the track light pulses; play or speak and it starts recording on the first note",
+    },
+  },
+  {
+    id: "rec.tap.stop",
+    layer: "stem",
+    controls: ["track-n"],
+    thresholdMs: 450,
+    command: "rec.tap track=n (recording → stop at seam; armed → cancel; else stop take / mute toggle)",
+    suppresses: [],
+    rollback: "none",
+    led: "solid while recording, returns to stem colour when stopped",
+    provenance: "reinterpreted",
+    tutorial: {
+      plainLanguage: "A short tap on the same track button stops the recording at the next loop point.",
+      highlight: ["track-n"],
+      expected: "recording ends cleanly on the loop seam, no click",
+    },
+  },
+  {
+    id: "rec.undo.doubleTap",
+    layer: "stem",
+    controls: ["track-n", "track-n"],
+    thresholdMs: 300,
+    command: "rec.undoLastPass track=n (non-destructive; redo available)",
+    suppresses: ["rec.tap"],
+    rollback: "txn-snapshot",
+    led: "undone pass dims in the take list",
+    provenance: "extension",
+    tutorial: {
+      plainLanguage: "Double-tap the track button to remove the last overdub pass. Nothing is deleted — you can bring it back.",
+      highlight: ["track-n"],
+      expected: "the newest pass mutes and the redo action becomes available",
+    },
+  },
+  {
+    id: "rec.input.drawer",
+    layer: "system",
+    controls: ["function", "record"],
+    command: "rec.openInputDrawer (permission, device, monitoring, latency)",
+    suppresses: [],
+    rollback: "none",
+    led: "input LED lit while the drawer is open",
+    provenance: "extension",
+    tutorial: {
+      plainLanguage: "Opens the input panel where you allow the microphone and choose monitoring.",
+      highlight: ["function", "record"],
+      expected: "the input drawer opens; monitoring stays off until you turn it on",
+    },
+  },
+  {
+    id: "grid.tap.learn",
+    layer: "system",
+    controls: ["function", "volume-plus"],
+    command: "grid.tapTempo (median-filtered, ≥3 taps, 1500 ms inactivity resets)",
+    suppresses: ["master.gain"],
+    rollback: "none",
+    led: "grid LED flashes on the downbeat once locked",
+    provenance: "extension",
+    tutorial: {
+      plainLanguage: "Tap this combination in time with your music to teach Stem Tape the tempo.",
+      highlight: ["function", "volume-plus"],
+      expected: "after three taps the tempo readout locks and the grid light flashes on beat one",
+    },
+  },
+  {
+    id: "grid.quantise.toggle",
+    layer: "system",
+    controls: ["function", "volume-minus"],
+    command: "grid.toggleQuantise (punch-in/out snaps to the grid)",
+    suppresses: ["master.gain"],
+    rollback: "none",
+    led: "grid LED solid when quantise is on",
+    provenance: "extension",
+    tutorial: {
+      plainLanguage: "Turns grid snapping on or off for punch-in recording.",
+      highlight: ["function", "volume-minus"],
+      expected: "recording starts and stops exactly on the beat instead of the instant you press",
+    },
+  },
+  {
+    id: "print.reserved",
+    layer: "system",
+    controls: ["function", "play"],
+    thresholdMs: 900,
+    command: "heads.print (RESERVED — records the heads sum to a new take)",
+    suppresses: ["transport.play"],
+    rollback: "none",
+    led: "print LED reserved, unlit in this build",
+    provenance: "extension",
+    tutorial: {
+      plainLanguage: "Reserved for PRINT: committing the tape heads to a new recorded layer.",
+      highlight: ["function", "play"],
+      expected: "reserved in this build — the gesture is registered but inactive",
+    },
+  },
+  {
+    id: "export.wav",
+    layer: "system",
+    controls: ["function", "record"],
+    thresholdMs: 900,
+    command: "export.wav (streamed 16/24-bit WAV, on-device)",
+    suppresses: ["rec.openInputDrawer"],
+    rollback: "none",
+    led: "export LED animates during assembly",
+    provenance: "extension",
+    tutorial: {
+      plainLanguage: "Holds to export what you have recorded as a WAV file saved from your own device.",
+      highlight: ["function", "record"],
+      expected: "a WAV download appears; the audio never leaves your device before saving",
+    },
+  },
+];
+
 export const STEM_TAPE_V1_MAP: StemTapeRow[] = [
   ...V26_ROWS_AS_REGISTRY,
   ...STEM_ROWS,
   ...SYSTEM_ROWS,
   ...FX_ROWS,
+  ...RECORDING_ROWS,
 ];
 
 export const STEM_TAPE_ROW_BY_ID: Record<string, StemTapeRow> = Object.fromEntries(
