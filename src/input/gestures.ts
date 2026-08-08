@@ -70,6 +70,18 @@ export type GestureListener = (g: Gesture) => void;
 export type RawListener = (e: RawInputEvent) => void;
 
 /**
+ * Continuous controls. Faders are drag controls: they must never enter
+ * button-hold recognition (no holdStart / holdEnd / tapThenHold) and never join
+ * a chord. Pointer-down starts fader interaction immediately.
+ * A fader still emits `tap` when it was pressed and released without moving,
+ * which is what the v2.6 "double-tap = reverse" row is built on.
+ */
+export function isContinuousControl(control: Control): boolean {
+  return control.startsWith("fader-");
+}
+
+
+/**
  * Raw pointer runtime + gesture interpreter.
  *
  * Deliberately framework-free: no React, no DOM queries. Components feed it
