@@ -1836,6 +1836,35 @@ export class AudioEngine {
           );
         }
         // ---- Phase 6: recording, grid, heads/PRINT -------------------------
+        case "rec.requestInput": {
+          const id = Number(p["track"]) as TrackId;
+          const rec = this.recording();
+          if (!rec) return this.ack(cmd, "rejected", "audio not unlocked");
+          if (rec.model.inputEnabled) {
+            rec.arm(id);
+            this.pendingInputTrack = null;
+            return this.ack(cmd, "completed", rec.model.lastAck);
+          }
+          // §2.2: the hold is remembered, not lost. The UI opens the grant
+          // drawer; the track arms itself the moment permission lands.
+          this.pendingInputTrack = id;
+          return this.ack(cmd, "accepted", `track ${id + 1} is waiting for input — allow the microphone and it arms itself, nothing else changed`);
+        }
+        case "rec.cancelInput": {
+          const had = this.pendingInputTrack;
+          this.pendingInputTrack = null;
+          return this.ack(cmd, "completed", had == null ? "no pending input request" : `pending input request for track ${had + 1} cancelled — track untouched`);
+        }
+        case "rec.recover": {
+          const rec = this.recording();
+          if (!rec) return this.ack(cmd, "rejected", "audio not unlocked");
+          const recoverable = rec.takes.filter((t) => t.state === "ready" && t.durable);
+          if (recoverable.length === 0)
+            return this.ack(cmd, "rejected", "nothing recoverable — interrupted takes stay interrupted rather than being played back short");
+          void Promise.all(recoverable.map((t) => rec.activateTake(t)));
+          return this.ack(cmd, "accepted", `re-activating ${recoverable.length} durable take(s)`);
+        }
+
         case "rec.arm":
         case "rec.tap":
         case "rec.undoPass": {
