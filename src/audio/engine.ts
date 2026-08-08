@@ -40,7 +40,12 @@ export interface TrackRuntime {
   /** Where the bytes came from — user audio is never network-fetched. */
   provenance: "user-private" | "bundled-demo" | null;
   name: string | null;
+  /** Decode instrumentation (Phase 4.1): must be exactly 1 per load. */
+  decodeCount: number;
+  decodeMs: number | null;
+  bufferReused: boolean;
 }
+
 
 export interface EngineStatus {
   contextState: AudioContextState | "none";
