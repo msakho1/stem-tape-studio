@@ -251,27 +251,37 @@ export function useDeviceSurface() {
     return layer.fn ? "window" : "fader";
   }, []);
 
-  const scheduleCap = useCallback((index: number, cy: number, value: number) => {
-    pendingCyRef.current = { index, cy, value };
-    if (frameRef.current != null) return;
-    frameRef.current = requestAnimationFrame(() => {
-      frameRef.current = null;
-      const pending = pendingCyRef.current;
-      if (!pending) return;
-      const cap = capRefs.current[pending.index];
-      if (cap) cap.setAttribute("cy", String(pending.cy));
-      const drag = dragRef.current;
+  /**
+   * ONE shared frame for every moving fader. Each pending fader is written to
+   * the DOM and pushed onto the control bus inside the same rAF, carrying the
+   * same batch id, so four fingers land on one future audio frame instead of
+   * four staggered ones.
+   */
+  const flushFrame = useCallback(() => {
+    frameRef.current = null;
+    const batch = faders.current.flush();
+    if (!batch) return;
+    const timestamp = performance.now();
+    for (const p of batch.previews) {
+      const cap = capRefs.current[p.faderIndex];
+      if (cap) cap.setAttribute("cy", String(faderValueToCy(p.value)));
       controlBus.send({
-        channel: drag?.channel ?? "fader",
-        index: pending.index,
-        value: pending.value,
+        channel: p.channel,
+        index: p.faderIndex,
+        value: p.value,
         committed: false,
-        pointerId: drag?.pointerId ?? -1,
+        pointerId: p.pointerId,
         phase: "move",
-        timestamp: performance.now(),
+        timestamp,
+        batchFrame: batch.batchFrame,
       });
-    });
+    }
   }, []);
+
+  const scheduleFlush = useCallback(() => {
+    if (frameRef.current != null) return;
+    frameRef.current = requestAnimationFrame(flushFrame);
+  }, [flushFrame]);
 
   const onControlPointerDown = useCallback(
     (control: Control, e: React.PointerEvent) => {
@@ -288,56 +298,67 @@ export function useDeviceSurface() {
       engine.press(control, e.pointerId, performance.now(), p?.x, p?.y);
 
       if (control.startsWith("fader-")) {
-        const index = Number(control.slice(-1)) - 1;
+        const index = (Number(control.slice(-1)) - 1) as FaderIndex;
         const channel = resolveChannel();
-        dragRef.current = { index, pointerId: e.pointerId, channel };
-        const value = p ? cyToFaderValue(p.y) : (faderValuesRef.current[index] ?? 0);
+        const current = faderValuesRef.current[index] ?? 0;
+        const pointerValue = p ? cyToFaderValue(p.y) : current;
+        // Pickup semantics: the cap does NOT jump to the finger. A second
+        // finger on an already-owned fader is rejected without disturbing it.
+        const session = faders.current.begin({
+          pointerId: e.pointerId,
+          faderIndex: index,
+          userY: p?.y ?? 0,
+          pointerValue,
+          currentValue: current,
+          channel,
+          source: e.pointerType === "mouse" ? "mouse" : "touch",
+          t: performance.now(),
+        });
+        if (!session) return;
         // The gesture opens on the bus BEFORE any movement, so the engine can
         // latch the head's current read position as the scrub origin.
         controlBus.send({
           channel,
           index,
-          value,
+          value: current,
           committed: false,
           pointerId: e.pointerId,
           phase: "start",
           timestamp: performance.now(),
         });
-        if (p) {
-          faderValuesRef.current[index] = value;
-          scheduleCap(index, faderValueToCy(value), value);
-        }
       }
     },
-    [engine, resolveChannel, scheduleCap, toUserSpace],
+    [engine, resolveChannel, toUserSpace],
   );
 
   const onControlPointerMove = useCallback(
     (control: Control, e: React.PointerEvent) => {
-      const drag = dragRef.current;
-      if (!drag || drag.pointerId !== e.pointerId) return;
+      const session = faders.current.sessionForPointer(e.pointerId);
+      if (!session) return;
       const p = toUserSpace(e.clientX, e.clientY);
       if (!p) return;
       engine.markMoved(control);
-      const value = cyToFaderValue(p.y);
-      faderValuesRef.current[drag.index] = value;
-      scheduleCap(drag.index, faderValueToCy(value), value);
+      const value = faders.current.move(e.pointerId, p.y, cyToFaderValue(p.y), (v) => Math.min(1, Math.max(0, v)));
+      if (value == null) return;
+      faderValuesRef.current[session.faderIndex] = value;
+      scheduleFlush();
     },
-    [engine, scheduleCap, toUserSpace],
+    [engine, scheduleFlush, toUserSpace],
   );
 
   /**
    * Commit: the reducer receives the EXACT value that was last audible, so the
-   * committed gain and the last preview gain are the same number.
+   * committed gain and the last preview gain are the same number. Only the
+   * session belonging to THIS pointer ends.
    */
-  const endDrag = useCallback(() => {
-    const drag = dragRef.current;
+  const endDrag = useCallback((pointerId: number) => {
+    const drag = faders.current.end(pointerId);
     if (!drag) return;
-    dragRef.current = null;
-    const value = faderValuesRef.current[drag.index] ?? 0;
+    const value = drag.lastPreviewValue;
+    faderValuesRef.current[drag.faderIndex] = value;
     controlBus.send({
       channel: drag.channel,
-      index: drag.index,
+      index: drag.faderIndex,
       value,
       committed: true,
       pointerId: drag.pointerId,
@@ -346,25 +367,24 @@ export function useDeviceSurface() {
     });
     // The reducer is told which layer the gesture claimed, so a modifier
     // released mid-drag cannot retarget the commit.
-    dispatch({ type: "faderCommit", index: drag.index, value, claimed: drag.channel });
+    dispatch({ type: "faderCommit", index: drag.faderIndex, value, claimed: drag.channel });
   }, []);
 
   /**
    * Documented cancel rule: a cancelled drag is NOT a commit. Audio is
    * reconciled back to the last committed value (ramped) and the reducer keeps
-   * the value it already had.
+   * the value it already had. Other live faders are untouched.
    */
-  const cancelDrag = useCallback(() => {
-    const drag = dragRef.current;
+  const cancelDrag = useCallback((pointerId: number) => {
+    const drag = faders.current.cancel(pointerId);
     if (!drag) return;
-    dragRef.current = null;
     if (drag.channel === "headScrub") {
       // Cancelling a scrub restores the pre-gesture head position; there is no
       // "last committed fader value" to ramp to.
       controlBus.send({
         channel: "headScrub",
-        index: drag.index,
-        value: faderValuesRef.current[drag.index] ?? 0,
+        index: drag.faderIndex,
+        value: faderValuesRef.current[drag.faderIndex] ?? 0,
         committed: false,
         pointerId: drag.pointerId,
         phase: "cancel",
@@ -372,9 +392,13 @@ export function useDeviceSurface() {
       });
       return;
     }
-    const committed = controlBus.reconcile(drag.channel, drag.index, stateRef.current.tracks[drag.index]?.volume ?? 0);
-    faderValuesRef.current[drag.index] = committed;
-    const cap = capRefs.current[drag.index];
+    const committed = controlBus.reconcile(
+      drag.channel,
+      drag.faderIndex,
+      stateRef.current.tracks[drag.faderIndex]?.volume ?? 0,
+    );
+    faderValuesRef.current[drag.faderIndex] = committed;
+    const cap = capRefs.current[drag.faderIndex];
     if (cap) cap.setAttribute("cy", String(faderValueToCy(committed)));
   }, []);
 
@@ -382,7 +406,7 @@ export function useDeviceSurface() {
   const onControlPointerUp = useCallback(
     (control: Control, e: React.PointerEvent) => {
       engine.release(control, e.pointerId);
-      endDrag();
+      endDrag(e.pointerId);
     },
     [endDrag, engine],
   );
@@ -390,10 +414,11 @@ export function useDeviceSurface() {
   const onControlPointerCancel = useCallback(
     (control: Control, e: React.PointerEvent) => {
       engine.cancel(control, e.pointerId);
-      cancelDrag();
+      cancelDrag(e.pointerId);
     },
     [cancelDrag, engine],
   );
+
 
   const leds = useMemo(() => deriveLeds(state), [state]);
   const observed = useMemo(() => observedRows(state, leds), [state, leds]);
