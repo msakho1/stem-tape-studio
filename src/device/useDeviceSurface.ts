@@ -25,6 +25,8 @@ import {
   type SurfaceState,
 } from "@/machine/surface";
 import { controlBus, type ContinuousChannel } from "@/audio/controlBus";
+import { FaderSessionManager, type FaderIndex } from "@/input/faderSessions";
+
 
 
 
@@ -81,9 +83,13 @@ export function useDeviceSurface() {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const capRefs = useRef<Record<number, SVGCircleElement | null>>({});
   const faderValuesRef = useRef<number[]>([0.78, 0.72, 0.65, 0.7]);
-  const dragRef = useRef<{ index: number; pointerId: number; channel: ContinuousChannel } | null>(null);
+  /**
+   * Workstream 1: one session per pointer. No singleton drag — a second finger
+   * can never steal the first fader, and each pointerup ends only its own.
+   */
+  const faders = useRef(new FaderSessionManager());
   const frameRef = useRef<number | null>(null);
-  const pendingCyRef = useRef<{ index: number; cy: number; value: number } | null>(null);
+
   /** Latest state, read by imperative pointer handlers without re-binding them. */
   const stateRef = useRef<SurfaceState>(state);
   stateRef.current = state;

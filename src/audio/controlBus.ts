@@ -28,7 +28,14 @@ export interface ContinuousEvent {
   phase?: ContinuousPhase;
   /** performance.now() of the originating pointer event. */
   timestamp?: number;
+  /**
+   * Shared id for every fader flushed in the same animation frame. The engine
+   * schedules one batch onto ONE future audio frame, so simultaneous fingers
+   * never stagger across frames.
+   */
+  batchFrame?: number;
 }
+
 
 
 type Handler = (e: ContinuousEvent) => void;
