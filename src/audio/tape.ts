@@ -64,6 +64,12 @@ export class TapeTimeline {
   private anchorCtx = 0;
   private anchorPos = 0;
   private rate = 1;
+  /**
+   * The MUSICAL target rate — what the tape returns to once any transport
+   * inertia finishes. A wind-down to ~0 must never overwrite it, otherwise the
+   * next Play winds "up" to zero and the transport is silently dead.
+   */
+  private musical = 1;
   private glide: GlideSegment | null = null;
   /**
    * Workstream 2: a finite transport-inertia ramp. It takes precedence over the
@@ -74,6 +80,7 @@ export class TapeTimeline {
 
   constructor(rate = 1) {
     this.rate = rate;
+    this.musical = rate;
   }
 
   /** Hard re-anchor (transport start, seek, seam wrap). */
@@ -104,7 +111,7 @@ export class TapeTimeline {
 
   /** The rate the tape returns to once inertia finishes (the musical rate). */
   musicalRate(): number {
-    return this.glide ? this.glide.to : this.rate;
+    return this.musical;
   }
 
   inertiaSegment(): InertiaSegment | null {
@@ -127,12 +134,31 @@ export class TapeTimeline {
     this.inertia = { ...seg, startAt: ctxTime };
   }
 
-  /** Ramp finished (or was superseded): settle on a constant rate. */
+  /**
+   * Ramp finished (or was superseded): settle on a constant rate. This NEVER
+   * touches the musical target — a wind-down settles the transport at ~0 while
+   * the tape still "wants" 1.00×.
+   */
   endInertia(ctxTime: number, rate: number) {
     this.anchorPos = this.positionAt(ctxTime);
     this.anchorCtx = ctxTime;
     this.inertia = null;
     this.rate = rate;
+  }
+
+  /**
+   * Interrupt an in-flight inertia ramp WITHOUT completing it: the position and
+   * the instantaneous rate at `ctxTime` become the new anchor, so the opposite
+   * curve can start from exactly where the tape actually is. Live sources are
+   * untouched — nothing is stopped, nothing is recreated.
+   */
+  interruptInertia(ctxTime: number): number {
+    const r = this.rateAtTime(ctxTime);
+    this.anchorPos = this.positionAt(ctxTime);
+    this.anchorCtx = ctxTime;
+    this.inertia = null;
+    this.rate = r;
+    return r;
   }
 
   private rateAtTime(ctxTime: number): number {
@@ -158,10 +184,12 @@ export class TapeTimeline {
     this.anchorCtx = ctxTime;
     if (tau <= 0) {
       this.rate = to;
+      this.musical = to;
       this.glide = null;
       return;
     }
     this.rate = to;
+    this.musical = to;
     this.glide = { startAt: ctxTime, from, to, tau };
   }
 
@@ -170,6 +198,7 @@ export class TapeTimeline {
     this.anchorPos = this.positionAt(ctxTime);
     this.anchorCtx = ctxTime;
     this.rate = rate;
+    this.musical = rate;
     this.glide = null;
   }
 

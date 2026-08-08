@@ -36,15 +36,42 @@ export function useAudioEngine(commands: AudioCommand[]) {
    * gesture, so what a harness reads is what the audio path actually did.
    */
   useEffect(() => {
-    const w = window as unknown as { __stemTapeScrub?: () => unknown };
+    const w = window as unknown as {
+      __stemTapeScrub?: () => unknown;
+      __stemTapeTransport?: () => unknown;
+    };
     w.__stemTapeScrub = () => {
       const d = engine.status();
       return { scrub: d.scrub, heads: d.heads, headsSummary: d.headsSummary, engineReady: engine.ready };
     };
+    /**
+     * Transport truth for the browser proofs: the three separate values
+     * (musical target, instantaneous inertia rate, movement), the phase, the
+     * reversal counter and the ordered timeline-event log. Read-only.
+     */
+    w.__stemTapeTransport = () => {
+      const d = engine.status();
+      return {
+        phase: d.transportPhase,
+        musicalRate: d.targetRate,
+        instantaneousRate: d.rate,
+        moving: d.actuallyPlaying,
+        requested: d.requestedPlaying,
+        position: d.position,
+        effectiveBpm: d.effectiveBpm,
+        windReversals: engine.windReversals,
+        masterRms: engine.masterRms(),
+        fx: d.fx.map((f) => (f ? { active: (f as unknown as Record<string, unknown>)["active"] ?? null, summary: JSON.stringify(f).slice(0, 200) } : null)),
+        lastFxRejection: d.lastFxRejection,
+        timelineEvents: engine.timelineBus.log.slice(-40),
+      };
+    };
     return () => {
       delete w.__stemTapeScrub;
+      delete w.__stemTapeTransport;
     };
   }, [engine]);
+
 
 
 

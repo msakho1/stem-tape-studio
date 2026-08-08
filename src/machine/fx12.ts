@@ -53,20 +53,23 @@ export interface AlgorithmDef {
 export interface BankDef {
   id: BankId;
   label: string;
-  /** Physical track button (0..3) that selects this bank. */
-  button: BankIndex;
+  /**
+   * Zero-indexed physical track button that selects this bank.
+   * buttonIndex 3 === physical Button 4 (RHYTHM).
+   */
+  buttonIndex: BankIndex;
   algorithms: [AlgorithmDef, AlgorithmDef, AlgorithmDef];
 }
 
 /**
- * Declared in SIGNAL ORDER. `button` keeps the physical mapping, so
- * BANKS[i].button is NOT i for RHYTHM/MOTION.
+ * Declared in SIGNAL ORDER. `buttonIndex` keeps the physical mapping, so
+ * BANKS[i].buttonIndex is NOT i for RHYTHM/MOTION.
  */
 export const BANKS: [BankDef, BankDef, BankDef, BankDef] = [
   {
     id: "tone",
     label: "TONE",
-    button: 0,
+    buttonIndex: 0,
     algorithms: [
       { id: "filter", label: "Filter", defaultMacro: 0.5, heavy: false, legacy: true },
       { id: "isolator", label: "Isolator", defaultMacro: 0.5, heavy: false, legacy: false },
@@ -76,7 +79,7 @@ export const BANKS: [BankDef, BankDef, BankDef, BankDef] = [
   {
     id: "rhythm",
     label: "RHYTHM",
-    button: 3,
+    buttonIndex: 3,
     algorithms: [
       { id: "beatRepeat", label: "Beat Repeat", defaultMacro: 0.5, heavy: false, legacy: true },
       { id: "gate", label: "Rhythmic Gate", defaultMacro: 0.5, heavy: false, legacy: false },
@@ -86,7 +89,7 @@ export const BANKS: [BankDef, BankDef, BankDef, BankDef] = [
   {
     id: "motion",
     label: "MOTION",
-    button: 1,
+    buttonIndex: 1,
     algorithms: [
       { id: "echo", label: "Tempo Echo", defaultMacro: 0.5, heavy: false, legacy: true },
       { id: "pitchEcho", label: "Pitch Echo", defaultMacro: 0.5, heavy: false, legacy: false },
@@ -96,7 +99,7 @@ export const BANKS: [BankDef, BankDef, BankDef, BankDef] = [
   {
     id: "space",
     label: "SPACE",
-    button: 2,
+    buttonIndex: 2,
     algorithms: [
       { id: "reverb", label: "Reverb", defaultMacro: 0.45, heavy: false, legacy: true },
       { id: "shimmer", label: "Shimmer", defaultMacro: 0.45, heavy: true, legacy: false },
@@ -112,13 +115,19 @@ export const SIGNAL_ORDER: BankIndex[] = [0, 1, 2, 3];
 export const BANK_BY_BUTTON: BankIndex[] = (() => {
   const out: BankIndex[] = [0, 0, 0, 0];
   BANKS.forEach((b, i) => {
-    out[b.button] = i as BankIndex;
+    out[b.buttonIndex] = i as BankIndex;
   });
   return out;
 })();
 
 export function bankOfButton(button: number): BankIndex {
   return BANK_BY_BUTTON[button] ?? 0;
+}
+
+/** RHYTHM sits on physical Button 4 (zero-indexed buttonIndex 3). */
+export const RHYTHM_PHYSICAL_BUTTON = 4;
+export function physicalButtonOf(bank: BankIndex): number {
+  return BANKS[bank]!.buttonIndex + 1;
 }
 
 export function algorithmDef(bank: BankIndex, algorithm: AlgorithmIndex): AlgorithmDef {
