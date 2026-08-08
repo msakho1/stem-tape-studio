@@ -336,39 +336,38 @@ export class ChordArbiter {
       }
     }
 
-    // ---- precedence 4 and 5: FX-track chords (only inside the overlay)
+    // ---- precedence 4: FX chords already resolved on press; releases only end
+    // momentary sound and clear macro repeat.
     if (fxOverlay) {
-      const heldTrack = this.activeFxTrackHeld();
-      if (heldTrack) {
-        const family = FX_FAMILY_BY_TRACK[TRACK_INDEX[heldTrack]!]!;
-        if (control === "function") {
-          const allFour = (Object.keys(TRACK_INDEX) as Control[]).every((c) => this.down.has(c));
-          this.claim("function", heldTrack);
-          if (allFour) {
-            this.emit({ type: "fx.clearLatches", stem: activeStem }, ["function", heldTrack], "all four FX tracks + FUNCTION — latches cleared");
-          } else {
-            this.emit({ type: "fx.latch", stem: activeStem, family }, ["function", heldTrack], `latch toggle ${family}`);
+      if (isVolume(control)) {
+        const fired = this.macroFired.has(control);
+        this.clearMacro(control);
+        if (fired) return; // macro hold — no algorithm cycle on release
+        if (this.claimed.has(control)) {
+          const { selectedBank } = this.view();
+          if (selectedBank != null) {
+            this.emit(
+              { type: "fx.algorithm.cycle", stem: activeStem, bank: selectedBank, dir: control === "volume-plus" ? 1 : -1 },
+              [control],
+              `algorithm cycle ${control === "volume-plus" ? "+1" : "−1"} on bank ${selectedBank + 1}`,
+            );
           }
-          return;
-        }
-        if (isVolume(control)) {
-          this.claim(control, heldTrack);
-          this.emit(
-            { type: "fx.variation", stem: activeStem, family, dir: control === "volume-plus" ? 1 : -1 },
-            [control, heldTrack],
-            `${family} variation ${control === "volume-plus" ? "+1" : "−1"}`,
-          );
           return;
         }
       }
 
-      // ---- precedence 6: bare momentary release
+      // ---- precedence 5: bare momentary release
       if (isTrack(control) && this.claimed.has(control)) {
-        const family = FX_FAMILY_BY_TRACK[TRACK_INDEX[control]!]!;
-        this.emit({ type: "fx.momentary.end", stem: activeStem, family }, [control], `momentary ${family} released after ${heldMs.toFixed(0)} ms`);
+        const bank = bankOfButton(TRACK_INDEX[control]!);
+        this.emit(
+          { type: "fx.momentary.end", stem: activeStem, bank },
+          [control],
+          `momentary bank ${bank + 1} released after ${heldMs.toFixed(0)} ms`,
+        );
         return;
       }
     }
+
 
     // ---- precedence 7: bare v2.6 — nothing claimed, the base map runs.
   }
