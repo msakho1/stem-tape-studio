@@ -557,11 +557,18 @@ export class AudioEngine {
         name: t.name,
         provenance: t.provenance,
         trashed: t.trash != null,
+        decodedBytes: t.buffer ? bufferBytes(t.buffer) : 0,
+        decodeCount: t.decodeCount,
+        decodeMs: t.decodeMs,
+        bufferReused: t.bufferReused,
       })),
       decodedBytes: this.decodedTotalBytes,
       budget: this.budget,
+      highMemoryMode: this.highMemoryMode,
+      memoryStatement: describeVerdict(this.decodedTotalBytes, this.budget, this.highMemoryMode),
       lastError: this.lastError,
       lastDecodeMs: this.lastDecodeMs,
+
     };
   }
 
