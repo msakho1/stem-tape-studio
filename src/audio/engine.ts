@@ -30,6 +30,9 @@ import { estimateMigration } from "./workletBudget";
 import { pairwiseDrift, sharedApplyFrame, type WorkletAck } from "./workletProtocol";
 import { preflightWorklet, WorkletTrack, type MigrationStatus, type PreflightResult } from "./workletTrack";
 import { FxRack, type FxRackSnapshot } from "./fx/rack";
+import { BankRack, type BankStageSnapshot } from "./fx/banks";
+import type { AlgorithmIndex, BankIndex } from "@/machine/fx12";
+import { algorithmDef } from "@/machine/fx12";
 import { FX_FAMILIES, type FxFamily } from "@/machine/stemPerformance";
 import { RecordingController } from "./input/recorder";
 import { PerformanceRecorder } from "./export/performanceRecorder";
@@ -96,6 +99,8 @@ export interface TrackRuntime {
   preFx: GainNode;
   /** Phase 5C per-stem FX rack. Its input node is never re-parented. */
   fxRack: FxRack | null;
+  /** Workstream 3: four serial bank stages, permanently inserted. */
+  bankRack: BankRack | null;
   /** Post-FX fader — it rides the FX tails, so mute never lives here. */
   gain: GainNode;
   /** Separate, smoothed solo gain. Solo never mutates saved mute state. */
@@ -411,6 +416,7 @@ export class AudioEngine {
         input,
         preFx,
         fxRack,
+        bankRack,
         gain,
         soloGain,
         soloed: false,
@@ -2283,6 +2289,8 @@ export class AudioEngine {
     for (const t of this.tracks) {
       t.fxRack?.dispose();
       t.fxRack = null;
+      t.bankRack?.dispose();
+      t.bankRack = null;
       void t.worklet?.dispose();
       t.worklet = null;
       t.engineMode = "node";
