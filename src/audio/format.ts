@@ -50,8 +50,13 @@ export interface SniffResult {
   channels?: number;
   /** WAV format tag: 1 = PCM, 3 = float, 0xFFFE = extensible. */
   pcm?: boolean;
+  /** WAV only: bytes in the data chunk, from the chunk header. */
+  dataBytes?: number;
+  /** WAV only: EXACT frame count = dataBytes / (channels * bitDepth/8). */
+  frames?: number;
   malformed?: string;
 }
+
 
 const ascii = (v: DataView, off: number, len: number) => {
   let s = "";
