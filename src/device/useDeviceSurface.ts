@@ -113,9 +113,18 @@ export function useDeviceSurface() {
    * Play / Volume / Track command is emitted and then undone.
    */
   const arbiter = useMemo(
-    () => new ChordArbiter(() => ({ activeStem: stateRef.current.perf.activeStem, fxOverlay: stateRef.current.perf.fxOverlay })),
+    () =>
+      new ChordArbiter(() => {
+        const perf = stateRef.current.perf;
+        return {
+          activeStem: perf.activeStem,
+          fxOverlay: perf.fxOverlay,
+          selectedBank: perf.tracks[perf.activeStem]!.fx12.selectedBank,
+        };
+      }),
     [],
   );
+
   const [powerHoldMs, setPowerHoldMsState] = useState(DEFAULT_TIMINGS.powerHoldMs);
 
   const setPowerHoldMs = useCallback(

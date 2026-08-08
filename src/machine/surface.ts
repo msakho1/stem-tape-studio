@@ -6,15 +6,21 @@ import type { PerfIntent } from "@/machine/chordArbiter";
 import {
   FX_FAMILIES,
   clearLatches,
+  cycleBankAlgorithm,
   initialStemPerformance,
+  nudgeBankMacro,
   patchSlot,
+  selectBank,
   selectStem,
-  setVariation,
+  setBankMomentary,
+  toggleBankLatch,
   toggleLink,
   toggleSolo,
   type FxFamily,
   type StemPerformanceState,
 } from "@/machine/stemPerformance";
+import { BANKS, algorithmDef } from "@/machine/fx12";
+
 
 export type LedPattern = "dark" | "faint" | "solid" | "pulse" | "blink" | "breathe" | "chase";
 

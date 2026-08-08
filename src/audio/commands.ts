@@ -35,6 +35,10 @@ export type AudioCommandType =
   | "fx.momentary.start"
   | "fx.momentary.end"
   | "fx.variation"
+  | "fx.bank.select"
+  | "fx.algorithm.cycle"
+  | "fx.macro"
+
   | "fx.latch"
   | "fx.clearLatches"
   // Phase 6 — recording, overdub, grid, heads/PRINT and export.
