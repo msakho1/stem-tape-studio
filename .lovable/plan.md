@@ -1,69 +1,171 @@
-# Guide Audit + Onboarding Wizard
+# Phase 7 — Learn Stem Tape: Onboarding Wizard + Control-Map Reconciliation
 
-## Part 1 — Guide v1.0 vs codebase (audit result)
+Revised plan. No production code until approved.
 
-Verified against `src/machine/*`, `src/audio/*`, `src/device/useDeviceSurface.ts`, `public/*-processor.js`, tests.
+## 1. Reconciled final gesture table (authoritative)
 
-### Accurate (no change needed)
-Transport phases and hold-to-cue frame zero (`surface.ts:370-374`, `564-573`); Play+Volume stem select and Play+Track solo/link at 700 ms (`chordArbiter.ts:312-337`, `47`); rocker ±1 BPM / glide / exact semitone (`surface.ts:528-537`, `628-631`); Function+Faders window + LP/dry/HP (`surface.ts:799-814`); Function+Volume chop slide/glide (`surface.ts:542-546`, `632-634`); Function+Play release/×2/×3/long (`surface.ts:351-369`, `662-669`); grid learning from Function ×4 and clear/round (`surface.ts:378-412`, `646-660`); FX overlay chord and bank buttons Track1 TONE / Track2 MOTION / Track3 SPACE / Track4 RHYTHM (`chordArbiter.ts:296-300`, `fx12.ts:68-109`) — the internal signal order TONE→RHYTHM→MOTION→SPACE is separate from button order and is documented in code; all twelve algorithm names, wrap-around cycling, per-algorithm macros, momentary/latch/clear-latches (`fx12.ts:73-108`, `197-212`, `chordArbiter.ts:206-258`); Heads offsets 0/25/50/75 %, head level/scrub/mute/reverse/source/PRINT (`surface.ts:356-362`, `423-433`, `580-590`, `779-797`); punch late window `min(120 ms, 1/8 beat)` (`grid.ts:124`, tested `phase6.test.ts:34-45`); 16 song slots and Function+Track navigation (`surface.ts:436-447`); IndexedDB + OPFS-preferred storage (`store.ts:78`, `102-135`); Memory Saver / High Memory Mode in MiB (`memory.ts:12-70`, `saver.ts`).
+Rocker block, as approved. "Suppresses" = commands the arbiter must block **before dispatch**.
 
-### Inaccurate — guide claims the code does not support
-1. **Track double-tap "undo newest pass".** Code only performs recoverable delete / arm-cancel / stop (`surface.ts:452-474`, `recordingState.ts:198-204`). `rec.undoPass` exists in `commands.ts:49` and `engine.ts:2541` but no gesture emits it — dead path.
-2. **Chop on Play + Rocker.** Code puts chop half/double/reset/glide on **Function + Rocker** double-tap and hold (`surface.ts:510-526`, `629`); Function + Rocker tap is the global scrub. The guide's "Function+Rocker = scrub only, chop lives on Play+Rocker" split does not exist.
-3. **Shift + R master performance record.** `PerformanceRecorder` exists (`performanceRecorder.ts:17-76`) but no `KeyR`/shift handler exists anywhere; `KEY_MAP`/`FADER_KEYS` in `useDeviceSurface.ts:33-58` have no R and no ESC.
-4. **ESC releases held controls.** Not bound.
-5. **LED priority order.** Actual tiers (`surface.ts:958-973`): error 98 > failedPrint 95 > printing 93 > recording 90 > overdubbing 89 > armed 88 > momentaryFx 82 > latchedFx 78 > heads 76 > soloed 74 > unlinked 70 > active 66 > muted 30 > base 10. The guide omits printing/failedPrint and orders FX above recording states.
+| Row id | Controls (ordered) | Command | Suppresses | Provenance | Change |
+|---|---|---|---|---|---|
+| `rocker.speed` | rocker fwd/rwd | `rate.set` ±1 BPM | — | v2.6 stock | unchanged |
+| `rocker.glide` | rocker hold | `rate.set` glide | — | v2.6 stock | unchanged |
+| `rocker.semitone` | rocker ×2 | `rate.set` ×2^(±1/12) | — | v2.6 stock | unchanged |
+| `rocker.scrub` | function + rocker | `transport.scrub` (all four stems, continuous) | `fn.*` tap actions | extension, supersedes `rocker.chop` | **now exclusive — chop removed from FN layer** |
+| `chop.step` | play + rocker fwd/rwd | `loop.chop` half/double | `transport.play`, `transport.stop`, `transport.cue`, play multi-tap txn | extension | **new binding** |
+| `chop.reset` | play + rocker ×2 | `loop.chop` reset to window | same as above | extension | **new binding** |
+| `chop.glide` | hold play + rocker | `loop.chop` continuous | same as above | extension | **moved off FN** |
 
-### Unconfirmed (needs a targeted read before being asserted)
-Continuous wind reversal without source recreation (`engine.ts` transport internals); exact 5 s threshold for dim/full lights; whether PRINT's captured buffer truly excludes master/solo/global speed/FX; explicit rejection of reverse-direction recording; permission-never-on-load guarantee in the input panel.
+Current code contradicts this at `surface.ts:508-526`: `fn` + rocker double-tap owns chop, and there is no play+rocker branch. The fix is a rocker-ownership claim in `chordArbiter.ts` that (a) marks Play as *claimed* the moment a rocker deflection arrives while Play is physically down, (b) cancels the pending Play tap/hold/multi-tap transaction before any command is emitted, and (c) routes the rocker to the chop family. Function+rocker keeps the scrub branch and loses its `g.count === 2` chop case.
 
-### In the code, absent from the guide
-Bluetooth pairing gesture (Vol− + Vol+ held ≥2 s → `system.pairing`, `chordArbiter.ts:297-298`); per-song snapshot memory (`surface.ts:280-299`); the diagnostics/coverage subsystem (`HitZoneAudit`, `DiagnosticPanel`, `fired`/`coverage` logs); FX schema v3→v4 migration.
+Other reconciliations:
 
-### Reconciliation choice
-Fix the **code** for items 3 and 4 (bind Shift+R and ESC — small, isolated, and the features already exist). Fix the **guide text inside the app** for items 1, 2 and 5 so the onboarding wizard teaches only behavior the code actually performs. The PDF itself is not editable from here; the in-app guide becomes the source of truth.
+- **Track double-tap** — taught exactly as implemented (`surface.ts:452-474`, `recordingState.ts:198-204`): loaded+idle → recoverable delete; armed/waiting → cancel only; recording/overdubbing → stop only; stopping/finalising → acknowledgement only. `rec.undoPass` (`commands.ts:49`) stays unreachable from hardware; if the Input/Performance drawer exposes it, the lesson lives there and is marked VERIFY until the control is confirmed present.
+- **LED priority** taught in full: error > failed PRINT > PRINT in progress > recording > overdubbing > armed/waiting > momentary FX > latched FX > Heads > soloed > unlinked > active > muted > base (matches `surface.ts:958-973`). Lessons state both the winning indication and the state hidden under it.
 
-## Part 2 — Step-based onboarding wizard
+## 2. Source of truth
 
-### Shape
-A dismissible overlay driven by a declarative step list, launched from a `learn` entry point on the TAPE tab and from the GUIDE tab. Each step is *completion-gated by real machine state*, not by a Next button: the wizard watches the same `state`/`status`/command stream the instrument already emits, so a step only clears when the user actually performs the gesture on the SP-1.
+`stemTapeV1Map.ts` becomes the single registry. Existing `StemTapeRow` gains a complete, non-optional-by-default `tutorial` block:
 
-### Files
-- `src/onboarding/steps.ts` — step definitions: `id`, `title`, `instruction` (gesture text), `highlight` (control ids from `geometry.ts` `CONTROL_LABELS`), `keyHint`, `done(ctx)` predicate over `{ state, status, sess, lastCommands }`, optional `setup()` (e.g. load demo), `skippable`.
-- `src/onboarding/useOnboarding.ts` — cursor, per-step completion evaluation on each surface state change, `localStorage` persistence (`stemtape.onboarding.v1`: completed step ids + dismissed flag), `restart()`.
-- `src/onboarding/OnboardingOverlay.tsx` — bottom-docked card (mobile) / right rail card (desktop): step n of N, instruction, live "waiting for…" vs "done" indicator, Skip step / Exit / Restart.
-- `src/device/DeviceSurface.tsx` — accept an optional `highlight: ControlId[]` prop that renders a pulsing outline on the named hit zones (reuses existing hit-zone geometry; no new coordinate system).
-- `src/routes/index.tsx` — mount overlay, add `learn` button in the header, replace the static "first moves" list in the GUIDE tab with a launcher plus the corrected control atlas.
+```ts
+interface TutorialMeta {
+  gestureName: string;          // "Play + Rocker forward"
+  doThis: string;               // imperative, plain language
+  watchFor: string;             // visual result
+  listenFor: string;            // audible result
+  highlight: ControlId[];       // geometry.ts ids, ordered
+  keyboard?: string[];          // "Space + Q"
+  ledExplanation: string;       // winning tier + what it hides
+  safety?: "modifies-audio" | "modifies-project" | "requires-input" | "none";
+  restrictions?: MapLayer[];    // contexts where the row is inert
+  completion: CompletionSpec;   // §4
+  cleanup?: CleanupSpec;        // commands to restore entry state
+  eligibility: "quick-start" | "curriculum" | "excluded";
+  excludedReason?: string;      // required when excluded
+}
+```
 
-### Step sequence (each gated on real state)
-1. **Enable audio** — done when `status.contextState === "running"`.
-2. **Load stems** — done when four decoded tracks exist; offers Try Demo as `setup()`.
-3. **Start the tape** — tap Play; done when transport enters playing.
-4. **Ride the mix** — move any fader; done when a fader value changes by >0.05.
-5. **Mute and return** — tap a Track twice; done when a track mutes then unmutes.
-6. **Cue frame zero** — hold Play; done on `transport.cue`.
-7. **Varispeed** — rocker tap/hold; done when `state.speed` leaves 1.0, then Function+Play ×2 to snap back.
-8. **Window and filter** — Function + Fader 1/2, then Function + Fader 4; done when window bounds and filter mode both change.
-9. **Chop** — Function + Rocker double-tap; done when `chopDiv` changes. (Corrected per audit item 2.)
-10. **Teach the grid** — Function ×4; done when `state.grid.source === "tap"`.
-11. **FX overlay** — Vol− + Vol+ chord, select a bank, cycle an algorithm, hold for momentary; done when a momentary FX has been engaged at least once.
-12. **Heads** — Function + Play ×3, raise head faders, Function + Fader scrub; done when heads mode entered and a scrub occurred.
-13. **PRINT** — hold an empty Track in Heads; done on print completion.
-14. **Recording** — Enable Input in System, hold an empty Track 450 ms to arm; done when armed. Marked skippable (needs a microphone).
-15. **Save the project** — done when `sess.saved` is true.
+Derived (never re-authored): onboarding instructions, GUIDE-tab atlas, `KEY_HINTS`, the mapping JSON export, and `guideCorrections.json`. Composite lessons reference row ids and add ordering only.
 
-Steps 11-15 form an "advanced" second half the user can defer; the wizard offers a natural stop after step 10 ("you can perform now").
+Coverage test: every `AudioCommandType` in `commands.ts` maps to ≥1 registry row with complete non-placeholder `tutorial`, or appears in an explicit exclusion list with a reason (`rollback`, `rec.recover`, schema-migration paths).
 
-### Behavior rules
-- Never blocks the instrument: the overlay is non-modal and pointer events pass through to the SP-1.
-- Auto-advances ~600 ms after a step completes, with a brief confirmation line, so the user hears what they just did.
-- Skipping a step marks it skipped, not completed, and it reappears in the GUIDE tab's checklist.
-- Reduced-motion respected on the highlight pulse; overlay is keyboard reachable and announced with `aria-live="polite"`.
-- First visit auto-opens at step 1 only if no stems are loaded and nothing is persisted.
+## 3. Completion model (event + ack based)
 
-### Also in scope
-- Bind `Shift+R` to `PerformanceRecorder` start/stop and `ESC` to release all held controls in `useDeviceSurface.ts`, then add both to `KEY_HINTS` (audit items 3, 4).
-- Correct the in-app guide text for Track double-tap, chop location, and the LED priority table so it matches `surface.ts:958-973`.
+```ts
+interface LessonRuntime {
+  enteredAtSequence: number;      // AudioCommand.id watermark at lesson entry
+  baseline: TutorialBaseline;     // transport phase, rate, mutes, active stem, heads, fx, project id
+  milestones: LessonMilestone[];  // ordered
+  observedCommands: AudioCommand[];
+  acceptedAcks: Ack[];
+  cleanup?: TutorialCleanup;
+}
+interface LessonMilestone {
+  match: (cmd: AudioCommand, ack: Ack | null, ctx: TutorialCtx) => boolean;
+  requireAck: AckStatus[];        // e.g. ["completed"]
+  assert?: (ctx: TutorialCtx) => boolean;  // engine/state result
+  ordered: true;
+}
+```
 
-### Tests
-`src/onboarding/onboarding.test.ts` — each step's `done()` predicate against synthetic surface states (true only for the intended gesture), persistence round-trip, and skip semantics. A Playwright pass drives steps 1-6 on the real surface and screenshots the overlay at 420 px and desktop width.
+Rules: a milestone only counts for `cmd.id > enteredAtSequence`; it needs the required ack status from the engine ack stream (`useAudioEngine` already surfaces `acks`); and its `assert` must observe the engine result, not the reducer snapshot alone. Stale state can never complete a lesson.
+
+Continuous controls have no semantic command today (faders go through `controlBus`). Add a **tutorial event stream**: `controlBus` and the fader session manager emit `{ channel, pointerId, value, batchFrame, t }` to a subscribable ring buffer used only by tutorials and diagnostics. Multi-finger lessons require ≥2 distinct `pointerId`s with movement inside the same `batchFrame`.
+
+Worked examples: Play → new `transport.play` + `completed` ack + `status.position` advancing. Mute/return → `track.mute` then `track.unmute` on the same track index, both after entry. Cue → `transport.cue` completed + phase `cued` + position frame 0. Varispeed → `rate.set` away from 1.0, then an independent `rate.set` landing exactly 1.0. FX stem switch → `stem.select` while `fx.overlay` remains open (no `fx.overlay` close command between). Heads scrub → `heads.scrub` accepted + audible read position change reported by the engine.
+
+## 4. Quick Start (10 lessons, ends "You can perform now.")
+
+| # | Lesson | Completion signal | Cleanup |
+|---|---|---|---|
+| 1 | Enable audio + load demo | context `running` + 4 decoded tracks | none |
+| 2 | Play / stop / resume | three separate transport commands, each completed | leave playing |
+| 3 | Two faders at once | 2 pointer ids, same batch frame | restore entry fader values |
+| 4 | Mute and unmute | mute then unmute, same track | restore mute map |
+| 5 | Hold Play to cue, then launch | `transport.cue` completed, then `transport.play` | none |
+| 6 | Select, solo, link/unlink | `stem.select`, `stem.solo`, `stem.link` | clear solo, restore link mask |
+| 7 | ±1 BPM, semitone, snap 1.0× | 3 ordered `rate.set` milestones | rate → 1.0 |
+| 8 | Function + Rocker four-stem scrub | `transport.scrub` accepted, position moves on all four | none |
+| 9 | Window / filter, then Play + Rocker chop | `filter.set` + `loop.chop` without any transport command | restore window, filter, chop |
+| 10 | FX overlay: apply, then switch stems inside it | `fx.momentary.start/end` + `stem.select` with overlay open | close overlay, clear momentary |
+
+## 5. Full curriculum inventory (modules)
+
+- **A. Mix and performance** (9 lessons) — roles, levels, 2/3/4-finger moves, opposing moves, mute, active stem, solo, link, linked-vs-independent targeting. Desktop shift-group and keyboard alternatives per lesson.
+- **B. Transport and tape** (11) — play/stop/resume, wind curves, cue, launch profiles (Exact ships; tape pre-roll marked VERIFY/deferred), ±1 BPM, glide, semitone, snap, four-stem scrub, reverse, rapid reversal.
+- **C. Window, chop, loops, grid** (14) — window start/end/shift/reverse, filter fader, chop half/double/reset/glide on the final Play+Rocker map, chop-window slide, fixed vs variable loops, polyrhythmic wraps, FN×4 learning, clear, round, beatmatch + rejection feedback.
+- **D. Twelve FX** (4 bank lessons + 8 concept lessons) — each bank lesson walks all three algorithms; concept lessons cover overlay open/close, bank select, ± cycling, macro, momentary, latch/unlatch, clear all latches, Play+Volume stem switching in-overlay, per-stem retained state, FX in Heads, heavy-effect rejection/recovery, Pump ↔ grid tempo relationship.
+- **E. Heads and PRINT** (11) — enter/exit, 0/25/50/75 %, levels, FN+Fader audible scrub, mute, reverse, source, FX in Heads, PRINT to empty track, PRINT progress/failure/recovery, PRINT inclusion/exclusion (**VERIFY-gated**).
+- **F. Recording and varispeed SOS** (14) — enable/release input, monitoring modes, arm, onset + look-back, stop/finalise, overdub, grid punch + late window, varispeed SOS, multiple passes, undo newest pass via its real UI, interrupted-take recovery, latency compensation, dry WAV export, master performance recording.
+- **G. Projects and songs** (10) — save/open/delete, 16 slots + bank nav, per-song snapshots, local-only storage, OPFS/IndexedDB, storage vs decoded memory, High Memory Mode, Memory Saver, recoverable trash, portable export/import (VERIFY if unimplemented).
+- **H. System and accessibility** (9) — audio unlock, Bluetooth pairing gesture, keyboard map, pointer/multitouch, hit zones, diagnostics, Node vs Worklet engine, background/interruption recovery, privacy guarantee.
+
+Schema migration is excluded from lessons and stays in developer diagnostics.
+
+## 6. Tutorial project snapshot / restore
+
+```ts
+interface TutorialSession {
+  id: string; startedAt: number; mode: "quick-start" | "module";
+  previousProject: { id: string; name: string; saved: boolean };
+  previousState: SurfaceState;               // serializable reducer snapshot
+  createdArtifacts: { prints: string[]; takes: string[]; blobKeys: string[] };
+  inputEnabledByTutorial: boolean;
+}
+```
+
+Quick Start uses the ordinary four-stem demo. Entering Heads/PRINT or Recording training prompts to switch to a **training project**: three short demo stems + one deliberately empty track. On switch: persist `TutorialSession` to IndexedDB, snapshot project identity and reducer state, never write to the user's project. On exit or explicit abandon: stop tutorial media tracks and release the microphone, delete tutorial prints/takes/blobs unless the user chose Keep, restore the previous project and reducer state, clear the session record. A reload with a live session record shows a recovery prompt ("resume training / restore my project"). Every lesson with `safety !== "none"` renders a visible banner.
+
+## 7. Keyboard implementation
+
+- `Shift + R` → dispatches a `perf.record` semantic command through the reducer and command stream; the engine's ack drives the UI. `PerformanceRecorder` is never called from the key handler.
+- `Escape` → calls the existing pointer-cancel/blur cleanup path (release held controls, cancel momentary FX, cancel pending multi-tap transactions, reconcile fader sessions). It must not clear latches, delete audio, stop a valid recording, or reset project state.
+- Both handlers ignore `event.repeat`, and ignore events whose target is `input`, `textarea`, `select`, or `[contenteditable]`. Both are added to `KEY_MAP`-derived hints and to the registry's `tutorial.keyboard`.
+
+## 8. Overlay behavior
+
+`DeviceSurface` gains `highlight?: ControlId[]`, drawn from existing hit-zone geometry into a `pointer-events:none` layer above the SVG. The lesson card wrapper is `pointer-events:none`; only its own controls opt back in. Placement is target-aware: on mobile the card docks to whichever edge is farthest from the highlighted control, and collapses to a coach pill during multi-touch lessons; desktop uses the right rail. Content is three lines — Do this / Watch / Listen for. `aria-live="polite"`, full keyboard nav, visible focus, reduced-motion respected on the highlight pulse. Auto-advance ~600 ms after the success confirmation. Skip records `skipped`, distinct from `completed`. Exit, restart lesson, restart module, restart all always available. First visit offers Quick Start but never covers a loaded project.
+
+## 9. Files
+
+Add: `src/tutorial/registry.ts` (derivations + coverage), `src/tutorial/lessons/{quickstart,moduleA…moduleH}.ts`, `src/tutorial/runtime.ts` (`LessonRuntime`, milestone evaluation), `src/tutorial/tutorialProject.ts` (snapshot/restore), `src/tutorial/events.ts` (continuous-control tutorial stream), `src/tutorial/useTutorial.ts`, `src/tutorial/TutorialOverlay.tsx`, `src/tutorial/CoachPill.tsx`, `src/tutorial/guideCorrections.ts` + generated `public/guideCorrections.json`, `src/tutorial/__tests__/{coverage,completion,rocker,project}.test.ts`.
+
+Change: `src/machine/stemTapeV1Map.ts` (full tutorial metadata + new rocker rows), `src/machine/surface.ts` (remove FN+rocker chop; add Play+rocker chop family), `src/machine/chordArbiter.ts` (rocker claims Play with pre-dispatch suppression), `src/audio/commands.ts` (`perf.record`; chop payload), `src/audio/engine.ts` (perf.record handling + ack; expose audible-scrub position for assertions), `src/audio/controlBus.ts` + `src/input/faderSessions.ts` (tutorial event emission with pointer id + batch frame), `src/device/useDeviceSurface.ts` (Shift+R, Escape, safety rules, KEY_HINTS), `src/device/DeviceSurface.tsx` (highlight layer), `src/routes/index.tsx` (learn entry point, overlay mount, code-derived GUIDE tab), `src/device/SystemPage.tsx` (mapping JSON export from registry).
+
+## 10. VERIFY items (excluded from completion-gated lessons until proven)
+
+Continuous wind reversal and source lifetime; exact dim/full-light hold duration; PRINT signal inclusion/exclusion (`print.ts` only encodes the buffer handed to it — the exclusion claim depends on `engine.ts`'s render path); reverse-direction recording rejection; permission-never-on-load; audible Heads scrubbing at browser level; final FN+Rocker vs Play+Rocker arbitration under all layers; Bluetooth pairing hold timing. Each gets a targeted source read plus an automated or Playwright test in Step 1 below; anything unresolved ships as a read-only "reference" lesson with no completion gate.
+
+## 11. Guide synchronization
+
+`guideCorrections.json` (generated from the registry, not hand-written) carries: final rocker/chop mapping, Track double-tap state table, complete LED priority including PRINT tiers, Bluetooth pairing gesture, Shift+R and Escape once shipped, and any verified PRINT/recording limitations. The wizard does not reproduce the PDF; the PDF stays the reference manual.
+
+## 12. Test and acceptance matrix
+
+| Area | Test |
+|---|---|
+| Rocker remap | FN+rocker scrubs all four stems; Play+rocker changes chop and emits **no** transport command; hold Play alone still cues frame zero; bare rocker still changes speed; all verified in tape / FX-overlay / Heads layers |
+| v2.6 coverage | existing 37-row suite green; each intentional remap asserted as a Stem Tape extension with `supersedes` |
+| Completion | every lesson rejects pre-entry state; ordered milestones enforced; ack status required |
+| Multi-fader | 2/3/4 distinct pointer ids in one batch frame recognised; single-pointer sequence rejected |
+| FX | overlay stays open across `stem.select`; all twelve algorithms present in curriculum (registry assertion) |
+| Tutorial project | enter/restore leaves user project byte-identical; mic released; temp artifacts deleted; reload recovery |
+| Keyboard | auto-repeat ignored; editable-target ignored; Escape preserves latches/recording/project |
+| Layout | no overlay covers a required control at 375 / 390 / 420 px, tablet, desktop (Playwright screenshots) |
+| Persistence | skipped ≠ completed; both survive reload |
+| Regression | audio, recording, Heads, FX, transport suites green; `tsgo --noEmit` clean; zero console errors; network log contains no user audio |
+
+Mobile runs are labelled emulation; real-iPhone verification requires the physical checklist.
+
+## 13. Implementation sequence
+
+1. Resolve VERIFY items (targeted reads + tests); publish results before writing lessons.
+2. Rocker remap + arbitration suppression + regression tests.
+3. Keyboard: Shift+R via command path, Escape via cleanup path, safety rules.
+4. Registry metadata schema + coverage test + derived guide/atlas/hints/export.
+5. Tutorial event stream for continuous controls.
+6. Runtime (`LessonRuntime`, milestones, persistence) with unit tests.
+7. Overlay + highlight layer + responsive placement.
+8. Quick Start ten lessons, Playwright end-to-end.
+9. Tutorial project snapshot/restore, then modules E and F.
+10. Remaining modules A–D, G, H; `guideCorrections.json`; full acceptance matrix.
