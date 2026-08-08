@@ -1,219 +1,105 @@
-# Phase 6 — Live Recording, Overdub, Tempo Grid, Punch-In, Heads/PRINT, WAV Export
+# Stem Tape — Performance Expansion (Multi-Fader, Tape Inertia, 12 FX)
 
-## A. Repository audit (verified this turn, not assumed)
+## A. Audited current state (verified reads)
 
-| Area | Actual state | Phase 6 integration point |
-| --- | --- | --- |
-| Engine | `src/audio/engine.ts` (1575 lines), `class AudioEngine`, `buildGraph()` at line 255 | add `RecorderBus` + per-track writer, master tap |
-| Per-track graph | `input → dry/filter→wet → preFx → FxRack.input → gain(fader) → soloGain → analyser → master → masterAnalyser → destination` (engine.ts 265–303) | live input joins at `input`; take layers join at `input`; master tap after `master` |
-| Tape worklet | `public/tape-processor.js` (328 lines), `class TapeProcessor`, frame-scheduled FIFO, ordered `applyAtContextFrame` commands | reused unchanged for Node/Worklet parity; recording does NOT extend it |
-| Protocol | `src/audio/workletProtocol.ts`, `sharedApplyFrame()`, `DRIFT_TOLERANCE_FRAMES = 2` | recorder reuses the same shared-frame scheduling |
-| Timeline | `src/audio/tape.ts` `TapeTimeline.positionAt/timeAtPosition` (exact glide integral) | authoritative tape-coordinate mapping for takes |
-| FX | `src/audio/fx/rack.ts` (502), permanent `FxRack.input` | untouched; dry recording taps before it |
-| Gestures | `src/input/gestures.ts` `GestureEngine`, `holdMs 450`, `powerHoldMs 1200`, `HoldLevel` | recording arm uses existing `holdStart` on `track*`; no second engine |
-| Arbitration | `src/machine/chordArbiter.ts` `PerfIntent`, claim-before-dispatch | new `rec.*` intents added to the same precedence table |
-| Reducer | `src/machine/surface.ts` (862), `grid: {bpm, rejected, source}` already tapped at 338–368, LED table ~743/825 | grid becomes frame-anchored; `recording` LED tier inserted |
-| Commands | `src/audio/commands.ts` ordered stream + `Ack` | new `rec.*` / `export.*` command types |
-| Storage | `src/audio/store.ts` `SCHEMA_VERSION = 2`, OPFS-with-IndexedDB-fallback behind one `projectStore` API; `contentHash()` exists | takes get chunked blobs through the same façade |
-| Perf schema | `src/machine/stemPerformance.ts` `STEM_TAPE_SCHEMA_VERSION = 3` | → 4, with take manifests |
-| WAV | `src/audio/wav.ts` — 16-bit only, whole-buffer, main-thread | replaced by a streaming 16/24-bit encoder in a worker; existing fn kept for the demo |
-| Heads/PRINT | Already *simulated* in the reducer (`heads.scrub`, `heads.print`, 451/479) — labels only, no audio | Phase 6C attaches experimental audio behind a flag |
+Single-fader cause — `src/device/useDeviceSurface.ts`:
+- L84 `const dragRef = useRef<{ index; pointerId; channel } | null>(null)` — one singleton drag session.
+- L86 `pendingCyRef` holds a single `{index, cy, value}`; L245-265 the shared rAF flushes only that one entry.
+- L309 `if (!drag || drag.pointerId !== e.pointerId) return;` — a second pointer's moves are dropped.
+- L284 a second pointer-down overwrites `dragRef`, stealing ownership from the first finger.
+- L324/L348 `endDrag`/`cancelDrag` take no pointer id, so any up/cancel ends whatever drag is current.
+- L239-243 `resolveChannel()` reads a mutable `layerRef`; correct per-gesture, but there is no rebase when a modifier changes mid-drag.
+- `src/audio/controlBus.ts` is already per-`channel:index` keyed — no change needed to be multi-pointer safe.
+- `src/styles.css` L179/L194 already scope `touch-action: none` to the surface.
 
-No `getUserMedia`, no MediaStream, no recorder code exists today. Grid is currently a label, not a clock.
+Transport — `src/audio/engine.ts` L1705-1743: `transport.play` calls `startAll(offset)` (shared `startAt = currentTime + LOOKAHEAD_S`, `timeline.anchor`), `transport.stop` anchors and hard `stopSources()`. No ramp on either. Rate ramps already exist and are correct: `rate.set` L1805-1842 uses `glideCurve` + `timeline.glideTo` with the exact exponential integral (`src/audio/glide.ts` `integratedDistance`), and forwards `setRate {rampFrames}` to the worklet.
 
-## B. Feasibility verdict by feature
+FX — `src/machine/stemPerformance.ts`: `FX_FAMILIES = [filter, echo, reverb, beatRepeat]`, `FxSlotState { momentary, latched, variation: 1|2|3|4, rejected, arming }`, `STEM_TAPE_SCHEMA_VERSION = 3`. `src/audio/fx/rack.ts` has a permanent rack input and 4 fixed variation tables. `src/machine/chordArbiter.ts` L249-268 currently maps volume ± inside the overlay to `fx.variation ±1` while an FX track is held (claims the track at L174 so no master-gain leak) — this is the system being superseded.
 
-- **Straightforward:** permissions/device enumeration, metering, monitoring with gain guard, onset trigger, pre-roll, chunked OPFS writes, dry WAV export, master performance WAV, take manifests, undo/redo, LED tiers.
-- **Technically challenging:** tape-coordinate mapping under glide/reverse/loop, loop-overdub wrap exactness, backpressure without dropped frames, interrupted-take recovery.
-- **Browser-dependent:** raw-input constraints (`echoCancellation:false` etc. may be ignored), deviceId selection (absent on iOS Safari), `SyncAccessHandle` (Safari worker-only), true input latency, Web MIDI (absent on Safari), iOS download behavior.
-- **Physically unverified:** loaded-track hold = overdub, hold-latch-after-release, punch-out timing, Heads source/offsets, PRINT semantics.
-- **Hardware-only:** sync jack, PO sync, real MIDI clock out.
+## B. Gesture / arbitration conflict matrix (new rows)
 
-## C. Chosen recording architecture — **Candidate C + per-track writers**
+| Context | Volume − / + | Track 1-4 | FUNCTION + Track | Faders |
+|---|---|---|---|---|
+| Base | master gain | v2.6 rows | v2.6 rows | stem level |
+| FX overlay open, no bank selected | short chord toggles overlay; single tap = bank-less no-op (claimed, no master gain) | tap selects bank | — | stem level |
+| FX overlay, bank selected | short tap cycles algorithm (+ fwd, − back); hold = macro ±; claimed before dispatch | tap re-selects; hold = momentary | latch/unlatch | stem level |
+| Heads + overlay | as above | as above | latch | head level |
+| Heads + FUNCTION | — | — | — | head scrub |
 
-One shared `input-capture-processor` worklet: metering, onset detection, bounded look-back ring (default 4 s stereo ≈ 1.5 MiB), grid-punch history, block emission. Rejected: **A** (extending `TapeProcessor`) — couples capture to tape lifetime, breaks Node-engine mode, and every Node↔Worklet migration would interrupt capture. **B** (four recorder processors) — duplicates onset/look-back and quadruples ring RAM when only one input target can be armed.
+Arbiter precedence insert: new "FX bank volume" claim sits above base master-volume, below the long Volume−+Volume+ system chord (duration arbitration unchanged) and below overlay toggle. Claims happen on pointer-down via `claim()`, so no command is emitted then rolled back.
 
-Ownership: audio thread owns write position and frame counting; the recording worker owns bytes; the main thread owns only manifests and UI. `MediaRecorder` is not used anywhere. Migration is **rejected while `recording`/`finalizing`** with an honest ack and runs at finalize. Processor failure keeps flushed chunks and marks the take `interrupted`, never `ready`.
+## C. Workstream 1 — true multi-fader
 
-### C1. Transfer path and backpressure (correction 3)
-
-```text
-AudioWorklet (capture)
-  → preallocated transferable block pool (4096 frames/block, 8 blocks)
-  → [transferred MessagePort, worklet ⇄ worker direct]
-  → recording worker aggregates blocks
-  → ~2 s OPFS storage chunks (fixed high-water mark: 6 pending chunks)
-```
-
-The port is created on the main thread with `new MessageChannel()`; one port is transferred into the worklet, the other into the worker, so there is **no main-thread relay** and no structured-clone copy of PCM after allocation. Blocks are returned to the pool by the worker for reuse; the audio thread never allocates in `process()` and never waits on storage. Pool exhaustion or a breached high-water mark → **immediate `interrupted`**, already-written chunks preserved, clean stop. A dropped frame can never produce a `ready` take. Step 6A-1 measures the actual transfer behaviour (block round-trip, zero-copy confirmed via detached `byteLength`, per-block copy count) and reports it in diagnostics.
-
-### C2. Long-take playback — paged take processor (correction 1)
-
-An `AudioBufferSourceNode` cannot stream OPFS chunks or follow a tape-mapping curve, so:
-
-```text
-OPFS/IndexedDB chunks
-  → take-page worker (read-ahead)
-  → bounded transferable page cache (default 8 pages ≈ 16 s stereo ≈ 6 MiB/take)
-  → TakeLayerProcessor (AudioWorklet)
-  → track input node
-```
-
-`TakeLayerProcessor` reads only a bounded window around the current tape position, follows rate/direction/loop/segment data, prefetches before playback and before each loop wrap, counts and reports underruns and page-cache misses, and plays a just-completed take immediately from resident pages.
-
-**Threshold:** takes ≤ **20 s** *and* within the existing memory verdict (`memory.ts judge()`) use a memory-gated `AudioBufferSourceNode` fast path; longer takes, or any take that would push the project into `warn`/`block`, use the streaming processor. Tunable in diagnostics.
-
-## D. Frame and tape-coordinate model
-
-**Chosen: store real-time PCM + exact event-defined timeline segments, rendered on playback.** Resampling-on-write bakes in an irreversible decision and compounds error across glides; raw + segments keeps takes portable, exportable dry and re-renderable, and the existing cubic interpolator already does the playback-side work.
-
-### D1. Segments, not sampled curves (correction 2)
-
+`src/device/useDeviceSurface.ts` replaces the singleton with:
 ```ts
-interface TakeTimelineSegment {
-  contextStartFrame: number;
-  contextEndFrame: number;
-  takeStartFrame: number;
-  tapeStartFrame: number;
-  direction: 1 | -1;
-  rate:
-    | { kind: "constant"; value: number }
-    | { kind: "linear"; r0: number; r1: number }
-    | { kind: "exponential"; r0: number; r1: number; tau: number };
-  loopIteration: number;
-}
+interface FaderDragSession { pointerId: number; faderIndex: 0|1|2|3; startUserY: number;
+  startValue: number; lastPreviewValue: number; channel: ContinuousChannel; grabOffset: number }
+const pointerToDrag = new Map<number, FaderDragSession>();
+const faderToPointer = new Map<number, number>();
+const pendingPreviews = new Map<number, { cy: number; value: number }>();
 ```
+- Down: reject if `faderToPointer.has(index)` (first pointer untouched); else create session, send `phase:"start"`.
+- Move: look up by `e.pointerId` only; write into `pendingPreviews`.
+- One shared rAF drains the whole map: all cap `cy` writes, then all `controlBus.send` previews tagged with a single `batchFrame` id so the worklet can apply them on one shared future audio frame (`workletProtocol` gains an optional `applyAtContextFrame` batch stamp for fader/level/scrub messages).
+- Up: commit only that session (`dispatch faderCommit` with the exact `lastPreviewValue`). Cancel/lostpointercapture/blur: reconcile only that fader; `releaseAll` on blur iterates sessions individually.
+- Modifier change mid-drag: sessions keep their claimed channel; if a session must rebase (mode switch), store `grabOffset = currentTargetValue - pointerValue` and use pickup semantics so nothing jumps.
+- Faders stay out of tap/hold/chord (`isContinuousControl` unchanged); no React state touched during drag.
 
-A segment is emitted **only** on: rate/glide change, direction change, loop wrap, window/chop boundary, link/relink, recording start/stop. The exponential form matches the existing analytic integral in `glide.ts` exactly — no per-quantum approximation, no unbounded metadata.
+Desktop: `Shift+click` on a cap toggles group membership (`faderGroup: Set<index>` in a ref, mirrored to a non-drag React state for the highlight ring only). Dragging a member moves all members by the same delta, clamped per-fader without re-scaling others. Keyboard (current map uses Q/A/Space/F/-/=/1-4): add `R/F`… conflicts with F=function, so use **Y/H, U/J, I/K, O/L** (raise/lower faders 1-4), all chordable via a held-keys set driven by one rAF ramp. Diagnostics label the source as `touch-multipointer` vs `mouse-group` vs `keyboard`.
 
-Because a looped recording maps many recorded frames onto the same tape coordinates, **each loop pass is a distinct pass sublayer** (`passIndex`, own segment list) inside the take, not one flattened curve. Tape position always comes from `TapeTimeline.positionAt(contextFrame / sampleRate)` — never React state or rAF. Unlinked stems use their own timeline; relink changes only future scheduling, never stored take data.
+## D. Workstream 2 — tape inertia
 
-**Reverse recording is rejected in Phase 6B** with an explicit ack; backward-write is a Phase 8 candidate pending physical verification.
+New `src/audio/inertia.ts`: presets `tight (180/300 ms)`, `classic (300/450 ms)`, `slow (600/900 ms)`; curve = finite sampled exponential ending exactly on target (reuse `sampleCurve`/`glideCurve` style), plus `integratedDistanceInertia()` so `TapeTimeline` advances on the same curve the audio uses.
+- `TapeTimeline` gains an `inertiaSegment` variant of the existing glide segment (finite duration, exact endpoint) so `positionAt` and `timeAtPosition` stay correct; seam recalculation already keys off `seamGeneration` — bump it on every inertia start/stop.
+- `transport.play`: schedule sources at rate ≈0 at the shared `startAt`, then apply the wind-up curve to `playbackRate` (node engine) or send `setRate {rampFrames, curve:"inertia"}` (worklet). All linked stems get the identical `startAt` and identical curve array.
+- `transport.stop`: apply wind-down curve, then a 8 ms click-free fade and `stopSources()` at the curve end; ack `completed` only when the transition is accepted/scheduled.
+- Reversal: Play during wind-down and Stop during wind-up read the instantaneous rate from the timeline and start a new curve from it — no source respawn, so rapid alternation cannot duplicate sources or strand state.
+- Exclusions (no inertia, instant rate): grid punch, recording onset, loop seams, relink, beat-aligned starts, internal source handoff, worklet migration — gated by an explicit `{ inertia: false }` flag on the internal start/stop path, defaulted off for those callers.
+- LED arbiter gains transport phases `winding-up | playing | winding-down | stopped`.
+- Worklet is the reference implementation; node fallback uses `setValueCurveAtTime` on `playbackRate` and is audited against the same thresholds — if it cannot hold them it is reported in diagnostics as degraded, not silently wrong.
+- Optional motor/hiss layer: designed, default **off**, locally generated.
 
-## E. Recording state machine
+## E. Workstream 3 — twelve FX
 
-`idle → arming → waiting-for-sound → (waiting-for-grid) → recording | overdubbing → stopping → finalizing → ready`, plus `interrupted` and `failed`. Trigger/punch decisions live on the audio thread; the state mirrors into `surface.ts` for LEDs. Arm = existing `holdStart` at `holdMs`; tap while waiting cancels; tap while recording stops; lost pointer capture forces `stopping` (never stuck). Onset detection: **RMS + peak envelope with hysteresis and a minimum-duration gate** (spectral flux rejected as unnecessary DSP weight).
+Banks (track button 1-4): TONE = Filter / Isolator / Dirt-Crusher; MOTION = Tempo Echo / Pitch Echo / Granular Scatter; SPACE = Reverb / Shimmer / Spectral Freeze; RHYTHM = Beat Repeat / Rhythmic Gate / Pump. No Tape Stop. Tape Brake only as an optional swap for Pump if requested.
 
-**One armed external-input target at a time.** Arming a second track returns an explicit ack — `switched: arm moved to track N` (intentional transfer) or `rejected: track N is recording`. Never two simultaneous capture targets. Holding a Track button while the **FX overlay is open never arms recording**; it stays FX-momentary, enforced in `chordArbiter` before dispatch.
-
-## F. Grid and punch
-
-Tap timestamps convert to AudioContext frames; BPM from a median-filtered inter-tap interval with the existing 25 % outlier rejection, feeding a light PLL for phase. Hold-to-round and clear-grid rows are preserved. Metronome LEDs schedule from audio frames, not timers.
-
-Late-press punch: within the late window (default 120 ms or 1/8 beat, whichever is smaller) after a boundary → start from the look-back buffer at that boundary. Otherwise, when a grid exists, the punch **always schedules to the next grid boundary** — no unquantised gridded starts. Punch-out default: **next loop seam when a loop exists; otherwise immediate with a short equal-power fade** — both flagged for physical verification.
-
-## G. Capture vs monitoring (correction 4)
-
-```text
-MediaStreamSource
-  ├→ InputCaptureProcessor → recording writer   (always, when input enabled)
-  └→ monitorGate → active track input → FX      (closed by default)
-```
-
-Capture runs regardless of monitor mode; `monitorGate` alone decides what is heard, and changing it can never alter stored PCM. Modes: off / dry / through-track-FX, with a headphone warning, a hard gain ceiling, and no silent enabling.
-
-**Loop-overdub double-audibility rule:** while a pass is being recorded, the live monitor is the only audible source of that material. A completed pass becomes audible at the **first loop seam after its final chunk is durably written and its first pages are prefetched**; if finalisation is not ready by that seam, it waits one further seam. That pass's live monitor contribution is muted at the same seam it starts playing back, so it is never heard twice.
-
-## H. Storage, memory, export, safety
-
-Manifests checkpoint per chunk, so a crash yields a recoverable partial take. Quota is checked before arming and during recording via `navigator.storage.estimate()`; storage is reported separately from decoded RAM (MiB, 1024²). Export: streaming WAV encoder worker, 16/24-bit with TPDF dither on reduction; master performance tap after `master`; Record Performance lives in the project drawer, never on the SP-1 artwork.
-
-**Large-WAV delivery on iOS:** the encoder worker writes the WAV incrementally to an OPFS file and returns a `File` handle instead of assembling an in-memory `Blob`. Where Safari refuses handle-based download, fall back to a size-gated in-memory blob with an explicit warning above **~300 MiB** plus an offer to export at 16-bit or in loop-length segments. No silent giant allocation.
-
-All audio stays local; the Phase 5C network-log assertion extends to recording and export. Every `MediaStreamTrack` stops on disable/project-close. Explicit handling planned for disconnect, backgrounding, lock, suspend, song/bank switch, stem delete, memory/quota ceilings, worklet and worker failure, permission revocation, sample-rate change, and refresh during finalize.
-
-**Project/song switching:** allowed while `armed`/`waiting` (arm cancelled with an ack); **rejected** while `recording`/`stopping`/`finalizing`.
-
-## I. Defaults and ambiguity gates (correction 5)
-
-- **Loaded-track hold → overdub: enabled by default once Phase 6B passes.** Labelled *Stem Tape extension*, not v2.6 parity, and excluded from the 37/37 count. A future hardware-faithful profile may disable or remap it.
-- **Heads and PRINT: off by default**, experimental, behind semantic commands, outside the permanent schema, pending physical verification.
-- **Reverse recording: rejected** in Phase 6B with an ack.
-- **Web MIDI: deferred to Phase 8** (absent on Safari; hardware sync is firmware-only).
-
-A physical SP-1 checklist ships with 6C: hold latch after release, onset timing, pre-roll, loaded-track record, stop timing, punch in/out, late tolerance, grid learning, heads source/offsets/which three tracks, fourth-track behaviour, PRINT, fixed vs variable loop while recording.
-
-## J. Phase 7 tutorial hooks (correction 6 — metadata only, no UI)
-
-Every Phase 6 semantic command carries a declarative record in `stemTapeV1Map.ts`:
-
+State (`src/machine/stemPerformance.ts`, schema → 4):
 ```ts
-interface TutorialMeta {
-  featureId: string;          // "recording.firstTake"
-  lessonId: string;           // "6a.arm-and-trigger"
-  requiredState: string[];    // ["input.enabled", "track.empty", "fxOverlay.closed"]
-  expectedCommand: AudioCommandType;
-  successAck: string;
-  resetCommand: AudioCommandType;   // e.g. "rec.undoTake"
-  ledExplanation: string;
-  requiresMicPermission: boolean;
-  modifiesProject: boolean;
-}
+interface FxBankState { selectedAlgorithm: 0|1|2; macroAmount: number; momentary: boolean; latched: boolean;
+  rejected: string | null; arming: boolean }
+interface StemFxState { banks: [FxBankState,FxBankState,FxBankState,FxBankState]; selectedBank: 0|1|2|3|null }
 ```
+Migration from v3: `filter/echo/reverb/beatRepeat` → bank N algorithm 0, `latched` preserved, old `variation 1..4` mapped to that algorithm's macro default (variation semantics retire; the value is kept in `legacyVariation` for one version so nothing is silently lost). `momentary`, `fxOverlay`, `selectedBank` never persist. New algorithms get safe default macros.
 
-A test asserts **every** new `rec.*` / `grid.*` / `export.*` row has complete, non-placeholder metadata, so Phase 7 never reverse-engineers the recording state machine. No tutorial UI in Phase 6.
+Commands: `fx.bank.select`, `fx.algorithm.cycle {dir}`, `fx.macro {dir|value}`, existing `fx.momentary.start/end`, `fx.latch` retargeted to bank. `fx.variation` is removed from the arbiter and map after migration — no two competing selection systems.
 
-## K. New files
+Routing: one rack per stem, unchanged permanent input. Banks are four serial stages between rack input and `faderGain`; each stage is a stable dry/wet crossfade node pair, algorithms lazily constructed on first use and swapped through a `FILTER_FADE_S` complementary-gain crossfade (correlated) so switching is click-free. Heads mixed output enters the same rack input through the existing handoff envelope, so all twelve process Heads audio; Beat Repeat / Scatter / Freeze read from their own bounded ring buffers and never touch head pointers. Freeze captures at the activation frame. Tails persist across overlay close and Heads exit.
 
-`src/audio/input/inputDevices.ts`, `inputSession.ts`, `recorder.ts`, `takes.ts`, `takePages.ts`, `latency.ts`; `src/audio/export/wavStream.ts`, `performanceRecorder.ts`; `src/workers/recordingWorker.ts`, `takePageWorker.ts`, `wavWorker.ts`; `public/input-capture-processor.js`, `public/take-layer-processor.js`; `src/machine/recordingState.ts`; `src/device/InputDrawer.tsx`. Extended: `commands.ts`, `engine.ts`, `store.ts` (SCHEMA 3), `stemPerformance.ts` (v4), `surface.ts`, `chordArbiter.ts`, `stemTapeV1Map.ts`, `DiagnosticPanel.tsx`.
+Heavy processors (Freeze, Scatter, Shimmer) load individually; a rejection sets `bank.rejected` and leaves every other bank running.
 
-## L. Sequence and acceptance
+## F. LED / UI
+Inside the existing arbiter only. Track LEDs = selected bank + momentary/latched; side LEDs = bank activity, temporarily overridden for ~800 ms during cycling to show 1/2/3 lit. Web overlay label shows bank, algorithm, `n/3`, macro. Recording/error/safety keep priority.
 
-**6A Capture Core** — permissions, devices, metering, monitor gate, shared capture worklet, block-pool/port transfer, onset + pre-roll, take manifests, chunked persistence, `TakeLayerProcessor` paged playback, finalize/recovery, dry WAV export. *Accept:* arm an empty track, sound triggers, full attack captured, playback in sync from pages, save/reload, export — no second full PCM copy, zero underruns.
+## G. Diagnostics
+Pointer→fader table, live pointer count, pending vs committed values, batch frame id, cancel/reconcile log, desktop group membership, inertia phase + instantaneous rate + preset + integrated position error, per-stem selected bank/algorithm/macro for all 16 banks, active instances + lazy state, crossfade events, processor memory, Heads+FX routing state, rejected effects, suppressed base commands, mapping JSON export with all twelve algorithms. Tutorial metadata authored for every new command; no guide built.
 
-**6B Overdub & tape coordinates** — pass sublayers, loop overdub with the seam audibility rule, exact segments across glides, unlinked tracks, undo/redo, latency compensation (reported estimate → manual offset → optional loopback wizard), master performance recording, loaded-track overdub enabled on pass.
+## H. Sequence and acceptance
+1. **Multi-fader input** — synthetic 2/3/4-pointer drags, opposite directions, crossing paths, random release order, ownership rejection, one cancel with three alive, blur recovery, zero React rerenders during drag, committed == last preview.
+2. **Multi-fader in every layer** — stem levels, head levels, simultaneous head scrub, overlay-open bare faders, pickup on modifier change.
+3. **Desktop group + keyboard** — offsets preserved, clamping isolated, chorded keys, diagnostics distinguish source.
+4. **Tape inertia (worklet)** — shared start frame, drift within existing tolerance, integrated position matches curve, play-during-stop, stop-during-start, rapid alternation, rates above/below 1.0, no discontinuity above threshold, no inertia on grid/record/seams.
+5. **Node-fallback inertia audit** — pass or documented degradation.
+6. **FX state + mapping migration** — cycle order 1→2→3→1 and 1→3→2→1, no master-volume leak, latch/momentary, v3→v4 project migration, persistence across save/reload and song switch.
+7. **Twelve DSP algorithms** — measurable wet/dry delta each, click-free swaps, 4 banks at once per stem, Heads-output processing, pointer immutability for Repeat/Scatter/Freeze, individual heavy-effect rejection, Node↔Worklet parity.
+8. **Regression** — Phase 5/6 suites green, 37/37 v2.6 map satisfied, TypeScript clean, zero console errors, zero user-audio network requests.
 
-**6C Grid, Heads, PRINT** — frame-anchored grid, tap learning, look-back punch, punch-out, grid LEDs, beatmatch, physical verification gate, experimental Heads/PRINT.
+Real-device checklist: iPhone + iPad four-finger fader drags, Heads scrub with two fingers, inertia audibility at 44.1/48 kHz, Freeze/Scatter CPU under load, memory headroom with 4 stems + 4 active banks; emulator runs labelled as emulation.
 
-Testing order: **each take layer is verified independently before any multilayer stress test.** Numeric acceptance: synthetic capture alignment ≤ 2 frames, punch on the intended frame, zero missing/duplicated frames across chunks, loop wrap exact to 1 frame, duration exact to 1 frame, transition residual ≤ −60 dBFS, fade deviation ≤ 0.25 dB, exact WAV header/data length, Node↔Worklet parity, no user audio in any network request. Diagnostics report **take-page cache misses and worklet load as explicitly labelled proxies**, never as CPU utilisation, unless real processor utilisation is measurable. Real-device results are reported in milliseconds, never as "sample-accurate".
+## I. Risks
+Worklet message volume from 4 simultaneous faders (mitigated by one batched frame); FFT Freeze memory on iOS (bounded, rejectable); serial 4-bank chain latency and gain staging (per-bank compensation); inertia interacting with existing seam scheduling (seamGeneration bump on every curve); migration losing variation nuance (legacy field retained).
 
-## M. Binding approval corrections — these supersede any conflicting text above
-
-**M1. Take playback scales per track, not per take.** One `TrackTakeMixerProcessor` per track (4 total) mixes every enabled take/pass sublayer for that track. A single project-level `TakePageBudgetManager` owns total take-cache memory, sized from simultaneously audible layers plus required read-ahead — no fixed per-take cache. The page worker prefetches before play, seek, reverse and loop wrap; misses and underruns are reported honestly; a take with missing audio is never marked playable. If activating another layer would exceed the budget, the activation is rejected or freeze/bounce is offered — never a silent underrun. The `AudioBufferSourceNode` fast path is **removed from 6A**; it is permitted later only for a provably trivial forward, constant-rate, non-looped take, after parity tests against `TrackTakeMixerProcessor`.
-
-**M2. Transfer blocks are not storage chunks.** The worklet emits small pooled 4096-frame transferable blocks (size and pool benchmark-tunable); the *worker* aggregates them into ~2 s storage chunks. `process()` never allocates two seconds of PCM. The direct Worklet↔Worker `MessagePort` is feature-tested; when unavailable, pooled blocks relay through `AudioWorkletNode.port` preserving transfer where supported, diagnostics state that the main thread is relaying, and the same backpressure and dropped-frame tests run against both paths. Structured-cloning large PCM is never a silent fallback. Pool exhaustion or a breached high-water mark stops the take safely, preserves committed chunks, marks the manifest as failed-mid-take, reports the exact cause, and never shows the take as ready.
-
-**M3. Three independent paths.**
-
-```text
-MediaStreamSource
-  ├→ InputCaptureProcessor → recording writer      (always)
-  ├→ monitorFxGain  → selected track pre-FX input
-  └→ monitorDryGain → selected track post-FX sum, pre-fader
-```
-
-Exactly one monitor gain open at a time (off / dry / through-FX); both monitor paths still pass the track fader and solo bus; stored PCM stays dry; default off; headphone warning and hard gain ceiling; never silently enabled; the writer never produces a second live-through signal.
-
-**M4. Loop-overdub monitoring (replaces the earlier mute rule).** Live monitoring is **never** muted when a completed pass begins playback. The pass starts at the next eligible loop seam with a seam crossfade, only once durably stored and prefetched; otherwise it waits for a later seam. The musician hears previous passes plus their live performance. Monitoring is fully independent of recording state, and no partially finalised pass may play.
-
-**M5. Bare-Track state table (existing 450 ms hold; declarative rows in `stemTapeV1Map.ts`).**
-
-| State | Tap | Hold ≥450 ms | Double-tap |
-| --- | --- | --- | --- |
-| Empty | no-op/status | arm first take | no-op |
-| Loaded idle | mute/unmute | arm overdub (6B) | recoverable delete |
-| Armed/waiting | cancel arm | already-armed ack | cancel; never delete |
-| Recording | stop take | no-op | stop only; never delete |
-| Overdubbing | stop overdub | no-op | stop only; never delete |
-| Stopping/finalising | status ack | no-op | never delete |
-| Failed mid-take | show recovery | no-op | never delete |
-
-Crossing 450 ms emits `rec.arm`; normal release leaves the track armed with no continued hold required. Pointer cancel before 450 ms never arms; cancel while waiting safely cancels the arm; cancel while recording requests a safe stop only if the gesture is not already latched; no pointer loss may leave a stuck held-control state; normal release is not cancellation. One armed target: arming another track while *waiting* transfers the arm with an ack naming old and new targets; arming another while recording/stopping/finalising is rejected. The same external input is never captured to two tracks in 6A.
-
-**M6. Input-disabled path.** A Track hold before input is enabled emits `rec.requestInput(trackId)`, opens the Input Drawer, remembers the pending target, and requires an explicit **Enable Input** tap to call `getUserMedia`. On success the originally requested track arms; on denial the pending target clears and the LED restores. Permission is never requested on page load.
-
-**M7. Transport-stopped onset.** The first valid onset on an armed track starts transport and recording on the *same scheduled audio frame*, from the current transport position (no forced restart unless already at zero), respecting the current loop/window; the accepted start frame appears in diagnostics. Playing without a grid: onset with pre-roll. Playing with a grid: look-back / next-boundary punch, using audio-thread frames rather than UI timestamps.
-
-**M8. Stop.** A tap while recording emits `rec.stop`: free recording stops immediately through the approved anti-click fade; with a loop, at the next loop seam; with a grid and no loop, at the approved grid punch-out boundary. During stopping/finalising no tap can start another take or delete audio. After finalisation the Track returns to normal loaded-track mute behaviour.
-
-**M9. FX-overlay exclusion enforced in `chordArbiter` before any `rec.*` is emitted.** With the overlay open, Tracks 1–4 are Filter / Echo / Reverb / Beat Repeat only: no arm, arm transfer, cancel, stop or delete.
-
-**M10. Grid, Heads, PRINT, master recording.** No new grid button: the existing Function ×4, re-tap-over-loop, tap-then-quick-hold and ×4-then-hold gestures remain the grid controls; grid audio behaviour is 6C, but its commands and tutorial metadata are schema-compatible from 6A. Heads/PRINT reserve only Function + triple-tap Play, Function + Faders, and the two Heads Track holds — off by default, experimental, excluded from parity; the double-tap reverse control stays unresolved pending physical testing. Master-performance recording stays in the Performance Drawer (optional `Shift + R`), is 6B, and captures exactly what is heard.
-
-**M11. LED priority.** `error > failed mid-take > recording > overdubbing > finalising > armed/waiting > momentary FX > latched FX > solo > unlinked > active > muted > base`, with breathing (armed), fast pulse or solid-bright (recording), double/alternating pulse (overdub), rapid chase (finalising) and the error pattern. Audio-thread state is authoritative; LEDs change only after accepted acks. Diagnostics show full underlying state, the winning pattern, its arbitration priority, and why it won.
-
-**M12. iOS export limit is benchmark-derived**, not a fixed 300 MiB assumption: measure whether `getFile()`/download spikes memory, then offer 16-bit or segmented export with an honest statement when safe single-file delivery is unavailable.
-
-**M13. Phase 6A scope only** — permissions and lifecycle, device enumeration with actual settings, shared `InputCaptureProcessor`, preallocated block pool, direct port plus tested fallback, metering, monitor modes with warning and ceiling, Track-hold arm mapping, single armed target, RMS + peak onset with minimum-duration gate, pre-roll/look-back, first take on an empty track, recording state machine, safe stop and finalisation, exact take segments, chunked OPFS/IndexedDB persistence, per-track `TrackTakeMixerProcessor` with the shared page budget, reload and paged playback, mid-take recovery, dry 16/24-bit WAV export, recording LED tiers, diagnostics, complete tutorial metadata, storage schema migration. **Not in 6A:** loaded-track overdub, multiple loop passes, master performance recording, operational grid punch, Heads, PRINT, reverse recording, Web MIDI — schema compatibility preserved for each.
-
-**M14. Acceptance and verification** follow the approval's sections 18–19 verbatim: the mapping/state suite, the audio/recording suite, and the objective thresholds (≤2-frame alignment, exact internal duration, zero unexplained dropped frames, residual ≤ −60 dBFS, fade deviation ≤ 0.25 dB, valid WAV header/size/channels/rate/depth, `tsgo --noEmit` clean, zero console errors, no user audio in any network request, no false CPU-utilisation claims). Mobile results are reported as **emulation**; real-iPhone verification is claimed only after the user runs the device checklist. Work stops with the Phase 6A completion report covering every field in section 20, and 6B does not begin without approval.
+## J. Blocking questions
+1. Inertia default preset — Classic (300/450 ms) unless you say otherwise.
+2. Macro-hold on Volume ±: should macro changes be per-algorithm or per-bank-shared?
+3. Should the desktop keyboard fader keys (Y/H, U/J, I/K, O/L) be confirmed, or do you want a different cluster?
+4. Tape Brake substitution for Pump — keep Pump as specified?
