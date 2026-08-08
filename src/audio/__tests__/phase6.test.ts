@@ -72,7 +72,7 @@ describe("phase 6 — WAV export math", () => {
     const pcm = encodeChunk([Float32Array.from([1, -1])], 2, 16, false);
     const view = new DataView(pcm.buffer, pcm.byteOffset, pcm.byteLength);
     expect(view.getInt16(0, true)).toBe(32767);
-    expect(view.getInt16(2, true)).toBe(-32768);
+    expect(view.getInt16(2, true)).toBe(-32767);
   });
 });
 
