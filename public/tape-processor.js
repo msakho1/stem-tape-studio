@@ -553,7 +553,56 @@ class TapeProcessor extends AudioWorkletProcessor {
           this.wrapCount++;
         }
       }
+    // Scrub telemetry: only while a scrub is live, ~every 8 quanta. Nothing is
+    // allocated in the per-frame loop; this object is built after it.
+    let anyScrub = false;
+    for (let h = 0; h < 4; h++) if (this.headScrubs[h]) anyScrub = true;
+    if (anyScrub) {
+      this.telemetryCountdown -= 1;
+      if (this.telemetryCountdown <= 0) {
+        this.telemetryCountdown = 8;
+        const rms = this.rmsFrames > 0 ? Math.sqrt(this.rmsAcc / this.rmsFrames) : 0;
+        this.rmsAcc = 0;
+        this.rmsFrames = 0;
+        const heads = [];
+        for (let h = 0; h < 4; h++) {
+          const sc = this.headScrubs[h];
+          heads.push(
+            sc
+              ? {
+                  head: h,
+                  pointerId: sc.pointerId,
+                  actualFrame: sc.actual,
+                  targetFrame: sc.target,
+                  velocity: sc.velocity,
+                  gain: sc.gain,
+                  mix: sc.mix,
+                  previews: sc.previews,
+                  releasing: sc.releasing,
+                }
+              : null,
+          );
+        }
+        this.port.postMessage({
+          seq: -1,
+          status: "telemetry",
+          detail: "scrub",
+          trackId: this.trackId,
+          contextFrame: currentFrame,
+          rms,
+          renderGapFrames: this.renderGapFrames,
+          scrubHeads: heads,
+        });
+      }
+    } else if (this.rmsFrames > 4096) {
+      this.rmsAcc = 0;
+      this.rmsFrames = 0;
     }
+
+    this.rendered = true;
+    return true;
+  }
+
 
     this.rendered = true;
     return true;
