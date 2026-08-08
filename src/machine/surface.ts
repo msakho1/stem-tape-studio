@@ -382,9 +382,8 @@ export function pressControl(state: SurfaceState, control: Control): SurfaceStat
     pressed,
     functionHeld: control === "function" ? true : state.functionHeld,
     fnModifierUsed:
-      control !== "function" && (state.functionHeld || control !== "function")
-        ? state.functionHeld || state.fnModifierUsed
-        : state.fnModifierUsed,
+      control !== "function" && state.functionHeld ? true : state.fnModifierUsed,
+
     fnHoldReached: control === "function" ? false : state.fnHoldReached,
     rocker:
       control === "rocker-fwd" ? "forward" : control === "rocker-rwd" ? "rewind" : state.rocker,
