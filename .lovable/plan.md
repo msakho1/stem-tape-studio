@@ -116,16 +116,19 @@ Safety: `navigator.storage.estimate()` shown as used/quota, `persist()` requeste
 
 ## 9. Phase 4 steps
 
-1. `ProjectStore` (IndexedDB + OPFS) and project schema v1.
-2. Uploader + validation + decode probe + memory estimator.
-3. Bundled short demo project (original CC0-licensed stems, no commercial music).
-4. `AudioEngine` (context, graph, transport, scheduled starts, acks).
-5. Reducer→audio adapter for play/restart/fader/mute/master.
-6. Audio diagnostics block in the existing panel.
+1. Ordered `SemanticCommand` stream + ack channel, emitted alongside the existing reducer dispatch (no second gesture engine, no map changes).
+2. `ProjectStore` (IndexedDB + OPFS) with project schema v1 and the recoverable trash record.
+3. Uploader + header sniffing + decode probe + memory estimator + five-state format report.
+4. Bundled short demo project (original/procedural, license-clear, strong synchronized transients).
+5. `AudioEngine` (single context, persistent graph, scheduled aligned starts, acks).
+6. Continuous control bus for live fader preview; reducer commit on pointer-up.
+7. Command consumers for play/restart/mute/master/track-delete + undo.
+8. Audio diagnostics block in the existing panel (requested vs actual state, drift, memory, storage, source provenance).
+
 7. `/bench` benchmark route.
 8. Offline + Playwright suites, then the device matrix.
 
-Acceptance: upload four WAVs on phone or desktop, press Play on the rendered SP-1, hear one synchronized song, mix with the four faders, mute/unmute, stop and restart reliably, reload a saved local project, and confirm no request carries audio.
+Acceptance: upload four WAVs on phone or desktop, press Play on the rendered SP-1, hear one synchronized song, mix with the four faders **with sound changing continuously during the drag**, mute/unmute, delete a track and undo it from the trash, stop and restart reliably, reload a saved local project, and confirm **no network request contains user-selected or user-recorded audio**. Bundled demo stems are ordinary app assets and will legitimately appear as network fetches; diagnostics label each audio source as `bundled-demo` or `user-private` so the two are never confused.
 
 ## 10. Later phases (estimates, high level)
 
