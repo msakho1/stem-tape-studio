@@ -4,17 +4,21 @@ import type { RawInputEvent } from "@/input/gestures";
 import type { Control } from "@/device/geometry";
 import {
   clearLatches,
+  cycleBankAlgorithm,
   deserializePerformance,
   initialStemPerformance,
   inputOpen,
   selectStem,
   serializePerformance,
-  setVariation,
+  setBankMomentary,
   tapeTarget,
+  toggleBankLatch,
   toggleLink,
   toggleSolo,
   STEM_TAPE_SCHEMA_VERSION,
 } from "@/machine/stemPerformance";
+import type { BankIndex } from "@/machine/fx12";
+
 import {
   ECHO_FEEDBACK_MAX,
   ECHO_VARIATIONS,
@@ -33,7 +37,7 @@ const TOL = 1e-9;
 const SR = 48000;
 
 function harness(overlay = false, activeStem: 0 | 1 | 2 | 3 = 0) {
-  const view = { activeStem, fxOverlay: overlay };
+  const view = { activeStem, fxOverlay: overlay, selectedBank: null as BankIndex | null };
   const arb = new ChordArbiter(() => view);
   const intents: PerfIntent[] = [];
   arb.onIntent((i) => intents.push(i));
@@ -102,27 +106,30 @@ describe("ordered chord arbitration (correction 1)", () => {
     expect(ambiguous.intents[0]!.type).toBe("system.noop");
   });
 
-  it("overlay open: a bare track press is momentary FX on press and release", () => {
+  it("overlay open: a bare track press selects the bank AND sounds it on press", () => {
     const { intents, ev, arb } = harness(true, 1);
     ev("track-button-4", "down", 0);
-    expect(intents[0]).toEqual({ type: "fx.momentary.start", stem: 1, family: "beatRepeat" });
+    // Zero hold latency: selection and audio both happen on pointer-down.
+    expect(intents[0]).toEqual({ type: "fx.bank.select", stem: 1, bank: 1 });
+    expect(intents[1]).toEqual({ type: "fx.momentary.start", stem: 1, bank: 1 });
     expect(arb.isClaimed("track-button-4")).toBe(true);
     ev("track-button-4", "up", 250);
-    expect(intents[1]).toEqual({ type: "fx.momentary.end", stem: 1, family: "beatRepeat" });
+    expect(intents[2]).toEqual({ type: "fx.momentary.end", stem: 1, bank: 1 });
   });
 
-  it("overlay open: FX track + Vol±  = variation, + FUNCTION = latch", () => {
+  it("overlay open: Vol± cycles the selected bank's algorithm, FUNCTION latches", () => {
     const v = harness(true, 0);
     v.ev("track-button-2", "down", 0);
+    v.view.selectedBank = 2; // MOTION, as the select intent just reported
     v.ev("volume-plus", "down", 30);
     v.ev("volume-plus", "up", 90);
-    expect(v.intents.at(-1)).toEqual({ type: "fx.variation", stem: 0, family: "echo", dir: 1 });
+    expect(v.intents.at(-1)).toEqual({ type: "fx.algorithm.cycle", stem: 0, bank: 2, dir: 1 });
 
     const l = harness(true, 0);
     l.ev("track-button-1", "down", 0);
     l.ev("function", "down", 20);
     l.ev("function", "up", 80);
-    expect(l.intents.at(-1)).toEqual({ type: "fx.latch", stem: 0, family: "filter" });
+    expect(l.intents.at(-1)).toEqual({ type: "fx.latch", stem: 0, bank: 0 });
   });
 
   it("all four FX tracks + FUNCTION clears the latches on the active stem", () => {
@@ -140,10 +147,11 @@ describe("ordered chord arbitration (correction 1)", () => {
     const { intents, ev, arb } = harness(true, 0);
     ev("track-button-3", "down", 0);
     ev("track-button-3", "cancel", 90);
-    expect(intents.at(-1)).toEqual({ type: "fx.momentary.end", stem: 0, family: "reverb" });
+    expect(intents.at(-1)).toEqual({ type: "fx.momentary.end", stem: 0, bank: 3 });
     ev("track-button-3", "down", 200);
     expect(arb.isClaimed("track-button-3")).toBe(true);
   });
+
 
   it("with the overlay CLOSED a bare track press is left to the v2.6 map", () => {
     const { intents, ev, arb } = harness(false);
@@ -184,13 +192,14 @@ describe("stem performance state", () => {
     expect(tapeTarget(s, 0)).toEqual([0, 1, 3]);
   });
 
-  it("persists link/solo/variation/latch and NEVER momentary or overlay", () => {
+  it("persists link/solo/algorithm/latch and NEVER momentary or overlay", () => {
     let s = initialStemPerformance();
     s = toggleSolo(s, 1);
     s = toggleLink(s, 3);
-    s = setVariation(s, 0, "echo", 1);
+    s = cycleBankAlgorithm(s, 0, 2, 1); // MOTION → algorithm 1 (Pitch Echo)
+    s = toggleBankLatch(s, 0, 3); // SPACE latched
+    s = setBankMomentary(s, 0, 3, true);
     s = { ...s, fxOverlay: true };
-    s = { ...s, tracks: s.tracks.map((t, i) => (i === 0 ? { ...t, fx: { ...t.fx, reverb: { ...t.fx.reverb, latched: true, momentary: true } } } : t)) as typeof s.tracks };
 
     const json = JSON.parse(JSON.stringify(serializePerformance(s)));
     expect(json.version).toBe(STEM_TAPE_SCHEMA_VERSION);
@@ -201,33 +210,41 @@ describe("stem performance state", () => {
     expect(back.fxOverlay).toBe(false);
     expect(back.tracks[1]!.soloed).toBe(true);
     expect(back.tracks[3]!.linked).toBe(false);
-    expect(back.tracks[0]!.fx.echo.variation).toBe(2);
-    expect(back.tracks[0]!.fx.reverb.latched).toBe(true);
-    expect(back.tracks[0]!.fx.reverb.momentary).toBe(false);
+    expect(back.tracks[0]!.fx12.banks[2]!.selectedAlgorithm).toBe(1);
+    expect(back.tracks[0]!.fx12.banks[3]!.latched).toBe(true);
+    expect(back.tracks[0]!.fx12.banks[3]!.momentary).toBe(false);
+    // Bank selection is a live overlay concern and never survives a reload.
+    expect(back.tracks[0]!.fx12.selectedBank).toBe(null);
   });
 
-  it("migrates pre-5C projects to linked / no solo / no latch / variation 1", () => {
+  it("migrates pre-5C projects to linked / no solo / no latch / algorithm 0", () => {
     const legacy = deserializePerformance({ version: 2, tracks: [{ soloed: true }] });
     expect(legacy.tracks.every((t) => t.linked && !t.soloed)).toBe(true);
-    expect(legacy.tracks.every((t) => Object.values(t.fx).every((f) => !f.latched && f.variation === 1))).toBe(true);
+    expect(
+      legacy.tracks.every((t) => t.fx12.banks.every((b) => !b.latched && !b.momentary && b.selectedAlgorithm === 0)),
+    ).toBe(true);
   });
 
   it("a restored Beat Repeat latch re-arms instead of replaying stale memory", () => {
     const restored = deserializePerformance({
-      version: STEM_TAPE_SCHEMA_VERSION,
+      version: 3,
       activeStem: 0,
       tracks: [{ soloed: false, linked: true, fx: { beatRepeat: { latched: true, variation: 2 } } }],
     });
     expect(restored.tracks[0]!.fx.beatRepeat.arming).toBe(true);
+    // v3 beatRepeat maps onto the RHYTHM bank, algorithm 0.
+    expect(restored.tracks[0]!.fx12.banks[1]!.latched).toBe(true);
   });
 
-  it("clearLatches leaves variations alone", () => {
+  it("clearLatches leaves the selected algorithm alone", () => {
     let s = initialStemPerformance();
-    s = setVariation(s, 0, "filter", 1);
+    s = cycleBankAlgorithm(s, 0, 0, 1);
+    s = toggleBankLatch(s, 0, 0);
     s = clearLatches(s, 0);
-    expect(s.tracks[0]!.fx.filter.variation).toBe(2);
-    expect(s.tracks[0]!.fx.filter.latched).toBe(false);
+    expect(s.tracks[0]!.fx12.banks[0]!.selectedAlgorithm).toBe(1);
+    expect(s.tracks[0]!.fx12.banks[0]!.latched).toBe(false);
   });
+
 });
 
 describe("FX timing math (correction 11 thresholds)", () => {
@@ -301,11 +318,12 @@ describe("LED priority table", () => {
   it("overlay side LEDs show momentary above latched, and arming above both", () => {
     let s = initialSurfaceState();
     s = applyPerfIntent(s, { type: "fx.overlay", on: true });
-    s = applyPerfIntent(s, { type: "fx.latch", stem: 0, family: "echo" });
+    s = applyPerfIntent(s, { type: "fx.latch", stem: 0, bank: 2 });
     let leds = deriveLeds(s);
     expect(leds["side-led-2"]!.pattern).toBe("solid");
 
-    s = applyPerfIntent(s, { type: "fx.momentary.start", stem: 0, family: "echo" });
+    s = applyPerfIntent(s, { type: "fx.momentary.start", stem: 0, bank: 2 });
+
     leds = deriveLeds(s);
     expect(leds["side-led-2"]!.pattern).toBe("breathe");
     expect(leds["side-led-2"]!.reason).toContain("momentary");

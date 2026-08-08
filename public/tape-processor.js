@@ -37,6 +37,8 @@ class TapeProcessor extends AudioWorkletProcessor {
     this.targetRate = 1;
     this.rateStep = 0;
     this.rampFramesLeft = 0;
+    /** Active transport-inertia ramp, or null. */
+    this.inertia = null;
     this.direction = 1;
     this.playing = false;
 
@@ -341,7 +343,24 @@ class TapeProcessor extends AudioWorkletProcessor {
         this.readPosition = this.loopEnabled ? this.loopStart : 0;
         this.playing = true;
         break;
+      case "inertia": {
+        // from/to are absolute rates; the ramp terminates EXACTLY on `to`.
+        const frames = Math.max(1, m.durationFrames | 0);
+        this.inertia = {
+          from: typeof m.from === "number" ? m.from : this.rate,
+          to: m.to,
+          frames,
+          k: m.k || 4,
+          expNegK: Math.exp(-(m.k || 4)),
+          elapsed: 0,
+        };
+        this.rampFramesLeft = 0;
+        this.rateStep = 0;
+        this.targetRate = m.to;
+        break;
+      }
       case "setRate": {
+        this.inertia = null;
         this.targetRate = m.rate;
         const frames = m.rampFrames | 0;
         if (frames > 0) {
@@ -447,7 +466,21 @@ class TapeProcessor extends AudioWorkletProcessor {
         this.applyCommand(this.scheduledCommands.shift().msg);
       }
 
-      if (this.rampFramesLeft > 0) {
+      if (this.inertia) {
+        // Workstream 2: the SAME exponential shape the main-thread timeline
+        // integrates, sample by sample, so the playhead never disagrees.
+        const g = this.inertia;
+        g.elapsed++;
+        if (g.elapsed >= g.frames) {
+          this.rate = g.to;
+          this.targetRate = g.to;
+          this.inertia = null;
+        } else {
+          const u = g.elapsed / g.frames;
+          const shape = (Math.exp(-g.k * u) - g.expNegK) / (1 - g.expNegK);
+          this.rate = g.to + (g.from - g.to) * shape;
+        }
+      } else if (this.rampFramesLeft > 0) {
         this.rate += this.rateStep;
         this.rampFramesLeft--;
         if (this.rampFramesLeft === 0) this.rate = this.targetRate;

@@ -25,6 +25,8 @@ import {
   type SurfaceState,
 } from "@/machine/surface";
 import { controlBus, type ContinuousChannel } from "@/audio/controlBus";
+import { FaderSessionManager, type FaderIndex } from "@/input/faderSessions";
+
 
 
 
@@ -40,6 +42,24 @@ const KEY_MAP: Record<string, Control> = {
   Digit3: "track-button-3",
   Digit4: "track-button-4",
 };
+
+/**
+ * Workstream 1, desktop parity: approved keyboard pairs. Up/down per fader,
+ * held simultaneously so a desktop user can move four faders at once.
+ */
+const FADER_KEYS: Record<string, { index: FaderIndex; dir: 1 | -1 }> = {
+  KeyY: { index: 0, dir: 1 },
+  KeyH: { index: 0, dir: -1 },
+  KeyU: { index: 1, dir: 1 },
+  KeyJ: { index: 1, dir: -1 },
+  KeyI: { index: 2, dir: 1 },
+  KeyK: { index: 2, dir: -1 },
+  KeyO: { index: 3, dir: 1 },
+  KeyL: { index: 3, dir: -1 },
+};
+
+/** Value units per second while a fader key is held. */
+const KEY_FADER_RATE = 0.9;
 
 export const KEY_HINTS: [string, Control][] = Object.entries(KEY_MAP).map(([k, c]) => [
   k.replace("Key", "").replace("Digit", "").replace("Space", "space").replace("Minus", "−").replace("Equal", "+"),
@@ -81,9 +101,18 @@ export function useDeviceSurface() {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const capRefs = useRef<Record<number, SVGCircleElement | null>>({});
   const faderValuesRef = useRef<number[]>([0.78, 0.72, 0.65, 0.7]);
-  const dragRef = useRef<{ index: number; pointerId: number; channel: ContinuousChannel } | null>(null);
+  /**
+   * Workstream 1: one session per pointer. No singleton drag — a second finger
+   * can never steal the first fader, and each pointerup ends only its own.
+   */
+  const faders = useRef(new FaderSessionManager());
   const frameRef = useRef<number | null>(null);
-  const pendingCyRef = useRef<{ index: number; cy: number; value: number } | null>(null);
+  /** Faders joined to the shift-click group; they move together as one gesture. */
+  const groupRef = useRef<Set<FaderIndex>>(new Set());
+  /** Keys currently held, with the frame time each was last integrated at. */
+  const keyFadersRef = useRef<Map<string, { index: FaderIndex; dir: 1 | -1; last: number }>>(new Map());
+  const keyFrameRef = useRef<number | null>(null);
+
   /** Latest state, read by imperative pointer handlers without re-binding them. */
   const stateRef = useRef<SurfaceState>(state);
   stateRef.current = state;
@@ -113,9 +142,18 @@ export function useDeviceSurface() {
    * Play / Volume / Track command is emitted and then undone.
    */
   const arbiter = useMemo(
-    () => new ChordArbiter(() => ({ activeStem: stateRef.current.perf.activeStem, fxOverlay: stateRef.current.perf.fxOverlay })),
+    () =>
+      new ChordArbiter(() => {
+        const perf = stateRef.current.perf;
+        return {
+          activeStem: perf.activeStem,
+          fxOverlay: perf.fxOverlay,
+          selectedBank: perf.tracks[perf.activeStem]!.fx12.selectedBank,
+        };
+      }),
     [],
   );
+
   const [powerHoldMs, setPowerHoldMsState] = useState(DEFAULT_TIMINGS.powerHoldMs);
 
   const setPowerHoldMs = useCallback(
@@ -242,27 +280,135 @@ export function useDeviceSurface() {
     return layer.fn ? "window" : "fader";
   }, []);
 
-  const scheduleCap = useCallback((index: number, cy: number, value: number) => {
-    pendingCyRef.current = { index, cy, value };
-    if (frameRef.current != null) return;
-    frameRef.current = requestAnimationFrame(() => {
-      frameRef.current = null;
-      const pending = pendingCyRef.current;
-      if (!pending) return;
-      const cap = capRefs.current[pending.index];
-      if (cap) cap.setAttribute("cy", String(pending.cy));
-      const drag = dragRef.current;
+  /**
+   * ONE shared frame for every moving fader. Each pending fader is written to
+   * the DOM and pushed onto the control bus inside the same rAF, carrying the
+   * same batch id, so four fingers land on one future audio frame instead of
+   * four staggered ones.
+   */
+  const flushFrame = useCallback(() => {
+    frameRef.current = null;
+    const batch = faders.current.flush();
+    if (!batch) return;
+    const timestamp = performance.now();
+    for (const p of batch.previews) {
+      const cap = capRefs.current[p.faderIndex];
+      if (cap) cap.setAttribute("cy", String(faderValueToCy(p.value)));
       controlBus.send({
-        channel: drag?.channel ?? "fader",
-        index: pending.index,
-        value: pending.value,
+        channel: p.channel,
+        index: p.faderIndex,
+        value: p.value,
         committed: false,
-        pointerId: drag?.pointerId ?? -1,
+        pointerId: p.pointerId,
         phase: "move",
+        timestamp,
+        batchFrame: batch.batchFrame,
+      });
+    }
+  }, []);
+
+  const scheduleFlush = useCallback(() => {
+    if (frameRef.current != null) return;
+    frameRef.current = requestAnimationFrame(flushFrame);
+  }, [flushFrame]);
+
+  /**
+   * Keyboard fader pairs (Y/H, U/J, I/K, O/L). Any number of keys may be held
+   * at once: every held key is integrated on the SAME rAF and flushed in one
+   * batch, so keyboard performance is genuinely simultaneous, not sequential.
+   */
+  const keyFrame = useCallback(() => {
+    keyFrameRef.current = null;
+    const held = keyFadersRef.current;
+    if (held.size === 0) return;
+    const now = performance.now();
+    const channel = resolveChannel();
+    for (const entry of held.values()) {
+      const dt = Math.min(0.1, Math.max(0, (now - entry.last) / 1000));
+      entry.last = now;
+      const current = faderValuesRef.current[entry.index] ?? 0;
+      const next = Math.min(1, Math.max(0, current + entry.dir * KEY_FADER_RATE * dt));
+      faderValuesRef.current[entry.index] = next;
+      faders.current.queue({ faderIndex: entry.index, value: next, channel, pointerId: -1 - entry.index });
+    }
+    scheduleFlush();
+    keyFrameRef.current = requestAnimationFrame(keyFrame);
+  }, [resolveChannel, scheduleFlush]);
+
+  useEffect(() => {
+    const down = (e: KeyboardEvent) => {
+      const spec = FADER_KEYS[e.code];
+      if (!readyRef.current || !spec || e.metaKey || e.ctrlKey || e.altKey) return;
+      const target = e.target as HTMLElement | null;
+      if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
+      e.preventDefault();
+      if (e.repeat) return;
+      // A pointer already owns this fader: the pointer wins, keys are ignored.
+      if (faders.current.owner(spec.index) != null) return;
+      keyFadersRef.current.set(e.code, { ...spec, last: performance.now() });
+      if (keyFrameRef.current == null) keyFrameRef.current = requestAnimationFrame(keyFrame);
+    };
+    const up = (e: KeyboardEvent) => {
+      const spec = FADER_KEYS[e.code];
+      if (!spec) return;
+      if (!keyFadersRef.current.delete(e.code)) return;
+      const value = faderValuesRef.current[spec.index] ?? 0;
+      const channel = resolveChannel();
+      controlBus.send({
+        channel,
+        index: spec.index,
+        value,
+        committed: true,
+        pointerId: -1 - spec.index,
+        phase: "end",
         timestamp: performance.now(),
       });
-    });
-  }, []);
+      dispatch({ type: "faderCommit", index: spec.index, value, claimed: channel });
+      if (keyFadersRef.current.size === 0 && keyFrameRef.current != null) {
+        cancelAnimationFrame(keyFrameRef.current);
+        keyFrameRef.current = null;
+      }
+    };
+    window.addEventListener("keydown", down);
+    window.addEventListener("keyup", up);
+    return () => {
+      window.removeEventListener("keydown", down);
+      window.removeEventListener("keyup", up);
+      if (keyFrameRef.current != null) cancelAnimationFrame(keyFrameRef.current);
+      keyFrameRef.current = null;
+      keyFadersRef.current.clear();
+    };
+  }, [keyFrame, resolveChannel]);
+
+  /**
+   * True rebase: FUNCTION or HEADS changing while faders are still down
+   * retargets every live session to the new channel without a value jump, and
+   * the old channel stops receiving previews immediately.
+   */
+  useEffect(() => {
+    const channel = layerRef.current.heads
+      ? layerRef.current.fn
+        ? "headScrub"
+        : "headLevel"
+      : layerRef.current.fn
+        ? "window"
+        : "fader";
+    for (const session of faders.current.sessions()) {
+      if (session.channel === channel) continue;
+      const destination = faderValuesRef.current[session.faderIndex] ?? 0;
+      const pointerValue = session.lastPreviewValue + session.grabOffset;
+      faders.current.rebase(session.pointerId, channel as ContinuousChannel, pointerValue, destination);
+      controlBus.send({
+        channel: channel as ContinuousChannel,
+        index: session.faderIndex,
+        value: destination,
+        committed: false,
+        pointerId: session.pointerId,
+        phase: "start",
+        timestamp: performance.now(),
+      });
+    }
+  }, [state.functionHeld, state.headsMode]);
 
   const onControlPointerDown = useCallback(
     (control: Control, e: React.PointerEvent) => {
@@ -279,56 +425,87 @@ export function useDeviceSurface() {
       engine.press(control, e.pointerId, performance.now(), p?.x, p?.y);
 
       if (control.startsWith("fader-")) {
-        const index = Number(control.slice(-1)) - 1;
+        const index = (Number(control.slice(-1)) - 1) as FaderIndex;
         const channel = resolveChannel();
-        dragRef.current = { index, pointerId: e.pointerId, channel };
-        const value = p ? cyToFaderValue(p.y) : (faderValuesRef.current[index] ?? 0);
+        const current = faderValuesRef.current[index] ?? 0;
+        const pointerValue = p ? cyToFaderValue(p.y) : current;
+        // Pickup semantics: the cap does NOT jump to the finger. A second
+        // finger on an already-owned fader is rejected without disturbing it.
+        const session = faders.current.begin({
+          pointerId: e.pointerId,
+          faderIndex: index,
+          userY: p?.y ?? 0,
+          pointerValue,
+          currentValue: current,
+          channel,
+          source: e.pointerType === "mouse" ? "mouse" : "touch",
+          t: performance.now(),
+        });
+        if (!session) return;
+        // Desktop grouping: shift+click joins this fader to the group, so one
+        // mouse drives several faders with the same relative delta.
+        if (e.shiftKey) groupRef.current.add(index);
+        else if (!groupRef.current.has(index)) groupRef.current.clear();
         // The gesture opens on the bus BEFORE any movement, so the engine can
         // latch the head's current read position as the scrub origin.
         controlBus.send({
           channel,
           index,
-          value,
+          value: current,
           committed: false,
           pointerId: e.pointerId,
           phase: "start",
           timestamp: performance.now(),
         });
-        if (p) {
-          faderValuesRef.current[index] = value;
-          scheduleCap(index, faderValueToCy(value), value);
-        }
       }
     },
-    [engine, resolveChannel, scheduleCap, toUserSpace],
+    [engine, resolveChannel, toUserSpace],
   );
 
   const onControlPointerMove = useCallback(
     (control: Control, e: React.PointerEvent) => {
-      const drag = dragRef.current;
-      if (!drag || drag.pointerId !== e.pointerId) return;
+      const session = faders.current.sessionForPointer(e.pointerId);
+      if (!session) return;
       const p = toUserSpace(e.clientX, e.clientY);
       if (!p) return;
       engine.markMoved(control);
-      const value = cyToFaderValue(p.y);
-      faderValuesRef.current[drag.index] = value;
-      scheduleCap(drag.index, faderValueToCy(value), value);
+      const value = faders.current.move(e.pointerId, p.y, cyToFaderValue(p.y), (v) => Math.min(1, Math.max(0, v)));
+      if (value == null) return;
+      const previous = faderValuesRef.current[session.faderIndex] ?? value;
+      faderValuesRef.current[session.faderIndex] = value;
+      if (groupRef.current.size > 1 && groupRef.current.has(session.faderIndex)) {
+        const delta = value - previous;
+        for (const other of groupRef.current) {
+          if (other === session.faderIndex) continue;
+          if (faders.current.owner(other) != null) continue; // owned by its own pointer
+          const next = Math.min(1, Math.max(0, (faderValuesRef.current[other] ?? 0) + delta));
+          faderValuesRef.current[other] = next;
+          faders.current.queue({
+            faderIndex: other,
+            value: next,
+            channel: session.channel,
+            pointerId: session.pointerId,
+          });
+        }
+      }
+      scheduleFlush();
     },
-    [engine, scheduleCap, toUserSpace],
+    [engine, scheduleFlush, toUserSpace],
   );
 
   /**
    * Commit: the reducer receives the EXACT value that was last audible, so the
-   * committed gain and the last preview gain are the same number.
+   * committed gain and the last preview gain are the same number. Only the
+   * session belonging to THIS pointer ends.
    */
-  const endDrag = useCallback(() => {
-    const drag = dragRef.current;
+  const endDrag = useCallback((pointerId: number) => {
+    const drag = faders.current.end(pointerId);
     if (!drag) return;
-    dragRef.current = null;
-    const value = faderValuesRef.current[drag.index] ?? 0;
+    const value = drag.lastPreviewValue;
+    faderValuesRef.current[drag.faderIndex] = value;
     controlBus.send({
       channel: drag.channel,
-      index: drag.index,
+      index: drag.faderIndex,
       value,
       committed: true,
       pointerId: drag.pointerId,
@@ -337,25 +514,40 @@ export function useDeviceSurface() {
     });
     // The reducer is told which layer the gesture claimed, so a modifier
     // released mid-drag cannot retarget the commit.
-    dispatch({ type: "faderCommit", index: drag.index, value, claimed: drag.channel });
+    dispatch({ type: "faderCommit", index: drag.faderIndex, value, claimed: drag.channel });
+    if (groupRef.current.size > 1 && groupRef.current.has(drag.faderIndex)) {
+      for (const other of groupRef.current) {
+        if (other === drag.faderIndex) continue;
+        const v = faderValuesRef.current[other] ?? 0;
+        controlBus.send({
+          channel: drag.channel,
+          index: other,
+          value: v,
+          committed: true,
+          pointerId: drag.pointerId,
+          phase: "end",
+          timestamp: performance.now(),
+        });
+        dispatch({ type: "faderCommit", index: other, value: v, claimed: drag.channel });
+      }
+    }
   }, []);
 
   /**
    * Documented cancel rule: a cancelled drag is NOT a commit. Audio is
    * reconciled back to the last committed value (ramped) and the reducer keeps
-   * the value it already had.
+   * the value it already had. Other live faders are untouched.
    */
-  const cancelDrag = useCallback(() => {
-    const drag = dragRef.current;
+  const cancelDrag = useCallback((pointerId: number) => {
+    const drag = faders.current.cancel(pointerId);
     if (!drag) return;
-    dragRef.current = null;
     if (drag.channel === "headScrub") {
       // Cancelling a scrub restores the pre-gesture head position; there is no
       // "last committed fader value" to ramp to.
       controlBus.send({
         channel: "headScrub",
-        index: drag.index,
-        value: faderValuesRef.current[drag.index] ?? 0,
+        index: drag.faderIndex,
+        value: faderValuesRef.current[drag.faderIndex] ?? 0,
         committed: false,
         pointerId: drag.pointerId,
         phase: "cancel",
@@ -363,9 +555,13 @@ export function useDeviceSurface() {
       });
       return;
     }
-    const committed = controlBus.reconcile(drag.channel, drag.index, stateRef.current.tracks[drag.index]?.volume ?? 0);
-    faderValuesRef.current[drag.index] = committed;
-    const cap = capRefs.current[drag.index];
+    const committed = controlBus.reconcile(
+      drag.channel,
+      drag.faderIndex,
+      stateRef.current.tracks[drag.faderIndex]?.volume ?? 0,
+    );
+    faderValuesRef.current[drag.faderIndex] = committed;
+    const cap = capRefs.current[drag.faderIndex];
     if (cap) cap.setAttribute("cy", String(faderValueToCy(committed)));
   }, []);
 
@@ -373,7 +569,7 @@ export function useDeviceSurface() {
   const onControlPointerUp = useCallback(
     (control: Control, e: React.PointerEvent) => {
       engine.release(control, e.pointerId);
-      endDrag();
+      endDrag(e.pointerId);
     },
     [endDrag, engine],
   );
@@ -381,10 +577,11 @@ export function useDeviceSurface() {
   const onControlPointerCancel = useCallback(
     (control: Control, e: React.PointerEvent) => {
       engine.cancel(control, e.pointerId);
-      cancelDrag();
+      cancelDrag(e.pointerId);
     },
     [cancelDrag, engine],
   );
+
 
   const leds = useMemo(() => deriveLeds(state), [state]);
   const observed = useMemo(() => observedRows(state, leds), [state, leds]);

@@ -21,6 +21,16 @@ export type WorkletMessage =
   | { type: "stop"; seq: number; applyAtContextFrame: number }
   | { type: "restart"; seq: number; applyAtContextFrame: number }
   | { type: "setRate"; seq: number; rate: number; rampFrames: number; applyAtContextFrame: number }
+  /** Workstream 2: finite exponential transport-inertia ramp (wind-up/down). */
+  | {
+      type: "inertia";
+      seq: number;
+      from: number;
+      to: number;
+      k: number;
+      durationFrames: number;
+      applyAtContextFrame: number;
+    }
   | { type: "setWindow"; seq: number; start: number; end: number; enabled: boolean; applyAtContextFrame: number }
   | { type: "setChop"; seq: number; division: number; index: number; applyAtContextFrame: number }
   | { type: "setLoopMode"; seq: number; mode: "fixed" | "variable"; applyAtContextFrame: number }

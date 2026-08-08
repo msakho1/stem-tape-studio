@@ -26,10 +26,23 @@ import { bufferBytes } from "./format";
 import { GLIDE_TAU, glideCurve, glideDurationS } from "./glide";
 import { allowed, defaultBudget, describeVerdict, formatMiB, judge, SSR_BUDGET, type MemoryBudget } from "./memory";
 import { DEFAULT_WINDOW, resolveLoop, TapeTimeline, type LoopWindow } from "./tape";
+import {
+  DEFAULT_INERTIA_PRESET,
+  INERTIA_MIN_RATE,
+  INERTIA_PRESETS,
+  INERTIA_STOP_FADE_S,
+  inertiaCurve,
+  makeInertiaSegment,
+  type InertiaPresetName,
+  type TransportPhase,
+} from "./inertia";
 import { estimateMigration } from "./workletBudget";
 import { pairwiseDrift, sharedApplyFrame, type WorkletAck } from "./workletProtocol";
 import { preflightWorklet, WorkletTrack, type MigrationStatus, type PreflightResult } from "./workletTrack";
 import { FxRack, type FxRackSnapshot } from "./fx/rack";
+import { BankRack, type BankStageSnapshot } from "./fx/banks";
+import type { AlgorithmIndex, BankIndex } from "@/machine/fx12";
+import { algorithmDef } from "@/machine/fx12";
 import { FX_FAMILIES, type FxFamily } from "@/machine/stemPerformance";
 import { RecordingController } from "./input/recorder";
 import { PerformanceRecorder } from "./export/performanceRecorder";
@@ -96,6 +109,8 @@ export interface TrackRuntime {
   preFx: GainNode;
   /** Phase 5C per-stem FX rack. Its input node is never re-parented. */
   fxRack: FxRack | null;
+  /** Workstream 3: four serial bank stages, permanently inserted. */
+  bankRack: BankRack | null;
   /** Post-FX fader — it rides the FX tails, so mute never lives here. */
   gain: GainNode;
   /** Separate, smoothed solo gain. Solo never mutates saved mute state. */
@@ -231,6 +246,13 @@ export class AudioEngine {
   private tracks: TrackRuntime[] = [];
   private timeline = new TapeTimeline(1);
   private requestedPlaying = false;
+  /** Workstream 2: tape inertia. Classic (300 ms / 450 ms) is the default. */
+  private inertiaPreset: InertiaPresetName = DEFAULT_INERTIA_PRESET;
+  private inertiaEnabled = true;
+  private transportPhase: TransportPhase = "stopped";
+  private windTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Dedicated transport envelope — never the fader, never the mute gain. */
+  private transportGain: GainNode | null = null;
   private masterLevel = 0.7;
   private listeners = new Set<Listener>();
   private schedulerTimer: ReturnType<typeof setInterval> | null = null;
@@ -363,7 +385,10 @@ export class AudioEngine {
     this.master.gain.value = this.masterLevel;
     this.masterAnalyser = ctx.createAnalyser();
     this.masterAnalyser.fftSize = 1024;
-    this.master.connect(this.masterAnalyser);
+    this.transportGain = ctx.createGain();
+    this.transportGain.gain.value = 1;
+    this.master.connect(this.transportGain);
+    this.transportGain.connect(this.masterAnalyser);
     this.masterAnalyser.connect(ctx.destination);
 
     this.tracks = [0, 1, 2, 3].map((i) => {
@@ -390,9 +415,15 @@ export class AudioEngine {
       filter.connect(wet);
       dry.connect(preFx);
       wet.connect(preFx);
-      // Phase 5C: preFx → FxRack → fader → solo → analyser → master.
-      const fxRack = new FxRack(ctx, gain);
+      // Phase 5C / Workstream 3:
+      //   preFx → FxRack (tape filter + Beat Repeat worklet)
+      //         → BankRack (TONE → RHYTHM → MOTION → SPACE)
+      //         → fader → solo → analyser → master.
+      const bankRack = new BankRack(ctx);
+      const fxRack = new FxRack(ctx, bankRack.input);
+      bankRack.output.connect(gain);
       preFx.connect(fxRack.input);
+
       gain.connect(soloGain);
       soloGain.connect(analyser);
       analyser.connect(this.master!);
@@ -405,6 +436,7 @@ export class AudioEngine {
         input,
         preFx,
         fxRack,
+        bankRack,
         gain,
         soloGain,
         soloed: false,
@@ -1192,6 +1224,91 @@ export class AudioEngine {
     return this.applyFx(id, family, latched);
   }
 
+  // ------------------------------------------------- Workstream 3: 12 FX ---
+
+  /**
+   * Beat Repeat is the one algorithm that stays on its sample-accurate
+   * worklet inside the legacy rack; its bank stage is a passthrough.
+   */
+  private isWorkletAlgorithm(bank: BankIndex, algorithm: AlgorithmIndex): boolean {
+    return algorithmDef(bank, algorithm).id === "beatRepeat";
+  }
+
+  /** Zero hold latency: the wet ramp starts at the current context time. */
+  async setBankActive(
+    id: TrackId,
+    bank: BankIndex,
+    algorithm: AlgorithmIndex,
+    active: boolean,
+    latched = false,
+  ): Promise<{ ok: boolean; detail: string }> {
+    const t = this.tracks[id];
+    if (!t?.bankRack || !this.ctx) return { ok: false, detail: "audio not unlocked" };
+    const def = algorithmDef(bank, algorithm);
+    if (this.isWorkletAlgorithm(bank, algorithm)) {
+      return this.setFxActive(id, "beatRepeat", active, latched);
+    }
+    const stage = t.bankRack.stage(bank);
+    stage.setTempo(this.effectiveBpm(id), this.ctx.currentTime);
+    stage.select(algorithm, this.ctx.currentTime);
+    stage.setActive(active, this.ctx.currentTime);
+    const rejected = stage.rejectionFor(algorithm);
+    if (rejected) {
+      this.lastFxRejection = `${def.label}: ${rejected}`;
+      // One algorithm is refused; the bank itself stays usable.
+      return { ok: false, detail: `${def.label} rejected — ${rejected}; bank ${bank + 1} still usable` };
+    }
+    return {
+      ok: true,
+      detail: `stem ${id + 1} ${def.label} ${active ? "engaged" : "released"}${latched ? " (latched)" : ""} · wet ${stage.snapshot().wet.toFixed(3)}`,
+    };
+  }
+
+  /** Cycling never activates an inactive bank. */
+  selectBankAlgorithm(id: TrackId, bank: BankIndex, algorithm: AlgorithmIndex): { ok: boolean; detail: string } {
+    const t = this.tracks[id];
+    if (!t?.bankRack || !this.ctx) return { ok: false, detail: "audio not unlocked" };
+    const stage = t.bankRack.stage(bank);
+    const wasWorklet = this.isWorkletAlgorithm(bank, stage.selected);
+    const active = stage.isActive || (wasWorklet && t.fxActive.beatRepeat);
+    // Leaving Beat Repeat must silence its worklet, not leave it running.
+    if (wasWorklet && !this.isWorkletAlgorithm(bank, algorithm) && t.fxActive.beatRepeat) {
+      void this.setFxActive(id, "beatRepeat", false);
+    }
+    stage.select(algorithm, this.ctx.currentTime);
+    if (active && this.isWorkletAlgorithm(bank, algorithm)) {
+      stage.setActive(false, this.ctx.currentTime);
+      void this.setFxActive(id, "beatRepeat", true);
+    }
+    return { ok: true, detail: `stem ${id + 1} bank ${bank + 1} → ${algorithmDef(bank, algorithm).label}` };
+  }
+
+  /** Macro values are PER ALGORITHM, never shared across a bank. */
+  setBankMacro(id: TrackId, bank: BankIndex, algorithm: AlgorithmIndex, value: number): { ok: boolean; detail: string } {
+    const t = this.tracks[id];
+    if (!t?.bankRack || !this.ctx) return { ok: false, detail: "audio not unlocked" };
+    const v = Math.min(1, Math.max(0, value));
+    t.bankRack.stage(bank).setMacro(algorithm, v, this.ctx.currentTime);
+    if (this.isWorkletAlgorithm(bank, algorithm)) {
+      // The legacy Beat Repeat exposes four presets; the macro selects one.
+      void this.setFxVariation(id, "beatRepeat", Math.min(4, Math.max(1, Math.round(v * 3) + 1)));
+    }
+    return { ok: true, detail: `stem ${id + 1} ${algorithmDef(bank, algorithm).label} macro → ${v.toFixed(2)}` };
+  }
+
+  clearBanks(id: TrackId): { ok: boolean; detail: string } {
+    const t = this.tracks[id];
+    if (!t?.bankRack || !this.ctx) return { ok: false, detail: "audio not unlocked" };
+    for (const stage of t.bankRack.stages) stage.setActive(false, this.ctx.currentTime);
+    void this.setFxActive(id, "beatRepeat", false);
+    return { ok: true, detail: `stem ${id + 1} all four banks released` };
+  }
+
+  bankSnapshots(): (BankStageSnapshot[] | null)[] {
+    return this.tracks.map((t) => t.bankRack?.snapshot() ?? null);
+  }
+
+
   setSolo(id: TrackId, soloed: boolean) {
     const t = this.tracks[id];
     if (!t) return;
@@ -1695,6 +1812,71 @@ export class AudioEngine {
   // --------------------------------------------------------------- commands
 
 
+  /** Abort any in-flight wind ramp so a reversal rebases from the real rate. */
+  private cancelWind() {
+    if (this.windTimer !== null) {
+      clearTimeout(this.windTimer);
+      this.windTimer = null;
+    }
+  }
+
+  /**
+   * Workstream 2: schedule one finite tape-inertia ramp across the node
+   * sources, the worklet kernels and the integrated timeline, so the audible
+   * rate and the reported playhead never disagree.
+   */
+  private beginWind(kind: "windUp" | "windDown", startAt: number) {
+    if (!this.ctx || !this.inertiaEnabled) return null;
+    const musical = this.timeline.targetRate();
+    const current =
+      this.transportPhase === "stopped"
+        ? INERTIA_MIN_RATE
+        : Math.max(INERTIA_MIN_RATE, this.timeline.currentRate(this.ctx.currentTime));
+    const seg = makeInertiaSegment({
+      startAt,
+      currentRate: kind === "windUp" ? current : Math.max(INERTIA_MIN_RATE, this.timeline.currentRate(startAt)),
+      targetRate: kind === "windUp" ? musical : INERTIA_MIN_RATE,
+      preset: INERTIA_PRESETS[this.inertiaPreset],
+      kind,
+    });
+    if (seg.durationS <= 0.011) return null;
+    this.transportPhase = kind === "windUp" ? "windingUp" : "windingDown";
+    this.timeline.startInertia(startAt, seg);
+    const curve = inertiaCurve(seg);
+    for (const t of this.tracks)
+      for (const s of t.sources) {
+        s.node.playbackRate.cancelScheduledValues(startAt);
+        s.node.playbackRate.setValueCurveAtTime(curve, startAt, seg.durationS);
+      }
+    this.fanout((_t, at) => ({
+      type: "inertia",
+      from: seg.from,
+      to: seg.to,
+      k: seg.k,
+      durationFrames: Math.round(seg.durationS * this.ctx!.sampleRate),
+      applyAtContextFrame: at,
+    }));
+    // Seams derived on the old curve are invalid the moment the rate moves.
+    this.invalidateSeams();
+    return seg;
+  }
+
+  /** Tape-inertia preset. Rhythmic operations never receive inertia. */
+  setInertiaPreset(name: InertiaPresetName | "off"): { ok: boolean; detail: string } {
+    if (name === "off") {
+      this.inertiaEnabled = false;
+      return { ok: true, detail: "tape inertia disabled — instant start/stop" };
+    }
+    this.inertiaEnabled = true;
+    this.inertiaPreset = name;
+    const p = INERTIA_PRESETS[name];
+    return { ok: true, detail: `inertia ${p.label} — up ${p.startS * 1000} ms / down ${p.stopS * 1000} ms` };
+  }
+
+  transportPhaseNow(): TransportPhase {
+    return this.transportPhase;
+  }
+
   execute(cmd: AudioCommand): Ack {
     const p = cmd.payload;
     if (!this.ctx && (cmd.type.startsWith("track.") || cmd.type.startsWith("loop.") || cmd.type.startsWith("tape."))) {
@@ -1706,9 +1888,15 @@ export class AudioEngine {
           if (!this.ctx) return this.ack(cmd, "rejected", "audio not unlocked — press Play again after enabling audio");
           if (this.ctx.state !== "running") return this.ack(cmd, "rejected", `AudioContext is ${this.ctx.state}`);
           if (this.duration === 0) return this.ack(cmd, "rejected", "no stems decoded");
+          const now = this.ctx.currentTime;
+          this.cancelWind();
           const resume = this.position() >= this.duration ? 0 : this.position();
           this.stopSources();
           this.requestedPlaying = true;
+          // The transport envelope always opens instantly on Play; the tape
+          // sound comes from the rate ramp, not from a volume fade-in.
+          this.transportGain?.gain.cancelScheduledValues(now);
+          this.transportGain?.gain.setValueAtTime(1, now);
           const { started, startAt } = this.startAll(resume);
           this.fanout((t, at) => ({
             type: "start",
@@ -1719,18 +1907,69 @@ export class AudioEngine {
             this.requestedPlaying = false;
             return this.ack(cmd, "failed", "no source could be created");
           }
-          return this.ack(cmd, "completed", `${started} stems scheduled at t=${startAt.toFixed(4)}s (spread 0.000 ms)`);
+          const wind = this.beginWind("windUp", startAt);
+          if (!wind) {
+            this.transportPhase = "playing";
+            return this.ack(cmd, "completed", `${started} stems scheduled at t=${startAt.toFixed(4)}s (spread 0.000 ms)`);
+          }
+          this.ack(cmd, "accepted", `Play accepted — winding up over ${(wind.durationS * 1000).toFixed(0)} ms`);
+          this.windTimer = setTimeout(() => {
+            this.windTimer = null;
+            this.transportPhase = "playing";
+            if (this.ctx) this.timeline.endInertia(this.ctx.currentTime, wind.to);
+          }, wind.durationS * 1000);
+          return this.ack(
+            cmd,
+            "completed",
+            `${started} stems scheduled at t=${startAt.toFixed(4)}s · wind-up ${wind.from.toFixed(3)}× → ${wind.to.toFixed(3)}× over ${(wind.durationS * 1000).toFixed(0)} ms`,
+          );
         }
         case "transport.stop": {
           if (!this.ctx) return this.ack(cmd, "rejected", "audio not unlocked");
-          const pos = this.position();
-          this.requestedPlaying = false;
-          this.timelineFrozenAt = this.ctx.currentTime;
-          this.timeline.anchor(this.ctx.currentTime, pos);
-          this.stopSources();
-          this.fanout((_t, at) => ({ type: "stop", applyAtContextFrame: at }));
-          return this.ack(cmd, "completed", `stopped at ${pos.toFixed(3)}s`);
+          const now = this.ctx.currentTime;
+          this.cancelWind();
+          const wind = this.requestedPlaying ? this.beginWind("windDown", now) : null;
+          if (!wind) {
+            const pos = this.position();
+            this.requestedPlaying = false;
+            this.transportPhase = "stopped";
+            this.timelineFrozenAt = now;
+            this.timeline.anchor(now, pos);
+            this.stopSources();
+            this.fanout((_t, at) => ({ type: "stop", applyAtContextFrame: at }));
+            return this.ack(cmd, "completed", `stopped at ${pos.toFixed(3)}s`);
+          }
+          const endAt = now + wind.durationS;
+          // Click-free: the dedicated transport envelope closes only after the
+          // tape has already slowed to a standstill.
+          this.transportGain?.gain.cancelScheduledValues(now);
+          this.transportGain?.gain.setValueAtTime(1, endAt);
+          this.transportGain?.gain.linearRampToValueAtTime(0, endAt + INERTIA_STOP_FADE_S);
+          this.ack(cmd, "accepted", `Stop accepted — winding down over ${(wind.durationS * 1000).toFixed(0)} ms`);
+          this.windTimer = setTimeout(
+            () => {
+              this.windTimer = null;
+              if (!this.ctx) return;
+              const t = this.ctx.currentTime;
+              const pos = this.position();
+              this.requestedPlaying = false;
+              this.transportPhase = "stopped";
+              this.timeline.endInertia(t, wind.to);
+              this.timelineFrozenAt = t;
+              this.timeline.anchor(t, pos);
+              this.stopSources();
+              this.fanout((_t2, at) => ({ type: "stop", applyAtContextFrame: at }));
+              this.transportGain?.gain.setValueAtTime(1, t + 0.001);
+            },
+            (wind.durationS + INERTIA_STOP_FADE_S) * 1000,
+          );
+          return this.ack(
+            cmd,
+            "completed",
+            `wind-down ${wind.from.toFixed(3)}× → 0× over ${(wind.durationS * 1000).toFixed(0)} ms, then transport envelope closed in ${(INERTIA_STOP_FADE_S * 1000).toFixed(0)} ms`,
+          );
         }
+
         case "transport.restart": {
           if (!this.ctx) return this.ack(cmd, "rejected", "audio not unlocked");
           if (this.duration === 0) return this.ack(cmd, "rejected", "no stems decoded");
@@ -2007,9 +2246,13 @@ export class AudioEngine {
           return this.ack(cmd, "completed", `active stem → ${Number(p["stem"]) + 1}`);
         case "fx.overlay":
           return this.ack(cmd, "completed", `FX overlay ${p["on"] ? "open" : "closed"} — tape audio unaffected`);
+        case "fx.bank.select":
+          return this.ack(cmd, "completed", `stem ${Number(p["track"]) + 1} bank ${Number(p["bank"]) + 1} selected — nothing sounded yet`);
         case "fx.momentary.start":
         case "fx.momentary.end":
         case "fx.latch":
+        case "fx.algorithm.cycle":
+        case "fx.macro":
         case "fx.variation":
         case "fx.clearLatches": {
           const id = Number(p["track"]) as TrackId;
@@ -2017,24 +2260,40 @@ export class AudioEngine {
           if (!t) return this.ack(cmd, "rejected", `no track ${id}`);
           if (!this.ctx) return this.ack(cmd, "rejected", "audio not unlocked");
           if (cmd.type === "fx.clearLatches") {
-            for (const f of FX_FAMILIES) void this.setFxActive(id, f, false);
-            return this.ack(cmd, "completed", `stem ${id + 1} latches cleared`);
+            const res = this.clearBanks(id);
+            return this.ack(cmd, res.ok ? "completed" : "rejected", res.detail);
           }
-          const family = String(p["family"]) as FxFamily;
-          if (!FX_FAMILIES.includes(family)) return this.ack(cmd, "rejected", `unknown FX family ${String(p["family"])}`);
           const latched = Boolean(p["latched"]);
+          // Workstream 3 commands carry a bank + algorithm; the legacy
+          // fx.variation command still carries a family.
           if (cmd.type === "fx.variation") {
+            const family = String(p["family"]) as FxFamily;
+            if (!FX_FAMILIES.includes(family)) return this.ack(cmd, "rejected", `unknown FX family ${String(p["family"])}`);
             void this.setFxVariation(id, family, Number(p["variation"]), latched);
             return this.ack(cmd, "completed", `stem ${id + 1} ${family} variation → ${Number(p["variation"])}`);
           }
+          const bank = Number(p["bank"]) as BankIndex;
+          if (!(bank >= 0 && bank <= 3)) return this.ack(cmd, "rejected", `unknown FX bank ${String(p["bank"])}`);
+          const algorithm = Number(p["algorithm"] ?? 0) as AlgorithmIndex;
+          if (cmd.type === "fx.algorithm.cycle") {
+            const res = this.selectBankAlgorithm(id, bank, algorithm);
+            return this.ack(cmd, res.ok ? "completed" : "rejected", res.detail);
+          }
+          if (cmd.type === "fx.macro") {
+            const res = this.setBankMacro(id, bank, algorithm, Number(p["value"]));
+            return this.ack(cmd, res.ok ? "completed" : "rejected", res.detail);
+          }
           const active = cmd.type === "fx.latch" ? Boolean(p["on"]) : cmd.type === "fx.momentary.start";
-          void this.setFxActive(id, family, active, latched);
-          return this.ack(
-            cmd,
-            "completed",
-            `stem ${id + 1} ${family} ${active ? "engaged" : "released"}${latched ? " (latched)" : ""}`,
+          // Accepted immediately (zero hold latency), completed once the wet
+          // ramp is scheduled. Distinct acknowledgements, never merged.
+          const accepted = this.ack(cmd, "accepted", `stem ${id + 1} bank ${bank + 1} ${active ? "engaging" : "releasing"}`);
+          void this.setBankActive(id, bank, algorithm, active, latched).then((res) =>
+            this.ack(cmd, res.ok ? "completed" : "rejected", res.detail),
           );
+          return accepted;
+
         }
+
         // ---- Phase 6: recording, grid, heads/PRINT -------------------------
         case "rec.requestInput": {
           const id = Number(p["track"]) as TrackId;
@@ -2277,6 +2536,8 @@ export class AudioEngine {
     for (const t of this.tracks) {
       t.fxRack?.dispose();
       t.fxRack = null;
+      t.bankRack?.dispose();
+      t.bankRack = null;
       void t.worklet?.dispose();
       t.worklet = null;
       t.engineMode = "node";

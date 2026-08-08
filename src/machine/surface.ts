@@ -6,15 +6,21 @@ import type { PerfIntent } from "@/machine/chordArbiter";
 import {
   FX_FAMILIES,
   clearLatches,
+  cycleBankAlgorithm,
   initialStemPerformance,
+  nudgeBankMacro,
   patchSlot,
+  selectBank,
   selectStem,
-  setVariation,
+  setBankMomentary,
+  toggleBankLatch,
   toggleLink,
   toggleSolo,
   type FxFamily,
   type StemPerformanceState,
 } from "@/machine/stemPerformance";
+import { BANKS, algorithmDef } from "@/machine/fx12";
+
 
 export type LedPattern = "dark" | "faint" | "solid" | "pulse" | "blink" | "breathe" | "chase";
 
@@ -846,40 +852,74 @@ export function applyPerfIntent(state: SurfaceState, intent: PerfIntent): Surfac
       return fire(next, "system.pairing", "Bluetooth pairing gesture (stock)", t);
     case "system.noop":
       return fire(next, "system.volumechord.ambiguous", intent.detail, t);
+    case "fx.bank.select": {
+      const p = selectBank(perf, intent.stem, intent.bank);
+      next = emit({ ...next, perf: p }, "fx.bank.select", { track: intent.stem, bank: intent.bank }, { rowId: "fx.bank.select", t });
+      return fire(next, "fx.bank.select", `stem ${intent.stem + 1} bank ${BANKS[intent.bank]!.id} selected`, t);
+    }
     case "fx.momentary.start":
     case "fx.momentary.end": {
       const on = intent.type === "fx.momentary.start";
-      const p = patchSlot(perf, intent.stem, intent.family, (slot) => ({ ...slot, momentary: on }));
-      const slot = p.tracks[intent.stem]!.fx[intent.family];
+      const p = setBankMomentary(perf, intent.stem, intent.bank, on);
+      const bank = p.tracks[intent.stem]!.fx12.banks[intent.bank]!;
+      const algo = algorithmDef(intent.bank, bank.selectedAlgorithm);
       next = emit(
         { ...next, perf: p },
         intent.type,
-        { track: intent.stem, family: intent.family, variation: slot.variation, latched: slot.latched },
-        { rowId: `fx.${intent.family}.momentary`, t },
+        { track: intent.stem, bank: intent.bank, algorithm: bank.selectedAlgorithm, latched: bank.latched },
+        { rowId: `fx.${BANKS[intent.bank]!.id}.momentary`, t },
       );
-      return fire(next, `fx.${intent.family}.momentary`, `stem ${intent.stem + 1} ${intent.family} ${on ? "engaged" : "released"}`, t);
+      return fire(
+        next,
+        `fx.${BANKS[intent.bank]!.id}.momentary`,
+        `stem ${intent.stem + 1} ${algo.label} ${on ? "engaged" : "released"}`,
+        t,
+      );
     }
-    case "fx.variation": {
-      const p = setVariation(perf, intent.stem, intent.family, intent.dir);
-      const slot = p.tracks[intent.stem]!.fx[intent.family];
+    case "fx.algorithm.cycle": {
+      const p = cycleBankAlgorithm(perf, intent.stem, intent.bank, intent.dir);
+      const bank = p.tracks[intent.stem]!.fx12.banks[intent.bank]!;
+      const algo = algorithmDef(intent.bank, bank.selectedAlgorithm);
       next = emit(
         { ...next, perf: p },
-        "fx.variation",
-        { track: intent.stem, family: intent.family, variation: slot.variation, latched: slot.latched },
-        { rowId: `fx.${intent.family}.variation`, t },
+        "fx.algorithm.cycle",
+        { track: intent.stem, bank: intent.bank, algorithm: bank.selectedAlgorithm, latched: bank.latched },
+        { rowId: `fx.${BANKS[intent.bank]!.id}.algorithm`, t },
       );
-      return fire(next, `fx.${intent.family}.variation`, `stem ${intent.stem + 1} ${intent.family} variation ${slot.variation}/4`, t);
+      return fire(next, `fx.${BANKS[intent.bank]!.id}.algorithm`, `stem ${intent.stem + 1} → ${algo.label}`, t);
+    }
+    case "fx.macro": {
+      const p = nudgeBankMacro(perf, intent.stem, intent.bank, intent.dir);
+      const bank = p.tracks[intent.stem]!.fx12.banks[intent.bank]!;
+      const value = bank.algorithms[bank.selectedAlgorithm]!.macroAmount;
+      next = emit(
+        { ...next, perf: p },
+        "fx.macro",
+        { track: intent.stem, bank: intent.bank, algorithm: bank.selectedAlgorithm, value },
+        { rowId: `fx.${BANKS[intent.bank]!.id}.macro`, t },
+      );
+      return fire(
+        next,
+        `fx.${BANKS[intent.bank]!.id}.macro`,
+        `stem ${intent.stem + 1} ${algorithmDef(intent.bank, bank.selectedAlgorithm).label} macro → ${value.toFixed(2)}`,
+        t,
+      );
     }
     case "fx.latch": {
-      const p = patchSlot(perf, intent.stem, intent.family, (slot) => ({ ...slot, latched: !slot.latched }));
-      const slot = p.tracks[intent.stem]!.fx[intent.family];
+      const p = toggleBankLatch(perf, intent.stem, intent.bank);
+      const bank = p.tracks[intent.stem]!.fx12.banks[intent.bank]!;
       next = emit(
         { ...next, perf: p },
         "fx.latch",
-        { track: intent.stem, family: intent.family, on: slot.latched, variation: slot.variation, latched: slot.latched },
-        { rowId: `fx.${intent.family}.latch`, t },
+        { track: intent.stem, bank: intent.bank, on: bank.latched, algorithm: bank.selectedAlgorithm, latched: bank.latched },
+        { rowId: `fx.${BANKS[intent.bank]!.id}.latch`, t },
       );
-      return fire(next, `fx.${intent.family}.latch`, `stem ${intent.stem + 1} ${intent.family} ${slot.latched ? "latched" : "unlatched"}`, t);
+      return fire(
+        next,
+        `fx.${BANKS[intent.bank]!.id}.latch`,
+        `stem ${intent.stem + 1} ${algorithmDef(intent.bank, bank.selectedAlgorithm).label} ${bank.latched ? "latched" : "unlatched"}`,
+        t,
+      );
     }
     case "fx.clearLatches": {
       const p = clearLatches(perf, intent.stem);
@@ -887,6 +927,8 @@ export function applyPerfIntent(state: SurfaceState, intent: PerfIntent): Surfac
       return fire(next, "fx.clearLatches", `stem ${intent.stem + 1} latches cleared`, t);
     }
   }
+  return next;
+
 }
 
 /**
