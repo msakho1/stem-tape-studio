@@ -22,7 +22,6 @@ export function useAudioEngine(commands: AudioCommand[]) {
   // SSR cannot know the device, so the engine starts on SSR_BUDGET and the real
   // tier is adopted here. Resolving during render would mismatch hydration.
   useEffect(() => {
-  useEffect(() => {
     engine.resolveBudget();
     // PRINT persists through the same single-decode ingest path as a user file.
     installPrintCommit(engine);
