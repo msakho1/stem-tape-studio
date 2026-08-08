@@ -819,6 +819,13 @@ export class AudioEngine {
     if (!this.ctx) return { ok: false, detail: "audio not unlocked" };
     if (t.engineMode === "worklet") return { ok: true, detail: `track ${id + 1} already on the worklet engine` };
     if (!t.buffer) return { ok: false, detail: `track ${id + 1} has no decoded audio` };
+    // Engine swaps are refused while heads are audible or a PRINT is baking:
+    // both read the source PCM and a handoff would move it under them.
+    if (this.heads.active)
+      return { ok: false, detail: `refused — heads mode is active (source track ${(this.heads.source ?? 0) + 1}); exit heads before switching engines` };
+    if (this.heads.print && (this.heads.print.phase === "rendering" || this.heads.print.phase === "finalising"))
+      return { ok: false, detail: "refused — a PRINT render is in flight" };
+
 
     t.migrationStatus = "checking";
     const pre = await this.preflight();
