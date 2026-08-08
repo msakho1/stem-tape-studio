@@ -166,6 +166,14 @@ export class WorkletTrack {
   }
 
   private receive(ack: WorkletAck) {
+    if (ack.status === "telemetry") {
+      // Telemetry is unsolicited (seq -1) and must never resolve a pending
+      // command or displace the last command ack.
+      this.lastTelemetry = ack;
+      if (typeof ack.renderGapFrames === "number") this.renderGapFrames = ack.renderGapFrames;
+      this.onTelemetry?.(this, ack);
+      return;
+    }
     this.lastAck = ack;
     this.acks.unshift(ack);
     if (this.acks.length > 40) this.acks.length = 40;
@@ -178,6 +186,7 @@ export class WorkletTrack {
       fn(ack);
     }
   }
+
 
   /** Transfer PCM ownership and wait for the readiness handshake. */
   async adopt(buffer: AudioBuffer): Promise<WorkletAck> {
