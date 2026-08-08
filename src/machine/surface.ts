@@ -692,7 +692,57 @@ export function releaseControl(state: SurfaceState, control: Control): SurfaceSt
 }
 
 
-/** Fader commit routing per v2.6: FN layer, heads layer, otherwise track volume. */
+// ------------------------------------------------- engine → surface feedback
+//
+// The engine is authoritative for what is audible. These setters are the ONLY
+// way its verdicts reach the surface state, so no handler ever fakes them.
+
+/** Input grant/denial. A grant arms the pending target; a denial clears it. */
+export function setInputEnabled(state: SurfaceState, on: boolean, detail: string): SurfaceState {
+  const t = performance.now();
+  if (!on) {
+    const pending = state.pendingInputTrack;
+    let next: SurfaceState = { ...state, inputEnabled: false, pendingInputTrack: null };
+    if (pending != null) next = { ...next, tracks: setTrack(next, pending, { content: next.tracks[pending]!.content === "armed" ? "empty" : next.tracks[pending]!.content }) };
+    return fire(next, "rec.inputDenied", detail, t);
+  }
+  let next: SurfaceState = { ...state, inputEnabled: true };
+  const pending = state.pendingInputTrack;
+  if (pending != null) {
+    next = { ...next, pendingInputTrack: null, tracks: setTrack(next, pending, { content: "armed" }), activeTrack: pending as TrackIndex };
+    next = emit(next, "rec.arm", { track: pending, pending: true }, { rowId: "rec.arm.hold", t });
+    return fire(next, "rec.arm.hold", `input enabled — the pending hold on track ${pending + 1} armed it`, t);
+  }
+  return fire(next, "rec.inputEnabled", detail, t);
+}
+
+/** Drawer closed, request superseded or input unavailable — honest cancel. */
+export function clearPendingInput(state: SurfaceState, reason: string): SurfaceState {
+  if (state.pendingInputTrack == null) return state;
+  const i = state.pendingInputTrack;
+  const next = emit({ ...state, pendingInputTrack: null }, "rec.cancelInput", { track: i }, { rowId: "rec.cancelInput" });
+  return fire(next, "rec.cancelInput", `track ${i + 1} input request cancelled — ${reason}`, performance.now());
+}
+
+export function setTrackContent(state: SurfaceState, i: number, content: TrackContent): SurfaceState {
+  return { ...state, tracks: setTrack(state, i, { content }) };
+}
+
+/** Heads/PRINT verdicts from the engine (entry rejection, print phases). */
+export function applyHeadsFeedback(
+  state: SurfaceState,
+  patch: { active?: boolean; source?: number | null; print?: SurfaceState["headsPrint"]; printedTrack?: number },
+): SurfaceState {
+  let next: SurfaceState = { ...state };
+  if (patch.active !== undefined) next = { ...next, headsMode: patch.active };
+  if (patch.source !== undefined) next = { ...next, headsSource: patch.source };
+  if (patch.print !== undefined) next = { ...next, headsPrint: patch.print };
+  if (patch.printedTrack !== undefined) next = { ...next, tracks: setTrack(next, patch.printedTrack, { content: "loaded" }) };
+  return next;
+}
+
+/** Fader commit routing: heads layer, FN layer, otherwise track volume. */
+
 export function applyFader(state: SurfaceState, index: number, value: number): SurfaceState {
   const t = performance.now();
   // Heads claims the fader layer before the v2.6 FN window/filter rows (§3.3).
