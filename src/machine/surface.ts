@@ -880,23 +880,31 @@ export function applyPerfIntent(state: SurfaceState, intent: PerfIntent): Surfac
 }
 
 /**
- * Phase 5C LED priority table (corrections 9 and 10). No handler writes LEDs:
- * every frame is derived here, and the winner always states why it won.
+ * LED priority table (Phase 5C corrections 9/10, extended for Phase 6 §5).
+ * No handler writes LEDs: every frame is derived here and the winner always
+ * states why it won.
  *
- *   error > recording (Phase 6 reserved) > momentary FX > latched FX >
- *   soloed > unlinked > active > muted > base
+ *   error > failed print/take > printing/finalising > recording > overdubbing >
+ *   armed > momentary FX > latched FX > heads source/head state > soloed >
+ *   unlinked > active > muted > base
  */
 export const LED_PRIORITY = {
   error: 98,
+  failedPrint: 95,
+  printing: 93,
   recording: 90,
+  overdubbing: 89,
+  armed: 88,
   momentaryFx: 82,
   latchedFx: 78,
+  heads: 76,
   soloed: 74,
   unlinked: 70,
   active: 66,
   muted: 30,
   base: 10,
 } as const;
+
 
 /**
  * LED arbitration — v2.6 LIGHTS block is the base layer:
