@@ -938,23 +938,49 @@ export function deriveLeds(state: SurfaceState): LedFrame {
       } else {
         frame[id] = { pattern: "faint", reason: "stem idle (overlay)", priority: LED_PRIORITY.base };
       }
+    } else if (track.content === "failed") {
+      frame[id] = { pattern: "blink", reason: "take/print failed — tap to open recovery", priority: LED_PRIORITY.failedPrint };
+    } else if (state.headsPrint?.track === i) {
+      frame[id] =
+        state.headsPrint.phase === "failed"
+          ? { pattern: "blink", reason: "PRINT failed — target left empty, heads still audible", priority: LED_PRIORITY.failedPrint }
+          : state.headsPrint.phase === "finalising"
+            ? { pattern: "chase", reason: "PRINT finalising — durable commit in progress", priority: LED_PRIORITY.printing }
+            : { pattern: "blink", reason: "PRINT accepted — rendering one heads cycle", priority: LED_PRIORITY.printing };
     } else if (state.pressed.includes(control)) {
       frame[id] = { pattern: "solid", reason: "button held (input feedback)", priority: 95 };
     } else if (track.content === "printing") {
-      frame[id] = { pattern: "chase", reason: "PRINT (heads mode, empty track)", priority: 85 };
+      frame[id] = { pattern: "blink", reason: "PRINT target (heads mode, empty track)", priority: LED_PRIORITY.printing };
     } else if (track.content === "recording") {
-      frame[id] = { pattern: "solid", reason: "recording", priority: 80 };
+      frame[id] = { pattern: "solid", reason: "recording", priority: LED_PRIORITY.recording };
+    } else if (track.content === "overdubbing") {
+      frame[id] = { pattern: "pulse", reason: "overdubbing onto existing content", priority: LED_PRIORITY.overdubbing };
+    } else if (track.content === "finalizing") {
+      frame[id] = { pattern: "chase", reason: "finalising the take — writing durable chunks", priority: LED_PRIORITY.printing };
+    } else if (state.pendingInputTrack === i) {
+      frame[id] = { pattern: "breathe", reason: "waiting for you to enable audio input before arming", priority: LED_PRIORITY.armed };
     } else if (track.content === "armed") {
-      frame[id] = { pattern: "breathe", reason: "armed — record starts on your first sound (v2.6)", priority: 70 };
+      frame[id] = { pattern: "breathe", reason: "armed — record starts on your first sound (v2.6)", priority: LED_PRIORITY.armed };
+    } else if (state.headsMode) {
+      // Heads language (§5): full-bright chase over loaded content, faint chase
+      // for an empty (printable) head, dark-but-distinguishable when muted.
+      const isSource = state.headsSource === i;
+      const loaded = track.content !== "empty";
+      const dir = track.headReverse ? "reversed chase" : "chase";
+      if (isSource) frame[id] = { pattern: "solid", reason: `heads source — track ${i + 1} feeds all four heads`, priority: LED_PRIORITY.heads + 1 };
+      else if (track.headMuted) frame[id] = { pattern: "faint", reason: `head ${i + 1} muted (still a head, not an empty slot)`, priority: LED_PRIORITY.heads - 2 };
+      else if (loaded) frame[id] = { pattern: "chase", reason: `head ${i + 1} ${dir} over loaded content`, priority: LED_PRIORITY.heads };
+      else frame[id] = { pattern: "faint", reason: `head ${i + 1} hollow — empty track, available as a PRINT target`, priority: LED_PRIORITY.heads - 1 };
     } else if (track.content === "empty") {
       frame[id] = { pattern: "dark", reason: "dark = empty (v2.6)", priority: 0 };
     } else if (track.content === "muted") {
-      frame[id] = { pattern: "faint", reason: "faint = muted content (v2.6)", priority: 10 };
+      frame[id] = { pattern: "faint", reason: "faint = muted content (v2.6)", priority: LED_PRIORITY.muted };
     } else if (state.playing) {
       frame[id] = { pattern: "pulse", reason: "pulse = playing — pulses on its own loop wrap (v2.6)", priority: 20 };
     } else {
-      frame[id] = { pattern: "faint", reason: "loaded, stopped", priority: 10 };
+      frame[id] = { pattern: "faint", reason: "loaded, stopped", priority: LED_PRIORITY.base };
     }
+
   });
 
   // Song row: solid = song · blink = bank (v2.6).
