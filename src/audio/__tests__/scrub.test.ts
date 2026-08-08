@@ -23,56 +23,38 @@ interface Harness {
   out: Float32Array[];
 }
 
-function loadProcessor(): any {
+/**
+ * Evaluate the real kernel with the AudioWorklet globals it expects.
+ * `currentFrame` must be live, so it is exposed through a getter and reached
+ * with a scope proxy that falls through to the normal globals.
+ */
+function loadProcessor(): { cls: any; posts: any[]; holder: { frame: number } } {
   const src = readFileSync("public/tape-processor.js", "utf8");
-  const g: any = {
-    sampleRate: SR,
-    currentFrame: 0,
-    registered: null as any,
-  };
-  g.AudioWorkletProcessor = class {
-    port: any;
-    constructor() {
-      this.port = { postMessage: (m: any) => g.posts.push(m), onmessage: null, close() {} };
-    }
-  };
-  g.posts = [] as any[];
-  g.registerProcessor = (_name: string, cls: any) => {
-    g.registered = cls;
-  };
-  // eslint-disable-next-line @typescript-eslint/no-implied-eval
-  const fn = new Function("sampleRate", "currentFrame", "AudioWorkletProcessor", "registerProcessor", "globalThis_", `${src}\n;return registerProcessor;`);
-  // currentFrame must be live: expose it through a getter on a scope object.
-  const scope: any = { frame: 0 };
-  const wrapped = new Function(
-    "ctx",
-    `with (ctx) { ${src} ; return registerProcessor.__cls; }`,
-  );
-  void fn;
-  void wrapped;
-  // Simpler, and honest about how the kernel reads globals: evaluate the module
-  // with `currentFrame` resolved from a mutable holder via a with-scope proxy.
+  const posts: any[] = [];
   const holder = { frame: 0 };
-  const ctxProxy = new Proxy(
-    {
-      sampleRate: SR,
-      AudioWorkletProcessor: g.AudioWorkletProcessor,
-      registerProcessor: g.registerProcessor,
-      Math,
-      Float32Array,
-      console,
-      get currentFrame() {
-        return holder.frame;
-      },
-    } as any,
-    {
-      has: () => true,
-      get: (t, k) => (k in t ? (t as any)[k] : undefined),
+  let registered: any = null;
+  const scope: any = {
+    sampleRate: SR,
+    get currentFrame() {
+      return holder.frame;
     },
-  );
+    AudioWorkletProcessor: class {
+      port: any;
+      constructor() {
+        this.port = { postMessage: (m: any) => posts.push(m), onmessage: null, close() {} };
+      }
+    },
+    registerProcessor: (_name: string, cls: any) => {
+      registered = cls;
+    },
+  };
+  const proxy = new Proxy(scope, {
+    has: (t, k) => k in t || k in (globalThis as any),
+    get: (t, k) => (k in t ? (t as any)[k] : (globalThis as any)[k as any]),
+  });
   // eslint-disable-next-line no-new-func
-  new Function("ctx", `with (ctx) { ${src} }`)(ctxProxy);
-  return { cls: g.registered, posts: g.posts, holder };
+  new Function("ctx", `with (ctx) { ${src} }`)(proxy);
+  return { cls: registered, posts, holder };
 }
 
 function makeHarness(opts: { frames: number; cycleFrames: number }): Harness {
