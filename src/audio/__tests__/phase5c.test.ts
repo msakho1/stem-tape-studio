@@ -37,7 +37,7 @@ const TOL = 1e-9;
 const SR = 48000;
 
 function harness(overlay = false, activeStem: 0 | 1 | 2 | 3 = 0) {
-  const view = { activeStem, fxOverlay: overlay };
+  const view = { activeStem, fxOverlay: overlay, selectedBank: null as BankIndex | null };
   const arb = new ChordArbiter(() => view);
   const intents: PerfIntent[] = [];
   arb.onIntent((i) => intents.push(i));
@@ -318,11 +318,12 @@ describe("LED priority table", () => {
   it("overlay side LEDs show momentary above latched, and arming above both", () => {
     let s = initialSurfaceState();
     s = applyPerfIntent(s, { type: "fx.overlay", on: true });
-    s = applyPerfIntent(s, { type: "fx.latch", stem: 0, family: "echo" });
+    s = applyPerfIntent(s, { type: "fx.latch", stem: 0, bank: 2 });
     let leds = deriveLeds(s);
     expect(leds["side-led-2"]!.pattern).toBe("solid");
 
-    s = applyPerfIntent(s, { type: "fx.momentary.start", stem: 0, family: "echo" });
+    s = applyPerfIntent(s, { type: "fx.momentary.start", stem: 0, bank: 2 });
+
     leds = deriveLeds(s);
     expect(leds["side-led-2"]!.pattern).toBe("breathe");
     expect(leds["side-led-2"]!.reason).toContain("momentary");
