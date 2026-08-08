@@ -15,8 +15,9 @@
  */
 
 import type { Ack, AudioCommand } from "./commands";
-import { decodedBytes } from "./format";
-import { defaultBudget, judge, type MemoryBudget } from "./memory";
+import { bufferBytes } from "./format";
+import { allowed, defaultBudget, describeVerdict, judge, SSR_BUDGET, type MemoryBudget } from "./memory";
+
 
 export const LOOKAHEAD_S = 0.08;
 export const RAMP_TAU = 0.008;
@@ -39,7 +40,12 @@ export interface TrackRuntime {
   /** Where the bytes came from — user audio is never network-fetched. */
   provenance: "user-private" | "bundled-demo" | null;
   name: string | null;
+  /** Decode instrumentation (Phase 4.1): must be exactly 1 per load. */
+  decodeCount: number;
+  decodeMs: number | null;
+  bufferReused: boolean;
 }
+
 
 export interface EngineStatus {
   contextState: AudioContextState | "none";
@@ -63,12 +69,22 @@ export interface EngineStatus {
     name: string | null;
     provenance: string | null;
     trashed: boolean;
+    /** Exact retained bytes of this track's decoded buffer. */
+    decodedBytes: number;
+    /** How many times this track's audio has been decoded this session. */
+    decodeCount: number;
+    decodeMs: number | null;
+    /** true when the AudioBuffer produced by the probe was adopted as-is. */
+    bufferReused: boolean;
   }[];
   decodedBytes: number;
   budget: MemoryBudget;
+  highMemoryMode: boolean;
+  memoryStatement: string;
   lastError: string | null;
   lastDecodeMs: number | null;
 }
+
 
 type Listener = (ack: Ack) => void;
 
@@ -83,9 +99,22 @@ export class AudioEngine {
   private requestedPlaying = false;
   private masterLevel = 0.7;
   private listeners = new Set<Listener>();
-  budget: MemoryBudget = defaultBudget();
+  budget: MemoryBudget = SSR_BUDGET;
+  /** Explicit opt-in; only meaningful above the standard threshold. */
+  highMemoryMode = false;
   lastError: string | null = null;
   lastDecodeMs: number | null = null;
+
+  /** Resolve the real platform budget after hydration (SSR must not guess). */
+  resolveBudget(): MemoryBudget {
+    this.budget = defaultBudget();
+    return this.budget;
+  }
+
+  setHighMemoryMode(on: boolean) {
+    this.highMemoryMode = on;
+  }
+
 
   onAck(fn: Listener) {
     this.listeners.add(fn);
@@ -152,6 +181,9 @@ export class AudioEngine {
         scheduledStartAt: null,
         provenance: null,
         name: null,
+        decodeCount: 0,
+        decodeMs: null,
+        bufferReused: false,
       } satisfies TrackRuntime;
     });
   }
@@ -161,17 +193,81 @@ export class AudioEngine {
   }
 
   get decodedTotalBytes() {
-    return this.tracks.reduce(
-      (sum, t) => sum + (t.buffer ? decodedBytes(t.buffer.duration, t.buffer.sampleRate, t.buffer.numberOfChannels) : 0),
-      0,
-    );
+    return this.tracks.reduce((sum, t) => sum + (t.buffer ? bufferBytes(t.buffer) : 0), 0);
+  }
+
+  /** Read-only access to a decoded buffer (Memory Saver derives from it). */
+  getBuffer(id: TrackId): AudioBuffer | null {
+    return this.tracks[id]?.buffer ?? null;
+  }
+
+  trackBytes(id: TrackId): number {
+
+    const b = this.tracks[id]?.buffer;
+    return b ? bufferBytes(b) : 0;
+  }
+
+  /** Retained total if this track's buffer were replaced by `incoming` bytes. */
+  projectedBytes(id: TrackId, incoming: number): number {
+    return this.decodedTotalBytes - this.trackBytes(id) + incoming;
   }
 
   get duration() {
     return this.tracks.reduce((max, t) => Math.max(max, t.buffer?.duration ?? 0), 0);
   }
 
-  /** Decode into the single context. Rejects when the memory budget would break. */
+  /**
+   * Stage 1 of the two-stage gate: decide from a pre-decode ESTIMATE, before an
+   * AudioBuffer is ever allocated.
+   */
+  preDecodeGate(id: TrackId, estimateBytes: number): { ok: boolean; detail: string } {
+    const projected = this.projectedBytes(id, estimateBytes);
+    const verdict = judge(projected, this.budget, this.highMemoryMode);
+    return { ok: allowed(verdict), detail: describeVerdict(projected, this.budget, this.highMemoryMode) };
+  }
+
+  /**
+   * Stage 2 of the two-stage gate: the exact post-decode verdict, applied to the
+   * ONE buffer the probe already produced. Accepted → adopted as-is (no second
+   * decode). Rejected → dereferenced here and never installed.
+   */
+  adoptBuffer(
+    id: TrackId,
+    buffer: AudioBuffer,
+    meta: { name: string; provenance: TrackRuntime["provenance"]; decodeMs?: number | undefined; reused?: boolean | undefined },
+  ): { ok: boolean; detail: string; bytes: number } {
+    const track = this.tracks[id];
+    if (!track) return { ok: false, detail: `no track ${id}`, bytes: 0 };
+    const incoming = bufferBytes(buffer);
+    const projected = this.projectedBytes(id, incoming);
+    const verdict = judge(projected, this.budget, this.highMemoryMode);
+    if (!allowed(verdict)) {
+      return { ok: false, detail: describeVerdict(projected, this.budget, this.highMemoryMode), bytes: incoming };
+    }
+    track.buffer = buffer;
+    track.name = meta.name;
+    track.provenance = meta.provenance;
+    track.decodeCount += 1;
+    track.decodeMs = meta.decodeMs ?? null;
+    track.bufferReused = meta.reused ?? true;
+    this.lastDecodeMs = meta.decodeMs ?? this.lastDecodeMs;
+    return {
+      ok: true,
+      detail: `adopted ${buffer.duration.toFixed(2)}s · ${buffer.numberOfChannels}ch @ ${buffer.sampleRate} Hz · ${(
+        incoming /
+        1024 /
+        1024
+      ).toFixed(1)} MiB${meta.decodeMs != null ? ` · decoded once in ${meta.decodeMs.toFixed(0)} ms` : ""}`,
+      bytes: incoming,
+    };
+  }
+
+  /**
+   * FALLBACK ONLY (documented): decodes encoded bytes itself. The normal path
+   * is probe → adoptBuffer, which decodes exactly once. Taking this path after
+   * a successful probe pushes decodeCount to 2, which the acceptance test
+   * asserts never happens.
+   */
   async loadTrack(
     id: TrackId,
     bytes: ArrayBuffer,
@@ -181,35 +277,40 @@ export class AudioEngine {
     if (!this.ctx) return { ok: false, detail: gate.detail };
     const started = performance.now();
     try {
-      const buffer = await this.ctx.decodeAudioData(bytes.slice(0));
-      const incoming = decodedBytes(buffer.duration, buffer.sampleRate, buffer.numberOfChannels);
-      const track = this.tracks[id]!;
-      const existing = track.buffer
-        ? decodedBytes(track.buffer.duration, track.buffer.sampleRate, track.buffer.numberOfChannels)
-        : 0;
-      const projected = this.decodedTotalBytes - existing + incoming;
-      if (judge(projected, this.budget) === "block") {
-        return {
-          ok: false,
-          detail: `memory budget exceeded — ${(projected / 1048576).toFixed(0)} MB decoded exceeds the ${(
-            this.budget.blockBytes / 1048576
-          ).toFixed(0)} MB ${this.budget.platform} block threshold`,
-        };
-      }
-      track.buffer = buffer;
-      track.name = meta.name;
-      track.provenance = meta.provenance;
-      this.lastDecodeMs = performance.now() - started;
-      return {
-        ok: true,
-        detail: `decoded ${buffer.duration.toFixed(2)}s · ${buffer.numberOfChannels}ch @ ${buffer.sampleRate} Hz in ${this.lastDecodeMs.toFixed(0)} ms`,
-      };
+      const buffer = await this.ctx.decodeAudioData(bytes);
+      const decodeMs = performance.now() - started;
+      const adopted = this.adoptBuffer(id, buffer, { ...meta, decodeMs, reused: false });
+      return { ok: adopted.ok, detail: adopted.detail };
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       this.lastError = detail;
       return { ok: false, detail: `decode failed — ${detail}` };
     }
   }
+
+  /** Explicit dereference: unloads a track's PCM and its trash copy. */
+  releaseTrack(id: TrackId): number {
+    const t = this.tracks[id];
+    if (!t) return 0;
+    const freed = (t.buffer ? bufferBytes(t.buffer) : 0) + (t.trash ? bufferBytes(t.trash) : 0);
+    t.buffer = null;
+    t.trash = null;
+    t.name = null;
+    t.provenance = null;
+    t.decodeCount = 0;
+    t.decodeMs = null;
+    t.bufferReused = false;
+    return freed;
+  }
+
+  resetDecodeCounters() {
+    for (const t of this.tracks) {
+      t.decodeCount = 0;
+      t.decodeMs = null;
+      t.bufferReused = false;
+    }
+  }
+
 
   /** Derived playhead. Never incremented by a timer. */
   position(): number {
@@ -462,11 +563,18 @@ export class AudioEngine {
         name: t.name,
         provenance: t.provenance,
         trashed: t.trash != null,
+        decodedBytes: t.buffer ? bufferBytes(t.buffer) : 0,
+        decodeCount: t.decodeCount,
+        decodeMs: t.decodeMs,
+        bufferReused: t.bufferReused,
       })),
       decodedBytes: this.decodedTotalBytes,
       budget: this.budget,
+      highMemoryMode: this.highMemoryMode,
+      memoryStatement: describeVerdict(this.decodedTotalBytes, this.budget, this.highMemoryMode),
       lastError: this.lastError,
       lastDecodeMs: this.lastDecodeMs,
+
     };
   }
 

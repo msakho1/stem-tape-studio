@@ -16,7 +16,16 @@ export function useAudioEngine(commands: AudioCommand[]) {
   const [status, setStatus] = useState<EngineStatus>(() => engine.status());
   const [unlockNote, setUnlockNote] = useState<string>("audio locked — press PLAY or enable audio");
 
+  // --- platform budget resolves only after hydration -----------------------
+  // SSR cannot know the device, so the engine starts on SSR_BUDGET and the real
+  // tier is adopted here. Resolving during render would mismatch hydration.
+  useEffect(() => {
+    engine.resolveBudget();
+    setStatus(engine.status());
+  }, [engine]);
+
   // --- ordered command drain (never a snapshot diff) -----------------------
+
   useEffect(() => {
     const pending = commands.filter((c) => c.id > watermark.current);
     if (pending.length === 0) return;

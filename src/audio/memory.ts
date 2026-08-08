@@ -1,40 +1,90 @@
 /**
- * Decoded-memory budget.
+ * Decoded-memory budget (Phase 4.1).
  *
- * Phase 4 uses full decode, so decoded memory — not a blanket duration cap — is
- * the primary limit. Thresholds are tunable and the platform defaults are
- * finalised from /bench results, not from guesswork.
+ * UNIT CONTRACT: every number in this module is BYTES, and every rendered
+ * figure is MiB (1024²). The label is "MiB", never "MB" — the divisor has
+ * always been 1024², so the old label was simply wrong.
+ *
+ * This module is about RAM (decoded PCM held by AudioBuffers). It is NOT about
+ * navigator.storage.estimate(), which measures on-device storage quota and is
+ * reported separately.
  */
 
+export const MiB = 1024 * 1024;
+
 export interface MemoryBudget {
+  /** Above this: allowed, warned. */
   warnBytes: number;
-  blockBytes: number;
-  platform: string;
+  /** Above this: requires explicit High Memory Mode. */
+  standardBlockBytes: number;
+  /** Above this: full decode is refused outright. */
+  highMemoryBlockBytes: number;
+  platform: "ios" | "android" | "desktop" | "ssr";
 }
 
-const MB = 1024 * 1024;
+/** Server-render default: neutral, and never used for a real decision. */
+export const SSR_BUDGET: MemoryBudget = {
+  warnBytes: 192 * MiB,
+  standardBlockBytes: 384 * MiB,
+  highMemoryBlockBytes: 512 * MiB,
+  platform: "ssr",
+};
 
 export function defaultBudget(): MemoryBudget {
-  if (typeof navigator === "undefined") return { warnBytes: 180 * MB, blockBytes: 320 * MB, platform: "ssr" };
+  if (typeof navigator === "undefined") return SSR_BUDGET;
   const ua = navigator.userAgent;
   const iOS = /iPad|iPhone|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
   const android = /Android/.test(ua);
-  if (iOS) return { warnBytes: 96 * MB, blockBytes: 192 * MB, platform: "ios" };
-  if (android) return { warnBytes: 128 * MB, blockBytes: 256 * MB, platform: "android" };
-  return { warnBytes: 180 * MB, blockBytes: 320 * MB, platform: "desktop" };
+  if (iOS) return { warnBytes: 192 * MiB, standardBlockBytes: 384 * MiB, highMemoryBlockBytes: 512 * MiB, platform: "ios" };
+  if (android)
+    return { warnBytes: 192 * MiB, standardBlockBytes: 384 * MiB, highMemoryBlockBytes: 512 * MiB, platform: "android" };
+  return { warnBytes: 384 * MiB, standardBlockBytes: 768 * MiB, highMemoryBlockBytes: 1024 * MiB, platform: "desktop" };
 }
 
-export type BudgetVerdict = "ok" | "warn" | "block";
+export type BudgetVerdict = "ok" | "warn" | "needs-high-memory" | "block";
 
-export function judge(totalBytes: number, budget: MemoryBudget): BudgetVerdict {
-  if (totalBytes > budget.blockBytes) return "block";
+export function judge(totalBytes: number, budget: MemoryBudget, highMemoryMode = false): BudgetVerdict {
+  if (totalBytes > budget.highMemoryBlockBytes) return "block";
+  if (totalBytes > budget.standardBlockBytes) return highMemoryMode ? "warn" : "needs-high-memory";
   if (totalBytes > budget.warnBytes) return "warn";
   return "ok";
 }
 
-/** Transient overhead: the original file bytes plus the decode scratch copy. */
-export function transientBytes(fileBytes: number): number {
-  return fileBytes * 2;
+export function allowed(verdict: BudgetVerdict): boolean {
+  return verdict === "ok" || verdict === "warn";
+}
+
+export function formatMiB(bytes: number): string {
+  return `${(bytes / MiB).toFixed(bytes < MiB ? 2 : 0)} MiB`;
+}
+
+/**
+ * The sentence shown to the user. It must be arithmetically true: a total is
+ * only ever described against the threshold it actually crossed.
+ */
+export function describeVerdict(totalBytes: number, budget: MemoryBudget, highMemoryMode = false): string {
+  const v = judge(totalBytes, budget, highMemoryMode);
+  const total = formatMiB(totalBytes);
+  const warn = formatMiB(budget.warnBytes);
+  const std = formatMiB(budget.standardBlockBytes);
+  const high = formatMiB(budget.highMemoryBlockBytes);
+  switch (v) {
+    case "ok":
+      return `Project total: ${total}. This is below the ${warn} warning threshold. Loading is allowed.`;
+    case "warn":
+      return totalBytes > budget.standardBlockBytes
+        ? `Project total: ${total}. This exceeds the ${std} standard limit and is allowed only because High Memory Mode is on (ceiling ${high}).`
+        : `Project total: ${total}. This exceeds the ${warn} warning threshold but remains below the ${std} standard limit. Loading is allowed.`;
+    case "needs-high-memory":
+      return `Project total: ${total}. This exceeds the ${std} standard limit. Enable High Memory Mode to attempt loading up to ${high}.`;
+    case "block":
+      return `Project total: ${total}. This exceeds the ${high} High Memory ceiling. Full decoding is refused — use Memory Saver (mono working copies) or fewer tracks.`;
+  }
+}
+
+/** Transient overhead during one decode: the encoded bytes still resident. */
+export function transientBytes(encodedBytes: number): number {
+  return encodedBytes;
 }
 
 /** Reverse copies (Phase 5) double every decoded buffer that needs one. */
