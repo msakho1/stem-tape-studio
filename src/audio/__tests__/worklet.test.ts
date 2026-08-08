@@ -40,11 +40,12 @@ beforeAll(async () => {
     // Evaluate the real source in this stubbed scope.
     const src = (m as { default: string }).default;
     // eslint-disable-next-line @typescript-eslint/no-implied-eval
-    new Function("AudioWorkletProcessor", "registerProcessor", "sampleRate", "currentFrame", src)(
+    // currentFrame is intentionally NOT shadowed: the processor must read the
+    // live global clock the way it does in a real AudioWorkletGlobalScope.
+    new Function("AudioWorkletProcessor", "registerProcessor", "sampleRate", src)(
       g["AudioWorkletProcessor"],
       g["registerProcessor"],
       SR,
-      0,
     );
   });
 });
