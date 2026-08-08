@@ -390,9 +390,15 @@ export class AudioEngine {
       filter.connect(wet);
       dry.connect(preFx);
       wet.connect(preFx);
-      // Phase 5C: preFx → FxRack → fader → solo → analyser → master.
-      const fxRack = new FxRack(ctx, gain);
+      // Phase 5C / Workstream 3:
+      //   preFx → FxRack (tape filter + Beat Repeat worklet)
+      //         → BankRack (TONE → RHYTHM → MOTION → SPACE)
+      //         → fader → solo → analyser → master.
+      const bankRack = new BankRack(ctx);
+      const fxRack = new FxRack(ctx, bankRack.input);
+      bankRack.output.connect(gain);
       preFx.connect(fxRack.input);
+
       gain.connect(soloGain);
       soloGain.connect(analyser);
       analyser.connect(this.master!);
