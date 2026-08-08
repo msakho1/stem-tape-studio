@@ -1,0 +1,284 @@
+/**
+ * Phase 5C — ordered chord arbitration (binding correction 1).
+ *
+ * Authoritative flow:
+ *
+ *   raw pointer/key input → ordered chord arbitration → ONE semantic command
+ *                          → reducer + audio
+ *
+ * Base Play / Volume / Track commands are never emitted-then-undone by this
+ * layer: the arbiter consumes the raw transitions first and marks the controls
+ * it claimed, so the v2.6 gesture consumer drops them before dispatch.
+ * `TxnSnapshot` rollback stays in place ONLY as the safety fallback for
+ * genuinely optimistic multi-tap sequences and for lost pointers.
+ *
+ * Precedence (highest first):
+ *   1. cancel / safety
+ *   2. long system chords (Vol− + Vol+ ≈ 2 s pairing)
+ *   3. Play-first chords    (Play + Vol−/+, Play + Track)
+ *   4. Function-first chords (FX track + Function)
+ *   5. FX-track-first chords (FX track + Vol−/+)
+ *   6. bare FX-overlay track (momentary FX)
+ *   7. bare v2.6
+ */
+
+import type { Control } from "@/device/geometry";
+import type { RawInputEvent } from "@/input/gestures";
+import { FX_FAMILY_BY_TRACK, type FxFamily, type StemIndex } from "./stemPerformance";
+
+export interface ArbiterTimings {
+  /** The second control of a chord must arrive within this of the first. */
+  modifierArrivalMs: number;
+  /** Play + Track: overlap shorter than this is solo, longer is link/unlink. */
+  soloLinkMs: number;
+  /** Vol− + Vol+ both released before this = overlay toggle. */
+  overlayShortMs: number;
+  /** Vol− + Vol+ held at least this = the existing pairing gesture. */
+  pairingMs: number;
+}
+
+export const DEFAULT_ARBITER_TIMINGS: ArbiterTimings = {
+  modifierArrivalMs: 400,
+  soloLinkMs: 700,
+  overlayShortMs: 600,
+  pairingMs: 2000,
+};
+
+export type PerfIntent =
+  | { type: "stem.select"; dir: 1 | -1 }
+  | { type: "stem.solo"; stem: StemIndex; overlapMs: number }
+  | { type: "stem.link"; stem: StemIndex; overlapMs: number }
+  | { type: "fx.overlay"; on: boolean }
+  | { type: "system.pairing" }
+  | { type: "system.noop"; detail: string }
+  | { type: "fx.momentary.start"; stem: StemIndex; family: FxFamily }
+  | { type: "fx.momentary.end"; stem: StemIndex; family: FxFamily }
+  | { type: "fx.variation"; stem: StemIndex; family: FxFamily; dir: 1 | -1 }
+  | { type: "fx.latch"; stem: StemIndex; family: FxFamily }
+  | { type: "fx.clearLatches"; stem: StemIndex };
+
+export interface ArbitrationRecord {
+  t: number;
+  controls: Control[];
+  intent: PerfIntent["type"] | "none";
+  suppressed: Control[];
+  detail: string;
+}
+
+const TRACK_INDEX: Record<string, number> = {
+  "track-button-1": 0,
+  "track-button-2": 1,
+  "track-button-3": 2,
+  "track-button-4": 3,
+};
+
+function isTrack(c: Control): boolean {
+  return c in TRACK_INDEX;
+}
+function isVolume(c: Control): c is "volume-minus" | "volume-plus" {
+  return c === "volume-minus" || c === "volume-plus";
+}
+
+export interface ArbiterView {
+  activeStem: StemIndex;
+  fxOverlay: boolean;
+}
+
+/**
+ * Stateful, framework-free. Fed raw transitions BEFORE the gesture engine's
+ * semantic output reaches the reducer.
+ */
+export class ChordArbiter {
+  timings: ArbiterTimings = { ...DEFAULT_ARBITER_TIMINGS };
+  readonly log: ArbitrationRecord[] = [];
+
+  private down = new Map<Control, number>();
+  /** Controls claimed by a chord: their base v2.6 gesture must be dropped. */
+  private claimed = new Set<Control>();
+  private listeners = new Set<(i: PerfIntent) => void>();
+
+  constructor(private view: () => ArbiterView) {}
+
+  onIntent(fn: (i: PerfIntent) => void): () => void {
+    this.listeners.add(fn);
+    return () => this.listeners.delete(fn);
+  }
+
+  private emit(intent: PerfIntent, controls: Control[], detail: string) {
+    this.log.unshift({ t: Date.now(), controls, intent: intent.type, suppressed: [...controls], detail });
+    if (this.log.length > 60) this.log.length = 60;
+    for (const l of this.listeners) l(intent);
+  }
+
+  private claim(...controls: Control[]) {
+    for (const c of controls) this.claimed.add(c);
+  }
+
+  /** True while this control's press has been consumed by a chord. */
+  isClaimed(control: Control): boolean {
+    return this.claimed.has(control);
+  }
+
+  reset() {
+    this.down.clear();
+    this.claimed.clear();
+  }
+
+  /** Feed every raw transition here, in order. */
+  handle(e: RawInputEvent): void {
+    if (e.phase === "down") return this.onDown(e.control, e.t);
+    if (e.phase === "cancel") return this.onCancel(e.control);
+    return this.onUp(e.control, e.t);
+  }
+
+  private heldSince(c: Control, now: number): number | null {
+    const at = this.down.get(c);
+    if (at == null) return null;
+    return now - at;
+  }
+
+  private modifierFresh(c: Control, now: number): boolean {
+    const held = this.heldSince(c, now);
+    return held != null && held <= this.timings.modifierArrivalMs;
+  }
+
+  private activeFxTrackHeld(): Control | null {
+    for (const c of Object.keys(TRACK_INDEX) as Control[]) if (this.down.has(c)) return c;
+    return null;
+  }
+
+  private onDown(control: Control, t: number) {
+    // A claim lives until the control is pressed again: clearing it on release
+    // would let the base v2.6 tap (which fires on release) slip through.
+    this.claimed.delete(control);
+    this.down.set(control, t);
+    const { fxOverlay, activeStem } = this.view();
+
+    // Precedence 6 — bare FX-overlay track press starts a momentary effect.
+    if (fxOverlay && isTrack(control)) {
+      const modifierHeld =
+        this.down.has("play") || this.down.has("function") || this.down.has("volume-minus") || this.down.has("volume-plus");
+      if (!modifierHeld) {
+        const family = FX_FAMILY_BY_TRACK[TRACK_INDEX[control]!]!;
+        this.claim(control);
+        this.emit({ type: "fx.momentary.start", stem: activeStem, family }, [control], `momentary ${family} on stem ${activeStem + 1}`);
+      }
+      return;
+    }
+
+    // Play-first and FX-track-first chords are resolved on RELEASE (they need a
+    // duration), but the modifier itself is claimed as soon as the partner
+    // arrives so the base command never dispatches.
+    if (isVolume(control) && this.modifierFresh("play", t)) this.claim("play");
+    if (isTrack(control) && this.modifierFresh("play", t)) this.claim("play");
+    if (isVolume(control) && fxOverlay && this.activeFxTrackHeld()) this.claim(this.activeFxTrackHeld()!);
+    if (control === "function" && fxOverlay && this.activeFxTrackHeld()) this.claim(this.activeFxTrackHeld()!);
+  }
+
+  private onCancel(control: Control) {
+    // Precedence 1 — safety. A lost pointer releases every claim on it.
+    this.down.delete(control);
+    const { fxOverlay, activeStem } = this.view();
+    if (fxOverlay && isTrack(control) && this.claimed.has(control)) {
+      const family = FX_FAMILY_BY_TRACK[TRACK_INDEX[control]!]!;
+      this.emit({ type: "fx.momentary.end", stem: activeStem, family }, [control], "pointer cancel — momentary released");
+    }
+  }
+
+  private onUp(control: Control, t: number) {
+    const downAt = this.down.get(control);
+    this.down.delete(control);
+    const { fxOverlay, activeStem } = this.view();
+    const heldMs = downAt == null ? 0 : t - downAt;
+
+    // ---- precedence 2: long system chord (Vol− + Vol+)
+    if (isVolume(control)) {
+      const other: Control = control === "volume-minus" ? "volume-plus" : "volume-minus";
+      const otherAt = this.down.get(other);
+      if (otherAt != null && downAt != null) {
+        const overlap = t - Math.max(otherAt, downAt);
+        const arrival = Math.abs(otherAt - downAt);
+        this.claim(control, other);
+        if (arrival > this.timings.modifierArrivalMs) {
+          this.emit({ type: "system.noop", detail: `volume chord arrival ${arrival.toFixed(0)} ms — ignored` }, [control, other], "arrival too wide");
+          return;
+        }
+        if (overlap >= this.timings.pairingMs) {
+          this.emit({ type: "system.pairing" }, [control, other], `pairing gesture (${overlap.toFixed(0)} ms)`);
+        } else if (overlap < this.timings.overlayShortMs) {
+          this.emit({ type: "fx.overlay", on: !fxOverlay }, [control, other], `FX overlay ${fxOverlay ? "closed" : "opened"} (${overlap.toFixed(0)} ms)`);
+        } else {
+          this.emit(
+            { type: "system.noop", detail: `ambiguous volume chord ${overlap.toFixed(0)} ms (600–2000 ms band)` },
+            [control, other],
+            "diagnostics-only no-op",
+          );
+        }
+        return;
+      }
+    }
+
+    // ---- precedence 3: Play-first
+    const playAt = this.down.get("play");
+    if (playAt != null && downAt != null && Math.abs(downAt - playAt) <= this.timings.modifierArrivalMs) {
+      if (isVolume(control)) {
+        this.claim("play", control);
+        this.emit(
+          { type: "stem.select", dir: control === "volume-plus" ? 1 : -1 },
+          ["play", control],
+          `stem select ${control === "volume-plus" ? "+1" : "−1"}`,
+        );
+        return;
+      }
+      if (isTrack(control)) {
+        // Correction 1: duration is the OVERLAP of the two controls, not the
+        // time since the initial Play press.
+        const overlap = t - Math.max(playAt, downAt);
+        const stem = TRACK_INDEX[control]! as StemIndex;
+        this.claim("play", control);
+        if (overlap < this.timings.soloLinkMs) {
+          this.emit({ type: "stem.solo", stem, overlapMs: overlap }, ["play", control], `solo (overlap ${overlap.toFixed(0)} ms)`);
+        } else {
+          this.emit({ type: "stem.link", stem, overlapMs: overlap }, ["play", control], `link/unlink (overlap ${overlap.toFixed(0)} ms)`);
+        }
+        return;
+      }
+    }
+
+    // ---- precedence 4 and 5: FX-track chords (only inside the overlay)
+    if (fxOverlay) {
+      const heldTrack = this.activeFxTrackHeld();
+      if (heldTrack) {
+        const family = FX_FAMILY_BY_TRACK[TRACK_INDEX[heldTrack]!]!;
+        if (control === "function") {
+          const allFour = (Object.keys(TRACK_INDEX) as Control[]).every((c) => this.down.has(c));
+          this.claim("function", heldTrack);
+          if (allFour) {
+            this.emit({ type: "fx.clearLatches", stem: activeStem }, ["function", heldTrack], "all four FX tracks + FUNCTION — latches cleared");
+          } else {
+            this.emit({ type: "fx.latch", stem: activeStem, family }, ["function", heldTrack], `latch toggle ${family}`);
+          }
+          return;
+        }
+        if (isVolume(control)) {
+          this.claim(control, heldTrack);
+          this.emit(
+            { type: "fx.variation", stem: activeStem, family, dir: control === "volume-plus" ? 1 : -1 },
+            [control, heldTrack],
+            `${family} variation ${control === "volume-plus" ? "+1" : "−1"}`,
+          );
+          return;
+        }
+      }
+
+      // ---- precedence 6: bare momentary release
+      if (isTrack(control) && this.claimed.has(control)) {
+        const family = FX_FAMILY_BY_TRACK[TRACK_INDEX[control]!]!;
+        this.emit({ type: "fx.momentary.end", stem: activeStem, family }, [control], `momentary ${family} released after ${heldMs.toFixed(0)} ms`);
+        return;
+      }
+    }
+
+    // ---- precedence 7: bare v2.6 — nothing claimed, the base map runs.
+  }
+}
