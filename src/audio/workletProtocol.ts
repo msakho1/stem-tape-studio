@@ -53,9 +53,23 @@ export type WorkletMessage =
   | { type: "dispose"; seq: number }
   | { type: "__forceError"; seq: number; inFrames: number };
 
+export interface ScrubTelemetryHead {
+  head: number;
+  pointerId: number;
+  actualFrame: number;
+  targetFrame: number;
+  /** Signed source frames per output frame. */
+  velocity: number;
+  gain: number;
+  mix: number;
+  previews: number;
+  releasing: boolean;
+}
+
 export interface WorkletAck {
   seq: number;
-  status: "ready" | "applied" | "rejected" | "failed";
+  status: "ready" | "applied" | "rejected" | "failed" | "telemetry";
+
   appliedAtContextFrame?: number;
   resultingSourceFrame?: number;
   detail: string;
