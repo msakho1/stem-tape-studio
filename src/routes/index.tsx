@@ -358,6 +358,8 @@ function LabPage() {
             gestureLog={gestureLog}
             faderValuesRef={faderValuesRef}
             svgRef={svgRef}
+            arbiter={arbiter}
+            audio={status}
           />
         </div>
       )}
