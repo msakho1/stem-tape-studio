@@ -26,6 +26,15 @@ export type WorkletMessage =
   | { type: "setLoopMode"; seq: number; mode: "fixed" | "variable"; applyAtContextFrame: number }
   | { type: "setDirection"; seq: number; direction: 1 | -1; applyAtContextFrame: number }
   | { type: "poll"; seq: number }
+  | {
+      type: "setHeads";
+      seq: number;
+      /** Null turns heads off and restores the single pointer, phase intact. */
+      heads: { offset: number; level: number; muted: boolean; reverse: boolean }[] | null;
+      cycleStart: number;
+      cycleFrames: number;
+    }
+  | { type: "readRange"; seq: number; start: number; frames: number }
   | { type: "dispose"; seq: number }
   | { type: "__forceError"; seq: number; inFrames: number };
 
@@ -41,7 +50,11 @@ export interface WorkletAck {
   rate?: number;
   direction?: 1 | -1;
   playing?: boolean;
+  /** readRange payload: transferred copies of the requested source range. */
+  channels?: ArrayBuffer[];
+  frames?: number;
 }
+
 
 export const PROCESSOR_NAME = "tape-processor";
 export const PROCESSOR_URL = "/tape-processor.js";
