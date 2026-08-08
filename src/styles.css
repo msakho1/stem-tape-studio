@@ -273,6 +273,38 @@
   animation: st-breathe 2.4s ease-in-out infinite;
 }
 
+/* PRINT (heads mode, empty track): fast travelling shimmer. */
+.st-led--chase .st-led__core {
+  animation: st-chase 0.55s linear infinite;
+}
+
+.st-led--chase .st-led__halo {
+  animation: st-pulse-halo 0.55s linear infinite;
+}
+
+@keyframes st-chase {
+  0% {
+    opacity: 0.2;
+  }
+  40% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0.2;
+  }
+}
+
+/* v2.6 lights row: dim / full is global brightness, not a pattern change. */
+.st-surface[data-lights="dim"] .st-led__core {
+  opacity: 0.28;
+}
+
+.st-surface[data-lights="dim"] .st-led__halo {
+  opacity: 0.05;
+}
+
+
+
 @keyframes st-pulse {
   0%,
   100% {
