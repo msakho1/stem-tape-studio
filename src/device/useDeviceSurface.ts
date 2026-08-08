@@ -344,6 +344,7 @@ export function useDeviceSurface() {
     leds,
     observed,
     engine,
+    arbiter,
     ready,
     powerHoldMs,
     setPowerHoldMs,
