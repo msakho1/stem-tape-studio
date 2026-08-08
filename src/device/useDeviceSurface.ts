@@ -59,43 +59,15 @@ function reducer(state: SurfaceState, action: Action): SurfaceState {
         rocker: action.control.startsWith("rocker") ? "center" : state.rocker,
       };
     }
-    case "gesture": {
-      const g = action.gesture;
-      const next: SurfaceState = { ...state, lastGesture: describeGesture(g) };
-      // Phase 2 wires only the unambiguous stock behaviours; everything else is
-      // logged for the Mapping Lab rather than guessed at.
-      if (g.type === "tap" && g.control === "play" && g.count === 1) {
-        next.playing = !state.playing;
-      }
-      if (g.type === "tap" && g.control.startsWith("track-button")) {
-        const i = (Number(g.control.slice(-1)) - 1) as TrackIndex;
-        next.activeTrack = i;
-        if (state.functionHeld) {
-          const tracks = [...state.tracks] as SurfaceState["tracks"];
-          tracks[i] = {
-            ...tracks[i],
-            content: tracks[i].content === "muted" ? "loaded" : "muted",
-          };
-          next.tracks = tracks;
-        }
-      }
-      if (g.type === "tap" && g.control === "volume-plus") {
-        next.masterVolume = clamp01(state.masterVolume + 0.0625);
-      }
-      if (g.type === "tap" && g.control === "volume-minus") {
-        next.masterVolume = clamp01(state.masterVolume - 0.0625);
-      }
-      return next;
-    }
-    case "faderCommit": {
-      const tracks = [...state.tracks] as SurfaceState["tracks"];
-      const slice = tracks[action.index];
-      if (!slice) return state;
-      tracks[action.index] = { ...slice, volume: action.value };
-      return { ...state, tracks };
-    }
+    case "gesture":
+      // Every behaviour is a documented Tape Looper v2.6 row. No experimental
+      // Stem Tape mappings are dispatched here (phase 4).
+      return applyGesture({ ...state, lastGesture: describeGesture(action.gesture) }, action.gesture);
+    case "faderCommit":
+      return applyFader(state, action.index, action.value);
   }
 }
+
 
 const LOG_LIMIT = 60;
 
