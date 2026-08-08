@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Ack, AudioCommand } from "./commands";
 import { controlBus } from "./controlBus";
 import { getAudioEngine, type EngineStatus } from "./engine";
+import { installPrintCommit } from "./print";
+
 
 /**
  * Drains the reducer's ordered command stream into the AudioEngine by
