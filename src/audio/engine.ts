@@ -899,6 +899,14 @@ export class AudioEngine {
     return { ok: true, detail: `track ${id + 1} recovered on the node engine` };
   }
 
+  /** Test hook: force one processor to throw so recovery can be proven. */
+  async forceProcessorFailure(id: TrackId): Promise<string> {
+    const t = this.tracks[id];
+    if (!t?.worklet?.node) return `track ${id + 1} is not on the worklet engine`;
+    const ack = await t.worklet.forceError(0);
+    return `track ${id + 1}: ${ack.detail}`;
+  }
+
   /** Ask every worklet processor where it is; report pairwise drift. */
   async measureDrift(): Promise<{ frames: (number | null)[]; pairs: string[]; maxDrift: number; acks: WorkletAck[] }> {
     const acks: WorkletAck[] = [];
