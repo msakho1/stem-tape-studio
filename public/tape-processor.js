@@ -553,10 +553,13 @@ class TapeProcessor extends AudioWorkletProcessor {
           this.wrapCount++;
         }
       }
+    }
+
     // Scrub telemetry: only while a scrub is live, ~every 8 quanta. Nothing is
     // allocated in the per-frame loop; this object is built after it.
     let anyScrub = false;
     for (let h = 0; h < 4; h++) if (this.headScrubs[h]) anyScrub = true;
+
     if (anyScrub) {
       this.telemetryCountdown -= 1;
       if (this.telemetryCountdown <= 0) {
