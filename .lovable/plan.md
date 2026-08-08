@@ -1,120 +1,69 @@
-# Transport, Cue, Varispeed SOS and Control-Conflict — Investigation + Implementation Plan
+# Guide Audit + Onboarding Wizard
 
-## 1. Reproduced regression: Play stops producing audio
+## Part 1 — Guide v1.0 vs codebase (audit result)
 
-Reproduced in a headless Chromium against the live dev build (demo project, Node engine, desktop pointer): after the first Play → Stop cycle the transport readout stays at `0:01 / 0:09` and the **rate readout reads `0.00×` on every subsequent tap**. The gesture layer is innocent — the surface log shows exactly one `tap ×1 · play` per tap, no duplicated or missing gesture.
+Verified against `src/machine/*`, `src/audio/*`, `src/device/useDeviceSurface.ts`, `public/*-processor.js`, tests.
 
-### Root cause (confirmed by code path, matches the observed `0.00×`)
+### Accurate (no change needed)
+Transport phases and hold-to-cue frame zero (`surface.ts:370-374`, `564-573`); Play+Volume stem select and Play+Track solo/link at 700 ms (`chordArbiter.ts:312-337`, `47`); rocker ±1 BPM / glide / exact semitone (`surface.ts:528-537`, `628-631`); Function+Faders window + LP/dry/HP (`surface.ts:799-814`); Function+Volume chop slide/glide (`surface.ts:542-546`, `632-634`); Function+Play release/×2/×3/long (`surface.ts:351-369`, `662-669`); grid learning from Function ×4 and clear/round (`surface.ts:378-412`, `646-660`); FX overlay chord and bank buttons Track1 TONE / Track2 MOTION / Track3 SPACE / Track4 RHYTHM (`chordArbiter.ts:296-300`, `fx12.ts:68-109`) — the internal signal order TONE→RHYTHM→MOTION→SPACE is separate from button order and is documented in code; all twelve algorithm names, wrap-around cycling, per-algorithm macros, momentary/latch/clear-latches (`fx12.ts:73-108`, `197-212`, `chordArbiter.ts:206-258`); Heads offsets 0/25/50/75 %, head level/scrub/mute/reverse/source/PRINT (`surface.ts:356-362`, `423-433`, `580-590`, `779-797`); punch late window `min(120 ms, 1/8 beat)` (`grid.ts:124`, tested `phase6.test.ts:34-45`); 16 song slots and Function+Track navigation (`surface.ts:436-447`); IndexedDB + OPFS-preferred storage (`store.ts:78`, `102-135`); Memory Saver / High Memory Mode in MiB (`memory.ts:12-70`, `saver.ts`).
 
-The wind-down leaves the tape's *musical* rate destroyed.
+### Inaccurate — guide claims the code does not support
+1. **Track double-tap "undo newest pass".** Code only performs recoverable delete / arm-cancel / stop (`surface.ts:452-474`, `recordingState.ts:198-204`). `rec.undoPass` exists in `commands.ts:49` and `engine.ts:2541` but no gesture emits it — dead path.
+2. **Chop on Play + Rocker.** Code puts chop half/double/reset/glide on **Function + Rocker** double-tap and hold (`surface.ts:510-526`, `629`); Function + Rocker tap is the global scrub. The guide's "Function+Rocker = scrub only, chop lives on Play+Rocker" split does not exist.
+3. **Shift + R master performance record.** `PerformanceRecorder` exists (`performanceRecorder.ts:17-76`) but no `KeyR`/shift handler exists anywhere; `KEY_MAP`/`FADER_KEYS` in `useDeviceSurface.ts:33-58` have no R and no ESC.
+4. **ESC releases held controls.** Not bound.
+5. **LED priority order.** Actual tiers (`surface.ts:958-973`): error 98 > failedPrint 95 > printing 93 > recording 90 > overdubbing 89 > armed 88 > momentaryFx 82 > latchedFx 78 > heads 76 > soloed 74 > unlinked 70 > active 66 > muted 30 > base 10. The guide omits printing/failedPrint and orders FX above recording states.
 
-- `src/audio/engine.ts:1828-1845` `beginWind()` reads the target from `this.timeline.targetRate()`, and builds a wind-down whose `to` is `INERTIA_MIN_RATE` (≈0).
-- `src/audio/engine.ts:1950-1962` the wind-down completion timer calls `this.timeline.endInertia(t, wind.to)` — i.e. it settles the timeline on **0×**, not on the musical rate.
-- `src/audio/tape.ts:131-136` `endInertia()` assigns that value to the timeline's constant `rate`. The 1.0× the user was playing at is now gone from state.
-- Next Play (`engine.ts:1887-1926`) calls `beginWind("windUp")`, which reads `targetRate()` → ≈0, so it schedules a ramp from ≈0 **to ≈0**. Sources start, but at zero playback rate: silent, playhead frozen, UI shows `0.00×`. Only a further stop/play cycle (which can short-circuit `beginWind` via the `seg.durationS <= 0.011` guard at `engine.ts:1841`) produces audible playback — this is exactly the "second tap works" symptom.
+### Unconfirmed (needs a targeted read before being asserted)
+Continuous wind reversal without source recreation (`engine.ts` transport internals); exact 5 s threshold for dim/full lights; whether PRINT's captured buffer truly excludes master/solo/global speed/FX; explicit rejection of reverse-direction recording; permission-never-on-load guarantee in the input panel.
 
-`TapeTimeline.musicalRate()` (`src/audio/tape.ts:106-108`) exists precisely for this and is never called.
+### In the code, absent from the guide
+Bluetooth pairing gesture (Vol− + Vol+ held ≥2 s → `system.pairing`, `chordArbiter.ts:297-298`); per-song snapshot memory (`surface.ts:280-299`); the diagnostics/coverage subsystem (`HitZoneAudit`, `DiagnosticPanel`, `fired`/`coverage` logs); FX schema v3→v4 migration.
 
-Contributing/secondary defects found on the same path, to be fixed together:
+### Reconciliation choice
+Fix the **code** for items 3 and 4 (bind Shift+R and ESC — small, isolated, and the features already exist). Fix the **guide text inside the app** for items 1, 2 and 5 so the onboarding wizard teaches only behavior the code actually performs. The PDF itself is not editable from here; the in-app guide becomes the source of truth.
 
-- `engine.ts:1892` Play calls `cancelWind()`, which only clears the timer (`engine.ts:1816-1822`). A Play during an in-flight wind-down therefore skips the deferred `stopSources()` and the `transportGain` restore at `engine.ts:1962`, leaving a scheduled ramp-to-zero and orphaned sources.
-- `engine.ts:1889` rejects Play whenever `ctx.state !== "running"`, but `useAudioEngine.ts:60` only unlocks when `!engine.ready`. A suspended context that was previously running is rejected instead of resumed → a second tap is required after backgrounding.
-- There is no `cued` phase; `transport.restart` (`engine.ts:1973`) starts playback immediately, so Play-hold is a restart, not a cue.
+## Part 2 — Step-based onboarding wizard
 
-### Fixes
+### Shape
+A dismissible overlay driven by a declarative step list, launched from a `learn` entry point on the TAPE tab and from the GUIDE tab. Each step is *completion-gated by real machine state*, not by a Next button: the wizard watches the same `state`/`status`/command stream the instrument already emits, so a step only clears when the user actually performs the gesture on the SP-1.
 
-1. `endInertia` on wind-down settles on the **musical** rate, and the transport phase carries whether the tape is stopped; `beginWind("windUp")` targets `timeline.musicalRate()`.
-2. `cancelWind()` becomes `settleWind()`: it runs the pending completion work immediately (sources, envelope, phase) before the new command, so a reversal rebases from real state.
-3. Play resumes a suspended context inline (`await ctx.resume()`) and then executes the same command; the hook stops treating `ready` as the only unlock trigger.
-4. Explicit phase machine in the engine, single source of truth:
-   `stopped → cued → windingUp → playing → windingDown → stopped`, with a reversal edge windingDown → windingUp and windingUp → windingDown.
-5. Bare Play dispatches on tap count 1 with no multi-tap wait (already true at `surface.ts:369`) — add a guard so FN-qualified Play multi-taps can never reach the bare branch, and assert hold/cancel suppression.
+### Files
+- `src/onboarding/steps.ts` — step definitions: `id`, `title`, `instruction` (gesture text), `highlight` (control ids from `geometry.ts` `CONTROL_LABELS`), `keyHint`, `done(ctx)` predicate over `{ state, status, sess, lastCommands }`, optional `setup()` (e.g. load demo), `skippable`.
+- `src/onboarding/useOnboarding.ts` — cursor, per-step completion evaluation on each surface state change, `localStorage` persistence (`stemtape.onboarding.v1`: completed step ids + dismissed flag), `restart()`.
+- `src/onboarding/OnboardingOverlay.tsx` — bottom-docked card (mobile) / right rail card (desktop): step n of N, instruction, live "waiting for…" vs "done" indicator, Skip step / Exit / Restart.
+- `src/device/DeviceSurface.tsx` — accept an optional `highlight: ControlId[]` prop that renders a pulsing outline on the named hit zones (reuses existing hit-zone geometry; no new coordinate system).
+- `src/routes/index.tsx` — mount overlay, add `learn` button in the header, replace the static "first moves" list in the GUIDE tab with a launcher plus the corrected control atlas.
 
-### Regression test
+### Step sequence (each gated on real state)
+1. **Enable audio** — done when `status.contextState === "running"`.
+2. **Load stems** — done when four decoded tracks exist; offers Try Demo as `setup()`.
+3. **Start the tape** — tap Play; done when transport enters playing.
+4. **Ride the mix** — move any fader; done when a fader value changes by >0.05.
+5. **Mute and return** — tap a Track twice; done when a track mutes then unmutes.
+6. **Cue frame zero** — hold Play; done on `transport.cue`.
+7. **Varispeed** — rocker tap/hold; done when `state.speed` leaves 1.0, then Function+Play ×2 to snap back.
+8. **Window and filter** — Function + Fader 1/2, then Function + Fader 4; done when window bounds and filter mode both change.
+9. **Chop** — Function + Rocker double-tap; done when `chopDiv` changes. (Corrected per audit item 2.)
+10. **Teach the grid** — Function ×4; done when `state.grid.source === "tap"`.
+11. **FX overlay** — Vol− + Vol+ chord, select a bank, cycle an algorithm, hold for momentary; done when a momentary FX has been engaged at least once.
+12. **Heads** — Function + Play ×3, raise head faders, Function + Fader scrub; done when heads mode entered and a scrub occurred.
+13. **PRINT** — hold an empty Track in Heads; done on print completion.
+14. **Recording** — Enable Input in System, hold an empty Track 450 ms to arm; done when armed. Marked skippable (needs a microphone).
+15. **Save the project** — done when `sess.saved` is true.
 
-Deterministic engine-level harness: 100 Play/Stop cycles asserting one transition per tap, `requestedPlaying`, phase, source count, timeline rate and position after each; repeated for Node, Worklet, FX overlay open, Heads on, suspended context. Plus a browser fixture that reads engine truth after each tap (rate ≠ 0, position advancing).
+Steps 11-15 form an "advanced" second half the user can defer; the wizard offers a natural stop after step 10 ("you can perform now").
 
-## 2. True stop-and-cue
+### Behavior rules
+- Never blocks the instrument: the overlay is non-modal and pointer events pass through to the SP-1.
+- Auto-advances ~600 ms after a step completes, with a brief confirmation line, so the user hears what they just did.
+- Skipping a step marks it skipped, not completed, and it reappears in the GUIDE tab's checklist.
+- Reduced-motion respected on the highlight pulse; overlay is keyboard reachable and announced with `aria-live="polite"`.
+- First visit auto-opens at step 1 only if no stems are loaded and nothing is persisted.
 
-New semantic command `transport.cue` (`stopAndCue`), distinct from `transport.restart` (kept, re-bound):
+### Also in scope
+- Bind `Shift+R` to `PerformanceRecorder` start/stop and `ESC` to release all held controls in `useDeviceSurface.ts`, then add both to `KEY_HINTS` (audit items 3, 4).
+- Correct the in-app guide text for Track double-tap, chop location, and the LED priority table so it matches `surface.ts:958-973`.
 
-- Bare Play **hold** → stop all targeted stems, wind down, anchor every stem to song frame 0, phase `cued`, grid phase reset. No playback on release.
-- Next single Play tap starts all four stems on **one** scheduled context frame.
-- Link/unlink, faders, mutes and FX state untouched. Rejected during recording/stopping/finalising.
-- Diagnostics: `cued @ frame 0`; LEDs distinguish cued (slow pulse) from stopped (dark).
-
-### Cue launch profiles
-
-- **Exact** — start at target rate at the scheduled frame; anti-click fade only (2 ms). Audio start frame and outgoing sync/Start share `startFrame`.
-- **Tape pre-roll** — the wind occurs in virtual negative time: the worklet is started at `startFrame − windFrames` with tape position held at 0 and output muted while rate integrates from `INERTIA_MIN_RATE` to target; the integral of the inertia curve is *not* consumed from the song (position clamps to 0 until the wind completes). Audible frame zero and sync Start both land on `startFrame`. Pre-roll duration = preset start time (Classic 300 ms), displayed as a countdown.
-
-Both are computable from the existing `inertia.ts` integral; no new DSP.
-
-## 3. Varispeed sound-on-sound — current capability: **partial**
-
-Present: tape-coordinate segment model and exact integrals (`src/audio/input/takes.ts:98-165`), paged take mixer, undo-pass, PRINT, per-track arm.
-
-Missing (verified by grep — no production caller):
-
-- `RecordingController` writes exactly **one** segment at take start (`recorder.ts:337-345`, `{ kind: "constant", value: currentRate() }`) and never appends a segment afterwards. `finishSegments()` (`recorder.ts:374-378`) only closes the last one.
-- `followRate()` (`recorder.ts:536-553`) has **zero call sites in `engine.ts`** — `rate.set`, glides, inertia, direction change, loop wrap, window/chop change and relink never notify the recorder or the take mixer.
-
-So today an overdub stores real-time PCM anchored at the tape position it started from and follows transport only superficially. It is not varispeed SOS.
-
-### Work
-
-Emit a segment on every event listed in the brief, driven from the engine's authoritative `TapeTimeline` (`rate.set`, glide, inertia, reverse, loop wrap, window/chop, link) and mirror each to the mixer; store each loop pass as its own sublayer; keep capture PCM dry; undo removes the newest pass only; reverse recording stays rejected.
-
-### Objective tests (must pass before the feature is claimed)
-
-440 Hz at 0.5× → ≈880 Hz at 1×; 440 Hz at 2× → ≈220 Hz; glide 0.5→1.5× compared against the analytic integral; 100 loop wraps frame-exact; repeated rate changes mid-take; save/reload reproduces positions; undo newest pass; PRINT one cycle frame-for-frame against the SOS mix.
-
-This is **four-track sequential recording from one armed input**, not four simultaneous inputs.
-
-## 4. Rocker remap and arbitration
-
-New declarative rows (provenance `extension`, replacing the v2.6 `rocker.chop` / `rocker.chopReset` rows at `src/machine/v26map.ts:28-31`):
-
-| Gesture | Command |
-| --- | --- |
-| Rocker fwd/back | `rate.set` ±1 BPM (unchanged) |
-| Rocker double-click | exact semitone (unchanged) |
-| FN + Rocker fwd/back | `transport.scrub` — global four-stem shuttle |
-| Play + Rocker fwd/back | `loop.chop` half/double |
-| Play + Rocker double-click | `loop.chopReset` |
-| Hold Play + Rocker | `loop.chopGlide` |
-| Hold bare Play | `transport.cue` |
-
-Conflicts to resolve in `chordArbiter.ts`: Rocker must claim `play` **before** the Play tap or the Play-hold cue fires (claim-before-dispatch, no rollback); FN + Rocker must suppress chop, FX latch and song navigation; Play + Rocker must never toggle transport. Global scrub moves all four timelines on one shared frame, preserves offsets/link/mutes/Heads, does not mutate loop windows, crossfades in/out, and is rejected while recording.
-
-## 5. Pump silence
-
-Two concrete causes:
-
-1. **Tempo collapse.** `effectiveBpm()` (`engine.ts:1156-1160`) is `baseBpm * |timeline.currentRate()|`, and `|rate| || 1` does not catch the ≈0 left by defect §1 — the LFO is programmed at ~0.01 Hz, i.e. a DC gain, inaudible as a pump. Fix: clamp to the musical rate and never below a floor; keep provisional 120 BPM when no grid exists.
-2. **Depth too shallow to read as Pump.** `buildLfoGate` (`fx/banks.ts:196-206`) uses depth 0.28 / offset 0.72 → 0.44…1.0. Required default is ≈65 % depth with a click-free boundary; macro must map to depth as well as division.
-
-Also verify during the fix: RHYTHM bank button index (`fx12.ts:76-84` declares `button: 3`, the brief says Button 4), latch survival when the overlay closes, and Heads output path. A rejected algorithm must not display as active (`banks.ts:538-548` already records per-algorithm rejection). Acceptance test measures the output envelope of a constant signal, not a flag.
-
-## 6. Stem switching inside FX mode
-
-The arbiter row exists — `chordArbiter.ts:311-321` claims `play` + volume and emits `stem.select` before the FX volume paths, and `surface.ts:829-833` applies it. What is unverified is whether the overlay session state survives: confirm the selected bank is overlay state (not per-stem reset), that each stem keeps its own algorithms/macros/latches, that a held momentary stays bound to the stem captured at pointer-down, and add the temporary `STEM n NAME` LED/readout that reverts to bank status. If a live check shows the chord failing inside the overlay, the conflicting row will be reported verbatim before the fix.
-
-## 7. Ordered implementation
-
-1. Transport phase machine + rate-preserving inertia (§1) — unblocks §5 too.
-2. `transport.cue` + both launch profiles (§2).
-3. Rocker remap + arbitration rows (§4).
-4. Pump tempo/depth (§5) and FX-mode stem selection polish (§6).
-5. Varispeed SOS segmentation (§3) with the objective test suite.
-6. Full investigation matrix capture (raw pointer → gesture → claim → command → seq → reducer → engine → ctx state → source generation → scheduled frame → ack → LED) for Node/Worklet, demo/user project, overlay, Heads, linked/unlinked, running/suspended, desktop and mobile emulation.
-
-## Migration / persistence
-
-`transport.cue` is additive to the command union; saved projects gain a cue position (default 0). Take layers gain a segment list per pass — existing single-segment takes load unchanged. FX macro defaults change for Pump only.
-
-## Blocking questions
-
-1. Which cue-launch profile is the default — Exact or Tape pre-roll?
-2. Is RHYTHM on hardware Button 3 (current registry) or Button 4 (your brief)?
-3. On Play during an in-flight wind-down, should the tape reverse from its current rate (continuous) or restart the wind-up from zero?
+### Tests
+`src/onboarding/onboarding.test.ts` — each step's `done()` predicate against synthetic surface states (true only for the intended gesture), persistence round-trip, and skip semantics. A Playwright pass drives steps 1-6 on the real surface and screenshots the overlay at 420 px and desktop width.
