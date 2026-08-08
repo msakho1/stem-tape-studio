@@ -782,12 +782,13 @@ export class AudioEngine {
     // Enough lookahead for every sequential adopt to complete before the switch.
     const at = sharedApplyFrame(this.ctx, 0.12 + 0.25 * ids.length);
     const results: string[] = [];
+    let ok = true;
     for (const id of ids) {
       const r = await this.migrateTrack(id, at);
+      if (!r.ok) ok = false;
       results.push(`T${id + 1}: ${r.ok ? "ok" : "FAILED"} — ${r.detail}`);
       await new Promise((res) => setTimeout(res, 0)); // yield between tracks
     }
-    const ok = this.workletTracks.length === ids.length;
     return { ok, detail: `shared context frame ${at}\n${results.join("\n")}\n${gate.statement}` };
   }
 
