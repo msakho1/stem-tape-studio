@@ -85,6 +85,12 @@ export const RAMP_TAU = 0.008;
 /** How far ahead the seam scheduler commits work, seconds. */
 export const SEAM_LOOKAHEAD_S = 0.25;
 const SCHEDULER_INTERVAL_MS = 25;
+/** Held-shuttle transport speed, in source seconds per real second. */
+const GLOBAL_SCRUB_RATE = 3;
+/** Grain scheduler period for the shuttle (ms). */
+const GLOBAL_SCRUB_INTERVAL_MS = 45;
+/** Grain level; the shuttle is deliberately quieter than normal playback. */
+const GLOBAL_SCRUB_LEVEL = 0.85;
 
 export type TrackId = 0 | 1 | 2 | 3;
 
