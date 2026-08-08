@@ -43,6 +43,24 @@ const KEY_MAP: Record<string, Control> = {
   Digit4: "track-button-4",
 };
 
+/**
+ * Workstream 1, desktop parity: approved keyboard pairs. Up/down per fader,
+ * held simultaneously so a desktop user can move four faders at once.
+ */
+const FADER_KEYS: Record<string, { index: FaderIndex; dir: 1 | -1 }> = {
+  KeyY: { index: 0, dir: 1 },
+  KeyH: { index: 0, dir: -1 },
+  KeyU: { index: 1, dir: 1 },
+  KeyJ: { index: 1, dir: -1 },
+  KeyI: { index: 2, dir: 1 },
+  KeyK: { index: 2, dir: -1 },
+  KeyO: { index: 3, dir: 1 },
+  KeyL: { index: 3, dir: -1 },
+};
+
+/** Value units per second while a fader key is held. */
+const KEY_FADER_RATE = 0.9;
+
 export const KEY_HINTS: [string, Control][] = Object.entries(KEY_MAP).map(([k, c]) => [
   k.replace("Key", "").replace("Digit", "").replace("Space", "space").replace("Minus", "−").replace("Equal", "+"),
   c,
@@ -89,6 +107,11 @@ export function useDeviceSurface() {
    */
   const faders = useRef(new FaderSessionManager());
   const frameRef = useRef<number | null>(null);
+  /** Faders joined to the shift-click group; they move together as one gesture. */
+  const groupRef = useRef<Set<FaderIndex>>(new Set());
+  /** Keys currently held, with the frame time each was last integrated at. */
+  const keyFadersRef = useRef<Map<string, { index: FaderIndex; dir: 1 | -1; last: number }>>(new Map());
+  const keyFrameRef = useRef<number | null>(null);
 
   /** Latest state, read by imperative pointer handlers without re-binding them. */
   const stateRef = useRef<SurfaceState>(state);
