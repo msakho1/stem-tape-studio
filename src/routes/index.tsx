@@ -314,43 +314,12 @@ function LabPage() {
       )}
 
       {tab === "system" && (
-        <div className="grid gap-5 px-4 py-5 md:px-8 lg:grid-cols-2">
-          <div className="grid gap-4">
-            <section className="st-card" data-testid="audio-diagnostics">
-              <h2 className="font-mono text-[11px] uppercase tracking-[0.2em] text-[var(--ink)]">audio engine</h2>
-              <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 font-mono text-[10px] text-[var(--ink-dim)]">
-                <dt>context</dt>
-                <dd className="text-[var(--ink)]" data-testid="ctx-state">{status.contextState}</dd>
-                <dt>requested / actual</dt>
-                <dd className="text-[var(--ink)]">
-                  {String(status.requestedPlaying)} / {String(status.actuallyPlaying)}
-                </dd>
-                <dt>position</dt>
-                <dd>{status.position.toFixed(3)}s of {status.duration.toFixed(3)}s</dd>
-                <dt>rate</dt>
-                <dd>{status.rate.toFixed(4)}×</dd>
-                <dt>start spread</dt>
-                <dd data-testid="start-spread">{status.startSpreadMs.toFixed(4)} ms</dd>
-                <dt>decoded</dt>
-                <dd>{formatBytes(status.decodedBytes)}</dd>
-                <dt>last decode</dt>
-                <dd>{status.lastDecodeMs != null ? `${status.lastDecodeMs.toFixed(0)} ms` : "—"}</dd>
-                <dt>last error</dt>
-                <dd>{status.lastError ?? "none"}</dd>
-              </dl>
-              <p className="mt-2 font-mono text-[10px] text-[var(--ink-faint)]">{unlockNote}</p>
-              <ul className="mt-2 grid gap-1" data-testid="ack-log">
-                {acks.slice(0, 10).map((a) => (
-                  <li key={a.id} className="font-mono text-[10px] text-[var(--ink-dim)]">
-                    <span className="text-[var(--ink)]">#{a.id} {a.type}</span> · {a.status} · {a.detail}
-                  </li>
-                ))}
-              </ul>
-            </section>
-            <WorkletPanel engine={engine} status={status} />
-            <InputPanel engine={engine} />
-          </div>
-          <DiagnosticPanel
+        <div className="px-4 py-5 md:px-8">
+          <SystemPage
+            engine={engine}
+            status={status}
+            acks={acks}
+            unlockNote={unlockNote}
             state={state}
             leds={leds}
             observed={observed}
@@ -366,6 +335,7 @@ function LabPage() {
           />
         </div>
       )}
+
 
       {/* ---------- transport bar ---------- */}
       <div className="hidden border-t border-[var(--bench-line)] px-8 py-3 lg:flex lg:items-center lg:gap-6">
