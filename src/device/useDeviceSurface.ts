@@ -268,7 +268,13 @@ export function useDeviceSurface() {
     (control: Control, e: React.PointerEvent) => {
       e.preventDefault();
       if (!readyRef.current) return;
-      (e.currentTarget as Element).setPointerCapture(e.pointerId);
+      // Capture is an optimisation, never a gate: if the UA refuses it the
+      // gesture must still reach the engine.
+      try {
+        (e.currentTarget as Element).setPointerCapture(e.pointerId);
+      } catch {
+        /* capture unavailable for this pointer */
+      }
       const p = toUserSpace(e.clientX, e.clientY);
       engine.press(control, e.pointerId, performance.now(), p?.x, p?.y);
 
