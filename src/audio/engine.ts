@@ -1823,9 +1823,15 @@ export class AudioEngine {
           if (!this.ctx) return this.ack(cmd, "rejected", "audio not unlocked — press Play again after enabling audio");
           if (this.ctx.state !== "running") return this.ack(cmd, "rejected", `AudioContext is ${this.ctx.state}`);
           if (this.duration === 0) return this.ack(cmd, "rejected", "no stems decoded");
+          const now = this.ctx.currentTime;
+          this.cancelWind();
           const resume = this.position() >= this.duration ? 0 : this.position();
           this.stopSources();
           this.requestedPlaying = true;
+          // The transport envelope always opens instantly on Play; the tape
+          // sound comes from the rate ramp, not from a volume fade-in.
+          this.transportGain?.gain.cancelScheduledValues(now);
+          this.transportGain?.gain.setValueAtTime(1, now);
           const { started, startAt } = this.startAll(resume);
           this.fanout((t, at) => ({
             type: "start",
@@ -1836,18 +1842,69 @@ export class AudioEngine {
             this.requestedPlaying = false;
             return this.ack(cmd, "failed", "no source could be created");
           }
-          return this.ack(cmd, "completed", `${started} stems scheduled at t=${startAt.toFixed(4)}s (spread 0.000 ms)`);
+          const wind = this.beginWind("windUp", startAt);
+          if (!wind) {
+            this.transportPhase = "playing";
+            return this.ack(cmd, "completed", `${started} stems scheduled at t=${startAt.toFixed(4)}s (spread 0.000 ms)`);
+          }
+          this.ack(cmd, "accepted", `Play accepted — winding up over ${(wind.durationS * 1000).toFixed(0)} ms`);
+          this.windTimer = setTimeout(() => {
+            this.windTimer = null;
+            this.transportPhase = "playing";
+            if (this.ctx) this.timeline.endInertia(this.ctx.currentTime, wind.to);
+          }, wind.durationS * 1000);
+          return this.ack(
+            cmd,
+            "completed",
+            `${started} stems scheduled at t=${startAt.toFixed(4)}s · wind-up ${wind.from.toFixed(3)}× → ${wind.to.toFixed(3)}× over ${(wind.durationS * 1000).toFixed(0)} ms`,
+          );
         }
         case "transport.stop": {
           if (!this.ctx) return this.ack(cmd, "rejected", "audio not unlocked");
-          const pos = this.position();
-          this.requestedPlaying = false;
-          this.timelineFrozenAt = this.ctx.currentTime;
-          this.timeline.anchor(this.ctx.currentTime, pos);
-          this.stopSources();
-          this.fanout((_t, at) => ({ type: "stop", applyAtContextFrame: at }));
-          return this.ack(cmd, "completed", `stopped at ${pos.toFixed(3)}s`);
+          const now = this.ctx.currentTime;
+          this.cancelWind();
+          const wind = this.requestedPlaying ? this.beginWind("windDown", now) : null;
+          if (!wind) {
+            const pos = this.position();
+            this.requestedPlaying = false;
+            this.transportPhase = "stopped";
+            this.timelineFrozenAt = now;
+            this.timeline.anchor(now, pos);
+            this.stopSources();
+            this.fanout((_t, at) => ({ type: "stop", applyAtContextFrame: at }));
+            return this.ack(cmd, "completed", `stopped at ${pos.toFixed(3)}s`);
+          }
+          const endAt = now + wind.durationS;
+          // Click-free: the dedicated transport envelope closes only after the
+          // tape has already slowed to a standstill.
+          this.transportGain?.gain.cancelScheduledValues(now);
+          this.transportGain?.gain.setValueAtTime(1, endAt);
+          this.transportGain?.gain.linearRampToValueAtTime(0, endAt + INERTIA_STOP_FADE_S);
+          this.ack(cmd, "accepted", `Stop accepted — winding down over ${(wind.durationS * 1000).toFixed(0)} ms`);
+          this.windTimer = setTimeout(
+            () => {
+              this.windTimer = null;
+              if (!this.ctx) return;
+              const t = this.ctx.currentTime;
+              const pos = this.position();
+              this.requestedPlaying = false;
+              this.transportPhase = "stopped";
+              this.timeline.endInertia(t, wind.to);
+              this.timelineFrozenAt = t;
+              this.timeline.anchor(t, pos);
+              this.stopSources();
+              this.fanout((_t2, at) => ({ type: "stop", applyAtContextFrame: at }));
+              this.transportGain?.gain.setValueAtTime(1, t + 0.001);
+            },
+            (wind.durationS + INERTIA_STOP_FADE_S) * 1000,
+          );
+          return this.ack(
+            cmd,
+            "completed",
+            `wind-down ${wind.from.toFixed(3)}× → 0× over ${(wind.durationS * 1000).toFixed(0)} ms, then transport envelope closed in ${(INERTIA_STOP_FADE_S * 1000).toFixed(0)} ms`,
+          );
         }
+
         case "transport.restart": {
           if (!this.ctx) return this.ack(cmd, "rejected", "audio not unlocked");
           if (this.duration === 0) return this.ack(cmd, "rejected", "no stems decoded");
