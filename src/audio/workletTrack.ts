@@ -92,6 +92,10 @@ export class WorkletTrack {
   status: MigrationStatus = "node";
   fallbackReason: string | null = null;
   lastAck: WorkletAck | null = null;
+  /** Most recent unsolicited scrub telemetry frame from the kernel. */
+  lastTelemetry: WorkletAck | null = null;
+  onTelemetry: ((t: WorkletTrack, ack: WorkletAck) => void) | null = null;
+
   lastSourceFrame: number | null = null;
   driftFrames: number | null = null;
   peakMigrationBytes = 0;
