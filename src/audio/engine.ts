@@ -196,7 +196,13 @@ export class AudioEngine {
     return this.tracks.reduce((sum, t) => sum + (t.buffer ? bufferBytes(t.buffer) : 0), 0);
   }
 
+  /** Read-only access to a decoded buffer (Memory Saver derives from it). */
+  getBuffer(id: TrackId): AudioBuffer | null {
+    return this.tracks[id]?.buffer ?? null;
+  }
+
   trackBytes(id: TrackId): number {
+
     const b = this.tracks[id]?.buffer;
     return b ? bufferBytes(b) : 0;
   }
