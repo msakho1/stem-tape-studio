@@ -66,6 +66,8 @@ function LabPage() {
             pressed={state.pressed}
             leds={leds}
             showHitZones={showHitZones}
+            lights={state.lights}
+
             {...handlers}
           />
           <div className="mt-5 w-full max-w-xl">
