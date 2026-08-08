@@ -57,7 +57,10 @@ export interface FxSlotState {
 export interface StemTrackState {
   soloed: boolean;
   linked: boolean;
+  /** Derived bridge to the existing rack processors. Never the source of truth. */
   fx: Record<FxFamily, FxSlotState>;
+  /** Authoritative twelve-FX state: four banks × three algorithms. */
+  fx12: StemFxState;
 }
 
 export interface StemPerformanceState {
@@ -68,8 +71,8 @@ export interface StemPerformanceState {
   lastRejection: string | null;
 }
 
-/** Saved-project schema version. Bumped by Phase 5C. */
-export const STEM_TAPE_SCHEMA_VERSION = 3;
+/** Saved-project schema version. 3 = Phase 5C, 4 = twelve-FX banks. */
+export const STEM_TAPE_SCHEMA_VERSION = FX12_SCHEMA_VERSION;
 
 export function initialFxSlot(): FxSlotState {
   return { momentary: false, latched: false, variation: 1, rejected: null, arming: false };
@@ -85,8 +88,38 @@ export function initialStemTrack(): StemTrackState {
       reverb: initialFxSlot(),
       beatRepeat: initialFxSlot(),
     },
+    fx12: initialStemFx(),
   };
 }
+
+/**
+ * Project the authoritative bank state onto the legacy family slots the audio
+ * rack still consumes. Bank i runs family `FX_FAMILIES[i]` only while algorithm
+ * 0 (the legacy processor) is selected; algorithms 1 and 2 are the new
+ * processors and never activate the legacy family.
+ */
+export const BANK_FAMILY: readonly FxFamily[] = ["filter", "beatRepeat", "echo", "reverb"];
+
+export function syncLegacySlots(t: StemTrackState): StemTrackState {
+  const fx = { ...t.fx };
+  BANKS.forEach((_def, i) => {
+    const bank = t.fx12.banks[i as BankIndex]!;
+    const family = BANK_FAMILY[i]!;
+    const legacySelected = bank.selectedAlgorithm === 0;
+    const alg = bank.algorithms[bank.selectedAlgorithm]!;
+    fx[family] = {
+      ...fx[family],
+      momentary: legacySelected && bank.momentary,
+      latched: legacySelected && bank.latched,
+      // Macro 0..1 drives the legacy 1..4 preset table with no second selector.
+      variation: (Math.min(4, Math.max(1, Math.round(alg.macroAmount * 3) + 1)) as FxSlotState["variation"]),
+      rejected: alg.rejected,
+      arming: alg.arming,
+    };
+  });
+  return { ...t, fx };
+}
+
 
 export function initialStemPerformance(): StemPerformanceState {
   return {
