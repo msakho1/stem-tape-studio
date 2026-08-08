@@ -60,7 +60,14 @@ class TapeProcessor extends AudioWorkletProcessor {
     this.expectedNextFrame = -1;
     this.forceErrorAt = -1;
     this.disposed = false;
-    this.headOffsets = null; // capability placeholder, disabled by default
+    /**
+     * Heads mode: four virtual heads reading THIS SAME PCM at fractional
+     * offsets of the active cycle. Null when heads mode is off. No PCM copy is
+     * ever made; reverse is a negative read step.
+     * @type {null | {cycleStart:number, cycleFrames:number, heads:{offset:number,level:number,muted:boolean,reverse:boolean}[]}}
+     */
+    this.heads = null;
+
 
     this.port.onmessage = (e) => this.onMessage(e.data);
   }
@@ -118,6 +125,43 @@ class TapeProcessor extends AudioWorkletProcessor {
         this.reply(msg.seq, "applied", "poll", currentFrame, this.readPosition);
         return;
       }
+      case "setHeads": {
+        // Immediate: heads config is a routing layer, not a transport change.
+        this.heads = msg.heads
+          ? {
+              cycleStart: Number(msg.cycleStart) || 0,
+              cycleFrames: Math.max(1, Number(msg.cycleFrames) || 1),
+              heads: msg.heads,
+            }
+          : null;
+        this.reply(
+          msg.seq,
+          "applied",
+          this.heads ? `heads on — 4 pointers over one PCM, cycle ${this.heads.cycleFrames} frames` : "heads off — single pointer restored",
+          currentFrame,
+          this.readPosition,
+        );
+        return;
+      }
+      case "readRange": {
+        // Copy a source range out for PRINT rendering. Copies are made here
+        // because the PCM itself is owned by this processor after adopt.
+        const start = Math.max(0, Math.round(Number(msg.start) || 0));
+        const len = Math.max(0, Math.round(Number(msg.frames) || 0));
+        const chans = [];
+        for (let c = 0; c < this.channels.length; c++) {
+          const src = this.channels[c];
+          const dst = new Float32Array(len);
+          for (let i = 0; i < len; i++) dst[i] = start + i < src.length ? src[start + i] : 0;
+          chans.push(dst.buffer);
+        }
+        this.port.postMessage(
+          { seq: msg.seq, status: "applied", detail: `read ${len} frames from ${start}`, channels: chans, frames: len, trackId: this.trackId, readAtContextFrame: currentFrame },
+          chans,
+        );
+        return;
+      }
+
       case "dispose": {
         this.disposed = true;
         this.playing = false;
@@ -302,10 +346,33 @@ class TapeProcessor extends AudioWorkletProcessor {
 
       for (let c = 0; c < outChannels; c++) {
         const src = this.channels[srcChannels === 1 ? 0 : Math.min(c, srcChannels - 1)];
-        let v = this.sampleAt(src, this.readPosition) * a;
-        if (b > 0) v += this.sampleAt(src, tailPos) * b;
+        let v;
+        if (this.heads) {
+          // Four heads, one PCM. Every head position is DERIVED from this
+          // block's readPosition, so no head can accumulate drift and the
+          // underlying pointer stays phase-correct when heads mode exits.
+          const cf = this.heads.cycleFrames;
+          const cs = this.heads.cycleStart;
+          let phase = (this.readPosition - cs) % cf;
+          if (phase < 0) phase += cf;
+          v = 0;
+          for (let h = 0; h < this.heads.heads.length; h++) {
+            const hd = this.heads.heads[h];
+            if (hd.muted || hd.level <= 0) continue;
+            const off = hd.offset * cf;
+            let p = hd.reverse ? (off - phase) % cf : (off + phase) % cf;
+            if (p < 0) p += cf;
+            v += this.sampleAt(src, cs + p) * hd.level;
+          }
+          if (v > 1) v = 1;
+          else if (v < -1) v = -1;
+        } else {
+          v = this.sampleAt(src, this.readPosition) * a;
+          if (b > 0) v += this.sampleAt(src, tailPos) * b;
+        }
         out[c][i] = v;
       }
+
 
       this.readPosition += this.rate * this.rateScale * this.direction;
 

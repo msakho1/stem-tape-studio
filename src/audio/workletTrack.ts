@@ -253,6 +253,23 @@ export class WorkletTrack {
     return this.send({ type: "poll", seq: this.nextSeq() });
   }
 
+  /** Heads routing layer. `null` restores the single pointer, phase intact. */
+  async setHeads(
+    heads: { offset: number; level: number; muted: boolean; reverse: boolean }[] | null,
+    cycleStart: number,
+    cycleFrames: number,
+  ): Promise<WorkletAck> {
+    return this.send({ type: "setHeads", seq: this.nextSeq(), heads, cycleStart, cycleFrames });
+  }
+
+  /** Copy one source range out of the processor (PRINT reads it this way). */
+  async readRange(start: number, frames: number): Promise<{ ok: boolean; channels: Float32Array[]; detail: string }> {
+    const ack = await this.send({ type: "readRange", seq: this.nextSeq(), start, frames });
+    if (ack.status !== "applied" || !ack.channels) return { ok: false, channels: [], detail: ack.detail };
+    return { ok: true, channels: ack.channels.map((b) => new Float32Array(b)), detail: ack.detail };
+  }
+
+
   async forceError(inFrames = 0): Promise<WorkletAck> {
     return this.send({ type: "__forceError", seq: this.nextSeq(), inFrames });
   }

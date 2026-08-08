@@ -40,7 +40,16 @@ export interface LedState {
 
 export type LedFrame = Record<LedId, LedState>;
 
-export type TrackContent = "empty" | "armed" | "recording" | "loaded" | "muted" | "printing";
+export type TrackContent =
+  | "empty"
+  | "armed"
+  | "recording"
+  | "overdubbing"
+  | "finalizing"
+  | "failed"
+  | "loaded"
+  | "muted"
+  | "printing";
 
 export interface TrackSlice {
   content: TrackContent;
@@ -49,7 +58,10 @@ export interface TrackSlice {
   /** Heads mode: per-head scrub position 0..1. */
   headPos: number;
   headReverse: boolean;
+  headMuted: boolean;
+  headLevel: number;
 }
+
 
 export interface FiredRow {
   id: number;
@@ -79,6 +91,19 @@ export interface SurfaceState {
   filter: { mode: "off" | "lp" | "hp"; amount: number };
   loopMode: "fixed" | "variable";
   headsMode: boolean;
+  /** Track the four heads are reading while heads mode is active. */
+  headsSource: number | null;
+  /** Track currently being PRINTed, and how far the render has got. */
+  headsPrint: { track: number; phase: "rendering" | "finalising" | "failed" } | null;
+  /** Mirrors the engine: audio input is enabled only after an explicit grant. */
+  inputEnabled: boolean;
+  /**
+   * A Track hold that arrived BEFORE input was enabled. The panel opens, the
+   * target is remembered, and getUserMedia is called only when the user taps
+   * Enable Input (§2.2). Cleared on denial, cancellation or drawer close.
+   */
+  pendingInputTrack: number | null;
+
   lights: "full" | "dim";
   song: number;
   bank: number;
@@ -173,8 +198,9 @@ function emit(
 let firedSeq = 0;
 
 function track(stem: TrackSlice["stem"], volume: number): TrackSlice {
-  return { content: "loaded", volume, stem, headPos: 0, headReverse: false };
+  return { content: "loaded", volume, stem, headPos: 0, headReverse: false, headMuted: false, headLevel: 0.8 };
 }
+
 
 export function initialSurfaceState(): SurfaceState {
   return {
@@ -196,6 +222,11 @@ export function initialSurfaceState(): SurfaceState {
     filter: { mode: "off", amount: 0 },
     loopMode: "variable",
     headsMode: false,
+    headsSource: null,
+    headsPrint: null,
+    inputEnabled: false,
+    pendingInputTrack: null,
+
     lights: "full",
     song: 0,
     bank: 0,
@@ -310,18 +341,19 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
       if (c === "play") {
         if (fn && g.count === 3) {
           const on = !next.headsMode;
-          next = { ...next, headsMode: on };
+          // The completed triple-tap has already rolled back the ×1 transport
+          // toggle and the ×2 1.0× snap above, so no lower-precedence Play
+          // command survives into heads entry/exit.
+          const tracks = [...next.tracks] as SurfaceState["tracks"];
+          for (let i = 0; i < 4; i++)
+            tracks[i] = { ...tracks[i]!, headPos: i * 0.25, headReverse: false, headMuted: false, headLevel: 0.8 };
+          next = { ...next, headsMode: on, tracks, headsPrint: null, headsSource: on ? next.headsSource : null };
+          next = emit(next, on ? "heads.enter" : "heads.exit", {}, { rowId: "play.heads", t });
           next = fire(next, "play.heads", `heads mode ${on ? "on" : "off"}`, t);
-          next = fire(next, "heads.toggle", `heads ${on ? "on" : "off"}`, t);
-          if (on) {
-            // 3 tracks replay the source, a quarter apart.
-            const tracks = [...next.tracks] as SurfaceState["tracks"];
-            for (let i = 1; i < 4; i++) tracks[i] = { ...tracks[i]!, headPos: i * 0.25, headReverse: false };
-            next = { ...next, tracks };
-            next = fire(next, "heads.replay", "heads 2·3·4 replay the source at 0.25 · 0.50 · 0.75", t);
-          }
+          if (on) next = fire(next, "heads.replay", "heads 1·2·3·4 read the source at 0 · 0.25 · 0.50 · 0.75 of the audible cycle", t);
           return next;
         }
+
         if (fn && g.count === 2) {
           next = { ...next, speed: 1 };
           return fire(emit(next, "rate.set", { rate: 1 }, { rowId: "play.snap", t }), "play.snap", "speed snapped to 1.000×", t);
@@ -377,6 +409,21 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
         const i = trackIndexOf(c);
         const slice = next.tracks[i]!;
 
+        // Heads mappings claim Track gestures before recording, mute/delete and
+        // bank navigation (§3.3). The FX overlay still wins for FX buttons.
+        if (next.headsMode && !next.perf.fxOverlay) {
+          if (g.count === 2) {
+            const rev = !slice.headReverse;
+            next = { ...next, tracks: setTrack(next, i, { headReverse: rev }) };
+            next = emit(next, "heads.reverse", { head: i, reverse: rev }, { rowId: "heads.reverse", t });
+            return fire(next, "heads.reverse", `head ${i + 1} → ${rev ? "reverse" : "forward"}`, t);
+          }
+          const muted = !slice.headMuted;
+          next = { ...next, tracks: setTrack(next, i, { headMuted: muted }) };
+          next = emit(next, "heads.mute", { head: i, muted }, { rowId: "heads.mute", t });
+          return fire(next, "heads.mute", `head ${i + 1} ${muted ? "muted" : "unmuted"}`, t);
+        }
+
         if (fn) {
           // FN + track = banks: jump · tap again = next song
           if (g.count === 1) {
@@ -390,33 +437,64 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
           return fire(next, "track.bank", `tap again → next song (${song + 1}/16) — transport stopped, waiting for PLAY`, t);
         }
 
-        if (g.count === 2) {
-          if (slice.content === "loaded" || slice.content === "recording") {
-            // Phase 6: double-tap on recorded content is a non-destructive
-            // undo of the newest overdub pass, never a delete.
-            next = { ...next, activeTrack: i };
-            next = emit(next, "rec.undoPass", { track: i }, { rowId: "rec.undo.doubleTap", t });
-            return fire(next, "rec.undoPass", `track ${i + 1} — last overdub pass undone (redo available)`, t);
-          }
-          next = { ...next, tracks: setTrack(next, i, { content: "empty" }), activeTrack: i };
-          // Recoverable trash: the surface loses the track immediately (gesture
-          // fidelity) but the engine keeps the buffer and the blob survives.
-          next = emit(next, "track.delete", { track: i }, { rowId: "track.delete", t });
-          return fire(next, "track.delete", `track ${i + 1} deleted → recoverable trash (undo available)`, t);
-        }
         next = { ...next, activeTrack: i };
-        if (slice.content === "recording" || slice.content === "armed") {
-          next = { ...next, tracks: setTrack(next, i, { content: "loaded" }) };
-          next = emit(next, "rec.tap", { track: i }, { rowId: "rec.tap.stop", t });
-          return fire(next, "track.tap", `track ${i + 1} — stop the take`, t);
-        }
-        if (slice.content === "empty") return fire(next, "track.tap", `track ${i + 1} empty — nothing to stop or mute`, t);
 
-        const muted = slice.content === "muted";
-        next = { ...next, tracks: setTrack(next, i, { content: muted ? "loaded" : "muted" }) };
-        next = emit(next, muted ? "track.unmute" : "track.mute", { track: i }, { rowId: "track.tap", t });
-        return fire(next, "track.tap", `track ${i + 1} ${muted ? "unmute" : "mute"}`, t);
+        // ---- approved bare-Track state table (§2.1) -------------------------
+        if (g.count === 2) {
+          switch (slice.content) {
+            case "loaded":
+            case "muted": {
+              // Recoverable delete: the surface drops the track immediately,
+              // the engine keeps the buffer and the blob survives in trash.
+              next = { ...next, tracks: setTrack(next, i, { content: "empty" }) };
+              next = emit(next, "track.delete", { track: i }, { rowId: "track.delete", t });
+              return fire(next, "track.delete", `track ${i + 1} deleted → recoverable trash (undo available)`, t);
+            }
+            case "armed": {
+              next = { ...next, tracks: setTrack(next, i, { content: "empty" }), pendingInputTrack: null };
+              next = emit(next, "rec.tap", { track: i, cancel: true }, { rowId: "rec.cancel", t });
+              return fire(next, "rec.cancel", `track ${i + 1} arm cancelled — never a delete while armed`, t);
+            }
+            case "recording":
+            case "overdubbing": {
+              next = emit(next, "rec.tap", { track: i }, { rowId: "rec.tap.stop", t });
+              return fire(next, "rec.tap.stop", `track ${i + 1} — double-tap stops the take, it never deletes`, t);
+            }
+            default:
+              return fire(next, "track.tap", `track ${i + 1} is ${slice.content} — double-tap never deletes in this state`, t);
+          }
+        }
+
+        switch (slice.content) {
+          case "empty":
+            return fire(next, "track.tap", `track ${i + 1} empty — nothing to stop or mute`, t);
+          case "armed": {
+            next = { ...next, tracks: setTrack(next, i, { content: "empty" }), pendingInputTrack: null };
+            next = emit(next, "rec.tap", { track: i, cancel: true }, { rowId: "rec.cancel", t });
+            return fire(next, "rec.cancel", `track ${i + 1} arm cancelled`, t);
+          }
+          case "recording":
+          case "overdubbing": {
+            next = { ...next, tracks: setTrack(next, i, { content: "finalizing" }) };
+            next = emit(next, "rec.tap", { track: i }, { rowId: "rec.tap.stop", t });
+            return fire(next, "rec.tap.stop", `track ${i + 1} — stop the ${slice.content === "overdubbing" ? "overdub" : "take"}`, t);
+          }
+          case "finalizing":
+          case "printing":
+            return fire(next, "track.tap", `track ${i + 1} is ${slice.content} — status only, no action`, t);
+          case "failed": {
+            next = emit(next, "rec.recover", { track: i }, { rowId: "rec.recover", t });
+            return fire(next, "rec.recover", `track ${i + 1} failed mid-take — opening recovery`, t);
+          }
+          default: {
+            const muted = slice.content === "muted";
+            next = { ...next, tracks: setTrack(next, i, { content: muted ? "loaded" : "muted" }) };
+            next = emit(next, muted ? "track.unmute" : "track.mute", { track: i }, { rowId: "track.tap", t });
+            return fire(next, "track.tap", `track ${i + 1} ${muted ? "unmute" : "mute"}`, t);
+          }
+        }
       }
+
 
       if (c === "rocker-fwd" || c === "rocker-rwd") {
         const dir = c === "rocker-fwd" ? 1 : -1;
@@ -453,12 +531,8 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
         return fire(next, "volume.master", `master → ${masterVolume.toFixed(3)}`, t);
       }
 
-      if (c.startsWith("fader-") && g.count === 2 && next.headsMode) {
-        const i = trackIndexOf(c);
-        const rev = !next.tracks[i]!.headReverse;
-        next = { ...next, tracks: setTrack(next, i, { headReverse: rev }) };
-        return fire(next, "heads.scrub", `head ${i + 1} double-tap → ${rev ? "reverse" : "forward"}`, t);
-      }
+      // Heads reverse is a Track double-tap (§3.3), never a fader double-tap.
+
       return next;
     }
 
@@ -482,15 +556,38 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
         const i = trackIndexOf(c);
         const slice = next.tracks[i]!;
 
-        if (state.headsMode) {
-          const printing = slice.content === "empty";
-          next = { ...next, tracks: setTrack(next, i, { content: printing ? "printing" : slice.content }) };
-          next = emit(next, "heads.print", { track: i, printing }, { rowId: "print.reserved", t });
-          return fire(next, "heads.print", `track ${i + 1} ${printing ? "PRINT" : "tape (loaded)"}`, t);
+        if (state.headsMode && !state.perf.fxOverlay) {
+          // §3.3: a loaded track becomes the heads SOURCE (never an overdub
+          // arm); an empty track is the PRINT target (never a mic request).
+          if (slice.content === "empty") {
+            next = { ...next, tracks: setTrack(next, i, { content: "printing" }), headsPrint: { track: i, phase: "rendering" } };
+            next = emit(next, "heads.print", { track: i }, { rowId: "heads.print", t });
+            return fire(next, "heads.print", `PRINT one heads cycle into empty track ${i + 1}`, t);
+          }
+          next = { ...next, headsSource: i };
+          next = emit(next, "heads.source", { track: i }, { rowId: "heads.source", t });
+          return fire(next, "heads.source", `track ${i + 1} is now the heads source`, t);
         }
+
+        // §2.2: a hold before input exists asks for input, it does not arm.
+        if (!next.inputEnabled) {
+          next = { ...next, pendingInputTrack: i, activeTrack: i };
+          next = emit(next, "rec.requestInput", { track: i }, { rowId: "rec.requestInput", t });
+          return fire(next, "rec.requestInput", `track ${i + 1} wants to record — enable audio input to arm it`, t);
+        }
+
+        if (slice.content === "armed") {
+          next = emit(next, "rec.arm", { track: i, already: true }, { rowId: "rec.arm.hold", t });
+          return fire(next, "rec.arm.hold", `track ${i + 1} is already armed`, t);
+        }
+        if (slice.content === "recording" || slice.content === "overdubbing" || slice.content === "finalizing" || slice.content === "failed") {
+          return fire(next, "track.record", `track ${i + 1} is ${slice.content} — hold does nothing`, t);
+        }
+
+        const overdub = slice.content === "loaded" || slice.content === "muted";
         next = { ...next, tracks: setTrack(next, i, { content: "armed" }), activeTrack: i };
-        next = emit(next, "rec.arm", { track: i }, { rowId: "rec.arm.hold", t });
-        next = fire(next, "track.record", `track ${i + 1} armed — records on your first sound`, t);
+        next = emit(next, "rec.arm", { track: i, overdub }, { rowId: "rec.arm.hold", t });
+        next = fire(next, "track.record", `track ${i + 1} armed — ${overdub ? "overdub" : "first take"} records on your first sound`, t);
         // v2.6 songs.length: takes run to 8:00 · longer with the tape slowed.
         const maxTakeSeconds = 480 / next.speed;
         next = { ...next, maxTakeSeconds };
@@ -505,6 +602,7 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
           t,
         );
       }
+
 
       if ((c === "rocker-fwd" || c === "rocker-rwd") && g.level === "hold") {
         if (fn) return fire({ ...next, chopGlide: true }, "rocker.chop", "hold = glide (chop glides)", t);
@@ -594,9 +692,80 @@ export function releaseControl(state: SurfaceState, control: Control): SurfaceSt
 }
 
 
-/** Fader commit routing per v2.6: FN layer, heads layer, otherwise track volume. */
+// ------------------------------------------------- engine → surface feedback
+//
+// The engine is authoritative for what is audible. These setters are the ONLY
+// way its verdicts reach the surface state, so no handler ever fakes them.
+
+/** Input grant/denial. A grant arms the pending target; a denial clears it. */
+export function setInputEnabled(state: SurfaceState, on: boolean, detail: string): SurfaceState {
+  const t = performance.now();
+  if (!on) {
+    const pending = state.pendingInputTrack;
+    let next: SurfaceState = { ...state, inputEnabled: false, pendingInputTrack: null };
+    if (pending != null) next = { ...next, tracks: setTrack(next, pending, { content: next.tracks[pending]!.content === "armed" ? "empty" : next.tracks[pending]!.content }) };
+    return fire(next, "rec.inputDenied", detail, t);
+  }
+  let next: SurfaceState = { ...state, inputEnabled: true };
+  const pending = state.pendingInputTrack;
+  if (pending != null) {
+    next = { ...next, pendingInputTrack: null, tracks: setTrack(next, pending, { content: "armed" }), activeTrack: pending as TrackIndex };
+    next = emit(next, "rec.arm", { track: pending, pending: true }, { rowId: "rec.arm.hold", t });
+    return fire(next, "rec.arm.hold", `input enabled — the pending hold on track ${pending + 1} armed it`, t);
+  }
+  return fire(next, "rec.inputEnabled", detail, t);
+}
+
+/** Drawer closed, request superseded or input unavailable — honest cancel. */
+export function clearPendingInput(state: SurfaceState, reason: string): SurfaceState {
+  if (state.pendingInputTrack == null) return state;
+  const i = state.pendingInputTrack;
+  const next = emit({ ...state, pendingInputTrack: null }, "rec.cancelInput", { track: i }, { rowId: "rec.cancelInput" });
+  return fire(next, "rec.cancelInput", `track ${i + 1} input request cancelled — ${reason}`, performance.now());
+}
+
+export function setTrackContent(state: SurfaceState, i: number, content: TrackContent): SurfaceState {
+  return { ...state, tracks: setTrack(state, i, { content }) };
+}
+
+/** Heads/PRINT verdicts from the engine (entry rejection, print phases). */
+export function applyHeadsFeedback(
+  state: SurfaceState,
+  patch: { active?: boolean; source?: number | null; print?: SurfaceState["headsPrint"]; printedTrack?: number },
+): SurfaceState {
+  let next: SurfaceState = { ...state };
+  if (patch.active !== undefined) next = { ...next, headsMode: patch.active };
+  if (patch.source !== undefined) next = { ...next, headsSource: patch.source };
+  if (patch.print !== undefined) next = { ...next, headsPrint: patch.print };
+  if (patch.printedTrack !== undefined) next = { ...next, tracks: setTrack(next, patch.printedTrack, { content: "loaded" }) };
+  return next;
+}
+
+/** Fader commit routing: heads layer, FN layer, otherwise track volume. */
+
 export function applyFader(state: SurfaceState, index: number, value: number): SurfaceState {
   const t = performance.now();
+  // Heads claims the fader layer before the v2.6 FN window/filter rows (§3.3).
+  if (state.headsMode && !state.perf.fxOverlay) {
+    if (state.functionHeld) {
+      // ABSOLUTE scrub: the head jumps to the fader position, deliberately.
+      const next = emit(
+        { ...state, tracks: setTrack(state, index, { headPos: value }) },
+        "heads.scrub",
+        { head: index, position: value },
+        { rowId: "heads.scrub", t },
+      );
+      return fire(next, "heads.scrub", `head ${index + 1} scrubbed to ${(value * 100).toFixed(1)}% of the cycle`, t);
+    }
+    // Releasing FUNCTION returns faders to level control with the STORED level.
+    const next = emit(
+      { ...state, tracks: setTrack(state, index, { headLevel: value }) },
+      "heads.level",
+      { head: index, level: value },
+      { rowId: "heads.level", t },
+    );
+    return fire(next, "heads.level", `head ${index + 1} level → ${value.toFixed(3)}`, t);
+  }
   if (state.functionHeld) {
     if (index === 3) {
       const mode = value > 0.58 ? "hp" : value < 0.42 ? "lp" : "off";
@@ -612,14 +781,7 @@ export function applyFader(state: SurfaceState, index: number, value: number): S
       ? fire(fired, "fader.windowReverse", "start past end → window plays in reverse", t)
       : fired;
   }
-  if (state.headsMode) {
-    return fire(
-      { ...state, tracks: setTrack(state, index, { headPos: value }) },
-      "fader.headScrub",
-      `head ${index + 1} scrub → ${value.toFixed(3)}`,
-      t,
-    );
-  }
+
   // Commit value MUST equal the last audible preview value pushed by the
   // continuous control bus during the drag — same number, no re-derivation.
   return fire(
@@ -718,23 +880,31 @@ export function applyPerfIntent(state: SurfaceState, intent: PerfIntent): Surfac
 }
 
 /**
- * Phase 5C LED priority table (corrections 9 and 10). No handler writes LEDs:
- * every frame is derived here, and the winner always states why it won.
+ * LED priority table (Phase 5C corrections 9/10, extended for Phase 6 §5).
+ * No handler writes LEDs: every frame is derived here and the winner always
+ * states why it won.
  *
- *   error > recording (Phase 6 reserved) > momentary FX > latched FX >
- *   soloed > unlinked > active > muted > base
+ *   error > failed print/take > printing/finalising > recording > overdubbing >
+ *   armed > momentary FX > latched FX > heads source/head state > soloed >
+ *   unlinked > active > muted > base
  */
 export const LED_PRIORITY = {
   error: 98,
+  failedPrint: 95,
+  printing: 93,
   recording: 90,
+  overdubbing: 89,
+  armed: 88,
   momentaryFx: 82,
   latchedFx: 78,
+  heads: 76,
   soloed: 74,
   unlinked: 70,
   active: 66,
   muted: 30,
   base: 10,
 } as const;
+
 
 /**
  * LED arbitration — v2.6 LIGHTS block is the base layer:
@@ -768,23 +938,49 @@ export function deriveLeds(state: SurfaceState): LedFrame {
       } else {
         frame[id] = { pattern: "faint", reason: "stem idle (overlay)", priority: LED_PRIORITY.base };
       }
+    } else if (track.content === "failed") {
+      frame[id] = { pattern: "blink", reason: "take/print failed — tap to open recovery", priority: LED_PRIORITY.failedPrint };
+    } else if (state.headsPrint?.track === i) {
+      frame[id] =
+        state.headsPrint.phase === "failed"
+          ? { pattern: "blink", reason: "PRINT failed — target left empty, heads still audible", priority: LED_PRIORITY.failedPrint }
+          : state.headsPrint.phase === "finalising"
+            ? { pattern: "chase", reason: "PRINT finalising — durable commit in progress", priority: LED_PRIORITY.printing }
+            : { pattern: "blink", reason: "PRINT accepted — rendering one heads cycle", priority: LED_PRIORITY.printing };
     } else if (state.pressed.includes(control)) {
       frame[id] = { pattern: "solid", reason: "button held (input feedback)", priority: 95 };
     } else if (track.content === "printing") {
-      frame[id] = { pattern: "chase", reason: "PRINT (heads mode, empty track)", priority: 85 };
+      frame[id] = { pattern: "blink", reason: "PRINT target (heads mode, empty track)", priority: LED_PRIORITY.printing };
     } else if (track.content === "recording") {
-      frame[id] = { pattern: "solid", reason: "recording", priority: 80 };
+      frame[id] = { pattern: "solid", reason: "recording", priority: LED_PRIORITY.recording };
+    } else if (track.content === "overdubbing") {
+      frame[id] = { pattern: "pulse", reason: "overdubbing onto existing content", priority: LED_PRIORITY.overdubbing };
+    } else if (track.content === "finalizing") {
+      frame[id] = { pattern: "chase", reason: "finalising the take — writing durable chunks", priority: LED_PRIORITY.printing };
+    } else if (state.pendingInputTrack === i) {
+      frame[id] = { pattern: "breathe", reason: "waiting for you to enable audio input before arming", priority: LED_PRIORITY.armed };
     } else if (track.content === "armed") {
-      frame[id] = { pattern: "breathe", reason: "armed — record starts on your first sound (v2.6)", priority: 70 };
+      frame[id] = { pattern: "breathe", reason: "armed — record starts on your first sound (v2.6)", priority: LED_PRIORITY.armed };
+    } else if (state.headsMode) {
+      // Heads language (§5): full-bright chase over loaded content, faint chase
+      // for an empty (printable) head, dark-but-distinguishable when muted.
+      const isSource = state.headsSource === i;
+      const loaded = track.content !== "empty";
+      const dir = track.headReverse ? "reversed chase" : "chase";
+      if (isSource) frame[id] = { pattern: "solid", reason: `heads source — track ${i + 1} feeds all four heads`, priority: LED_PRIORITY.heads + 1 };
+      else if (track.headMuted) frame[id] = { pattern: "faint", reason: `head ${i + 1} muted (still a head, not an empty slot)`, priority: LED_PRIORITY.heads - 2 };
+      else if (loaded) frame[id] = { pattern: "chase", reason: `head ${i + 1} ${dir} over loaded content`, priority: LED_PRIORITY.heads };
+      else frame[id] = { pattern: "faint", reason: `head ${i + 1} hollow — empty track, available as a PRINT target`, priority: LED_PRIORITY.heads - 1 };
     } else if (track.content === "empty") {
       frame[id] = { pattern: "dark", reason: "dark = empty (v2.6)", priority: 0 };
     } else if (track.content === "muted") {
-      frame[id] = { pattern: "faint", reason: "faint = muted content (v2.6)", priority: 10 };
+      frame[id] = { pattern: "faint", reason: "faint = muted content (v2.6)", priority: LED_PRIORITY.muted };
     } else if (state.playing) {
       frame[id] = { pattern: "pulse", reason: "pulse = playing — pulses on its own loop wrap (v2.6)", priority: 20 };
     } else {
-      frame[id] = { pattern: "faint", reason: "loaded, stopped", priority: 10 };
+      frame[id] = { pattern: "faint", reason: "loaded, stopped", priority: LED_PRIORITY.base };
     }
+
   });
 
   // Song row: solid = song · blink = bank (v2.6).

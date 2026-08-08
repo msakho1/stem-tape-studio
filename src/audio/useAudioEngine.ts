@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Ack, AudioCommand } from "./commands";
 import { controlBus } from "./controlBus";
 import { getAudioEngine, type EngineStatus } from "./engine";
+import { installPrintCommit } from "./print";
+
 
 /**
  * Drains the reducer's ordered command stream into the AudioEngine by
@@ -21,8 +23,11 @@ export function useAudioEngine(commands: AudioCommand[]) {
   // tier is adopted here. Resolving during render would mismatch hydration.
   useEffect(() => {
     engine.resolveBudget();
+    // PRINT persists through the same single-decode ingest path as a user file.
+    installPrintCommit(engine);
     setStatus(engine.status());
   }, [engine]);
+
 
   // --- ordered command drain (never a snapshot diff) -----------------------
 
@@ -52,9 +57,13 @@ export function useAudioEngine(commands: AudioCommand[]) {
   // --- continuous control bus → AudioParam --------------------------------
   useEffect(() => {
     const off = controlBus.subscribe((e) => {
-      if (e.channel !== "fader") return; // window / heads land in Phase 5
+      if (e.channel !== "fader") return;
+      // In heads mode the faders are the head layer: level/scrub arrive as
+      // ordered commands, so the continuous bus must not move the track fader.
+      if (engine.heads.active) return;
       engine.applyTrackGain(e.index as 0 | 1 | 2 | 3, e.value);
     });
+
     return () => {
       off();
     };

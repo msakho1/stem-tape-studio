@@ -38,10 +38,13 @@ export function InputPanel({ engine }: { engine: AudioEngine }) {
       }
       const rec = engine.recording();
       const r = rec ? await rec.enableInput(deviceId) : { ok: false, detail: "engine not ready" };
-      setNote(r.detail);
+      // §2.2: a track held before permission existed arms itself now.
+      const pending = r.ok ? engine.resolvePendingInput() : { ok: false, detail: "" };
+      setNote(pending.ok ? `${r.detail} · ${pending.detail}` : r.detail);
       setBusy(false);
       refresh();
     },
+
     [engine, refresh],
   );
 
@@ -68,8 +71,26 @@ export function InputPanel({ engine }: { engine: AudioEngine }) {
         {snap?.privacy ?? "captured audio is written to this device only — nothing is uploaded"}
       </p>
 
+      {engine.pendingInputTrack != null && !snap?.inputEnabled && (
+        <p className="mt-2 font-mono text-[10px] text-[var(--ink)]" data-testid="rec-pending-input">
+          track {engine.pendingInputTrack + 1} is held for recording — allow the microphone and it arms itself.{" "}
+          <button
+            type="button"
+            className="underline"
+            data-testid="cancel-pending-input"
+            onClick={() => {
+              engine.pendingInputTrack = null;
+              refresh();
+            }}
+          >
+            cancel
+          </button>
+        </p>
+      )}
+
       {/* ---- permission ---- */}
       <div className="mt-3 flex flex-wrap items-center gap-2">
+
         <button
           type="button"
           className="st-btn"
