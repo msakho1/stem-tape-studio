@@ -19,6 +19,9 @@ export interface DeviceSurfaceProps {
   pressed: readonly Control[];
   leds: LedFrame;
   showHitZones: boolean;
+  /** v2.6 lights row: dim / full is global brightness, not a pattern change. */
+  lights?: "full" | "dim";
+
   onControlPointerDown: (control: Control, e: React.PointerEvent) => void;
   onControlPointerMove: (control: Control, e: React.PointerEvent) => void;
   onControlPointerUp: (control: Control, e: React.PointerEvent) => void;
