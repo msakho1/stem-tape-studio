@@ -1,13 +1,12 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
-  clamp01,
   cyToFaderValue,
   faderValueToCy,
   type Control,
-  type TrackIndex,
 } from "@/device/geometry";
 import { GestureEngine, describeGesture, type Gesture, type RawInputEvent } from "@/input/gestures";
-import { deriveLeds, initialSurfaceState, type SurfaceState } from "@/machine/surface";
+import { applyFader, applyGesture, deriveLeds, initialSurfaceState, type SurfaceState } from "@/machine/surface";
+
 
 const KEY_MAP: Record<string, Control> = {
   KeyQ: "rocker-fwd",
