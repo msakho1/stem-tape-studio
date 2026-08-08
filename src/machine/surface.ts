@@ -163,18 +163,34 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
   const fn = state.functionHeld;
   const t = g.t;
 
-  // Power is a v2.6 row: FUNCTION hold. While off, only that row responds.
-  if (state.power === "off") {
-    if (g.type === "holdStart" && g.control === "function" && g.duration === 450) {
-      next = { ...next, power: "on" };
-      return fire(next, "fn.power", "power on", t);
-    }
-    return next;
+  // Power is a v2.6 row: FUNCTION hold. It is armed here and only commits on
+  // FUNCTION release (see releaseControl) — otherwise every FN + X combo, which
+  // necessarily holds FUNCTION past 450 ms, would power the unit down.
+  if (g.type === "holdStart" && g.control === "function" && g.duration === 450) {
+    return { ...next, fnHoldReached: true };
   }
+  // While off, nothing but that row responds.
+  if (state.power === "off") return next;
 
   switch (g.type) {
     case "tap": {
       const c = g.control;
+
+      // Roll back the optimistic ×1 effect before running the ×2 / ×3 row.
+      if (g.count > 1 && state.pendingUndo && state.pendingUndo.control === c) {
+        next = {
+          ...next,
+          tracks: state.pendingUndo.tracks,
+          speed: state.pendingUndo.speed,
+          chopDiv: state.pendingUndo.chopDiv,
+        };
+      } else if (g.count === 1) {
+        next = {
+          ...next,
+          pendingUndo: { control: c, tracks: state.tracks, speed: state.speed, chopDiv: state.chopDiv },
+        };
+      }
+
 
       if (c === "play") {
         if (fn && g.count === 3) {
