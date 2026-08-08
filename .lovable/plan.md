@@ -1,105 +1,120 @@
-# Stem Tape — Performance Expansion (Multi-Fader, Tape Inertia, 12 FX)
+# Transport, Cue, Varispeed SOS and Control-Conflict — Investigation + Implementation Plan
 
-## A. Audited current state (verified reads)
+## 1. Reproduced regression: Play stops producing audio
 
-Single-fader cause — `src/device/useDeviceSurface.ts`:
-- L84 `const dragRef = useRef<{ index; pointerId; channel } | null>(null)` — one singleton drag session.
-- L86 `pendingCyRef` holds a single `{index, cy, value}`; L245-265 the shared rAF flushes only that one entry.
-- L309 `if (!drag || drag.pointerId !== e.pointerId) return;` — a second pointer's moves are dropped.
-- L284 a second pointer-down overwrites `dragRef`, stealing ownership from the first finger.
-- L324/L348 `endDrag`/`cancelDrag` take no pointer id, so any up/cancel ends whatever drag is current.
-- L239-243 `resolveChannel()` reads a mutable `layerRef`; correct per-gesture, but there is no rebase when a modifier changes mid-drag.
-- `src/audio/controlBus.ts` is already per-`channel:index` keyed — no change needed to be multi-pointer safe.
-- `src/styles.css` L179/L194 already scope `touch-action: none` to the surface.
+Reproduced in a headless Chromium against the live dev build (demo project, Node engine, desktop pointer): after the first Play → Stop cycle the transport readout stays at `0:01 / 0:09` and the **rate readout reads `0.00×` on every subsequent tap**. The gesture layer is innocent — the surface log shows exactly one `tap ×1 · play` per tap, no duplicated or missing gesture.
 
-Transport — `src/audio/engine.ts` L1705-1743: `transport.play` calls `startAll(offset)` (shared `startAt = currentTime + LOOKAHEAD_S`, `timeline.anchor`), `transport.stop` anchors and hard `stopSources()`. No ramp on either. Rate ramps already exist and are correct: `rate.set` L1805-1842 uses `glideCurve` + `timeline.glideTo` with the exact exponential integral (`src/audio/glide.ts` `integratedDistance`), and forwards `setRate {rampFrames}` to the worklet.
+### Root cause (confirmed by code path, matches the observed `0.00×`)
 
-FX — `src/machine/stemPerformance.ts`: `FX_FAMILIES = [filter, echo, reverb, beatRepeat]`, `FxSlotState { momentary, latched, variation: 1|2|3|4, rejected, arming }`, `STEM_TAPE_SCHEMA_VERSION = 3`. `src/audio/fx/rack.ts` has a permanent rack input and 4 fixed variation tables. `src/machine/chordArbiter.ts` L249-268 currently maps volume ± inside the overlay to `fx.variation ±1` while an FX track is held (claims the track at L174 so no master-gain leak) — this is the system being superseded.
+The wind-down leaves the tape's *musical* rate destroyed.
 
-## B. Gesture / arbitration conflict matrix (new rows)
+- `src/audio/engine.ts:1828-1845` `beginWind()` reads the target from `this.timeline.targetRate()`, and builds a wind-down whose `to` is `INERTIA_MIN_RATE` (≈0).
+- `src/audio/engine.ts:1950-1962` the wind-down completion timer calls `this.timeline.endInertia(t, wind.to)` — i.e. it settles the timeline on **0×**, not on the musical rate.
+- `src/audio/tape.ts:131-136` `endInertia()` assigns that value to the timeline's constant `rate`. The 1.0× the user was playing at is now gone from state.
+- Next Play (`engine.ts:1887-1926`) calls `beginWind("windUp")`, which reads `targetRate()` → ≈0, so it schedules a ramp from ≈0 **to ≈0**. Sources start, but at zero playback rate: silent, playhead frozen, UI shows `0.00×`. Only a further stop/play cycle (which can short-circuit `beginWind` via the `seg.durationS <= 0.011` guard at `engine.ts:1841`) produces audible playback — this is exactly the "second tap works" symptom.
 
-| Context | Volume − / + | Track 1-4 | FUNCTION + Track | Faders |
-|---|---|---|---|---|
-| Base | master gain | v2.6 rows | v2.6 rows | stem level |
-| FX overlay open, no bank selected | short chord toggles overlay; single tap = bank-less no-op (claimed, no master gain) | tap selects bank | — | stem level |
-| FX overlay, bank selected | short tap cycles algorithm (+ fwd, − back); hold = macro ±; claimed before dispatch | tap re-selects; hold = momentary | latch/unlatch | stem level |
-| Heads + overlay | as above | as above | latch | head level |
-| Heads + FUNCTION | — | — | — | head scrub |
+`TapeTimeline.musicalRate()` (`src/audio/tape.ts:106-108`) exists precisely for this and is never called.
 
-Arbiter precedence insert: new "FX bank volume" claim sits above base master-volume, below the long Volume−+Volume+ system chord (duration arbitration unchanged) and below overlay toggle. Claims happen on pointer-down via `claim()`, so no command is emitted then rolled back.
+Contributing/secondary defects found on the same path, to be fixed together:
 
-## C. Workstream 1 — true multi-fader
+- `engine.ts:1892` Play calls `cancelWind()`, which only clears the timer (`engine.ts:1816-1822`). A Play during an in-flight wind-down therefore skips the deferred `stopSources()` and the `transportGain` restore at `engine.ts:1962`, leaving a scheduled ramp-to-zero and orphaned sources.
+- `engine.ts:1889` rejects Play whenever `ctx.state !== "running"`, but `useAudioEngine.ts:60` only unlocks when `!engine.ready`. A suspended context that was previously running is rejected instead of resumed → a second tap is required after backgrounding.
+- There is no `cued` phase; `transport.restart` (`engine.ts:1973`) starts playback immediately, so Play-hold is a restart, not a cue.
 
-`src/device/useDeviceSurface.ts` replaces the singleton with:
-```ts
-interface FaderDragSession { pointerId: number; faderIndex: 0|1|2|3; startUserY: number;
-  startValue: number; lastPreviewValue: number; channel: ContinuousChannel; grabOffset: number }
-const pointerToDrag = new Map<number, FaderDragSession>();
-const faderToPointer = new Map<number, number>();
-const pendingPreviews = new Map<number, { cy: number; value: number }>();
-```
-- Down: reject if `faderToPointer.has(index)` (first pointer untouched); else create session, send `phase:"start"`.
-- Move: look up by `e.pointerId` only; write into `pendingPreviews`.
-- One shared rAF drains the whole map: all cap `cy` writes, then all `controlBus.send` previews tagged with a single `batchFrame` id so the worklet can apply them on one shared future audio frame (`workletProtocol` gains an optional `applyAtContextFrame` batch stamp for fader/level/scrub messages).
-- Up: commit only that session (`dispatch faderCommit` with the exact `lastPreviewValue`). Cancel/lostpointercapture/blur: reconcile only that fader; `releaseAll` on blur iterates sessions individually.
-- Modifier change mid-drag: sessions keep their claimed channel; if a session must rebase (mode switch), store `grabOffset = currentTargetValue - pointerValue` and use pickup semantics so nothing jumps.
-- Faders stay out of tap/hold/chord (`isContinuousControl` unchanged); no React state touched during drag.
+### Fixes
 
-Desktop: `Shift+click` on a cap toggles group membership (`faderGroup: Set<index>` in a ref, mirrored to a non-drag React state for the highlight ring only). Dragging a member moves all members by the same delta, clamped per-fader without re-scaling others. Keyboard (current map uses Q/A/Space/F/-/=/1-4): add `R/F`… conflicts with F=function, so use **Y/H, U/J, I/K, O/L** (raise/lower faders 1-4), all chordable via a held-keys set driven by one rAF ramp. Diagnostics label the source as `touch-multipointer` vs `mouse-group` vs `keyboard`.
+1. `endInertia` on wind-down settles on the **musical** rate, and the transport phase carries whether the tape is stopped; `beginWind("windUp")` targets `timeline.musicalRate()`.
+2. `cancelWind()` becomes `settleWind()`: it runs the pending completion work immediately (sources, envelope, phase) before the new command, so a reversal rebases from real state.
+3. Play resumes a suspended context inline (`await ctx.resume()`) and then executes the same command; the hook stops treating `ready` as the only unlock trigger.
+4. Explicit phase machine in the engine, single source of truth:
+   `stopped → cued → windingUp → playing → windingDown → stopped`, with a reversal edge windingDown → windingUp and windingUp → windingDown.
+5. Bare Play dispatches on tap count 1 with no multi-tap wait (already true at `surface.ts:369`) — add a guard so FN-qualified Play multi-taps can never reach the bare branch, and assert hold/cancel suppression.
 
-## D. Workstream 2 — tape inertia
+### Regression test
 
-New `src/audio/inertia.ts`: presets `tight (180/300 ms)`, `classic (300/450 ms)`, `slow (600/900 ms)`; curve = finite sampled exponential ending exactly on target (reuse `sampleCurve`/`glideCurve` style), plus `integratedDistanceInertia()` so `TapeTimeline` advances on the same curve the audio uses.
-- `TapeTimeline` gains an `inertiaSegment` variant of the existing glide segment (finite duration, exact endpoint) so `positionAt` and `timeAtPosition` stay correct; seam recalculation already keys off `seamGeneration` — bump it on every inertia start/stop.
-- `transport.play`: schedule sources at rate ≈0 at the shared `startAt`, then apply the wind-up curve to `playbackRate` (node engine) or send `setRate {rampFrames, curve:"inertia"}` (worklet). All linked stems get the identical `startAt` and identical curve array.
-- `transport.stop`: apply wind-down curve, then a 8 ms click-free fade and `stopSources()` at the curve end; ack `completed` only when the transition is accepted/scheduled.
-- Reversal: Play during wind-down and Stop during wind-up read the instantaneous rate from the timeline and start a new curve from it — no source respawn, so rapid alternation cannot duplicate sources or strand state.
-- Exclusions (no inertia, instant rate): grid punch, recording onset, loop seams, relink, beat-aligned starts, internal source handoff, worklet migration — gated by an explicit `{ inertia: false }` flag on the internal start/stop path, defaulted off for those callers.
-- LED arbiter gains transport phases `winding-up | playing | winding-down | stopped`.
-- Worklet is the reference implementation; node fallback uses `setValueCurveAtTime` on `playbackRate` and is audited against the same thresholds — if it cannot hold them it is reported in diagnostics as degraded, not silently wrong.
-- Optional motor/hiss layer: designed, default **off**, locally generated.
+Deterministic engine-level harness: 100 Play/Stop cycles asserting one transition per tap, `requestedPlaying`, phase, source count, timeline rate and position after each; repeated for Node, Worklet, FX overlay open, Heads on, suspended context. Plus a browser fixture that reads engine truth after each tap (rate ≠ 0, position advancing).
 
-## E. Workstream 3 — twelve FX
+## 2. True stop-and-cue
 
-Banks (track button 1-4): TONE = Filter / Isolator / Dirt-Crusher; MOTION = Tempo Echo / Pitch Echo / Granular Scatter; SPACE = Reverb / Shimmer / Spectral Freeze; RHYTHM = Beat Repeat / Rhythmic Gate / Pump. No Tape Stop. Tape Brake only as an optional swap for Pump if requested.
+New semantic command `transport.cue` (`stopAndCue`), distinct from `transport.restart` (kept, re-bound):
 
-State (`src/machine/stemPerformance.ts`, schema → 4):
-```ts
-interface FxBankState { selectedAlgorithm: 0|1|2; macroAmount: number; momentary: boolean; latched: boolean;
-  rejected: string | null; arming: boolean }
-interface StemFxState { banks: [FxBankState,FxBankState,FxBankState,FxBankState]; selectedBank: 0|1|2|3|null }
-```
-Migration from v3: `filter/echo/reverb/beatRepeat` → bank N algorithm 0, `latched` preserved, old `variation 1..4` mapped to that algorithm's macro default (variation semantics retire; the value is kept in `legacyVariation` for one version so nothing is silently lost). `momentary`, `fxOverlay`, `selectedBank` never persist. New algorithms get safe default macros.
+- Bare Play **hold** → stop all targeted stems, wind down, anchor every stem to song frame 0, phase `cued`, grid phase reset. No playback on release.
+- Next single Play tap starts all four stems on **one** scheduled context frame.
+- Link/unlink, faders, mutes and FX state untouched. Rejected during recording/stopping/finalising.
+- Diagnostics: `cued @ frame 0`; LEDs distinguish cued (slow pulse) from stopped (dark).
 
-Commands: `fx.bank.select`, `fx.algorithm.cycle {dir}`, `fx.macro {dir|value}`, existing `fx.momentary.start/end`, `fx.latch` retargeted to bank. `fx.variation` is removed from the arbiter and map after migration — no two competing selection systems.
+### Cue launch profiles
 
-Routing: one rack per stem, unchanged permanent input. Banks are four serial stages between rack input and `faderGain`; each stage is a stable dry/wet crossfade node pair, algorithms lazily constructed on first use and swapped through a `FILTER_FADE_S` complementary-gain crossfade (correlated) so switching is click-free. Heads mixed output enters the same rack input through the existing handoff envelope, so all twelve process Heads audio; Beat Repeat / Scatter / Freeze read from their own bounded ring buffers and never touch head pointers. Freeze captures at the activation frame. Tails persist across overlay close and Heads exit.
+- **Exact** — start at target rate at the scheduled frame; anti-click fade only (2 ms). Audio start frame and outgoing sync/Start share `startFrame`.
+- **Tape pre-roll** — the wind occurs in virtual negative time: the worklet is started at `startFrame − windFrames` with tape position held at 0 and output muted while rate integrates from `INERTIA_MIN_RATE` to target; the integral of the inertia curve is *not* consumed from the song (position clamps to 0 until the wind completes). Audible frame zero and sync Start both land on `startFrame`. Pre-roll duration = preset start time (Classic 300 ms), displayed as a countdown.
 
-Heavy processors (Freeze, Scatter, Shimmer) load individually; a rejection sets `bank.rejected` and leaves every other bank running.
+Both are computable from the existing `inertia.ts` integral; no new DSP.
 
-## F. LED / UI
-Inside the existing arbiter only. Track LEDs = selected bank + momentary/latched; side LEDs = bank activity, temporarily overridden for ~800 ms during cycling to show 1/2/3 lit. Web overlay label shows bank, algorithm, `n/3`, macro. Recording/error/safety keep priority.
+## 3. Varispeed sound-on-sound — current capability: **partial**
 
-## G. Diagnostics
-Pointer→fader table, live pointer count, pending vs committed values, batch frame id, cancel/reconcile log, desktop group membership, inertia phase + instantaneous rate + preset + integrated position error, per-stem selected bank/algorithm/macro for all 16 banks, active instances + lazy state, crossfade events, processor memory, Heads+FX routing state, rejected effects, suppressed base commands, mapping JSON export with all twelve algorithms. Tutorial metadata authored for every new command; no guide built.
+Present: tape-coordinate segment model and exact integrals (`src/audio/input/takes.ts:98-165`), paged take mixer, undo-pass, PRINT, per-track arm.
 
-## H. Sequence and acceptance
-1. **Multi-fader input** — synthetic 2/3/4-pointer drags, opposite directions, crossing paths, random release order, ownership rejection, one cancel with three alive, blur recovery, zero React rerenders during drag, committed == last preview.
-2. **Multi-fader in every layer** — stem levels, head levels, simultaneous head scrub, overlay-open bare faders, pickup on modifier change.
-3. **Desktop group + keyboard** — offsets preserved, clamping isolated, chorded keys, diagnostics distinguish source.
-4. **Tape inertia (worklet)** — shared start frame, drift within existing tolerance, integrated position matches curve, play-during-stop, stop-during-start, rapid alternation, rates above/below 1.0, no discontinuity above threshold, no inertia on grid/record/seams.
-5. **Node-fallback inertia audit** — pass or documented degradation.
-6. **FX state + mapping migration** — cycle order 1→2→3→1 and 1→3→2→1, no master-volume leak, latch/momentary, v3→v4 project migration, persistence across save/reload and song switch.
-7. **Twelve DSP algorithms** — measurable wet/dry delta each, click-free swaps, 4 banks at once per stem, Heads-output processing, pointer immutability for Repeat/Scatter/Freeze, individual heavy-effect rejection, Node↔Worklet parity.
-8. **Regression** — Phase 5/6 suites green, 37/37 v2.6 map satisfied, TypeScript clean, zero console errors, zero user-audio network requests.
+Missing (verified by grep — no production caller):
 
-Real-device checklist: iPhone + iPad four-finger fader drags, Heads scrub with two fingers, inertia audibility at 44.1/48 kHz, Freeze/Scatter CPU under load, memory headroom with 4 stems + 4 active banks; emulator runs labelled as emulation.
+- `RecordingController` writes exactly **one** segment at take start (`recorder.ts:337-345`, `{ kind: "constant", value: currentRate() }`) and never appends a segment afterwards. `finishSegments()` (`recorder.ts:374-378`) only closes the last one.
+- `followRate()` (`recorder.ts:536-553`) has **zero call sites in `engine.ts`** — `rate.set`, glides, inertia, direction change, loop wrap, window/chop change and relink never notify the recorder or the take mixer.
 
-## I. Risks
-Worklet message volume from 4 simultaneous faders (mitigated by one batched frame); FFT Freeze memory on iOS (bounded, rejectable); serial 4-bank chain latency and gain staging (per-bank compensation); inertia interacting with existing seam scheduling (seamGeneration bump on every curve); migration losing variation nuance (legacy field retained).
+So today an overdub stores real-time PCM anchored at the tape position it started from and follows transport only superficially. It is not varispeed SOS.
 
-## J. Blocking questions
-1. Inertia default preset — Classic (300/450 ms) unless you say otherwise.
-2. Macro-hold on Volume ±: should macro changes be per-algorithm or per-bank-shared?
-3. Should the desktop keyboard fader keys (Y/H, U/J, I/K, O/L) be confirmed, or do you want a different cluster?
-4. Tape Brake substitution for Pump — keep Pump as specified?
+### Work
+
+Emit a segment on every event listed in the brief, driven from the engine's authoritative `TapeTimeline` (`rate.set`, glide, inertia, reverse, loop wrap, window/chop, link) and mirror each to the mixer; store each loop pass as its own sublayer; keep capture PCM dry; undo removes the newest pass only; reverse recording stays rejected.
+
+### Objective tests (must pass before the feature is claimed)
+
+440 Hz at 0.5× → ≈880 Hz at 1×; 440 Hz at 2× → ≈220 Hz; glide 0.5→1.5× compared against the analytic integral; 100 loop wraps frame-exact; repeated rate changes mid-take; save/reload reproduces positions; undo newest pass; PRINT one cycle frame-for-frame against the SOS mix.
+
+This is **four-track sequential recording from one armed input**, not four simultaneous inputs.
+
+## 4. Rocker remap and arbitration
+
+New declarative rows (provenance `extension`, replacing the v2.6 `rocker.chop` / `rocker.chopReset` rows at `src/machine/v26map.ts:28-31`):
+
+| Gesture | Command |
+| --- | --- |
+| Rocker fwd/back | `rate.set` ±1 BPM (unchanged) |
+| Rocker double-click | exact semitone (unchanged) |
+| FN + Rocker fwd/back | `transport.scrub` — global four-stem shuttle |
+| Play + Rocker fwd/back | `loop.chop` half/double |
+| Play + Rocker double-click | `loop.chopReset` |
+| Hold Play + Rocker | `loop.chopGlide` |
+| Hold bare Play | `transport.cue` |
+
+Conflicts to resolve in `chordArbiter.ts`: Rocker must claim `play` **before** the Play tap or the Play-hold cue fires (claim-before-dispatch, no rollback); FN + Rocker must suppress chop, FX latch and song navigation; Play + Rocker must never toggle transport. Global scrub moves all four timelines on one shared frame, preserves offsets/link/mutes/Heads, does not mutate loop windows, crossfades in/out, and is rejected while recording.
+
+## 5. Pump silence
+
+Two concrete causes:
+
+1. **Tempo collapse.** `effectiveBpm()` (`engine.ts:1156-1160`) is `baseBpm * |timeline.currentRate()|`, and `|rate| || 1` does not catch the ≈0 left by defect §1 — the LFO is programmed at ~0.01 Hz, i.e. a DC gain, inaudible as a pump. Fix: clamp to the musical rate and never below a floor; keep provisional 120 BPM when no grid exists.
+2. **Depth too shallow to read as Pump.** `buildLfoGate` (`fx/banks.ts:196-206`) uses depth 0.28 / offset 0.72 → 0.44…1.0. Required default is ≈65 % depth with a click-free boundary; macro must map to depth as well as division.
+
+Also verify during the fix: RHYTHM bank button index (`fx12.ts:76-84` declares `button: 3`, the brief says Button 4), latch survival when the overlay closes, and Heads output path. A rejected algorithm must not display as active (`banks.ts:538-548` already records per-algorithm rejection). Acceptance test measures the output envelope of a constant signal, not a flag.
+
+## 6. Stem switching inside FX mode
+
+The arbiter row exists — `chordArbiter.ts:311-321` claims `play` + volume and emits `stem.select` before the FX volume paths, and `surface.ts:829-833` applies it. What is unverified is whether the overlay session state survives: confirm the selected bank is overlay state (not per-stem reset), that each stem keeps its own algorithms/macros/latches, that a held momentary stays bound to the stem captured at pointer-down, and add the temporary `STEM n NAME` LED/readout that reverts to bank status. If a live check shows the chord failing inside the overlay, the conflicting row will be reported verbatim before the fix.
+
+## 7. Ordered implementation
+
+1. Transport phase machine + rate-preserving inertia (§1) — unblocks §5 too.
+2. `transport.cue` + both launch profiles (§2).
+3. Rocker remap + arbitration rows (§4).
+4. Pump tempo/depth (§5) and FX-mode stem selection polish (§6).
+5. Varispeed SOS segmentation (§3) with the objective test suite.
+6. Full investigation matrix capture (raw pointer → gesture → claim → command → seq → reducer → engine → ctx state → source generation → scheduled frame → ack → LED) for Node/Worklet, demo/user project, overlay, Heads, linked/unlinked, running/suspended, desktop and mobile emulation.
+
+## Migration / persistence
+
+`transport.cue` is additive to the command union; saved projects gain a cue position (default 0). Take layers gain a segment list per pass — existing single-segment takes load unchanged. FX macro defaults change for Pump only.
+
+## Blocking questions
+
+1. Which cue-launch profile is the default — Exact or Tape pre-roll?
+2. Is RHYTHM on hardware Button 3 (current registry) or Button 4 (your brief)?
+3. On Play during an in-flight wind-down, should the tape reverse from its current rate (continuous) or restart the wind-up from zero?
