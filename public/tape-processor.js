@@ -68,9 +68,46 @@ class TapeProcessor extends AudioWorkletProcessor {
      */
     this.heads = null;
 
+    /**
+     * Per-head phase anchor. `phi = phase - anchor`, so setting the anchor to
+     * the current phase makes a head read exactly `offset * cycleFrames` at
+     * that instant — this is how a released scrub resumes normal playback from
+     * the scrubbed position without touching the underlying transport.
+     */
+    this.headAnchors = [0, 0, 0, 0];
+    /**
+     * Per-head scrub voice. Non-null only while a pointer is scrubbing head i.
+     * Preallocated shape; no object is created inside process().
+     * @type {(null | {pointerId:number, target:number, actual:number, velocity:number, gain:number, mix:number, releasing:boolean, previews:number, savedOffset:number, savedAnchor:number})[]}
+     */
+    this.headScrubs = [null, null, null, null];
+    this.scrubLag = Math.max(1, 0.03 * sampleRate);
+    this.scrubXfadeFrames = Math.max(1, Math.round(0.012 * sampleRate));
+    this.maxScrubRate = 32;
+    this.scrubSilenceRate = 0.02;
+    /** Telemetry accumulators (read by the diagnostics panel). */
+    this.telemetryCountdown = 0;
+    this.rmsAcc = 0;
+    this.rmsFrames = 0;
 
     this.port.onmessage = (e) => this.onMessage(e.data);
   }
+
+  /** Current derived read position (absolute source frames) of head i. */
+  headReadFrame(i) {
+    if (!this.heads) return this.readPosition;
+    const cf = this.heads.cycleFrames;
+    const cs = this.heads.cycleStart;
+    const hd = this.heads.heads[i];
+    if (!hd) return this.readPosition;
+    let phase = (this.readPosition - cs - this.headAnchors[i]) % cf;
+    if (phase < 0) phase += cf;
+    const off = hd.offset * cf;
+    let p = hd.reverse ? (off - phase) % cf : (off + phase) % cf;
+    if (p < 0) p += cf;
+    return cs + p;
+  }
+
 
   // ------------------------------------------------------------- protocol
 
