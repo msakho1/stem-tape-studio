@@ -145,28 +145,31 @@ export class GestureEngine {
       moved: false,
     };
 
-    rec.holdTimer = setTimeout(() => {
-      rec.holdFired = true;
-      const prevTap = this.taps.get(control);
-      const isTapThenHold =
-        prevTap != null &&
-        prevTap.count > 0 &&
-        rec.downAt - prevTap.lastReleaseAt <= this.timings.tapThenHoldGapMs;
-      if (isTapThenHold) {
-        this.emit({ type: "tapThenHold", control, t: performance.now() });
-        this.clearTaps(control);
-      }
-      this.emit({ type: "holdStart", control, duration: this.timings.holdMs, t: performance.now() });
-    }, this.timings.holdMs);
+    if (!isContinuousControl(control)) {
+      rec.holdTimer = setTimeout(() => {
+        rec.holdFired = true;
+        const prevTap = this.taps.get(control);
+        const isTapThenHold =
+          prevTap != null &&
+          prevTap.count > 0 &&
+          rec.downAt - prevTap.lastReleaseAt <= this.timings.tapThenHoldGapMs;
+        if (isTapThenHold) {
+          this.emit({ type: "tapThenHold", control, t: performance.now() });
+          this.clearTaps(control);
+        }
+        this.emit({ type: "holdStart", control, duration: this.timings.holdMs, t: performance.now() });
+      }, this.timings.holdMs);
 
-    rec.longHoldTimer = setTimeout(() => {
-      rec.longHoldFired = true;
-      this.emit({ type: "holdStart", control, duration: this.timings.longHoldMs, t: performance.now() });
-    }, this.timings.longHoldMs);
+      rec.longHoldTimer = setTimeout(() => {
+        rec.longHoldFired = true;
+        this.emit({ type: "holdStart", control, duration: this.timings.longHoldMs, t: performance.now() });
+      }, this.timings.longHoldMs);
+    }
 
     this.presses.set(control, rec);
     this.emitRaw({ id: ++this.seq, control, phase: "down", pointerId, t, x, y });
-    this.evaluateChordStart(t);
+    if (!isContinuousControl(control)) this.evaluateChordStart(t);
+
   }
 
   markMoved(control: Control) {
