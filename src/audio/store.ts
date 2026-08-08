@@ -8,11 +8,24 @@
 
 import type { StemRole } from "./format";
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
+export const DERIVED_SCHEMA_VERSION = 1;
 export const DB_NAME = "stem-tape";
 export const DB_VERSION = 1;
 const STORE_PROJECTS = "projects";
 const STORE_BLOBS = "blobs";
+
+/**
+ * A Memory Saver working copy. The ORIGINAL blob is never replaced: this is a
+ * separate, separately-keyed derived asset that can be deleted and regenerated.
+ */
+export interface DerivedAsset {
+  derivedKey: string;
+  sourceBlobKey: string;
+  sourceContentHash: string;
+  conversion: { type: "mono-downmix"; sampleRate: number };
+  derivedSchemaVersion: number;
+}
 
 export interface StoredStem {
   role: StemRole;
@@ -28,11 +41,13 @@ export interface StoredStem {
   decodedSampleRate: number;
   /** Stable content id (SHA-256 of the bytes). */
   contentHash: string;
-  /** Key in whichever blob backend is active. */
+  /** Key of the ORIGINAL, untouched blob. */
   blobKey: string;
   provenance: "user-private" | "bundled-demo";
   /** In the recoverable trash: unloaded from the surface, bytes retained. */
   trashed?: boolean;
+  /** Memory Saver working copy, when one has been generated. */
+  derived?: DerivedAsset | null;
 }
 
 export interface StoredProject {
@@ -54,7 +69,9 @@ export interface StoredProject {
     song: number;
   };
   blobBackend: "opfs" | "indexeddb";
+  highMemoryMode?: boolean;
 }
+
 
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
