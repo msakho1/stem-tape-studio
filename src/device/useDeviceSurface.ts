@@ -24,7 +24,7 @@ import {
   releaseControl,
   type SurfaceState,
 } from "@/machine/surface";
-import { controlBus } from "@/audio/controlBus";
+import { controlBus, type ContinuousChannel } from "@/audio/controlBus";
 
 
 
@@ -69,7 +69,7 @@ function reducer(state: SurfaceState, action: Action): SurfaceState {
       // Stem Tape mappings are dispatched here (phase 4).
       return applyGesture({ ...state, lastGesture: describeGesture(action.gesture) }, action.gesture);
     case "faderCommit":
-      return applyFader(state, action.index, action.value);
+      return applyFader(state, action.index, action.value, action.claimed);
   }
 }
 
@@ -81,7 +81,7 @@ export function useDeviceSurface() {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const capRefs = useRef<Record<number, SVGCircleElement | null>>({});
   const faderValuesRef = useRef<number[]>([0.78, 0.72, 0.65, 0.7]);
-  const dragRef = useRef<{ index: number; pointerId: number } | null>(null);
+  const dragRef = useRef<{ index: number; pointerId: number; channel: ContinuousChannel } | null>(null);
   const frameRef = useRef<number | null>(null);
   const pendingCyRef = useRef<{ index: number; cy: number; value: number } | null>(null);
   /** Latest state, read by imperative pointer handlers without re-binding them. */
@@ -257,7 +257,7 @@ export function useDeviceSurface() {
         index: pending.index,
         value: pending.value,
         committed: false,
-        pointerId: drag?.pointerId,
+        pointerId: drag?.pointerId ?? -1,
         phase: "move",
         timestamp: performance.now(),
       });
@@ -329,13 +329,9 @@ export function useDeviceSurface() {
       phase: "end",
       timestamp: performance.now(),
     });
-    // A scrub or head level is not a track volume: it must not be written to
-    // the mixer state on release.
-    if (drag.channel === "fader" || drag.channel === "window") {
-      dispatch({ type: "faderCommit", index: drag.index, value });
-    } else {
-      dispatch({ type: "headFaderCommit", index: drag.index, value, scrub: drag.channel === "headScrub" });
-    }
+    // The reducer is told which layer the gesture claimed, so a modifier
+    // released mid-drag cannot retarget the commit.
+    dispatch({ type: "faderCommit", index: drag.index, value, claimed: drag.channel });
   }, []);
 
   /**
