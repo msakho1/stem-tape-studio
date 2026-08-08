@@ -7,7 +7,6 @@ import {
   FX_FAMILIES,
   clearLatches,
   initialStemPerformance,
-  isFxActive,
   patchSlot,
   selectStem,
   setVariation,
