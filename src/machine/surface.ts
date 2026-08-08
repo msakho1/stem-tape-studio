@@ -862,11 +862,11 @@ export function applyPerfIntent(state: SurfaceState, intent: PerfIntent): Surfac
       const on = intent.type === "fx.momentary.start";
       const p = setBankMomentary(perf, intent.stem, intent.bank, on);
       const bank = p.tracks[intent.stem]!.fx12.banks[intent.bank]!;
-      const algo = algorithmDef(intent.bank, bank.algorithm);
+      const algo = algorithmDef(intent.bank, bank.selectedAlgorithm);
       next = emit(
         { ...next, perf: p },
         intent.type,
-        { track: intent.stem, bank: intent.bank, algorithm: bank.algorithm, latched: bank.latched },
+        { track: intent.stem, bank: intent.bank, algorithm: bank.selectedAlgorithm, latched: bank.latched },
         { rowId: `fx.${BANKS[intent.bank]!.id}.momentary`, t },
       );
       return fire(
@@ -879,11 +879,11 @@ export function applyPerfIntent(state: SurfaceState, intent: PerfIntent): Surfac
     case "fx.algorithm.cycle": {
       const p = cycleBankAlgorithm(perf, intent.stem, intent.bank, intent.dir);
       const bank = p.tracks[intent.stem]!.fx12.banks[intent.bank]!;
-      const algo = algorithmDef(intent.bank, bank.algorithm);
+      const algo = algorithmDef(intent.bank, bank.selectedAlgorithm);
       next = emit(
         { ...next, perf: p },
         "fx.algorithm.cycle",
-        { track: intent.stem, bank: intent.bank, algorithm: bank.algorithm, latched: bank.latched },
+        { track: intent.stem, bank: intent.bank, algorithm: bank.selectedAlgorithm, latched: bank.latched },
         { rowId: `fx.${BANKS[intent.bank]!.id}.algorithm`, t },
       );
       return fire(next, `fx.${BANKS[intent.bank]!.id}.algorithm`, `stem ${intent.stem + 1} → ${algo.label}`, t);
@@ -891,17 +891,17 @@ export function applyPerfIntent(state: SurfaceState, intent: PerfIntent): Surfac
     case "fx.macro": {
       const p = nudgeBankMacro(perf, intent.stem, intent.bank, intent.dir);
       const bank = p.tracks[intent.stem]!.fx12.banks[intent.bank]!;
-      const value = bank.algorithms[bank.algorithm]!.macro;
+      const value = bank.algorithms[bank.selectedAlgorithm]!.macroAmount;
       next = emit(
         { ...next, perf: p },
         "fx.macro",
-        { track: intent.stem, bank: intent.bank, algorithm: bank.algorithm, value },
+        { track: intent.stem, bank: intent.bank, algorithm: bank.selectedAlgorithm, value },
         { rowId: `fx.${BANKS[intent.bank]!.id}.macro`, t },
       );
       return fire(
         next,
         `fx.${BANKS[intent.bank]!.id}.macro`,
-        `stem ${intent.stem + 1} ${algorithmDef(intent.bank, bank.algorithm).label} macro → ${value.toFixed(2)}`,
+        `stem ${intent.stem + 1} ${algorithmDef(intent.bank, bank.selectedAlgorithm).label} macro → ${value.toFixed(2)}`,
         t,
       );
     }
@@ -911,13 +911,13 @@ export function applyPerfIntent(state: SurfaceState, intent: PerfIntent): Surfac
       next = emit(
         { ...next, perf: p },
         "fx.latch",
-        { track: intent.stem, bank: intent.bank, on: bank.latched, algorithm: bank.algorithm, latched: bank.latched },
+        { track: intent.stem, bank: intent.bank, on: bank.latched, algorithm: bank.selectedAlgorithm, latched: bank.latched },
         { rowId: `fx.${BANKS[intent.bank]!.id}.latch`, t },
       );
       return fire(
         next,
         `fx.${BANKS[intent.bank]!.id}.latch`,
-        `stem ${intent.stem + 1} ${algorithmDef(intent.bank, bank.algorithm).label} ${bank.latched ? "latched" : "unlatched"}`,
+        `stem ${intent.stem + 1} ${algorithmDef(intent.bank, bank.selectedAlgorithm).label} ${bank.latched ? "latched" : "unlatched"}`,
         t,
       );
     }
