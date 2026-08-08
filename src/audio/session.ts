@@ -115,12 +115,14 @@ export const session = {
 export function toStoredProject(s: SessionState, control: StoredProject["control"], backend: "opfs" | "indexeddb"): StoredProject {
   return {
     id: s.projectId,
-    schemaVersion: 1,
+    schemaVersion: 2,
     name: s.name,
     createdAt: Date.now(),
     updatedAt: Date.now(),
     blobBackend: backend,
-    control,
+    // BPM value AND source persist per song.
+    control: { ...control, grid: { bpm: s.bpm, source: s.bpmSource } },
+    highMemoryMode: s.highMemoryMode,
     stems: Object.values(s.stems).map((stem) => ({
       role: stem.role,
       filename: stem.filename,
@@ -136,6 +138,16 @@ export function toStoredProject(s: SessionState, control: StoredProject["control
       blobKey: stem.blobKey,
       provenance: stem.provenance,
       trashed: stem.trashed,
+      derived: stem.derived?.derivedKey
+        ? {
+            derivedKey: stem.derived.derivedKey,
+            sourceBlobKey: stem.derived.sourceBlobKey ?? stem.blobKey,
+            sourceContentHash: stem.derived.sourceContentHash ?? stem.contentHash,
+            conversion: stem.derived.conversion ?? { type: "mono-downmix" as const, sampleRate: 0 },
+            derivedSchemaVersion: stem.derived.derivedSchemaVersion ?? DERIVED_SCHEMA_VERSION,
+          }
+        : null,
     })),
   };
+
 }
