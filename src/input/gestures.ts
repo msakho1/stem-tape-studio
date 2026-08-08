@@ -11,10 +11,13 @@ export interface RawInputEvent {
   y?: number | undefined;
 }
 
+/** Which hold threshold produced a holdStart / holdEnd. */
+export type HoldLevel = "hold" | "power" | "long";
+
 export type Gesture =
   | { type: "tap"; control: Control; count: number; t: number }
-  | { type: "holdStart"; control: Control; duration: number; t: number }
-  | { type: "holdEnd"; control: Control; duration: number; t: number }
+  | { type: "holdStart"; control: Control; level: HoldLevel; duration: number; t: number }
+  | { type: "holdEnd"; control: Control; level: HoldLevel; duration: number; t: number }
   | { type: "tapThenHold"; control: Control; t: number }
   | { type: "chordStart"; controls: Control[]; t: number }
   | { type: "chordRelease"; controls: Control[]; releaseSpreadMs: number; t: number }
@@ -23,6 +26,12 @@ export type Gesture =
 export interface GestureTimings {
   /** Pointer-down to holdStart. */
   holdMs: number;
+  /**
+   * Power hold. v2.6 powers the unit with a FUNCTION hold, so it must NOT share
+   * the general 450 ms button hold — every FN + X chord crosses that. Separate
+   * and configurable so it can be retuned against the physical unit.
+   */
+  powerHoldMs: number;
   /** Documented Tape Looper v2.6 long hold (dim / full lights). */
   longHoldMs: number;
   /** Max gap between taps for a multi-tap sequence. */
@@ -36,12 +45,22 @@ export interface GestureTimings {
 }
 
 /**
+ * Tempo tapping (FN tap ×4 in rhythm) is an INACTIVITY timeout between
+ * consecutive taps — it is NOT a fixed first-to-fourth window. The sequence is
+ * kept alive as long as each gap is <= this value, so a 104 BPM tap-in
+ * (576.9 ms gaps, 1730.8 ms first-to-fourth) is accepted; only a gap slower
+ * than 40 BPM breaks the sequence and restarts the count at 1.
+ */
+export const TEMPO_TAP_IDLE_MS = 1500;
+
+/**
  * Defaults, NOT measurements. Every value here is a guess until it is measured
  * on a physical SP-1 (see the verification checklist). They live in one place
  * precisely so the Mapping Lab can retune them.
  */
 export const DEFAULT_TIMINGS: GestureTimings = {
   holdMs: 450,
+  powerHoldMs: 1200,
   longHoldMs: 5000,
   multiTapGapMs: 300,
   tapThenHoldGapMs: 300,
@@ -49,13 +68,16 @@ export const DEFAULT_TIMINGS: GestureTimings = {
   chordReleaseSpreadMs: 120,
 };
 
+
 interface PressRecord {
   control: Control;
   pointerId: number | "keyboard";
   downAt: number;
   holdFired: boolean;
+  powerHoldFired: boolean;
   longHoldFired: boolean;
   holdTimer: ReturnType<typeof setTimeout> | null;
+  powerHoldTimer: ReturnType<typeof setTimeout> | null;
   longHoldTimer: ReturnType<typeof setTimeout> | null;
   moved: boolean;
 }
@@ -139,30 +161,61 @@ export class GestureEngine {
       pointerId,
       downAt: t,
       holdFired: false,
+      powerHoldFired: false,
       longHoldFired: false,
       holdTimer: null,
+      powerHoldTimer: null,
       longHoldTimer: null,
       moved: false,
     };
 
     if (!isContinuousControl(control)) {
+      // Snapshot the preceding tap NOW: the multi-tap record self-expires after
+      // multiTapGapMs, which is shorter than holdMs, so reading it inside the
+      // hold timer always found null and "tap, then quick hold" never emitted.
+      const prevTap = this.taps.get(control);
+      const isTapThenHold =
+        prevTap != null && prevTap.count > 0 && t - prevTap.lastReleaseAt <= this.timings.tapThenHoldGapMs;
+
       rec.holdTimer = setTimeout(() => {
         rec.holdFired = true;
-        const prevTap = this.taps.get(control);
-        const isTapThenHold =
-          prevTap != null &&
-          prevTap.count > 0 &&
-          rec.downAt - prevTap.lastReleaseAt <= this.timings.tapThenHoldGapMs;
         if (isTapThenHold) {
           this.emit({ type: "tapThenHold", control, t: performance.now() });
           this.clearTaps(control);
         }
-        this.emit({ type: "holdStart", control, duration: this.timings.holdMs, t: performance.now() });
+
+        this.emit({
+          type: "holdStart",
+          control,
+          level: "hold",
+          duration: this.timings.holdMs,
+          t: performance.now(),
+        });
       }, this.timings.holdMs);
+
+      // Power gets its own threshold, only on FUNCTION (the v2.6 power row).
+      if (control === "function") {
+        rec.powerHoldTimer = setTimeout(() => {
+          rec.powerHoldFired = true;
+          this.emit({
+            type: "holdStart",
+            control,
+            level: "power",
+            duration: this.timings.powerHoldMs,
+            t: performance.now(),
+          });
+        }, this.timings.powerHoldMs);
+      }
 
       rec.longHoldTimer = setTimeout(() => {
         rec.longHoldFired = true;
-        this.emit({ type: "holdStart", control, duration: this.timings.longHoldMs, t: performance.now() });
+        this.emit({
+          type: "holdStart",
+          control,
+          level: "long",
+          duration: this.timings.longHoldMs,
+          t: performance.now(),
+        });
       }, this.timings.longHoldMs);
     }
 
@@ -190,11 +243,13 @@ export class GestureEngine {
       this.registerChordRelease(control, t);
     }
 
-    if (rec.holdFired) {
-      this.emit({ type: "holdEnd", control, duration, t });
+    if (rec.holdFired || rec.powerHoldFired) {
+      const level: HoldLevel = rec.longHoldFired ? "long" : rec.powerHoldFired ? "power" : "hold";
+      this.emit({ type: "holdEnd", control, level, duration, t });
       this.clearTaps(control);
       return;
     }
+
 
     // A fader that was actually dragged is a continuous edit, not a tap.
     if (isContinuousControl(control) && rec.moved) {
@@ -235,8 +290,10 @@ export class GestureEngine {
 
   private clearTimers(rec: PressRecord) {
     if (rec.holdTimer) clearTimeout(rec.holdTimer);
+    if (rec.powerHoldTimer) clearTimeout(rec.powerHoldTimer);
     if (rec.longHoldTimer) clearTimeout(rec.longHoldTimer);
   }
+
 
   private clearTaps(control: Control) {
     const prev = this.taps.get(control);
@@ -300,9 +357,10 @@ export function describeGesture(g: Gesture): string {
     case "tap":
       return `tap ×${g.count} · ${g.control}`;
     case "holdStart":
-      return `hold start (${g.duration}ms) · ${g.control}`;
+      return `hold start (${g.level}, ${g.duration}ms) · ${g.control}`;
     case "holdEnd":
-      return `hold end (${Math.round(g.duration)}ms) · ${g.control}`;
+      return `hold end (${g.level}, ${Math.round(g.duration)}ms) · ${g.control}`;
+
     case "tapThenHold":
       return `tap-then-hold · ${g.control}`;
     case "chordStart":

@@ -29,7 +29,20 @@ export const Route = createFileRoute("/")({
 
 function LabPage() {
   const [showHitZones, setShowHitZones] = useState(false);
-  const { state, leds, svgRef, capRefs, faderValuesRef, rawLog, gestureLog, handlers } = useDeviceSurface();
+  const {
+    state,
+    leds,
+    observed,
+    ready,
+    powerHoldMs,
+    setPowerHoldMs,
+    svgRef,
+    capRefs,
+    faderValuesRef,
+    rawLog,
+    gestureLog,
+    handlers,
+  } = useDeviceSurface();
 
   return (
     <main className="min-h-screen px-5 py-6 md:px-10 md:py-9">
@@ -93,6 +106,11 @@ function LabPage() {
           <DiagnosticPanel
             state={state}
             leds={leds}
+            observed={observed}
+            ready={ready}
+            powerHoldMs={powerHoldMs}
+            setPowerHoldMs={setPowerHoldMs}
+
             rawLog={rawLog}
             gestureLog={gestureLog}
             faderValuesRef={faderValuesRef}

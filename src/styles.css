@@ -479,3 +479,15 @@
   border-color: var(--signal);
 }
 
+
+.st-step {
+  border: 1px solid var(--bench-line);
+  background: transparent;
+  color: var(--ink-dim);
+  font: inherit;
+  line-height: 1;
+  padding: 1px 6px;
+  margin: 0 6px;
+  cursor: pointer;
+}
+.st-step:hover { color: var(--ink); border-color: var(--ink-faint); }

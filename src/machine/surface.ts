@@ -1,5 +1,5 @@
 import type { Control, TrackIndex } from "@/device/geometry";
-import type { Gesture } from "@/input/gestures";
+import { TEMPO_TAP_IDLE_MS, type Gesture } from "@/input/gestures";
 import { V26_ROW_BY_ID } from "@/machine/v26map";
 
 export type LedPattern = "dark" | "faint" | "solid" | "pulse" | "blink" | "breathe" | "chase";
@@ -72,21 +72,66 @@ export interface SurfaceState {
   grid: { bpm: number | null; rejected: boolean; source: "none" | "tapped" | "beatmatched" | "rounded" };
   fnTapTimes: number[];
   fnTapCount: number;
-  /** FUNCTION hold has crossed 450 ms and no other control has been touched. */
+  /** FUNCTION hold has crossed the dedicated POWER threshold (not the 450 ms hold). */
   fnHoldReached: boolean;
   /** FUNCTION was used as a modifier during this hold — so it must NOT power-toggle. */
   fnModifierUsed: boolean;
   /**
-   * Taps fire optimistically at ×1 and revise upward. When ×2 arrives the ×1
-   * effect has to be rolled back before the ×2 row runs, or a double-tap leaves
-   * the ×1 side effect behind.
+   * Multi-tap transaction. Taps fire optimistically at ×1; when ×2 / ×3 arrives
+   * the WHOLE machine is rolled back to the snapshot taken before ×1 and only
+   * then does the higher-count row run. Nothing from an intermediate count is
+   * allowed to survive (e.g. FN+PLAY ×3 must not keep the ×2 1.0× snap).
    */
-  pendingUndo: { control: Control; tracks: SurfaceState["tracks"]; speed: number; chopDiv: number } | null;
+  txn: { control: Control; count: number; snapshot: TxnSnapshot } | null;
+  /** Per-song memory: loops, speed, chop, mutes, grid (v2.6 songs.memory). */
+  songMemory: Record<number, TxnSnapshot>;
+  /** v2.6 songs.length: to 8:00 · longer with the tape slowed. */
+  maxTakeSeconds: number;
 
   fired: FiredRow[];
   coverage: Record<string, number>;
   note: string;
 }
+
+/** Everything a multi-tap transaction (and a song slot) has to remember. */
+export interface TxnSnapshot {
+  tracks: SurfaceState["tracks"];
+  speed: number;
+  chopDiv: number;
+  chopWindowOffset: number;
+  window: SurfaceState["window"];
+  filter: SurfaceState["filter"];
+  masterVolume: number;
+  playing: boolean;
+  headsMode: boolean;
+  loopMode: SurfaceState["loopMode"];
+  activeTrack: TrackIndex;
+  grid: SurfaceState["grid"];
+  lights: SurfaceState["lights"];
+}
+
+export function snapshotOf(s: SurfaceState): TxnSnapshot {
+  return {
+    tracks: s.tracks,
+    speed: s.speed,
+    chopDiv: s.chopDiv,
+    chopWindowOffset: s.chopWindowOffset,
+    window: s.window,
+    filter: s.filter,
+    masterVolume: s.masterVolume,
+    playing: s.playing,
+    headsMode: s.headsMode,
+    loopMode: s.loopMode,
+    activeTrack: s.activeTrack,
+    grid: s.grid,
+    lights: s.lights,
+  };
+}
+
+export function restoreSnapshot(s: SurfaceState, snap: TxnSnapshot): SurfaceState {
+  return { ...s, ...snap };
+}
+
 
 export const STEM_ROLES = ["vocals", "drums", "bass", "instruments"] as const;
 
@@ -126,7 +171,10 @@ export function initialSurfaceState(): SurfaceState {
     fnTapCount: 0,
     fnHoldReached: false,
     fnModifierUsed: false,
-    pendingUndo: null,
+    txn: null,
+    songMemory: {},
+    maxTakeSeconds: 480,
+
 
     fired: [],
     coverage: {},
@@ -155,6 +203,27 @@ function setTrack(state: SurfaceState, i: number, patch: Partial<TrackSlice>): S
   if (slice) tracks[i] = { ...slice, ...patch };
   return tracks;
 }
+/**
+ * v2.6 songs.memory — "every song remembers loops, speed, chop, mutes, grid".
+ * Leaving a song writes its snapshot to memory; arriving at one restores it
+ * (or starts a clean slot if it has never been visited).
+ */
+function loadSong(state: SurfaceState, song: number): SurfaceState {
+  if (song === state.song) return state;
+  const songMemory = { ...state.songMemory, [state.song]: snapshotOf(state) };
+  const target = songMemory[song];
+  const base: SurfaceState = { ...state, songMemory, song };
+  const next = target ? restoreSnapshot(base, target) : base;
+  return fire(
+    next,
+    "songs.memory",
+    target
+      ? `song ${song + 1}/16 recalled — loops, speed ${next.speed.toFixed(4)}×, chop 1/${next.chopDiv}, mutes, grid`
+      : `song ${song + 1}/16 opened — new slot, song ${state.song + 1} stored`,
+    performance.now(),
+  );
+}
+
 
 /** ---------------- v2.6 gesture → command dispatch ---------------- */
 
@@ -163,10 +232,10 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
   const fn = state.functionHeld;
   const t = g.t;
 
-  // Power is a v2.6 row: FUNCTION hold. It is armed here and only commits on
-  // FUNCTION release (see releaseControl) — otherwise every FN + X combo, which
-  // necessarily holds FUNCTION past 450 ms, would power the unit down.
-  if (g.type === "holdStart" && g.control === "function" && g.duration === 450) {
+  // Power is a v2.6 row: FUNCTION hold. It uses its OWN configurable threshold
+  // (timings.powerHoldMs), never the general 450 ms hold, and it only commits on
+  // FUNCTION release (see releaseControl) so FN + X chords can't power down.
+  if (g.type === "holdStart" && g.control === "function" && g.level === "power") {
     return { ...next, fnHoldReached: true };
   }
   // While off, nothing but that row responds.
@@ -176,46 +245,52 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
     case "tap": {
       const c = g.control;
 
-      // Roll back the optimistic ×1 effect before running the ×2 / ×3 row.
-      if (g.count > 1 && state.pendingUndo && state.pendingUndo.control === c) {
-        next = {
-          ...next,
-          tracks: state.pendingUndo.tracks,
-          speed: state.pendingUndo.speed,
-          chopDiv: state.pendingUndo.chopDiv,
-        };
+      // Transactional multi-tap. ×1 snapshots the machine; ×2 / ×3 restore that
+      // snapshot IN FULL before running, so no intermediate count leaves state
+      // behind (rocker ×1 +1 BPM must not compound into the ×2 semitone, and
+      // FN+PLAY ×2's 1.0× snap must not survive into ×3 heads mode).
+      if (g.count > 1 && state.txn && state.txn.control === c) {
+        next = restoreSnapshot(next, state.txn.snapshot);
+        next = { ...next, txn: { control: c, count: g.count, snapshot: state.txn.snapshot } };
       } else if (g.count === 1) {
-        next = {
-          ...next,
-          pendingUndo: { control: c, tracks: state.tracks, speed: state.speed, chopDiv: state.chopDiv },
-        };
+        next = { ...next, txn: { control: c, count: 1, snapshot: snapshotOf(state) } };
       }
 
 
       if (c === "play") {
         if (fn && g.count === 3) {
-          next = { ...next, headsMode: !state.headsMode };
-          next = fire(next, "play.heads", `heads mode ${next.headsMode ? "on" : "off"}`, t);
-          return fire(next, "heads.toggle", `heads ${next.headsMode ? "on" : "off"}`, t);
+          const on = !next.headsMode;
+          next = { ...next, headsMode: on };
+          next = fire(next, "play.heads", `heads mode ${on ? "on" : "off"}`, t);
+          next = fire(next, "heads.toggle", `heads ${on ? "on" : "off"}`, t);
+          if (on) {
+            // 3 tracks replay the source, a quarter apart.
+            const tracks = [...next.tracks] as SurfaceState["tracks"];
+            for (let i = 1; i < 4; i++) tracks[i] = { ...tracks[i]!, headPos: i * 0.25, headReverse: false };
+            next = { ...next, tracks };
+            next = fire(next, "heads.replay", "heads 2·3·4 replay the source at 0.25 · 0.50 · 0.75", t);
+          }
+          return next;
         }
         if (fn && g.count === 2) {
           next = { ...next, speed: 1 };
           return fire(next, "play.snap", "speed snapped to 1.000×", t);
         }
         if (!fn && g.count === 1) {
-          next = { ...next, playing: !state.playing };
+          next = { ...next, playing: !next.playing };
           return fire(next, "play.toggle", next.playing ? "play" : "stop", t);
         }
         return next;
       }
 
       if (c === "function") {
-        // Tempo tapping is NOT multi-tap: at 120 BPM the gap is 500 ms, far
-        // outside the 300 ms multi-tap window, so the engine's `count` is
-        // always 1 here. Count the taps ourselves over a musical window
-        // (40–240 BPM => 250–1500 ms between taps).
-        const prev = state.fnTapTimes;
-        const inRhythm = prev.length > 0 && t - prev[prev.length - 1]! <= 1500;
+        // Tempo tapping is NOT the engine's multi-tap: at 120 BPM the gap is
+        // 500 ms, far outside the 300 ms multi-tap window, so `count` is always
+        // 1 here. We count taps ourselves with an INACTIVITY timeout between
+        // consecutive taps (TEMPO_TAP_IDLE_MS) — not a fixed first-to-fourth
+        // window, so e.g. 104 BPM (576.9 ms gaps, 1730.8 ms total) is accepted.
+        const prev = next.fnTapTimes;
+        const inRhythm = prev.length > 0 && t - prev[prev.length - 1]! <= TEMPO_TAP_IDLE_MS;
         const times = (inRhythm ? [...prev, t] : [t]).slice(-4);
         const count = times.length;
         next = { ...next, fnTapTimes: times, fnTapCount: count };
@@ -223,23 +298,25 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
           const gaps = times.slice(1).map((v, i) => v - times[i]!);
           const mean = gaps.reduce((a, b) => a + b, 0) / gaps.length;
           const bpm = 60000 / mean;
-          const farOff = state.grid.bpm != null && Math.abs(bpm - state.grid.bpm) / state.grid.bpm > 0.25;
+          const farOff = next.grid.bpm != null && Math.abs(bpm - next.grid.bpm) / next.grid.bpm > 0.25;
           if (farOff) {
-            next = { ...next, grid: { ...state.grid, rejected: true } };
+            next = { ...next, grid: { ...next.grid, rejected: true } };
             return fire(
               next,
               "fn.gridReject",
-              `tapped ${bpm.toFixed(1)} vs grid ${state.grid.bpm!.toFixed(1)} — all four blink, nothing moves`,
+              `tapped ${bpm.toFixed(1)} vs grid ${next.grid.bpm!.toFixed(1)} — all four blink, nothing moves`,
               t,
             );
           }
           next = { ...next, grid: { bpm, rejected: false, source: "tapped" } };
           return fire(next, "fn.tempoGrid", `grid = ${bpm.toFixed(1)} BPM`, t);
         }
-        if (state.grid.bpm != null) {
-          next = { ...next, grid: { ...state.grid, source: "beatmatched", rejected: false } };
-          return fire(next, "fn.beatmatch", `re-tap over loops · ${state.grid.bpm.toFixed(1)} BPM held`, t);
+        const held = next.grid.bpm;
+        if (held != null) {
+          next = { ...next, grid: { ...next.grid, source: "beatmatched", rejected: false } };
+          return fire(next, "fn.beatmatch", `re-tap over loops · ${held.toFixed(1)} BPM held`, t);
         }
+
         return next;
       }
 
@@ -255,10 +332,11 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
             next = { ...next, bank: i, bankJumpArmed: true, activeTrack: i };
             return fire(next, "track.bank", `bank jump → bank ${i + 1}`, t);
           }
-          const song = (state.bank * 4 + ((state.song % 4) + 1) % 4) % 16;
-          next = { ...next, song, bankJumpArmed: true };
+          const song = (next.bank * 4 + (((next.song % 4) + 1) % 4)) % 16;
+          next = { ...loadSong(next, song), bankJumpArmed: true };
           return fire(next, "track.bank", `tap again → next song (${song + 1}/16)`, t);
         }
+
         if (g.count === 2) {
           next = { ...next, tracks: setTrack(next, i, { content: "empty" }), activeTrack: i };
           return fire(next, "track.delete", `track ${i + 1} deleted`, t);
@@ -290,7 +368,7 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
           next = { ...next, speed };
           return fire(next, "rocker.semitone", `exact semitone ${dir > 0 ? "+1" : "−1"} → ${speed.toFixed(4)}×`, t);
         }
-        const bpmBase = state.grid.bpm ?? 120;
+        const bpmBase = next.grid.bpm ?? 120;
         const speed = next.speed * ((bpmBase + dir) / bpmBase);
         next = { ...next, speed };
 
@@ -300,16 +378,16 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
       if (c === "volume-plus" || c === "volume-minus") {
         const dir = c === "volume-plus" ? 1 : -1;
         if (fn) {
-          const chopWindowOffset = clamp01(state.chopWindowOffset + dir * 0.0625);
+          const chopWindowOffset = clamp01(next.chopWindowOffset + dir * 0.0625);
           next = { ...next, chopWindowOffset };
           return fire(next, "volume.chopWindow", `chop window → ${chopWindowOffset.toFixed(3)}`, t);
         }
-        const masterVolume = clamp01(state.masterVolume + dir * 0.0625);
+        const masterVolume = clamp01(next.masterVolume + dir * 0.0625);
         next = { ...next, masterVolume };
         return fire(next, "volume.master", `master → ${masterVolume.toFixed(3)}`, t);
       }
 
-      if (c.startsWith("fader-") && g.count === 2 && state.headsMode) {
+      if (c.startsWith("fader-") && g.count === 2 && next.headsMode) {
         const i = trackIndexOf(c);
         const rev = !next.tracks[i]!.headReverse;
         next = { ...next, tracks: setTrack(next, i, { headReverse: rev }) };
@@ -321,14 +399,15 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
     case "holdStart": {
       const c = g.control;
       if (c === "play") {
-        if (g.duration === 5000) {
+        if (g.level === "long") {
           next = { ...next, lights: state.lights === "full" ? "dim" : "full" };
           return fire(next, "play.lights", `lights ${next.lights}`, t);
         }
-        if (!fn) return fire({ ...next, playing: true }, "play.restart", "restart from the top", t);
+        if (g.level === "hold" && !fn)
+          return fire({ ...next, playing: true }, "play.restart", "restart from the top", t);
         return next;
       }
-      if (c.startsWith("track-button")) {
+      if (c.startsWith("track-button") && g.level === "hold") {
         const i = trackIndexOf(c);
         const slice = next.tracks[i]!;
 
@@ -338,15 +417,30 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
           return fire(next, "heads.print", `track ${i + 1} ${printing ? "PRINT" : "tape (loaded)"}`, t);
         }
         next = { ...next, tracks: setTrack(next, i, { content: "armed" }), activeTrack: i };
-        return fire(next, "track.record", `track ${i + 1} armed — records on your first sound`, t);
+        next = fire(next, "track.record", `track ${i + 1} armed — records on your first sound`, t);
+        // v2.6 songs.length: takes run to 8:00 · longer with the tape slowed.
+        const maxTakeSeconds = 480 / next.speed;
+        next = { ...next, maxTakeSeconds };
+        const mm = Math.floor(maxTakeSeconds / 60);
+        const ss = Math.round(maxTakeSeconds % 60)
+          .toString()
+          .padStart(2, "0");
+        return fire(
+          next,
+          "songs.length",
+          `take limit ${mm}:${ss} at ${next.speed.toFixed(4)}× (8:00 at 1.0000×)`,
+          t,
+        );
       }
-      if ((c === "rocker-fwd" || c === "rocker-rwd") && g.duration === 450) {
+
+      if ((c === "rocker-fwd" || c === "rocker-rwd") && g.level === "hold") {
         if (fn) return fire({ ...next, chopGlide: true }, "rocker.chop", "hold = glide (chop glides)", t);
         return fire({ ...next, speedGlide: true }, "rocker.speed", "hold = continuous speed glide", t);
       }
-      if ((c === "volume-plus" || c === "volume-minus") && g.duration === 450 && fn) {
+      if ((c === "volume-plus" || c === "volume-minus") && g.level === "hold" && fn) {
         return fire({ ...next, chopGlide: true }, "volume.chopWindow", "hold = glide", t);
       }
+
       return next;
     }
 
@@ -532,3 +626,34 @@ export function deriveLeds(state: SurfaceState): LedFrame {
   // Lights dim/full is a global brightness layer, not a pattern change.
   return frame;
 }
+
+/**
+ * Rows that are not "fired" by a gesture but are OBSERVABLE in the rendered
+ * frame (the LIGHTS block) or are pure documentation. Coverage reporting has to
+ * account for all 37 rows, and these are satisfied by observation, not by a
+ * dispatch. Returns rowId -> the evidence for it right now.
+ */
+export function observedRows(state: SurfaceState, leds: LedFrame): Record<string, string> {
+  const out: Record<string, string> = {};
+  const patterns = ([1, 2, 3, 4] as const).map((i) => leds[`track-led-${i}` as LedId]!.pattern);
+
+  const dark = patterns.filter((p) => p === "dark").length;
+  const faint = patterns.filter((p) => p === "faint").length;
+  if (dark || faint)
+    out["lights.base"] = `${dark} dark (empty) · ${faint} faint (muted / stopped content)`;
+
+  const pulsing = patterns.filter((p) => p === "pulse").length;
+  if (pulsing) out["lights.pulse"] = `${pulsing} track lights pulsing on their own loop wrap`;
+
+  const songRow = ([1, 2, 3, 4] as const).map((i) => leds[`side-led-${i}` as LedId]!.pattern);
+  if (songRow.some((p) => p === "solid" || p === "blink"))
+    out["lights.songRow"] = `solid = song ${(state.song % 4) + 1} · ${
+      state.bankJumpArmed ? `blink = bank ${state.bank + 1}` : "no bank blink"
+    }`;
+
+  out["songs.transfer"] =
+    "documentation row — WAVs in + out happen on the hardware transfer page; no browser equivalent until the audio engine lands";
+
+  return out;
+}
+

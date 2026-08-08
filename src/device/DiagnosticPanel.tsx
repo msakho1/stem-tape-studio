@@ -19,11 +19,16 @@ const LED_ORDER: LedId[] = [
 interface Props {
   state: SurfaceState;
   leds: LedFrame;
+  observed: Record<string, string>;
+  ready: boolean;
+  powerHoldMs: number;
+  setPowerHoldMs: (ms: number) => void;
   rawLog: RawInputEvent[];
   gestureLog: { id: number; text: string; t: number }[];
   faderValuesRef: React.MutableRefObject<number[]>;
   svgRef: React.RefObject<SVGSVGElement | null>;
 }
+
 
 
 /** Live fader readout, driven by rAF off the same ref the drag loop writes. */
@@ -61,13 +66,50 @@ function FaderReadout({ faderValuesRef }: { faderValuesRef: React.MutableRefObje
   );
 }
 
-export function DiagnosticPanel({ state, leds, rawLog, gestureLog, faderValuesRef, svgRef }: Props) {
-  const covered = V26_MAP.filter((r) => (state.coverage[r.id] ?? 0) > 0).length;
+export function DiagnosticPanel({
+  state,
+  leds,
+  observed,
+  ready,
+  powerHoldMs,
+  setPowerHoldMs,
+  rawLog,
+  gestureLog,
+  faderValuesRef,
+  svgRef,
+}: Props) {
+  const satisfied = (r: (typeof V26_MAP)[number]) => (state.coverage[r.id] ?? 0) > 0 || observed[r.id] != null;
+  const covered = V26_MAP.filter(satisfied).length;
   const exercisable = V26_MAP.filter((r) => r.status !== "doc" && r.status !== "audio").length;
 
   return (
     <div className="st-panel">
       <section className="st-section">
+        <h2 className="st-section__title">harness gate</h2>
+        <div className="st-grid">
+          <div className="st-kv">
+            <span className="st-kv__k">application ready</span>
+            <span className="st-kv__v" data-app-ready-readout={ready}>
+              {ready ? "ready — input armed" : "booting — input rejected"}
+            </span>
+          </div>
+          <div className="st-kv">
+            <span className="st-kv__k">power hold (fn)</span>
+            <span className="st-kv__v">
+              <button className="st-step" type="button" onClick={() => setPowerHoldMs(powerHoldMs - 100)}>
+                −
+              </button>
+              {powerHoldMs} ms
+              <button className="st-step" type="button" onClick={() => setPowerHoldMs(powerHoldMs + 100)}>
+                +
+              </button>
+            </span>
+          </div>
+        </div>
+      </section>
+
+      <section className="st-section">
+
         <h2 className="st-section__title">machine state (tape looper v2.6)</h2>
         <div className="st-grid">
           <div className="st-kv">
@@ -157,20 +199,29 @@ export function DiagnosticPanel({ state, leds, rawLog, gestureLog, faderValuesRe
 
       <section className="st-section">
         <h2 className="st-section__title">
-          v2.6 map coverage — {covered}/{V26_MAP.length} rows fired ({exercisable} reachable without audio)
+          v2.6 map coverage — {covered}/{V26_MAP.length} rows satisfied ({exercisable} reachable without audio)
         </h2>
         <div className="st-rows">
           {V26_MAP.map((r) => {
             const n = state.coverage[r.id] ?? 0;
+            const obs = observed[r.id];
             return (
-              <div key={r.id} className="st-row" data-fired={n > 0}>
+              <div key={r.id} className="st-row" data-fired={n > 0 || obs != null}>
                 <span className="st-row__i">{V26_GROUP_LABEL[r.group].slice(0, 3)}</span>
                 <span className="st-row__a">{r.input}</span>
                 <span className="st-row__b">{r.command}</span>
                 <span className="st-row__d">
-                  {r.status} · {n > 0 ? `×${n}` : r.status === "audio" || r.status === "doc" ? "n/a (no engine)" : "—"}
+                  {r.status} ·{" "}
+                  {n > 0
+                    ? `×${n}`
+                    : obs
+                      ? `observed — ${obs}`
+                      : r.status === "audio" || r.status === "doc"
+                        ? "n/a (no engine)"
+                        : "—"}
                 </span>
               </div>
+
             );
           })}
         </div>
