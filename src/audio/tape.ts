@@ -173,10 +173,16 @@ export class TapeTimeline {
     this.glide = null;
   }
 
-  /** Media position at a context time, integrating any in-flight glide. */
+  /** Media position at a context time, integrating glide or inertia exactly. */
   positionAt(ctxTime: number): number {
     const dt = ctxTime - this.anchorCtx;
     if (dt <= 0) return this.anchorPos;
+    if (this.inertia) {
+      const offset = this.anchorCtx - this.inertia.startAt;
+      return (
+        this.anchorPos + inertiaDistance(this.inertia, offset + dt) - inertiaDistance(this.inertia, offset)
+      );
+    }
     if (!this.glide) return this.anchorPos + dt * this.rate;
     const offset = this.anchorCtx - this.glide.startAt;
     const total = integratedDistance(this.glide, offset + dt) - integratedDistance(this.glide, offset);
@@ -186,12 +192,18 @@ export class TapeTimeline {
   /**
    * Context time at which the playhead will reach `position`, on the SAME
    * integrated curve. Returns null when unreachable (rate glides to 0).
+   *
+   * Seams are never scheduled through an inertia ramp: rhythmic operations do
+   * not receive inertia, and any in-flight ramp bumps the seam generation, so
+   * this returns null while one is running rather than guessing.
    */
   timeAtPosition(nowCtx: number, position: number): number | null {
+    if (this.inertia && nowCtx < this.inertia.startAt + this.inertia.durationS) return null;
     const here = this.positionAt(nowCtx);
     const distance = position - here;
     if (distance <= 0) return nowCtx;
     if (!this.glide) return this.rate > 0 ? nowCtx + distance / this.rate : null;
+
     const offset = nowCtx - this.glide.startAt;
     const base = integratedDistance(this.glide, offset);
     const shifted: GlideSegment = { ...this.glide };
