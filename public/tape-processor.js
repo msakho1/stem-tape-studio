@@ -518,7 +518,10 @@ class TapeProcessor extends AudioWorkletProcessor {
             const normal = this.sampleAt(src, cs + p);
             const sc = this.headScrubs[h];
             if (sc) {
-              const scrubbed = this.sampleAt(src, sc.actual) * sc.gain;
+              let srel = (sc.actual - cs) % cf;
+              if (srel < 0) srel += cf;
+              const scrubbed = this.sampleAt(src, cs + srel) * sc.gain;
+
               v += (normal * (1 - sc.mix) + scrubbed * sc.mix) * hd.level;
             } else {
               v += normal * hd.level;
