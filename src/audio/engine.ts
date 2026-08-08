@@ -35,6 +35,7 @@ import {
   makeInertiaSegment,
   type InertiaPresetName,
   type TransportPhase,
+  CUE_FADE_S,
 } from "./inertia";
 import { estimateMigration } from "./workletBudget";
 import { pairwiseDrift, sharedApplyFrame, type WorkletAck } from "./workletProtocol";
@@ -45,6 +46,7 @@ import type { AlgorithmIndex, BankIndex } from "@/machine/fx12";
 import { algorithmDef } from "@/machine/fx12";
 import { FX_FAMILIES, type FxFamily } from "@/machine/stemPerformance";
 import { RecordingController } from "./input/recorder";
+import { TapeTimelineBus, type TapeTimelineEvent } from "./timelineEvents";
 import { PerformanceRecorder } from "./export/performanceRecorder";
 import { emptyGrid, tapGrid, type GridState } from "./grid";
 import {
@@ -162,8 +164,11 @@ export interface EngineStatus {
   actuallyPlaying: boolean;
   position: number;
   duration: number;
+  /** Instantaneous inertia rate — what you hear right now. */
   rate: number;
+  /** Musical target rate — preserved across wind-up/wind-down. */
   targetRate: number;
+  transportPhase: TransportPhase;
   masterGain: number;
   startSpreadMs: number;
   tracks: {
@@ -245,6 +250,8 @@ export class AudioEngine {
   private masterAnalyser: AnalyserNode | null = null;
   private tracks: TrackRuntime[] = [];
   private timeline = new TapeTimeline(1);
+  /** Correction 6 — the one authoritative timeline event stream. */
+  readonly timelineBus = new TapeTimelineBus();
   private requestedPlaying = false;
   /** Workstream 2: tape inertia. Classic (300 ms / 450 ms) is the default. */
   private inertiaPreset: InertiaPresetName = DEFAULT_INERTIA_PRESET;
@@ -308,6 +315,18 @@ export class AudioEngine {
         },
         trackContent: (i) => (engine.tracks[i]?.buffer ? "loaded" : engine.tracks[i]?.trash ? "trashed" : "empty"),
         currentRate: () => engine.timeline.currentRate(engine.ctx?.currentTime ?? 0),
+      });
+      // SOS follows the timeline through ONE subscription. No engine branch has
+      // to remember to call followRate() ever again.
+      const rec = this.recorder;
+      this.timelineBus.subscribe((ev: TapeTimelineEvent) => {
+        if (ev.type === "RateChange") {
+          for (let i = 0; i < engine.tracks.length; i++) rec.followRate(i, ev.rate, ev.rampFrames);
+        } else if (ev.type === "DirectionChange") {
+          // Reverse stays REJECTED for recorded layers until reverse recording
+          // is approved — the take mixer keeps its forward rate.
+          engine.lastError = "reverse is not applied to recorded take layers (reverse recording unapproved)";
+        }
       });
     }
     return this.recorder;
@@ -1152,10 +1171,15 @@ export class AudioEngine {
     }
   }
 
-  /** Per-stem effective BPM (correction 5): baseBpm × |rate of that stem|. */
+  /**
+   * Per-stem effective BPM: baseBpm × |MUSICAL rate|.
+   *
+   * Correction 8: tempo-derived effects (Pump, Echo, Gate, Beat Repeat) must
+   * follow the musical rate, never the instantaneous inertia rate — otherwise a
+   * wind-down collapses the LFO to ~0 Hz and Pump goes silent.
+   */
   effectiveBpm(id: TrackId): number {
-    const now = this.ctx?.currentTime ?? 0;
-    const rate = Math.abs(this.timeline.currentRate(now)) || 1;
+    const rate = Math.abs(this.timeline.musicalRate()) || 1;
     return this.baseBpm * rate;
   }
 
@@ -1827,11 +1851,14 @@ export class AudioEngine {
    */
   private beginWind(kind: "windUp" | "windDown", startAt: number) {
     if (!this.ctx || !this.inertiaEnabled) return null;
-    const musical = this.timeline.targetRate();
-    const current =
-      this.transportPhase === "stopped"
-        ? INERTIA_MIN_RATE
-        : Math.max(INERTIA_MIN_RATE, this.timeline.currentRate(this.ctx.currentTime));
+    // Correction 1: the MUSICAL target is never read back off the transport.
+    // A wind-down parks the instantaneous rate at ~0; the musical rate is still
+    // 1.00×, and that is what a wind-up must aim at.
+    const musical = this.timeline.musicalRate();
+    const stoppedish = this.transportPhase === "stopped" || this.transportPhase === "cued";
+    const current = stoppedish
+      ? INERTIA_MIN_RATE
+      : Math.max(INERTIA_MIN_RATE, this.timeline.currentRate(startAt));
     const seg = makeInertiaSegment({
       startAt,
       currentRate: kind === "windUp" ? current : Math.max(INERTIA_MIN_RATE, this.timeline.currentRate(startAt)),
@@ -1856,10 +1883,77 @@ export class AudioEngine {
       durationFrames: Math.round(seg.durationS * this.ctx!.sampleRate),
       applyAtContextFrame: at,
     }));
+    this.timelineBus.emit({
+      type: "RateChange",
+      rate: seg.to,
+      musicalRate: this.timeline.musicalRate(),
+      rampFrames: Math.round(seg.durationS * this.ctx.sampleRate),
+      cause: kind,
+    });
     // Seams derived on the old curve are invalid the moment the rate moves.
     this.invalidateSeams();
     return seg;
   }
+
+  /**
+   * Correction 2 — reverse an in-flight wind WITHOUT completing it.
+   *
+   * The completion path stops sources and would then have to create new ones;
+   * doing that mid-gesture is the source-recreation bug. This instead freezes
+   * the ramp at `now`, re-anchors the timeline on the instantaneous rate, and
+   * leaves every live source running so the opposite curve can be scheduled on
+   * top of the very same nodes.
+   */
+  private interruptAndRebaseWind(now: number): number {
+    if (this.windTimer) {
+      clearTimeout(this.windTimer);
+      this.windTimer = null;
+    }
+    const instant = Math.max(INERTIA_MIN_RATE, this.timeline.interruptInertia(now));
+    if (this.transportGain) {
+      this.transportGain.gain.cancelScheduledValues(now);
+      this.transportGain.gain.setValueAtTime(1, now);
+    }
+    for (const t of this.tracks)
+      for (const src of t.sources) {
+        src.node.playbackRate.cancelScheduledValues(now);
+        src.node.playbackRate.setValueAtTime(instant, now);
+      }
+    this.fanout((_t, at) => ({
+      type: "inertia",
+      from: instant,
+      to: instant,
+      k: 1,
+      durationFrames: 0,
+      applyAtContextFrame: at,
+    }));
+    this.invalidateSeams();
+    this.timelineBus.emit({
+      type: "RateChange",
+      rate: instant,
+      musicalRate: this.timeline.musicalRate(),
+      rampFrames: 0,
+      cause: "windReversal",
+    });
+    this.windReversals += 1;
+    return instant;
+  }
+
+  /**
+   * Force-complete any transition. Used ONLY for teardown (project change,
+   * dispose) — never for a musical reversal.
+   */
+  private forceCompleteWind(): void {
+    if (this.windTimer) {
+      clearTimeout(this.windTimer);
+      this.windTimer = null;
+    }
+    if (this.ctx) this.timeline.endInertia(this.ctx.currentTime, this.timeline.musicalRate());
+  }
+
+  /** Evidence counters for the transport proofs. */
+  windReversals = 0;
+  sourceCreations = 0;
 
   /** Tape-inertia preset. Rhythmic operations never receive inertia. */
   setInertiaPreset(name: InertiaPresetName | "off"): { ok: boolean; detail: string } {
@@ -1871,6 +1965,17 @@ export class AudioEngine {
     this.inertiaPreset = name;
     const p = INERTIA_PRESETS[name];
     return { ok: true, detail: `inertia ${p.label} — up ${p.startS * 1000} ms / down ${p.stopS * 1000} ms` };
+  }
+
+  /** Post-FX, post-transport-envelope RMS — what the speakers actually get. */
+  masterRms(): number {
+    const a = this.masterAnalyser;
+    if (!a) return 0;
+    const buf = new Float32Array(a.fftSize);
+    a.getFloatTimeDomainData(buf);
+    let sum = 0;
+    for (let i = 0; i < buf.length; i++) sum += buf[i]! * buf[i]!;
+    return Math.sqrt(sum / buf.length);
   }
 
   transportPhaseNow(): TransportPhase {
@@ -1889,8 +1994,31 @@ export class AudioEngine {
           if (this.ctx.state !== "running") return this.ack(cmd, "rejected", `AudioContext is ${this.ctx.state}`);
           if (this.duration === 0) return this.ack(cmd, "rejected", "no stems decoded");
           const now = this.ctx.currentTime;
+          if (this.transportPhase === "windingDown" && this.requestedPlaying) {
+            // Continuous reversal: the tape never restarts from zero and no
+            // source is recreated.
+            const instant = this.interruptAndRebaseWind(now);
+            const up = this.beginWind("windUp", now);
+            if (!up) {
+              this.transportPhase = "playing";
+              this.timeline.endInertia(now, this.timeline.musicalRate());
+              return this.ack(cmd, "completed", `wind-down reversed instantly at ${instant.toFixed(3)}×`);
+            }
+            this.ack(cmd, "accepted", `wind-down reversed from ${instant.toFixed(3)}× — no source recreated`);
+            this.windTimer = setTimeout(() => {
+              this.windTimer = null;
+              this.transportPhase = "playing";
+              if (this.ctx) this.timeline.endInertia(this.ctx.currentTime, this.timeline.musicalRate());
+            }, up.durationS * 1000);
+            return this.ack(
+              cmd,
+              "completed",
+              `continuous reversal ${up.from.toFixed(3)}× → ${up.to.toFixed(3)}× over ${(up.durationS * 1000).toFixed(0)} ms (sources preserved)`,
+            );
+          }
           this.cancelWind();
-          const resume = this.position() >= this.duration ? 0 : this.position();
+          const cueLaunch = this.transportPhase === "cued";
+          const resume = cueLaunch ? 0 : this.position() >= this.duration ? 0 : this.position();
           this.stopSources();
           this.requestedPlaying = true;
           // The transport envelope always opens instantly on Play; the tape
@@ -1907,8 +2035,20 @@ export class AudioEngine {
             this.requestedPlaying = false;
             return this.ack(cmd, "failed", "no source could be created");
           }
-          const wind = this.beginWind("windUp", startAt);
+          // Correction/Decision: cue launches EXACT — predictable live sync.
+          const wind = cueLaunch ? null : this.beginWind("windUp", startAt);
           if (!wind) {
+            if (cueLaunch) {
+              this.timeline.endInertia(startAt, this.timeline.musicalRate());
+              this.transportGain?.gain.setValueAtTime(0, startAt);
+              this.transportGain?.gain.linearRampToValueAtTime(1, startAt + CUE_FADE_S);
+              this.transportPhase = "playing";
+              return this.ack(
+                cmd,
+                "completed",
+                `EXACT cue launch — ${started} stems from frame 0 at t=${startAt.toFixed(4)}s, ${(CUE_FADE_S * 1000).toFixed(0)} ms anti-click open`,
+              );
+            }
             this.transportPhase = "playing";
             return this.ack(cmd, "completed", `${started} stems scheduled at t=${startAt.toFixed(4)}s (spread 0.000 ms)`);
           }
@@ -1916,7 +2056,7 @@ export class AudioEngine {
           this.windTimer = setTimeout(() => {
             this.windTimer = null;
             this.transportPhase = "playing";
-            if (this.ctx) this.timeline.endInertia(this.ctx.currentTime, wind.to);
+            if (this.ctx) this.timeline.endInertia(this.ctx.currentTime, this.timeline.musicalRate());
           }, wind.durationS * 1000);
           return this.ack(
             cmd,
@@ -1970,6 +2110,58 @@ export class AudioEngine {
           );
         }
 
+        case "transport.cue": {
+          if (!this.ctx) return this.ack(cmd, "rejected", "audio not unlocked");
+          const now = this.ctx.currentTime;
+          // Correction 3: cue is a UTILITY action — it must not sit through a
+          // 450 ms wind-down. Interrupt inertia, close an 8 ms anti-click fade,
+          // stop the sources and park every stem on frame zero.
+          if (this.transportPhase === "windingUp" || this.transportPhase === "windingDown") {
+            this.interruptAndRebaseWind(now);
+          }
+          this.cancelWind();
+          if (this.transportGain) {
+            this.transportGain.gain.cancelScheduledValues(now);
+            this.transportGain.gain.setValueAtTime(this.transportGain.gain.value, now);
+            this.transportGain.gain.linearRampToValueAtTime(0, now + CUE_FADE_S);
+          }
+          const fadeEnd = now + CUE_FADE_S;
+          this.requestedPlaying = false;
+          this.transportPhase = "cued";
+          // v1 feature freeze: the cue point is frame zero, runtime only.
+          this.timeline.endInertia(now, this.timeline.musicalRate());
+          this.timeline.anchor(fadeEnd, 0);
+          this.timelineFrozenAt = fadeEnd;
+          this.stopSources();
+          this.fanout((_t, at) => ({ type: "stop", applyAtContextFrame: at }));
+          this.transportGain?.gain.setValueAtTime(1, fadeEnd + 0.001);
+          return this.ack(
+            cmd,
+            "completed",
+            `cued at frame 0 after a ${(CUE_FADE_S * 1000).toFixed(0)} ms transport fade — musical rate held at ${this.timeline.musicalRate().toFixed(3)}×`,
+          );
+        }
+        case "transport.scrub": {
+          if (!this.ctx) return this.ack(cmd, "rejected", "audio not unlocked");
+          if (this.duration === 0) return this.ack(cmd, "rejected", "no stems decoded");
+          const now = this.ctx.currentTime;
+          const delta = Number(p["seconds"] ?? 0);
+          const target = Math.min(this.duration, Math.max(0, this.position() + delta));
+          const wasPlaying = this.requestedPlaying;
+          this.stopSources();
+          this.timeline.anchor(now, target);
+          if (wasPlaying) {
+            const { started } = this.startAll(target);
+            this.invalidateSeams();
+            return this.ack(
+              cmd,
+              "completed",
+              `global scrub ${delta >= 0 ? "+" : ""}${delta.toFixed(3)}s → ${target.toFixed(3)}s across ${started} stems (one shared playhead)`,
+            );
+          }
+          this.timelineFrozenAt = now;
+          return this.ack(cmd, "completed", `global scrub → ${target.toFixed(3)}s (transport stopped, all four stems parked together)`);
+        }
         case "transport.restart": {
           if (!this.ctx) return this.ack(cmd, "rejected", "audio not unlocked");
           if (this.duration === 0) return this.ack(cmd, "rejected", "no stems decoded");
@@ -2048,6 +2240,14 @@ export class AudioEngine {
             const from = this.timeline.currentRate(now);
             if (glide > 0) {
               this.timeline.glideTo(now, rate, glide);
+              this.timelineBus.emit({ type: "GlideChange", from, to: rate, tau: glide, cause: "rate.set" });
+              this.timelineBus.emit({
+                type: "RateChange",
+                rate,
+                musicalRate: rate,
+                rampFrames: Math.round(glideDurationS(glide) * (this.ctx?.sampleRate ?? 48000)),
+                cause: "rate.set glide",
+              });
               const curve = glideCurve(from, rate, glide);
               const dur = glideDurationS(glide);
               for (const t of this.tracks)
@@ -2059,6 +2259,7 @@ export class AudioEngine {
                 }
             } else {
               this.timeline.setRate(now, rate);
+              this.timelineBus.emit({ type: "RateChange", rate, musicalRate: rate, rampFrames: 0, cause: "rate.set" });
               for (const t of this.tracks)
                 for (const s of t.sources) s.node.playbackRate.setValueAtTime(rate, now);
             }
@@ -2090,6 +2291,15 @@ export class AudioEngine {
           const end = p["end"] == null ? t.loop.end : Math.min(1, Math.max(0, Number(p["end"])));
           t.loop = { ...t.loop, enabled, start, end };
           this.invalidateSeams();
+          {
+            const b = t.buffer ? resolveLoop(t.loop, t.buffer.duration) : null;
+            this.timelineBus.emit({
+              type: "WindowChange",
+              track: id,
+              startS: b?.start ?? 0,
+              lengthS: b ? b.end - b.start : 0,
+            });
+          }
           if (t.engineMode === "worklet" && t.worklet && this.ctx) {
             const frames = Math.round(t.sourceDurationS * this.ctx.sampleRate);
             const at = sharedApplyFrame(this.ctx);
@@ -2120,6 +2330,7 @@ export class AudioEngine {
           const index = Math.floor(Number(p["index"] ?? t.loop.chopIndex));
           t.loop = { ...t.loop, chopDiv: div, chopIndex: index, enabled: true };
           this.invalidateSeams();
+          this.timelineBus.emit({ type: "ChopChange", track: id, div });
           if (t.engineMode === "worklet" && t.worklet && this.ctx) {
             void t.worklet.post({
               type: "setChop",
@@ -2240,6 +2451,7 @@ export class AudioEngine {
           const id = Number(p["track"]) as TrackId;
           if (!this.tracks[id]) return this.ack(cmd, "rejected", `no track ${id}`);
           this.setLinked(id, Boolean(p["on"]));
+          this.timelineBus.emit({ type: "LinkChange", mask: this.tracks.map((x) => (x.linked ? "1" : "0")).join("") });
           return this.ack(cmd, "completed", `stem ${id + 1} ${p["on"] ? "linked" : "unlinked"} — phase-continuous, no restart`);
         }
         case "stem.select":
@@ -2439,7 +2651,8 @@ export class AudioEngine {
       position: this.position(),
       duration: this.duration,
       rate: this.timeline.currentRate(now),
-      targetRate: this.timeline.targetRate(),
+      targetRate: this.timeline.musicalRate(),
+      transportPhase: this.transportPhase,
       masterGain: this.masterLevel,
       startSpreadMs: this.startSpreadMs(),
       tracks: this.tracks.map((t, i) => {

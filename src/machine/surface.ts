@@ -301,6 +301,9 @@ function loadSong(state: SurfaceState, song: number): SurfaceState {
 
 /** ---------------- v2.6 gesture → command dispatch ---------------- */
 
+/** FN + rocker scrub step, seconds of song time per tap. */
+export const SCRUB_STEP_S = 0.5;
+
 export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
   let next: SurfaceState = { ...state };
   const fn = state.functionHeld;
@@ -505,13 +508,22 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
       if (c === "rocker-fwd" || c === "rocker-rwd") {
         const dir = c === "rocker-fwd" ? 1 : -1;
         if (fn) {
+          // Stem Tape v1 override (supersedes rocker.chop). The v2.6 row is kept
+          // verbatim in v26map.ts as historical source truth; chop moves to the
+          // double-tap so the single tap can scrub all four stems together.
           if (g.count === 2) {
-            next = { ...next, chopDiv: 1 };
-            return fire(next, "rocker.chopReset", "chop reset → 1", t);
+            const chopDiv = Math.min(16, Math.max(1, dir > 0 ? next.chopDiv * 2 : next.chopDiv / 2));
+            next = { ...next, chopDiv };
+            return fire(next, "rocker.chop", `chop ${dir > 0 ? "double" : "half"} → 1/${chopDiv}`, t);
           }
-          const chopDiv = Math.min(16, Math.max(1, dir > 0 ? next.chopDiv * 2 : next.chopDiv / 2));
-          next = { ...next, chopDiv };
-          return fire(next, "rocker.chop", `chop ${dir > 0 ? "double" : "half"} → 1/${chopDiv}`, t);
+          const seconds = dir * SCRUB_STEP_S;
+          next = emit(next, "transport.scrub", { seconds }, { rowId: "rocker.scrub", t });
+          return fire(
+            next,
+            "rocker.scrub",
+            `global scrub ${dir > 0 ? "+" : "−"}${SCRUB_STEP_S.toFixed(2)}s — one shared playhead, all four stems`,
+            t,
+          );
         }
         if (g.count === 2) {
           const speed = next.speed * Math.pow(2, dir / 12);
@@ -550,10 +562,13 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
           return fire(next, "play.lights", `lights ${next.lights}`, t);
         }
         if (g.level === "hold" && !fn)
+          // Correction 3: Hold Play is the UTILITY cue — 8 ms anti-click fade,
+          // sources stopped, every stem parked on frame zero. Tap Play stays the
+          // musical wind-up / wind-down control.
           return fire(
-            emit({ ...next, playing: true }, "transport.restart", {}, { rowId: "play.restart", t }),
-            "play.restart",
-            "restart from the top",
+            emit({ ...next, playing: false }, "transport.cue", { frame: 0 }, { rowId: "play.cue", t }),
+            "play.cue",
+            "cued at frame 0 — next Play tap launches EXACT",
             t,
           );
         return next;

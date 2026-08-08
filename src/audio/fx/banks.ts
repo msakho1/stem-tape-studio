@@ -201,10 +201,11 @@ function buildLfoGate(ctx: AudioContext, kind: "gate" | "pump"): AlgorithmGraph 
     const divisions = [1, 2, 4, 8];
     const div = divisions[Math.min(divisions.length - 1, Math.floor(macro * divisions.length))]!;
     lfo.frequency.setValueAtTime((bpm / 60) * div, t);
-    // Pump is a soft duck; gate is a hard chop.
-    const d = kind === "gate" ? 0.5 : 0.28;
+    // Pump is a soft duck; gate is a hard chop. The pump depth is ~65 %:
+    // the VCA travels 0.35 → 1.0, which is unmistakably audible.
+    const d = kind === "gate" ? 0.5 : 0.325;
     depth.gain.setValueAtTime(d, t);
-    offset.offset.setValueAtTime(kind === "gate" ? 0.5 : 0.72, t);
+    offset.offset.setValueAtTime(kind === "gate" ? 0.5 : 0.675, t);
   };
   apply(ctx.currentTime);
 

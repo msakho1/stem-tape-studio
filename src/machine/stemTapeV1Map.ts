@@ -25,6 +25,10 @@ export interface StemTapeRow {
   command: string;
   /** Base commands the arbiter suppresses BEFORE dispatch when this row wins. */
   suppresses: string[];
+  /** Documented v2.6 row ids this Stem Tape binding reinterprets. */
+  supersedes?: string[];
+  /** The original v2.6 behaviour, preserved in documentation only. */
+  originalBehaviour?: string;
   /** Rollback strategy when the row loses to a longer chord. */
   rollback: "none" | "txn-snapshot";
   led: string;
@@ -93,6 +97,44 @@ export const STEM_ROWS: StemTapeRow[] = [
     rollback: "none",
     led: "unlinked stem double-pulses",
     provenance: "extension",
+  },
+];
+
+export const TRANSPORT_OVERRIDE_ROWS: StemTapeRow[] = [
+  {
+    id: "play.cue",
+    layer: "tape",
+    controls: ["play"],
+    thresholdMs: 450,
+    command: "transport.cue frame=0 (8 ms anti-click fade, sources stopped, EXACT launch armed)",
+    suppresses: ["transport.restart"],
+    supersedes: ["play.restart"],
+    originalBehaviour: "v2.6: hold PLAY restarts the loop from the top immediately.",
+    rollback: "none",
+    led: "PLAY indicator slow-blinks while cued",
+    provenance: "reinterpreted",
+    tutorial: {
+      plainLanguage: "Hold PLAY to park the tape at the very start, ready for a clean launch.",
+      highlight: ["play"],
+      expected: "Sound stops within ~8 ms and the next PLAY tap starts everything exactly on frame 0.",
+    },
+  },
+  {
+    id: "rocker.scrub",
+    layer: "tape",
+    controls: ["function", "rocker-fwd"],
+    command: "transport.scrub seconds=±0.5 (global four-stem shuttle on one shared playhead)",
+    suppresses: ["rocker.chop"],
+    supersedes: ["rocker.chop"],
+    originalBehaviour: "v2.6: FUNCTION + rocker halves/doubles the chop division. Chop now lives on the FUNCTION + rocker DOUBLE-tap.",
+    rollback: "none",
+    led: "rocker LED flashes in the scrub direction",
+    provenance: "reinterpreted",
+    tutorial: {
+      plainLanguage: "Hold FUNCTION and click a rocker to shuttle all four stems together.",
+      highlight: ["function", "rocker-fwd"],
+      expected: "All four stems move by half a second and stay locked to each other.",
+    },
   },
 ];
 
@@ -316,6 +358,7 @@ export const RECORDING_ROWS: StemTapeRow[] = [
 export const STEM_TAPE_V1_MAP: StemTapeRow[] = [
   ...V26_ROWS_AS_REGISTRY,
   ...STEM_ROWS,
+  ...TRANSPORT_OVERRIDE_ROWS,
   ...SYSTEM_ROWS,
   ...FX_ROWS,
   ...RECORDING_ROWS,

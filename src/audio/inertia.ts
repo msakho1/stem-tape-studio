@@ -129,4 +129,11 @@ export function makeInertiaSegment(args: {
   };
 }
 
-export type TransportPhase = "stopped" | "windingUp" | "playing" | "windingDown";
+/**
+ * "cued" is a distinct STOPPED state: the tape is parked on song frame zero and
+ * the next single Play tap launches every stem on one scheduled frame.
+ */
+export type TransportPhase = "stopped" | "cued" | "windingUp" | "playing" | "windingDown";
+
+/** Exact cue launch: no wind-up, only a click-free 8 ms open. */
+export const CUE_FADE_S = 0.008;
