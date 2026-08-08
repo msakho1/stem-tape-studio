@@ -31,6 +31,8 @@ import { pairwiseDrift, sharedApplyFrame, type WorkletAck } from "./workletProto
 import { preflightWorklet, WorkletTrack, type MigrationStatus, type PreflightResult } from "./workletTrack";
 import { FxRack, type FxRackSnapshot } from "./fx/rack";
 import { FX_FAMILIES, type FxFamily } from "@/machine/stemPerformance";
+import { RecordingController } from "./input/recorder";
+import { PerformanceRecorder } from "./export/performanceRecorder";
 
 export type EnginePreference = "node" | "worklet";
 
@@ -198,6 +200,50 @@ export class AudioEngine {
   lastDecodeMs: number | null = null;
   /** Published for the diagnostics panel. */
   readonly antiClickMatrix = ANTI_CLICK_MATRIX;
+  /** Phase 6 — created lazily, only after the context exists. */
+  private recorder: RecordingController | null = null;
+  private perfRecorder: PerformanceRecorder | null = null;
+
+  /** Phase 6 capture/overdub runtime. Null until the context is unlocked. */
+  recording(): RecordingController | null {
+    if (!this.ctx) return null;
+    if (!this.recorder) {
+      const engine = this;
+      this.recorder = new RecordingController({
+        ctx: this.ctx,
+        inputNodeFor: (i) => engine.tracks[i]?.input ?? null,
+        faderNodeFor: (i) => engine.tracks[i]?.gain ?? null,
+        tapeFrameFor: (i) => {
+          const sr = engine.ctx?.sampleRate ?? 48000;
+          void i;
+          return Math.round(engine.position() * sr);
+        },
+        loopFramesFor: (i) => {
+          const t = engine.tracks[i];
+          if (!t?.buffer) return null;
+          const b = resolveLoop(t.loop, t.buffer.duration);
+          const sr = engine.ctx!.sampleRate;
+          return { start: Math.round(b.start * sr), end: Math.round(b.end * sr) };
+        },
+        trackContent: (i) => (engine.tracks[i]?.buffer ? "loaded" : engine.tracks[i]?.trash ? "trashed" : "empty"),
+        currentRate: () => engine.timeline.currentRate(engine.ctx?.currentTime ?? 0),
+      });
+    }
+    return this.recorder;
+  }
+
+  /** Master-bus performance recorder — records exactly what is heard. */
+  performance(): PerformanceRecorder | null {
+    if (!this.ctx) return null;
+    if (!this.perfRecorder) {
+      this.perfRecorder = new PerformanceRecorder({
+        ctx: this.ctx,
+        masterTap: () => this.masterAnalyser,
+      });
+    }
+    return this.perfRecorder;
+  }
+
 
   /** Resolve the real platform budget after hydration (SSR must not guess). */
   resolveBudget(): MemoryBudget {
@@ -1435,6 +1481,45 @@ export class AudioEngine {
             `stem ${id + 1} ${family} ${active ? "engaged" : "released"}${latched ? " (latched)" : ""}`,
           );
         }
+        // ---- Phase 6: recording, grid, heads/PRINT -------------------------
+        case "rec.arm":
+        case "rec.tap":
+        case "rec.undoPass": {
+          const id = Number(p["track"]) as TrackId;
+          const rec = this.recording();
+          if (!rec) return this.ack(cmd, "rejected", "audio not unlocked");
+          if (!rec.model.inputEnabled)
+            return this.ack(cmd, "rejected", "input is not enabled — open the input drawer and allow the microphone first");
+          if (cmd.type === "rec.arm") rec.arm(id);
+          else if (cmd.type === "rec.tap") rec.tap(id);
+          else rec.doubleTap(id);
+          return this.ack(cmd, "completed", rec.model.lastAck);
+        }
+        case "grid.tap": {
+          const frame = this.ctx ? Math.round(this.ctx.currentTime * this.ctx.sampleRate) : 0;
+          const sr = this.ctx?.sampleRate ?? 48000;
+          if (this.grid.sampleRate !== sr) this.grid = { ...this.grid, sampleRate: sr };
+          // 1500 ms of inactivity resets the learning window (v2.6 behaviour).
+          const stale = this.lastGridTapFrame != null && frame - this.lastGridTapFrame > 1.5 * sr;
+          if (stale) this.grid = emptyGrid(sr);
+          this.grid = tapGrid(this.grid, frame, stale ? null : this.lastGridTapFrame);
+          this.lastGridTapFrame = frame;
+          return this.ack(
+            cmd,
+            "completed",
+            this.grid.rejected
+              ? "tap far outside 40–220 BPM — grid rejected, nothing moved"
+              : this.grid.bpm == null
+                ? `tap ${this.grid.intervals.length + 1} — keep tapping, three intervals lock the tempo`
+                : `grid ${this.grid.bpm.toFixed(2)} BPM (${this.grid.source}, median of ${this.grid.intervals.length})`,
+          );
+        }
+        case "grid.quantise": {
+          this.quantisePunch = !this.quantisePunch;
+          return this.ack(cmd, "completed", `punch quantise ${this.quantisePunch ? "on — punches snap to the grid" : "off — punches land where you press"}`);
+        }
+        case "heads.print":
+          return this.ack(cmd, "rejected", "PRINT is reserved in this build — the gesture, LED slot and take shape exist, the render is not enabled");
         default:
           return this.ack(cmd, "rejected", "unknown command type");
       }

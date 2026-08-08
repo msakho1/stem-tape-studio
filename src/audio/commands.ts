@@ -37,6 +37,13 @@ export type AudioCommandType =
   | "fx.variation"
   | "fx.latch"
   | "fx.clearLatches"
+  // Phase 6 — recording, overdub, grid, heads/PRINT and export.
+  | "rec.arm"
+  | "rec.tap"
+  | "rec.undoPass"
+  | "grid.tap"
+  | "grid.quantise"
+  | "heads.print"
   | "rollback";
 
 
