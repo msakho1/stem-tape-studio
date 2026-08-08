@@ -132,13 +132,318 @@
   --sidebar-ring: oklch(0.551 0.027 264.364);
 }
 
+/*
+ * Stem Tape R&D bench tokens.
+ * Graphite workbench, bone instrument, single signal red. No purple gradients.
+ */
+:root {
+  --bench: oklch(0.19 0.004 250);
+  --bench-raised: oklch(0.235 0.004 250);
+  --bench-line: oklch(0.32 0.004 250);
+  --ink: oklch(0.93 0.003 250);
+  --ink-dim: oklch(0.66 0.004 250);
+  --ink-faint: oklch(0.5 0.004 250);
+  --signal: oklch(0.66 0.19 22);
+  --lamp: oklch(0.95 0.06 92);
+  --mono: ui-monospace, "SFMono-Regular", "JetBrains Mono", Menlo, monospace;
+}
+
+@theme inline {
+  --color-bench: var(--bench);
+  --color-bench-raised: var(--bench-raised);
+  --color-bench-line: var(--bench-line);
+  --color-ink: var(--ink);
+  --color-ink-dim: var(--ink-dim);
+  --color-signal: var(--signal);
+  --font-mono: var(--mono);
+}
+
 @layer base {
   * {
     border-color: var(--color-border);
   }
 
   body {
-    background-color: var(--color-background);
-    color: var(--color-foreground);
+    background-color: var(--bench);
+    color: var(--ink);
   }
 }
+
+/* ---------- device surface ---------- */
+
+.st-surface {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 78vh;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  filter: drop-shadow(0 24px 48px oklch(0 0 0 / 0.55));
+}
+
+.st-art {
+  pointer-events: none;
+}
+
+.st-zones rect {
+  fill: transparent;
+  stroke: none;
+  cursor: pointer;
+  touch-action: none;
+}
+
+.st-zones--visible rect {
+  fill: oklch(0.66 0.19 22 / 0.14);
+  stroke: oklch(0.66 0.19 22 / 0.75);
+  stroke-width: 1.5;
+  stroke-dasharray: 6 5;
+}
+
+.st-press {
+  transition:
+    opacity 90ms linear,
+    transform 90ms ease-out;
+  transform-origin: center;
+}
+
+.st-press--down {
+  opacity: 0.62;
+  transform: translateY(1.5px);
+}
+
+.st-rocker {
+  transition: transform 110ms ease-out;
+  transform-origin: 80px 225px;
+}
+
+.st-rocker--fwd {
+  transform: rotate(-3.2deg);
+}
+
+.st-rocker--rwd {
+  transform: rotate(3.2deg);
+}
+
+/* LEDs: static halo + core, opacity only. No SVG filters (Safari cost). */
+.st-led__halo {
+  opacity: 0;
+  transition: opacity 120ms linear;
+}
+
+.st-led__core {
+  opacity: 0.1;
+  transition: opacity 120ms linear;
+}
+
+.st-led--dark .st-led__core {
+  opacity: 0.08;
+}
+
+.st-led--faint .st-led__core {
+  opacity: 0.32;
+}
+
+.st-led--faint .st-led__halo {
+  opacity: 0.06;
+}
+
+.st-led--solid .st-led__core {
+  opacity: 1;
+}
+
+.st-led--solid .st-led__halo {
+  opacity: 0.34;
+}
+
+.st-led--pulse .st-led__core {
+  animation: st-pulse 1.2s ease-in-out infinite;
+}
+
+.st-led--pulse .st-led__halo {
+  animation: st-pulse-halo 1.2s ease-in-out infinite;
+}
+
+.st-led--blink .st-led__core {
+  animation: st-blink 0.4s steps(1, end) infinite;
+}
+
+.st-led--breathe .st-led__core {
+  animation: st-breathe 2.4s ease-in-out infinite;
+}
+
+@keyframes st-pulse {
+  0%,
+  100% {
+    opacity: 0.34;
+  }
+  12% {
+    opacity: 1;
+  }
+}
+
+@keyframes st-pulse-halo {
+  0%,
+  100% {
+    opacity: 0.04;
+  }
+  12% {
+    opacity: 0.36;
+  }
+}
+
+@keyframes st-blink {
+  0% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.12;
+  }
+}
+
+@keyframes st-breathe {
+  0%,
+  100% {
+    opacity: 0.22;
+  }
+  50% {
+    opacity: 0.95;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .st-led__core,
+  .st-led__halo {
+    animation: none !important;
+  }
+  .st-led--pulse .st-led__core,
+  .st-led--blink .st-led__core,
+  .st-led--breathe .st-led__core {
+    opacity: 0.8;
+  }
+}
+
+/* ---------- lab chrome ---------- */
+
+.st-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.st-section {
+  border: 1px solid var(--bench-line);
+  background: var(--bench-raised);
+  border-radius: 4px;
+  padding: 0.75rem 0.85rem 0.85rem;
+}
+
+.st-section__title {
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin-bottom: 0.6rem;
+}
+
+.st-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.35rem 1rem;
+}
+
+.st-kv {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  border-bottom: 1px dotted var(--bench-line);
+  padding-bottom: 2px;
+}
+
+.st-kv__k {
+  color: var(--ink-dim);
+}
+
+.st-kv__v {
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.st-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.st-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 0.6rem;
+  align-items: baseline;
+  color: var(--ink-dim);
+}
+
+.st-row__i {
+  color: var(--signal);
+}
+
+.st-row__a {
+  color: var(--ink);
+}
+
+.st-row__c {
+  font-variant-numeric: tabular-nums;
+}
+
+.st-row__d {
+  grid-column: 1 / -1;
+  color: var(--ink-faint);
+  font-size: 10px;
+}
+
+.st-log {
+  max-height: 168px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.st-log__line {
+  display: grid;
+  grid-template-columns: 62px 1fr;
+  gap: 0.5rem;
+  color: var(--ink-dim);
+}
+
+.st-log__t {
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.st-empty {
+  color: var(--ink-faint);
+}
+
+.st-toggle {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  border: 1px solid var(--bench-line);
+  background: var(--bench-raised);
+  color: var(--ink-dim);
+  padding: 0.4rem 0.7rem;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.st-toggle[data-on="true"] {
+  color: var(--signal);
+  border-color: var(--signal);
+}
+
