@@ -245,11 +245,13 @@ export class GestureEngine {
   }
 
   private evaluateChordStart(t: number) {
-    if (this.presses.size < 2 || this.chordActive) return;
+    if (this.chordActive) return;
     const members = [...this.presses.values()]
+      .filter((p) => !isContinuousControl(p.control))
       .filter((p) => t - p.downAt <= this.timings.chordWindowMs || p.downAt <= t)
       .map((p) => p.control);
     if (members.length < 2) return;
+
     this.chordActive = members;
     this.chordReleased = [];
     this.chordReleaseStartedAt = null;
