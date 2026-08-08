@@ -57,9 +57,13 @@ export function useAudioEngine(commands: AudioCommand[]) {
   // --- continuous control bus → AudioParam --------------------------------
   useEffect(() => {
     const off = controlBus.subscribe((e) => {
-      if (e.channel !== "fader") return; // window / heads land in Phase 5
+      if (e.channel !== "fader") return;
+      // In heads mode the faders are the head layer: level/scrub arrive as
+      // ordered commands, so the continuous bus must not move the track fader.
+      if (engine.heads.active) return;
       engine.applyTrackGain(e.index as 0 | 1 | 2 | 3, e.value);
     });
+
     return () => {
       off();
     };
