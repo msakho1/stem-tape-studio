@@ -26,6 +26,16 @@ import { bufferBytes } from "./format";
 import { GLIDE_TAU, glideCurve, glideDurationS } from "./glide";
 import { allowed, defaultBudget, describeVerdict, formatMiB, judge, SSR_BUDGET, type MemoryBudget } from "./memory";
 import { DEFAULT_WINDOW, resolveLoop, TapeTimeline, type LoopWindow } from "./tape";
+import {
+  DEFAULT_INERTIA_PRESET,
+  INERTIA_MIN_RATE,
+  INERTIA_PRESETS,
+  INERTIA_STOP_FADE_S,
+  inertiaCurve,
+  makeInertiaSegment,
+  type InertiaPresetName,
+  type TransportPhase,
+} from "./inertia";
 import { estimateMigration } from "./workletBudget";
 import { pairwiseDrift, sharedApplyFrame, type WorkletAck } from "./workletProtocol";
 import { preflightWorklet, WorkletTrack, type MigrationStatus, type PreflightResult } from "./workletTrack";
@@ -236,6 +246,13 @@ export class AudioEngine {
   private tracks: TrackRuntime[] = [];
   private timeline = new TapeTimeline(1);
   private requestedPlaying = false;
+  /** Workstream 2: tape inertia. Classic (300 ms / 450 ms) is the default. */
+  private inertiaPreset: InertiaPresetName = DEFAULT_INERTIA_PRESET;
+  private inertiaEnabled = true;
+  private transportPhase: TransportPhase = "stopped";
+  private windTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Dedicated transport envelope — never the fader, never the mute gain. */
+  private transportGain: GainNode | null = null;
   private masterLevel = 0.7;
   private listeners = new Set<Listener>();
   private schedulerTimer: ReturnType<typeof setInterval> | null = null;
@@ -368,7 +385,10 @@ export class AudioEngine {
     this.master.gain.value = this.masterLevel;
     this.masterAnalyser = ctx.createAnalyser();
     this.masterAnalyser.fftSize = 1024;
-    this.master.connect(this.masterAnalyser);
+    this.transportGain = ctx.createGain();
+    this.transportGain.gain.value = 1;
+    this.master.connect(this.transportGain);
+    this.transportGain.connect(this.masterAnalyser);
     this.masterAnalyser.connect(ctx.destination);
 
     this.tracks = [0, 1, 2, 3].map((i) => {
