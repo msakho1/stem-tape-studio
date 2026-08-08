@@ -20,12 +20,16 @@ describe("glide math", () => {
     expect(integratedDistance(seg, dt)).toBeLessThan(linear);
   });
 
-  it("never mathematically reaches the target", () => {
+  it("never mathematically reaches the target within the settle window", () => {
     const seg = { startAt: 0, from: 1, to: 2, tau: 0.06 };
-    expect(rateAt(seg, 10)).toBeGreaterThan(2 - 1e-6 ? 1.999999 : 0);
-    expect(rateAt(seg, 1e6)).not.toBe(2);
-    expect(Math.abs(rateAt(seg, 1e6) - 2)).toBeLessThan(1e-12);
+    // At 6τ the residual is small but strictly non-zero — this is exactly why
+    // the playhead may not assume the target rate during a glide.
+    const residual = 2 - rateAt(seg, seg.tau * 6);
+    expect(residual).toBeGreaterThan(0);
+    expect(residual).toBeLessThan(0.0025);
+    expect(rateAt(seg, 0)).toBeCloseTo(1, 12);
   });
+
 
   it("finite scheduled curve lands exactly on the target", () => {
     const c = glideCurve(1, 2, GLIDE_TAU, 64);
