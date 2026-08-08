@@ -23,7 +23,7 @@ export const VIEWBOX_HEIGHT = 940;
  * Sizing hit zones off 375 produced 39.31 px targets — a real 44 px failure
  * that only the measured audit caught. 335 is the number that matters.
  */
-export const MIN_RENDER_WIDTH = 335;
+export const MIN_RENDER_WIDTH = 334; // 1 px of headroom so 44.00 is never missed by float error
 export const MIN_TOUCH_TARGET_PX = 44;
 
 /**

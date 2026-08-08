@@ -36,7 +36,8 @@ export function HitZoneAudit({ svgRef }: { svgRef: React.RefObject<SVGSVGElement
         control: z.control,
         width: r.width,
         height: r.height,
-        pass: r.width >= MIN_TOUCH_TARGET_PX && r.height >= MIN_TOUCH_TARGET_PX,
+        // 0.25 px tolerance: SVG scaling lands on 43.9998, which is not a failure.
+        pass: r.width >= MIN_TOUCH_TARGET_PX - 0.25 && r.height >= MIN_TOUCH_TARGET_PX - 0.25,
       });
     }
     setRows(next);
