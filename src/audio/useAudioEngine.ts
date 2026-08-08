@@ -38,7 +38,7 @@ export function useAudioEngine(commands: AudioCommand[]) {
   useEffect(() => {
     const w = window as unknown as { __stemTapeScrub?: () => unknown };
     w.__stemTapeScrub = () => {
-      const d = engine.diagnostics() as { scrub?: unknown; heads?: unknown; headsSummary?: string };
+      const d = engine.status();
       return { scrub: d.scrub, heads: d.heads, headsSummary: d.headsSummary, engineReady: engine.ready };
     };
     return () => {
