@@ -38,10 +38,13 @@ export function InputPanel({ engine }: { engine: AudioEngine }) {
       }
       const rec = engine.recording();
       const r = rec ? await rec.enableInput(deviceId) : { ok: false, detail: "engine not ready" };
-      setNote(r.detail);
+      // §2.2: a track held before permission existed arms itself now.
+      const pending = r.ok ? engine.resolvePendingInput() : { ok: false, detail: "" };
+      setNote(pending.ok ? `${r.detail} · ${pending.detail}` : r.detail);
       setBusy(false);
       refresh();
     },
+
     [engine, refresh],
   );
 
