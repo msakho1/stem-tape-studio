@@ -11,11 +11,33 @@
  * reload with a finger held down or an overlay open.
  */
 
+import {
+  BANKS,
+  FX12_SCHEMA_VERSION,
+  clearBankLatches,
+  cycleAlgorithm,
+  deserializeStemFx,
+  initialStemFx,
+  isBankActive,
+  migrateLegacyStemFx,
+  nudgeMacro,
+  serializeStemFx,
+  type AlgorithmIndex,
+  type BankIndex,
+  type StemFxState,
+} from "./fx12";
+
 export const FX_FAMILIES = ["filter", "echo", "reverb", "beatRepeat"] as const;
 export type FxFamily = (typeof FX_FAMILIES)[number];
 
-/** Track button 1..4 map to the four FX families while the overlay is open. */
+/**
+ * Legacy bridge only. Selection now lives in `fx12` (four banks × three
+ * algorithms); these four families remain because the audio rack's existing
+ * Phase 5C processors are still the implementations behind algorithm 0 of each
+ * bank. There is exactly ONE selection system — this map is derived from it.
+ */
 export const FX_FAMILY_BY_TRACK: readonly FxFamily[] = FX_FAMILIES;
+
 
 export type StemIndex = 0 | 1 | 2 | 3;
 
