@@ -466,6 +466,37 @@ class TapeProcessor extends AudioWorkletProcessor {
         }
       }
 
+      // ---- per-frame scrub integration (once per frame, not per channel) ----
+      if (this.heads) {
+        const cf0 = this.heads.cycleFrames;
+        const mixStep = 1 / this.scrubXfadeFrames;
+        for (let h = 0; h < 4; h++) {
+          const sc = this.headScrubs[h];
+          if (!sc) continue;
+          // Bounded chase: velocity is the clamped, one-pole-smoothed distance
+          // to the target divided by the documented lag.
+          let desired = (sc.target - sc.actual) / this.scrubLag;
+          if (desired > this.maxScrubRate) desired = this.maxScrubRate;
+          else if (desired < -this.maxScrubRate) desired = -this.maxScrubRate;
+          sc.velocity += (desired - sc.velocity) * 0.004;
+          sc.actual += sc.velocity;
+          // Wrap only inside the active heads cycle.
+          let rel = (sc.actual - this.heads.cycleStart) % cf0;
+          if (rel < 0) rel += cf0;
+          sc.actual = this.heads.cycleStart + rel;
+          sc.target = sc.actual + (sc.target - (sc.actual - sc.velocity)) - sc.velocity === sc.target ? sc.target : sc.target;
+          // A stationary tape is silent: fade the scrub voice with |velocity|.
+          const speed = sc.velocity < 0 ? -sc.velocity : sc.velocity;
+          let gTarget = speed / this.scrubSilenceRate;
+          if (gTarget > 1) gTarget = 1;
+          sc.gain += (gTarget - sc.gain) * 0.002;
+          const mixTarget = sc.releasing ? 0 : 1;
+          if (sc.mix < mixTarget) sc.mix = Math.min(mixTarget, sc.mix + mixStep);
+          else if (sc.mix > mixTarget) sc.mix = Math.max(mixTarget, sc.mix - mixStep);
+          if (sc.releasing && sc.mix <= 0) this.headScrubs[h] = null;
+        }
+      }
+
       for (let c = 0; c < outChannels; c++) {
         const src = this.channels[srcChannels === 1 ? 0 : Math.min(c, srcChannels - 1)];
         let v;
@@ -475,16 +506,23 @@ class TapeProcessor extends AudioWorkletProcessor {
           // underlying pointer stays phase-correct when heads mode exits.
           const cf = this.heads.cycleFrames;
           const cs = this.heads.cycleStart;
-          let phase = (this.readPosition - cs) % cf;
-          if (phase < 0) phase += cf;
           v = 0;
           for (let h = 0; h < this.heads.heads.length; h++) {
             const hd = this.heads.heads[h];
             if (hd.muted || hd.level <= 0) continue;
+            let phase = (this.readPosition - cs - this.headAnchors[h]) % cf;
+            if (phase < 0) phase += cf;
             const off = hd.offset * cf;
             let p = hd.reverse ? (off - phase) % cf : (off + phase) % cf;
             if (p < 0) p += cf;
-            v += this.sampleAt(src, cs + p) * hd.level;
+            const normal = this.sampleAt(src, cs + p);
+            const sc = this.headScrubs[h];
+            if (sc) {
+              const scrubbed = this.sampleAt(src, sc.actual) * sc.gain;
+              v += (normal * (1 - sc.mix) + scrubbed * sc.mix) * hd.level;
+            } else {
+              v += normal * hd.level;
+            }
           }
           if (v > 1) v = 1;
           else if (v < -1) v = -1;
@@ -493,7 +531,12 @@ class TapeProcessor extends AudioWorkletProcessor {
           if (b > 0) v += this.sampleAt(src, tailPos) * b;
         }
         out[c][i] = v;
+        if (c === 0) {
+          this.rmsAcc += v * v;
+          this.rmsFrames++;
+        }
       }
+
 
 
       this.readPosition += this.rate * this.rateScale * this.direction;
