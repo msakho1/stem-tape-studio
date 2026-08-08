@@ -89,7 +89,9 @@ function reducer(state: SurfaceState, action: Action): SurfaceState {
     }
     case "faderCommit": {
       const tracks = [...state.tracks] as SurfaceState["tracks"];
-      tracks[action.index] = { ...tracks[action.index], volume: action.value };
+      const slice = tracks[action.index];
+      if (!slice) return state;
+      tracks[action.index] = { ...slice, volume: action.value };
       return { ...state, tracks };
     }
   }
