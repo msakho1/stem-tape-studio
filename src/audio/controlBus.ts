@@ -12,7 +12,10 @@
  * SVG components never see an AudioNode — they call the bus.
  */
 
-export type ContinuousChannel = "fader" | "window" | "headScrub";
+export type ContinuousChannel = "fader" | "window" | "headScrub" | "headLevel";
+
+/** Gesture lifecycle. `move` events are rAF-coalesced; the rest are discrete. */
+export type ContinuousPhase = "start" | "move" | "end" | "cancel";
 
 export interface ContinuousEvent {
   channel: ContinuousChannel;
@@ -20,7 +23,13 @@ export interface ContinuousEvent {
   value: number;
   /** false while dragging, true for the committed value on pointer-up. */
   committed: boolean;
+  /** Present for every pointer-driven control; identifies the gesture. */
+  pointerId?: number;
+  phase?: ContinuousPhase;
+  /** performance.now() of the originating pointer event. */
+  timestamp?: number;
 }
+
 
 type Handler = (e: ContinuousEvent) => void;
 
