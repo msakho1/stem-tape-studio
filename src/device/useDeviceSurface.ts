@@ -34,30 +34,11 @@ type Action =
 
 function reducer(state: SurfaceState, action: Action): SurfaceState {
   switch (action.type) {
-    case "press": {
-      if (state.pressed.includes(action.control)) return state;
-      const pressed = [...state.pressed, action.control];
-      return {
-        ...state,
-        pressed,
-        functionHeld: action.control === "function" ? true : state.functionHeld,
-        rocker:
-          action.control === "rocker-fwd"
-            ? "forward"
-            : action.control === "rocker-rwd"
-              ? "rewind"
-              : state.rocker,
-      };
-    }
-    case "release": {
-      const pressed = state.pressed.filter((c) => c !== action.control);
-      return {
-        ...state,
-        pressed,
-        functionHeld: action.control === "function" ? false : state.functionHeld,
-        rocker: action.control.startsWith("rocker") ? "center" : state.rocker,
-      };
-    }
+    case "press":
+      return pressControl(state, action.control);
+    case "release":
+      return releaseControl(state, action.control);
+
     case "gesture":
       // Every behaviour is a documented Tape Looper v2.6 row. No experimental
       // Stem Tape mappings are dispatched here (phase 4).
