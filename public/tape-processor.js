@@ -164,6 +164,7 @@ class TapeProcessor extends AudioWorkletProcessor {
       }
       case "setHeads": {
         // Immediate: heads config is a routing layer, not a transport change.
+        const hadHeads = this.heads != null;
         this.heads = msg.heads
           ? {
               cycleStart: Number(msg.cycleStart) || 0,
@@ -171,6 +172,22 @@ class TapeProcessor extends AudioWorkletProcessor {
               heads: msg.heads,
             }
           : null;
+        if (!this.heads) {
+          // Leaving heads ends every scrub safely before the tracks return.
+          for (let i = 0; i < 4; i++) {
+            this.headScrubs[i] = null;
+            this.headAnchors[i] = 0;
+          }
+        } else if (!hadHeads) {
+          for (let i = 0; i < 4; i++) this.headAnchors[i] = 0;
+        } else {
+          // A live scrub owns its head's offset; the engine's table must not
+          // yank the travelling pointer back under the finger.
+          for (let i = 0; i < 4; i++) {
+            const sc = this.headScrubs[i];
+            if (sc && this.heads.heads[i]) this.heads.heads[i].offset = sc.savedOffset;
+          }
+        }
         this.reply(
           msg.seq,
           "applied",
@@ -180,6 +197,74 @@ class TapeProcessor extends AudioWorkletProcessor {
         );
         return;
       }
+      case "headScrub": {
+        if (!this.heads) {
+          this.reply(msg.seq, "rejected", "headScrub while heads mode is off", currentFrame, this.readPosition);
+          return;
+        }
+        const i = msg.head | 0;
+        const hd = this.heads.heads[i];
+        if (!hd) {
+          this.reply(msg.seq, "rejected", `head ${i + 1} does not exist`, currentFrame, this.readPosition);
+          return;
+        }
+        const cf = this.heads.cycleFrames;
+        const cs = this.heads.cycleStart;
+        if (msg.phase === "start") {
+          const at = this.headReadFrame(i);
+          this.headScrubs[i] = {
+            pointerId: msg.pointerId | 0,
+            target: at,
+            actual: at,
+            velocity: 0,
+            gain: 0,
+            mix: 0,
+            releasing: false,
+            previews: 0,
+            savedOffset: hd.offset,
+            savedAnchor: this.headAnchors[i],
+          };
+          this.reply(msg.seq, "applied", `scrub start head ${i + 1} at source frame ${at.toFixed(1)}`, currentFrame, at);
+          return;
+        }
+        const sc = this.headScrubs[i];
+        if (!sc) {
+          this.reply(msg.seq, "rejected", `no active scrub on head ${i + 1}`, currentFrame, this.readPosition);
+          return;
+        }
+        if (msg.phase === "preview") {
+          // Unwrapped travel: direction always follows the finger.
+          sc.target += Number(msg.deltaFrames) || 0;
+          sc.previews++;
+          this.reply(msg.seq, "applied", `scrub preview ${sc.previews} head ${i + 1}`, currentFrame, sc.actual);
+          return;
+        }
+        if (msg.phase === "end") {
+          // Exact absolute landing, chosen as the nearest unwrapped equivalent
+          // so the last leg of travel keeps the direction it already had.
+          const want = cs + ((((Number(msg.normalizedPosition) || 0) % 1) + 1) % 1) * cf;
+          let t = want;
+          const k = Math.round((sc.target - want) / cf);
+          t = want + k * cf;
+          sc.target = t;
+          sc.releasing = true;
+          hd.offset = (((want - cs) / cf) % 1 + 1) % 1;
+          // Anchor so normal playback resumes exactly from the landing frame.
+          let phase = (this.readPosition - cs) % cf;
+          if (phase < 0) phase += cf;
+          this.headAnchors[i] = phase;
+          this.reply(msg.seq, "applied", `scrub end head ${i + 1} → source frame ${want.toFixed(3)} (${sc.previews} previews)`, currentFrame, want);
+          return;
+        }
+        // cancel: crossfade back to normal playback at the pre-scrub position.
+        hd.offset = sc.savedOffset;
+        this.headAnchors[i] = sc.savedAnchor;
+        sc.releasing = true;
+        sc.target = this.headReadFrame(i);
+        this.reply(msg.seq, "applied", `scrub cancel head ${i + 1} → restored pre-scrub position`, currentFrame, sc.target);
+        return;
+      }
+
       case "readRange": {
         // Copy a source range out for PRINT rendering. Copies are made here
         // because the PCM itself is owned by this processor after adopt.
