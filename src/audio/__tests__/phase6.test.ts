@@ -31,17 +31,19 @@ describe("phase 6 — tempo grid", () => {
     expect(g.bpm).toBeNull();
   });
 
-  it("quantised punch snaps to the next boundary and unquantised does not", () => {
+  it("a late press recovers from look-back; an early press quantises forward", () => {
     let g = emptyGrid(SR);
     const step = SR / 2;
     let last: number | null = null;
     for (let i = 0; i < 5; i++) { g = tapGrid(g, i * step, last); last = i * step; }
-    const press = 4 * step + 1000;
-    const snapped = decidePunch(g, press, true);
-    const raw = decidePunch(g, press, false);
-    expect(raw.frame).toBe(press);
-    expect(snapped.frame).toBe(nextBoundary(g, press));
-    expect(snapped.frame! % step).toBe(0);
+    const late = decidePunch(g, 4 * step + 480, { maxLookBackFrames: 4 * SR });
+    expect(late.mode).toBe("late-lookback");
+    expect(late.startFrame).toBe(4 * step);
+    expect(late.lookBackFrames).toBe(480);
+    const early = decidePunch(g, 4 * step + step / 2, { maxLookBackFrames: 4 * SR });
+    expect(early.mode).toBe("next-boundary");
+    expect(early.startFrame).toBe(nextBoundary(g, 4 * step + step / 2));
+    expect(early.startFrame % step).toBe(0);
   });
 });
 
