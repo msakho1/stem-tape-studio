@@ -16,14 +16,22 @@ export const VIEWBOX_WIDTH = 720;
 export const VIEWBOX_HEIGHT = 940;
 
 /**
- * Smallest render width we support (iPhone portrait with page padding).
- * Hit zones are sized from this so they are >= 44 CSS px there.
+ * Smallest width the SVG itself renders at — NOT the viewport width.
+ *
+ * Measured, not assumed: at a 375 px viewport the page is `px-5` (20 px each
+ * side), so getBoundingClientRect() on <svg.st-surface> returns 335.00 px.
+ * Sizing hit zones off 375 produced 39.31 px targets — a real 44 px failure
+ * that only the measured audit caught. 335 is the number that matters.
  */
-export const MIN_RENDER_WIDTH = 375;
+export const MIN_RENDER_WIDTH = 335;
 export const MIN_TOUCH_TARGET_PX = 44;
 
-/** 44 CSS px expressed in viewBox user units at MIN_RENDER_WIDTH. */
-export const HIT_UNITS = (MIN_TOUCH_TARGET_PX * VIEWBOX_WIDTH) / MIN_RENDER_WIDTH; // ~84.5
+/**
+ * 44 CSS px expressed in viewBox user units at MIN_RENDER_WIDTH (~94.57).
+ * Still below the 97.2-unit column pitch, so zones stay non-overlapping.
+ */
+export const HIT_UNITS = (MIN_TOUCH_TARGET_PX * VIEWBOX_WIDTH) / MIN_RENDER_WIDTH;
+
 
 export type TrackIndex = 0 | 1 | 2 | 3;
 
