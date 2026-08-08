@@ -2138,11 +2138,19 @@ export class AudioEngine {
         case "heads.scrub": {
           if (!this.heads.active) return this.ack(cmd, "rejected", "heads mode is not active");
           const i = Number(p["head"]);
-          this.heads = scrubHead(this.heads, i, Number(p["position"]));
+          const pos = Number(p["position"]);
+          const already = Math.abs((this.heads.heads[i]?.offset ?? -1) - ((pos % 1) + 1) % 1) < 1e-9;
+          this.heads = scrubHead(this.heads, i, pos);
+          if (already) {
+            // The audible gesture already landed this head; re-seaming the
+            // voice here would add a second, inaudible-but-real restart.
+            return this.ack(cmd, "completed", `head ${i + 1} landing confirmed at ${(this.heads.heads[i]!.offset * 100).toFixed(1)}% (audible scrub already applied)`);
+          }
           this.pushHeads();
           this.restartHeadVoice(i);
           return this.ack(cmd, "completed", `head ${i + 1} scrubbed to ${(this.heads.heads[i]!.offset * 100).toFixed(1)}% of the cycle`);
         }
+
         case "heads.print": {
           const target = Number(p["track"]) as TrackId;
           if (!this.heads.active) return this.ack(cmd, "rejected", "PRINT requires heads mode to be active");
