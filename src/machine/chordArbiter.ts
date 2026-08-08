@@ -24,7 +24,8 @@
 
 import type { Control } from "@/device/geometry";
 import type { RawInputEvent } from "@/input/gestures";
-import { FX_FAMILY_BY_TRACK, type FxFamily, type StemIndex } from "./stemPerformance";
+import { bankOfButton, type BankIndex } from "./fx12";
+import { type StemIndex } from "./stemPerformance";
 
 export interface ArbiterTimings {
   /** The second control of a chord must arrive within this of the first. */
@@ -35,6 +36,10 @@ export interface ArbiterTimings {
   overlayShortMs: number;
   /** Vol− + Vol+ held at least this = the existing pairing gesture. */
   pairingMs: number;
+  /** Volume held this long inside FX mode starts macro adjustment. */
+  macroHoldMs: number;
+  /** Macro repeat interval once macro adjustment has started. */
+  macroRepeatMs: number;
 }
 
 export const DEFAULT_ARBITER_TIMINGS: ArbiterTimings = {
@@ -42,6 +47,8 @@ export const DEFAULT_ARBITER_TIMINGS: ArbiterTimings = {
   soloLinkMs: 700,
   overlayShortMs: 600,
   pairingMs: 2000,
+  macroHoldMs: 450,
+  macroRepeatMs: 120,
 };
 
 export type PerfIntent =
@@ -51,11 +58,16 @@ export type PerfIntent =
   | { type: "fx.overlay"; on: boolean }
   | { type: "system.pairing" }
   | { type: "system.noop"; detail: string }
-  | { type: "fx.momentary.start"; stem: StemIndex; family: FxFamily }
-  | { type: "fx.momentary.end"; stem: StemIndex; family: FxFamily }
-  | { type: "fx.variation"; stem: StemIndex; family: FxFamily; dir: 1 | -1 }
-  | { type: "fx.latch"; stem: StemIndex; family: FxFamily }
+  // Twelve-FX intents. Selection + momentary fire on POINTER-DOWN: there is no
+  // hold threshold between touching a bank button and hearing the effect.
+  | { type: "fx.bank.select"; stem: StemIndex; bank: BankIndex }
+  | { type: "fx.momentary.start"; stem: StemIndex; bank: BankIndex }
+  | { type: "fx.momentary.end"; stem: StemIndex; bank: BankIndex }
+  | { type: "fx.algorithm.cycle"; stem: StemIndex; bank: BankIndex; dir: 1 | -1 }
+  | { type: "fx.macro"; stem: StemIndex; bank: BankIndex; dir: 1 | -1 }
+  | { type: "fx.latch"; stem: StemIndex; bank: BankIndex }
   | { type: "fx.clearLatches"; stem: StemIndex };
+
 
 export interface ArbitrationRecord {
   t: number;
