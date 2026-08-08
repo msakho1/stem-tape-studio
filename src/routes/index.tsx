@@ -93,7 +93,9 @@ function LabPage() {
             rawLog={rawLog}
             gestureLog={gestureLog}
             faderValuesRef={faderValuesRef}
+            svgRef={svgRef}
           />
+
         </aside>
       </div>
     </main>
