@@ -72,6 +72,17 @@ export interface SurfaceState {
   grid: { bpm: number | null; rejected: boolean; source: "none" | "tapped" | "beatmatched" | "rounded" };
   fnTapTimes: number[];
   fnTapCount: number;
+  /** FUNCTION hold has crossed 450 ms and no other control has been touched. */
+  fnHoldReached: boolean;
+  /** FUNCTION was used as a modifier during this hold — so it must NOT power-toggle. */
+  fnModifierUsed: boolean;
+  /**
+   * Taps fire optimistically at ×1 and revise upward. When ×2 arrives the ×1
+   * effect has to be rolled back before the ×2 row runs, or a double-tap leaves
+   * the ×1 side effect behind.
+   */
+  pendingUndo: { control: Control; tracks: SurfaceState["tracks"]; speed: number; chopDiv: number } | null;
+
   fired: FiredRow[];
   coverage: Record<string, number>;
   note: string;
