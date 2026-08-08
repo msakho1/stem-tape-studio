@@ -1204,6 +1204,91 @@ export class AudioEngine {
     return this.applyFx(id, family, latched);
   }
 
+  // ------------------------------------------------- Workstream 3: 12 FX ---
+
+  /**
+   * Beat Repeat is the one algorithm that stays on its sample-accurate
+   * worklet inside the legacy rack; its bank stage is a passthrough.
+   */
+  private isWorkletAlgorithm(bank: BankIndex, algorithm: AlgorithmIndex): boolean {
+    return algorithmDef(bank, algorithm).id === "beatRepeat";
+  }
+
+  /** Zero hold latency: the wet ramp starts at the current context time. */
+  async setBankActive(
+    id: TrackId,
+    bank: BankIndex,
+    algorithm: AlgorithmIndex,
+    active: boolean,
+    latched = false,
+  ): Promise<{ ok: boolean; detail: string }> {
+    const t = this.tracks[id];
+    if (!t?.bankRack || !this.ctx) return { ok: false, detail: "audio not unlocked" };
+    const def = algorithmDef(bank, algorithm);
+    if (this.isWorkletAlgorithm(bank, algorithm)) {
+      return this.setFxActive(id, "beatRepeat", active, latched);
+    }
+    const stage = t.bankRack.stage(bank);
+    stage.setTempo(this.effectiveBpm(id), this.ctx.currentTime);
+    stage.select(algorithm, this.ctx.currentTime);
+    stage.setActive(active, this.ctx.currentTime);
+    const rejected = stage.rejectionFor(algorithm);
+    if (rejected) {
+      this.lastFxRejection = `${def.label}: ${rejected}`;
+      // One algorithm is refused; the bank itself stays usable.
+      return { ok: false, detail: `${def.label} rejected — ${rejected}; bank ${bank + 1} still usable` };
+    }
+    return {
+      ok: true,
+      detail: `stem ${id + 1} ${def.label} ${active ? "engaged" : "released"}${latched ? " (latched)" : ""} · wet ${stage.snapshot().wet.toFixed(3)}`,
+    };
+  }
+
+  /** Cycling never activates an inactive bank. */
+  selectBankAlgorithm(id: TrackId, bank: BankIndex, algorithm: AlgorithmIndex): { ok: boolean; detail: string } {
+    const t = this.tracks[id];
+    if (!t?.bankRack || !this.ctx) return { ok: false, detail: "audio not unlocked" };
+    const stage = t.bankRack.stage(bank);
+    const wasWorklet = this.isWorkletAlgorithm(bank, stage.selected);
+    const active = stage.isActive || (wasWorklet && t.fxActive.beatRepeat);
+    // Leaving Beat Repeat must silence its worklet, not leave it running.
+    if (wasWorklet && !this.isWorkletAlgorithm(bank, algorithm) && t.fxActive.beatRepeat) {
+      void this.setFxActive(id, "beatRepeat", false);
+    }
+    stage.select(algorithm, this.ctx.currentTime);
+    if (active && this.isWorkletAlgorithm(bank, algorithm)) {
+      stage.setActive(false, this.ctx.currentTime);
+      void this.setFxActive(id, "beatRepeat", true);
+    }
+    return { ok: true, detail: `stem ${id + 1} bank ${bank + 1} → ${algorithmDef(bank, algorithm).label}` };
+  }
+
+  /** Macro values are PER ALGORITHM, never shared across a bank. */
+  setBankMacro(id: TrackId, bank: BankIndex, algorithm: AlgorithmIndex, value: number): { ok: boolean; detail: string } {
+    const t = this.tracks[id];
+    if (!t?.bankRack || !this.ctx) return { ok: false, detail: "audio not unlocked" };
+    const v = Math.min(1, Math.max(0, value));
+    t.bankRack.stage(bank).setMacro(algorithm, v, this.ctx.currentTime);
+    if (this.isWorkletAlgorithm(bank, algorithm)) {
+      // The legacy Beat Repeat exposes four presets; the macro selects one.
+      void this.setFxVariation(id, "beatRepeat", Math.min(4, Math.max(1, Math.round(v * 3) + 1)));
+    }
+    return { ok: true, detail: `stem ${id + 1} ${algorithmDef(bank, algorithm).label} macro → ${v.toFixed(2)}` };
+  }
+
+  clearBanks(id: TrackId): { ok: boolean; detail: string } {
+    const t = this.tracks[id];
+    if (!t?.bankRack || !this.ctx) return { ok: false, detail: "audio not unlocked" };
+    for (const stage of t.bankRack.stages) stage.setActive(false, this.ctx.currentTime);
+    void this.setFxActive(id, "beatRepeat", false);
+    return { ok: true, detail: `stem ${id + 1} all four banks released` };
+  }
+
+  bankSnapshots(): (BankStageSnapshot[] | null)[] {
+    return this.tracks.map((t) => t.bankRack?.snapshot() ?? null);
+  }
+
+
   setSolo(id: TrackId, soloed: boolean) {
     const t = this.tracks[id];
     if (!t) return;
