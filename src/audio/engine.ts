@@ -874,7 +874,12 @@ export class AudioEngine {
     }
 
     const wt = new WorkletTrack(id, this.ctx, t.input, (w, detail) => this.handleProcessorError(w, detail));
+    wt.onTelemetry = (_w, ack) => {
+      if (ack.detail !== "scrub" || !ack.scrubHeads) return;
+      this.scrubTelemetry = { contextFrame: ack.contextFrame ?? 0, rms: ack.rms ?? 0, heads: ack.scrubHeads };
+    };
     const created = wt.create();
+
     if (!created.ok) {
       t.migrationStatus = "failed";
       t.fallbackReason = created.detail;
