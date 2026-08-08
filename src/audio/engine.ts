@@ -1397,6 +1397,8 @@ export class AudioEngine {
   }
 
   exitHeadsMode(): { ok: boolean; detail: string } {
+    // Any open scrub must be closed before the heads layer disappears.
+    this.cancelAllScrubs();
     if (!this.heads.active) return { ok: true, detail: "heads already off" };
     const src = this.heads.source;
     const engine = this.heads.engine;
@@ -2211,6 +2213,13 @@ export class AudioEngine {
       lastError: this.lastError,
       heads: this.heads,
       headsSummary: headsSummary(this.heads),
+      scrub: {
+        open: this.scrubTrackers.map((t, i) =>
+          t ? { head: i, pointerId: t.pointerId, previews: t.previewCount, lastVelocity: t.lastVelocity } : null,
+        ),
+        telemetry: this.scrubTelemetry,
+        events: this.scrubLog.events.slice(0, 12),
+      },
 
       lastDecodeMs: this.lastDecodeMs,
       enginePreference: this.enginePreference,
