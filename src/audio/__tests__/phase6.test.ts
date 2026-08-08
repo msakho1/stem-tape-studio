@@ -63,7 +63,7 @@ describe("phase 6 — WAV export math", () => {
   });
 
   it("falls back to 16-bit when 24-bit exceeds the measured ceiling", () => {
-    const spec = { sampleRate: SR, channels: 2, bitDepth: 24 as const, frames: SR * 600 };
+    const spec = { sampleRate: SR, channels: 2, bitDepth: 24 as const, frames: SR * 1800 };
     const plan = exportPlan(spec, 200 * 1024 * 1024);
     expect(["16-bit", "segmented"]).toContain(plan.mode);
   });
