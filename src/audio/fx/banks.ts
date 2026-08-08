@@ -131,9 +131,9 @@ function buildIsolator(ctx: AudioContext): AlgorithmGraph {
   };
 }
 
-function crusherCurve(drive: number): Float32Array {
+function crusherCurve(drive: number): Float32Array<ArrayBuffer> {
   const n = 1024;
-  const curve = new Float32Array(n);
+  const curve = new Float32Array(new ArrayBuffer(n * 4));
   const k = 1 + drive * 40;
   for (let i = 0; i < n; i++) {
     const x = (i / (n - 1)) * 2 - 1;
