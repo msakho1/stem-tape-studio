@@ -1,12 +1,10 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { DeviceSurface } from "@/device/DeviceSurface";
-import { DiagnosticPanel } from "@/device/DiagnosticPanel";
+import { SystemPage } from "@/device/SystemPage";
 import { KEY_HINTS, useDeviceSurface } from "@/device/useDeviceSurface";
 import { CONTROL_LABELS } from "@/device/geometry";
 import { ProjectDrawer } from "@/audio/ProjectDrawer";
-import { WorkletPanel } from "@/audio/WorkletPanel";
-import { InputPanel } from "@/audio/InputPanel";
 import { Waveform } from "@/components/tape/Waveform";
 import { useAudioEngine } from "@/audio/useAudioEngine";
 import { formatBytes } from "@/audio/format";
