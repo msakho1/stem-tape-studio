@@ -164,8 +164,8 @@
   }
 
   body {
-    background-color: var(--bench);
-    color: var(--ink);
+    background-color: var(--background);
+    color: var(--foreground);
   }
 }
 
