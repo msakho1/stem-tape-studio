@@ -157,9 +157,9 @@ describe("Workstream 1 — simultaneous faders", () => {
 describe("Workstream 3 — twelve FX", () => {
   it("macro values are per algorithm, never shared across a bank", () => {
     let bank = initialStemFx().banks[3]!;
-    const before = bank.algorithms.map((a) => a.macro);
+    const before = bank.algorithms.map((a) => a.macroAmount);
     bank = nudgeMacro(3, bank, 1);
-    const after = bank.algorithms.map((a) => a.macro);
+    const after = bank.algorithms.map((a) => a.macroAmount);
     const changed = after.filter((v, i) => v !== before[i]);
     expect(changed).toHaveLength(1);
     expect(after[bank.selectedAlgorithm]).not.toBe(before[bank.selectedAlgorithm]);
