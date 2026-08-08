@@ -1853,8 +1853,56 @@ export class AudioEngine {
           this.quantisePunch = !this.quantisePunch;
           return this.ack(cmd, "completed", `punch quantise ${this.quantisePunch ? "on — punches snap to the grid" : "off — punches land where you press"}`);
         }
-        case "heads.print":
-          return this.ack(cmd, "rejected", "PRINT is reserved in this build — the gesture, LED slot and take shape exist, the render is not enabled");
+        case "heads.enter": {
+          const r = this.enterHeadsMode();
+          return this.ack(cmd, r.ok ? "completed" : "rejected", r.detail);
+        }
+        case "heads.exit": {
+          const r = this.exitHeadsMode();
+          return this.ack(cmd, r.ok ? "completed" : "rejected", r.detail);
+        }
+        case "heads.source": {
+          const r = this.setHeadsSource(Number(p["track"]) as TrackId);
+          return this.ack(cmd, r.ok ? "completed" : "rejected", r.detail);
+        }
+        case "heads.level": {
+          if (!this.heads.active) return this.ack(cmd, "rejected", "heads mode is not active");
+          const i = Number(p["head"]);
+          this.heads = setHeadLevel(this.heads, i, Number(p["level"]));
+          this.pushHeads();
+          return this.ack(cmd, "completed", `head ${i + 1} level → ${this.heads.heads[i]!.level.toFixed(3)}`);
+        }
+        case "heads.mute": {
+          if (!this.heads.active) return this.ack(cmd, "rejected", "heads mode is not active");
+          const i = Number(p["head"]);
+          this.heads = toggleHeadMute(this.heads, i);
+          this.pushHeads();
+          return this.ack(cmd, "completed", `head ${i + 1} ${this.heads.heads[i]!.muted ? "muted" : "unmuted"} — still a head, geometry unchanged`);
+        }
+        case "heads.reverse": {
+          if (!this.heads.active) return this.ack(cmd, "rejected", "heads mode is not active");
+          const i = Number(p["head"]);
+          this.heads = toggleHeadReverse(this.heads, i);
+          this.pushHeads();
+          this.restartHeadVoice(i);
+          return this.ack(cmd, "completed", `head ${i + 1} → ${this.heads.heads[i]!.reverse ? "reverse" : "forward"} (crossfaded, no reversed PCM copy on the worklet path)`);
+        }
+        case "heads.scrub": {
+          if (!this.heads.active) return this.ack(cmd, "rejected", "heads mode is not active");
+          const i = Number(p["head"]);
+          this.heads = scrubHead(this.heads, i, Number(p["position"]));
+          this.pushHeads();
+          this.restartHeadVoice(i);
+          return this.ack(cmd, "completed", `head ${i + 1} scrubbed to ${(this.heads.heads[i]!.offset * 100).toFixed(1)}% of the cycle`);
+        }
+        case "heads.print": {
+          const target = Number(p["track"]) as TrackId;
+          if (!this.heads.active) return this.ack(cmd, "rejected", "PRINT requires heads mode to be active");
+          void this.printHeads(target).then((r) =>
+            this.ack({ id: cmd.id, type: cmd.type }, r.ok ? "completed" : "failed", r.detail),
+          );
+          return this.ack(cmd, "accepted", `PRINT accepted — rendering one heads cycle into track ${target + 1}`);
+        }
         default:
           return this.ack(cmd, "rejected", "unknown command type");
       }
