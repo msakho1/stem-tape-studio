@@ -267,18 +267,19 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
             next = { ...next, chopDiv: 1 };
             return fire(next, "rocker.chopReset", "chop reset → 1", t);
           }
-          const chopDiv = Math.min(16, Math.max(1, dir > 0 ? state.chopDiv * 2 : state.chopDiv / 2));
+          const chopDiv = Math.min(16, Math.max(1, dir > 0 ? next.chopDiv * 2 : next.chopDiv / 2));
           next = { ...next, chopDiv };
           return fire(next, "rocker.chop", `chop ${dir > 0 ? "double" : "half"} → 1/${chopDiv}`, t);
         }
         if (g.count === 2) {
-          const speed = state.speed * Math.pow(2, dir / 12);
+          const speed = next.speed * Math.pow(2, dir / 12);
           next = { ...next, speed };
           return fire(next, "rocker.semitone", `exact semitone ${dir > 0 ? "+1" : "−1"} → ${speed.toFixed(4)}×`, t);
         }
         const bpmBase = state.grid.bpm ?? 120;
-        const speed = state.speed * ((bpmBase + dir) / bpmBase);
+        const speed = next.speed * ((bpmBase + dir) / bpmBase);
         next = { ...next, speed };
+
         return fire(next, "rocker.speed", `${dir > 0 ? "+" : "−"}1 BPM → ${speed.toFixed(4)}×`, t);
       }
 
