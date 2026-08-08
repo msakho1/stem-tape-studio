@@ -35,6 +35,21 @@ export type WorkletMessage =
       cycleFrames: number;
     }
   | { type: "readRange"; seq: number; start: number; frames: number }
+  | {
+      /**
+       * Audible head scrub. `deltaFrames` is signed and UNWRAPPED, so the
+       * kernel travels in the direction the finger moved rather than taking the
+       * shortest way round the cycle.
+       */
+      type: "headScrub";
+      seq: number;
+      head: number;
+      phase: "start" | "preview" | "end" | "cancel";
+      pointerId: number;
+      normalizedPosition: number;
+      deltaFrames: number;
+    }
+
   | { type: "dispose"; seq: number }
   | { type: "__forceError"; seq: number; inFrames: number };
 
