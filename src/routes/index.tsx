@@ -78,6 +78,7 @@ function LabPage() {
     rawLog,
     gestureLog,
     handlers,
+    arbiter,
   } = useDeviceSurface();
 
   const { engine, status, acks, unlock, unlockNote } = useAudioEngine(state.commands);
