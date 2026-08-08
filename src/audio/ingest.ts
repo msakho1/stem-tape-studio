@@ -15,12 +15,13 @@ export interface IngestResult {
   ok: boolean;
   role: StemRole;
   detail: string;
-  estimate?: PreDecodeEstimate;
-  decodedBytes?: number;
-  decodeMs?: number;
+  estimate?: PreDecodeEstimate | undefined;
+  decodedBytes?: number | undefined;
+  decodeMs?: number | undefined;
   /** Which gate refused it, when it was refused. */
-  refusedAt?: "pre-decode" | "post-decode" | "format";
+  refusedAt?: "pre-decode" | "post-decode" | "format" | undefined;
 }
+
 
 export interface IngestOptions {
   /** Aborts the remaining work of a queued multi-stem load. */
