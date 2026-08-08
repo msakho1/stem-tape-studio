@@ -22,8 +22,13 @@ export type AudioCommandType =
   | "track.restore"
   | "master.gain"
   | "rate.set"
+  | "loop.set"
+  | "loop.chop"
+  | "tape.reverse"
+  | "filter.set"
   | "song.load"
   | "rollback";
+
 
 export interface AudioCommand {
   /** Monotonic, never reused — the drain watermark. */
