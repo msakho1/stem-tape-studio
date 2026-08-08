@@ -50,7 +50,18 @@ import {
   type HeadState,
   type HeadsState,
   type SourceCandidate,
+  headReadPosition,
 } from "./heads";
+import {
+  MAX_SCRUB_RATE,
+  SCRUB_SILENCE_RATE,
+  ScrubLog,
+  ScrubTracker,
+  type ScrubEvent,
+} from "./scrub";
+import type { ScrubTelemetryHead } from "./workletProtocol";
+
+
 
 export type EnginePreference = "node" | "worklet";
 
