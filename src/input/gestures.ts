@@ -70,6 +70,18 @@ export type GestureListener = (g: Gesture) => void;
 export type RawListener = (e: RawInputEvent) => void;
 
 /**
+ * Continuous controls. Faders are drag controls: they must never enter
+ * button-hold recognition (no holdStart / holdEnd / tapThenHold) and never join
+ * a chord. Pointer-down starts fader interaction immediately.
+ * A fader still emits `tap` when it was pressed and released without moving,
+ * which is what the v2.6 "double-tap = reverse" row is built on.
+ */
+export function isContinuousControl(control: Control): boolean {
+  return control.startsWith("fader-");
+}
+
+
+/**
  * Raw pointer runtime + gesture interpreter.
  *
  * Deliberately framework-free: no React, no DOM queries. Components feed it
@@ -133,28 +145,31 @@ export class GestureEngine {
       moved: false,
     };
 
-    rec.holdTimer = setTimeout(() => {
-      rec.holdFired = true;
-      const prevTap = this.taps.get(control);
-      const isTapThenHold =
-        prevTap != null &&
-        prevTap.count > 0 &&
-        rec.downAt - prevTap.lastReleaseAt <= this.timings.tapThenHoldGapMs;
-      if (isTapThenHold) {
-        this.emit({ type: "tapThenHold", control, t: performance.now() });
-        this.clearTaps(control);
-      }
-      this.emit({ type: "holdStart", control, duration: this.timings.holdMs, t: performance.now() });
-    }, this.timings.holdMs);
+    if (!isContinuousControl(control)) {
+      rec.holdTimer = setTimeout(() => {
+        rec.holdFired = true;
+        const prevTap = this.taps.get(control);
+        const isTapThenHold =
+          prevTap != null &&
+          prevTap.count > 0 &&
+          rec.downAt - prevTap.lastReleaseAt <= this.timings.tapThenHoldGapMs;
+        if (isTapThenHold) {
+          this.emit({ type: "tapThenHold", control, t: performance.now() });
+          this.clearTaps(control);
+        }
+        this.emit({ type: "holdStart", control, duration: this.timings.holdMs, t: performance.now() });
+      }, this.timings.holdMs);
 
-    rec.longHoldTimer = setTimeout(() => {
-      rec.longHoldFired = true;
-      this.emit({ type: "holdStart", control, duration: this.timings.longHoldMs, t: performance.now() });
-    }, this.timings.longHoldMs);
+      rec.longHoldTimer = setTimeout(() => {
+        rec.longHoldFired = true;
+        this.emit({ type: "holdStart", control, duration: this.timings.longHoldMs, t: performance.now() });
+      }, this.timings.longHoldMs);
+    }
 
     this.presses.set(control, rec);
     this.emitRaw({ id: ++this.seq, control, phase: "down", pointerId, t, x, y });
-    this.evaluateChordStart(t);
+    if (!isContinuousControl(control)) this.evaluateChordStart(t);
+
   }
 
   markMoved(control: Control) {
@@ -180,6 +195,14 @@ export class GestureEngine {
       this.clearTaps(control);
       return;
     }
+
+    // A fader that was actually dragged is a continuous edit, not a tap.
+    if (isContinuousControl(control) && rec.moved) {
+      this.clearTaps(control);
+      return;
+    }
+
+
 
     // Optimistic tap: fire now, revise upward if more taps arrive.
     const prev = this.taps.get(control);
@@ -222,11 +245,13 @@ export class GestureEngine {
   }
 
   private evaluateChordStart(t: number) {
-    if (this.presses.size < 2 || this.chordActive) return;
+    if (this.chordActive) return;
     const members = [...this.presses.values()]
+      .filter((p) => !isContinuousControl(p.control))
       .filter((p) => t - p.downAt <= this.timings.chordWindowMs || p.downAt <= t)
       .map((p) => p.control);
     if (members.length < 2) return;
+
     this.chordActive = members;
     this.chordReleased = [];
     this.chordReleaseStartedAt = null;

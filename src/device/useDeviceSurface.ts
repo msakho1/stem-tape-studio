@@ -1,13 +1,21 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
-  clamp01,
   cyToFaderValue,
   faderValueToCy,
   type Control,
-  type TrackIndex,
 } from "@/device/geometry";
 import { GestureEngine, describeGesture, type Gesture, type RawInputEvent } from "@/input/gestures";
-import { deriveLeds, initialSurfaceState, type SurfaceState } from "@/machine/surface";
+import {
+  applyFader,
+  applyGesture,
+  deriveLeds,
+  initialSurfaceState,
+  pressControl,
+  releaseControl,
+  type SurfaceState,
+} from "@/machine/surface";
+
+
 
 const KEY_MAP: Record<string, Control> = {
   KeyQ: "rocker-fwd",
@@ -35,67 +43,20 @@ type Action =
 
 function reducer(state: SurfaceState, action: Action): SurfaceState {
   switch (action.type) {
-    case "press": {
-      if (state.pressed.includes(action.control)) return state;
-      const pressed = [...state.pressed, action.control];
-      return {
-        ...state,
-        pressed,
-        functionHeld: action.control === "function" ? true : state.functionHeld,
-        rocker:
-          action.control === "rocker-fwd"
-            ? "forward"
-            : action.control === "rocker-rwd"
-              ? "rewind"
-              : state.rocker,
-      };
-    }
-    case "release": {
-      const pressed = state.pressed.filter((c) => c !== action.control);
-      return {
-        ...state,
-        pressed,
-        functionHeld: action.control === "function" ? false : state.functionHeld,
-        rocker: action.control.startsWith("rocker") ? "center" : state.rocker,
-      };
-    }
-    case "gesture": {
-      const g = action.gesture;
-      const next: SurfaceState = { ...state, lastGesture: describeGesture(g) };
-      // Phase 2 wires only the unambiguous stock behaviours; everything else is
-      // logged for the Mapping Lab rather than guessed at.
-      if (g.type === "tap" && g.control === "play" && g.count === 1) {
-        next.playing = !state.playing;
-      }
-      if (g.type === "tap" && g.control.startsWith("track-button")) {
-        const i = (Number(g.control.slice(-1)) - 1) as TrackIndex;
-        next.activeTrack = i;
-        if (state.functionHeld) {
-          const tracks = [...state.tracks] as SurfaceState["tracks"];
-          tracks[i] = {
-            ...tracks[i],
-            content: tracks[i].content === "muted" ? "loaded" : "muted",
-          };
-          next.tracks = tracks;
-        }
-      }
-      if (g.type === "tap" && g.control === "volume-plus") {
-        next.masterVolume = clamp01(state.masterVolume + 0.0625);
-      }
-      if (g.type === "tap" && g.control === "volume-minus") {
-        next.masterVolume = clamp01(state.masterVolume - 0.0625);
-      }
-      return next;
-    }
-    case "faderCommit": {
-      const tracks = [...state.tracks] as SurfaceState["tracks"];
-      const slice = tracks[action.index];
-      if (!slice) return state;
-      tracks[action.index] = { ...slice, volume: action.value };
-      return { ...state, tracks };
-    }
+    case "press":
+      return pressControl(state, action.control);
+    case "release":
+      return releaseControl(state, action.control);
+
+    case "gesture":
+      // Every behaviour is a documented Tape Looper v2.6 row. No experimental
+      // Stem Tape mappings are dispatched here (phase 4).
+      return applyGesture({ ...state, lastGesture: describeGesture(action.gesture) }, action.gesture);
+    case "faderCommit":
+      return applyFader(state, action.index, action.value);
   }
 }
+
 
 const LOG_LIMIT = 60;
 

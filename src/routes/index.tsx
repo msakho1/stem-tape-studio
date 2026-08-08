@@ -42,9 +42,10 @@ function LabPage() {
             Stem Tape — interaction prototype
           </h1>
           <p className="mt-1 max-w-2xl font-mono text-[11px] leading-relaxed text-[var(--ink-dim)]">
-            Phase 2: control surface and input model only. No audio engine is running. Every gesture is
-            recognised, logged and arbitrated so the mapping can be validated before a single sample is
-            loaded.
+            Phase 3: exact Tape Looper v2.6 behavioural simulation. No audio engine is running — every
+            gesture is recognised, routed through the v2.6 map, logged and arbitrated so the mapping can be
+            validated before a single sample is loaded.
+
           </p>
         </div>
         <button
@@ -66,6 +67,8 @@ function LabPage() {
             pressed={state.pressed}
             leds={leds}
             showHitZones={showHitZones}
+            lights={state.lights}
+
             {...handlers}
           />
           <div className="mt-5 w-full max-w-xl">
@@ -93,7 +96,9 @@ function LabPage() {
             rawLog={rawLog}
             gestureLog={gestureLog}
             faderValuesRef={faderValuesRef}
+            svgRef={svgRef}
           />
+
         </aside>
       </div>
     </main>

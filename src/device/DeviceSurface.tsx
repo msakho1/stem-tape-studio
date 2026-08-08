@@ -19,6 +19,9 @@ export interface DeviceSurfaceProps {
   pressed: readonly Control[];
   leds: LedFrame;
   showHitZones: boolean;
+  /** v2.6 lights row: dim / full is global brightness, not a pattern change. */
+  lights?: "full" | "dim";
+
   onControlPointerDown: (control: Control, e: React.PointerEvent) => void;
   onControlPointerMove: (control: Control, e: React.PointerEvent) => void;
   onControlPointerUp: (control: Control, e: React.PointerEvent) => void;
@@ -52,6 +55,7 @@ export function DeviceSurface({
   pressed,
   leds,
   showHitZones,
+  lights = "full",
   onControlPointerDown,
   onControlPointerMove,
   onControlPointerUp,
@@ -71,9 +75,11 @@ export function DeviceSurface({
       ref={svgRef}
       viewBox={`0 0 ${VIEWBOX_WIDTH} ${VIEWBOX_HEIGHT}`}
       className="st-surface"
+      data-lights={lights}
       role="group"
       aria-label="Unofficial Stem Tape prototype control surface"
     >
+
       <defs>
         <linearGradient id={body} x1="0" y1="0" x2="1" y2="1">
           <stop offset="0" stopColor="#c9c9c7" />
