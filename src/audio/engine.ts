@@ -64,12 +64,22 @@ export interface EngineStatus {
     name: string | null;
     provenance: string | null;
     trashed: boolean;
+    /** Exact retained bytes of this track's decoded buffer. */
+    decodedBytes: number;
+    /** How many times this track's audio has been decoded this session. */
+    decodeCount: number;
+    decodeMs: number | null;
+    /** true when the AudioBuffer produced by the probe was adopted as-is. */
+    bufferReused: boolean;
   }[];
   decodedBytes: number;
   budget: MemoryBudget;
+  highMemoryMode: boolean;
+  memoryStatement: string;
   lastError: string | null;
   lastDecodeMs: number | null;
 }
+
 
 type Listener = (ack: Ack) => void;
 
