@@ -4,12 +4,20 @@ import {
   faderValueToCy,
   type Control,
 } from "@/device/geometry";
-import { GestureEngine, describeGesture, type Gesture, type RawInputEvent } from "@/input/gestures";
+import {
+  DEFAULT_TIMINGS,
+  GestureEngine,
+  describeGesture,
+  type Gesture,
+  type RawInputEvent,
+} from "@/input/gestures";
 import {
   applyFader,
   applyGesture,
   deriveLeds,
   initialSurfaceState,
+  observedRows,
+
   pressControl,
   releaseControl,
   type SurfaceState,
@@ -69,11 +77,51 @@ export function useDeviceSurface() {
   const frameRef = useRef<number | null>(null);
   const pendingCyRef = useRef<{ index: number; cy: number } | null>(null);
 
+  /**
+   * Application-ready gate. Nothing reaches the gesture engine until the client
+   * has mounted and the surface SVG is in the DOM. Pre-hydration presses used to
+   * be silently swallowed, which made harness runs report false failures.
+   * `document.documentElement[data-app-ready]` and `window.__stemTapeReady` are
+   * the public signals a browser harness must wait on.
+   */
+  const [ready, setReady] = useState(false);
+  const readyRef = useRef(false);
+
   const [rawLog, setRawLog] = useState<RawInputEvent[]>([]);
   const [gestureLog, setGestureLog] = useState<{ id: number; text: string; t: number }[]>([]);
   const gestureId = useRef(0);
 
+
   const engine = useMemo(() => new GestureEngine(), []);
+  const [powerHoldMs, setPowerHoldMsState] = useState(DEFAULT_TIMINGS.powerHoldMs);
+
+  const setPowerHoldMs = useCallback(
+    (ms: number) => {
+      const clamped = Math.max(200, Math.min(6000, Math.round(ms)));
+      engine.timings = { ...engine.timings, powerHoldMs: clamped };
+      setPowerHoldMsState(clamped);
+    },
+    [engine],
+  );
+
+  // Application-ready gate: arm input only once mounted and the surface exists.
+  useEffect(() => {
+    const id = requestAnimationFrame(() => {
+      if (!svgRef.current) return;
+      readyRef.current = true;
+      setReady(true);
+      document.documentElement.dataset["appReady"] = "true";
+      (window as unknown as { __stemTapeReady?: boolean }).__stemTapeReady = true;
+    });
+    return () => {
+      cancelAnimationFrame(id);
+      readyRef.current = false;
+      delete document.documentElement.dataset["appReady"];
+      (window as unknown as { __stemTapeReady?: boolean }).__stemTapeReady = false;
+    };
+  }, []);
+
+
 
   useEffect(() => {
     const offRaw = engine.onRaw((e) => {
@@ -110,7 +158,8 @@ export function useDeviceSurface() {
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
       const control = KEY_MAP[e.code];
-      if (!control || e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (!readyRef.current || !control || e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
+
       const target = e.target as HTMLElement | null;
       if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
       e.preventDefault();
@@ -155,9 +204,11 @@ export function useDeviceSurface() {
   const onControlPointerDown = useCallback(
     (control: Control, e: React.PointerEvent) => {
       e.preventDefault();
+      if (!readyRef.current) return;
       (e.currentTarget as Element).setPointerCapture(e.pointerId);
       const p = toUserSpace(e.clientX, e.clientY);
       engine.press(control, e.pointerId, performance.now(), p?.x, p?.y);
+
       if (control.startsWith("fader-")) {
         const index = Number(control.slice(-1)) - 1;
         dragRef.current = { index, pointerId: e.pointerId };
@@ -213,16 +264,22 @@ export function useDeviceSurface() {
   );
 
   const leds = useMemo(() => deriveLeds(state), [state]);
+  const observed = useMemo(() => observedRows(state, leds), [state, leds]);
 
   return {
     state,
     leds,
+    observed,
     engine,
+    ready,
+    powerHoldMs,
+    setPowerHoldMs,
     svgRef,
     capRefs,
     faderValuesRef,
     rawLog,
     gestureLog,
+
     handlers: {
       onControlPointerDown,
       onControlPointerMove,
