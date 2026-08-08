@@ -34,6 +34,23 @@ import { FX_FAMILIES, type FxFamily } from "@/machine/stemPerformance";
 import { RecordingController } from "./input/recorder";
 import { PerformanceRecorder } from "./export/performanceRecorder";
 import { emptyGrid, tapGrid, type GridState } from "./grid";
+import {
+  chooseSource,
+  emptyHeads,
+  enterHeads,
+  exitHeads,
+  headsSummary,
+  peakOf,
+  relinkSource,
+  renderHeadsCycle,
+  setHeadLevel,
+  scrubHead,
+  toggleHeadMute,
+  toggleHeadReverse,
+  type HeadState,
+  type HeadsState,
+  type SourceCandidate,
+} from "./heads";
 
 export type EnginePreference = "node" | "worklet";
 
