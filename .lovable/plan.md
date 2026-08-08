@@ -1,86 +1,86 @@
-# Phase 5C — Stem Tape v1 Mapping + Four-Effect Performance Layer
+# Phase 6 — Live Recording, Overdub, Tempo Grid, Punch-In, Heads/PRINT, WAV Export
 
-Adds the stem-performance half of the instrument on top of the existing Phase 5A/5B tape engine, without a second gesture engine, second transport, or an audio "mode" switch. The FX overlay only re-labels the four track buttons; tape audio never stops.
+## A. Repository audit (verified this turn, not assumed)
 
-Incorporates the 11 binding corrections.
+| Area | Actual state | Phase 6 integration point |
+| --- | --- | --- |
+| Engine | `src/audio/engine.ts` (1575 lines), `class AudioEngine`, `buildGraph()` at line 255 | add `RecorderBus` + per-track writer, master tap |
+| Per-track graph | `input → dry/filter→wet → preFx → FxRack.input → gain(fader) → soloGain → analyser → master → masterAnalyser → destination` (engine.ts 265–303) | live input joins at `input`; take layers join at `input`; master tap after `master` |
+| Tape worklet | `public/tape-processor.js` (328 lines), `class TapeProcessor`, frame-scheduled FIFO, ordered `applyAtContextFrame` commands | reused unchanged for Node/Worklet parity; recording does NOT extend it |
+| Protocol | `src/audio/workletProtocol.ts`, `sharedApplyFrame()`, `DRIFT_TOLERANCE_FRAMES = 2` | recorder reuses the same shared-frame scheduling |
+| Timeline | `src/audio/tape.ts` `TapeTimeline.positionAt/timeAtPosition` (exact glide integral) | authoritative tape-coordinate mapping for takes |
+| FX | `src/audio/fx/rack.ts` (502), permanent `FxRack.input` | untouched; dry recording taps before it |
+| Gestures | `src/input/gestures.ts` `GestureEngine`, `holdMs 450`, `powerHoldMs 1200`, `HoldLevel` | recording arm uses existing `holdStart` on `track*`; no second engine |
+| Arbitration | `src/machine/chordArbiter.ts` `PerfIntent`, claim-before-dispatch | new `rec.*` intents added to the same precedence table |
+| Reducer | `src/machine/surface.ts` (862), `grid: {bpm, rejected, source}` already tapped at 338–368, LED table ~743/825 | grid becomes frame-anchored; `recording` LED tier inserted |
+| Commands | `src/audio/commands.ts` ordered stream + `Ack` | new `rec.*` / `export.*` command types |
+| Storage | `src/audio/store.ts` `SCHEMA_VERSION = 2`, OPFS-with-IndexedDB-fallback behind one `projectStore` API; `contentHash()` exists | takes get chunked blobs through the same façade |
+| Perf schema | `src/machine/stemPerformance.ts` `STEM_TAPE_SCHEMA_VERSION = 3` | → 4, with take manifests |
+| WAV | `src/audio/wav.ts` — 16-bit only, whole-buffer, main-thread | replaced by a streaming 16/24-bit encoder in a worker; existing fn kept for the demo |
+| Heads/PRINT | Already *simulated* in the reducer (`heads.scrub`, `heads.print`, 451/479) — labels only, no audio | Phase 6C attaches experimental audio behind a flag |
 
-## What gets built
+No `getUserMedia`, no MediaStream, no recorder code exists today. Grid is currently a label, not a clock.
 
-**1. Versioned mapping registry — `src/machine/stemTapeV1Map.ts`**
-Declarative rows (layer, required control order, controls, tap/hold threshold, semantic command, suppressed base commands, rollback, LED response, provenance: stock | v2.6 | reinterpreted | extension). The existing 37 v2.6 rows are re-exported unchanged and referenced, not rewritten. JSON export from the Mapping Lab.
+## B. Feasibility verdict by feature
 
-**2. Ordered chord arbitration before dispatch (correction 1)**
-Authoritative flow: raw pointer/key input → ordered chord arbitration → **one** semantic command → reducer + audio. Base Play/Volume/Track commands are never emitted-then-undone; arbitration holds the base command until the chord window resolves. `TxnSnapshot` rollback stays only as the safety fallback for genuinely optimistic multi-tap sequences and for lost pointers.
-Precedence: cancel/safety → long system chords → Play-first → Function-first → FX-track-first → bare FX-overlay track → bare v2.6.
-Chords: `Play+Vol−/+` select stem (wrap Vocals→Drums→Bass→Instruments); `Play+Track` short = solo, >700 ms = link/unlink, **duration measured from the overlap of the two controls, not from the initial Play press**; `Vol−+Vol+` (second within 120 ms, both released <600 ms) toggles the FX overlay, ~2 s holds the existing pairing gesture, the 600–2000 ms band is a diagnostics-only no-op; `FXtrack+Vol−/+` variation; `FXtrack+Function` short latch/unlatch; all four FX tracks + Function clears latches on the active stem.
+- **Straightforward:** permissions/device enumeration, metering, monitoring with gain guard, onset trigger, pre-roll, chunked OPFS writes, dry WAV export, master performance WAV, take manifests, undo/redo, LED tiers.
+- **Technically challenging:** tape-coordinate mapping under glide/reverse/loop, loop-overdub wrap exactness, backpressure without dropped frames, interrupted-take recovery.
+- **Browser-dependent:** raw-input constraints (`echoCancellation:false` etc. may be ignored), deviceId selection (absent on iOS Safari), `SyncAccessHandle` (Safari worker-only), true input latency, Web MIDI (absent on Safari), iOS download behavior.
+- **Physically unverified:** loaded-track hold = overdub, hold-latch-after-release, punch-out timing, Heads source/offsets, PRINT semantics.
+- **Hardware-only:** sync jack, PO sync, real MIDI clock out.
 
-**3. Performance state — `src/machine/stemPerformance.ts`**
-`StemPerformanceState` as specified (`activeStem`, `fxOverlay`, per-track `soloed`/`linked`/`fx: Record<FxFamily, FxSlotState>`). Persisted per song: link, solo, variations, latches — never `momentary`, never `fxOverlay`.
+## C. Chosen recording architecture — **Candidate C + per-track writers**
 
-**4. Semantic commands**
-`stem.select`, `stem.solo`, `stem.link`, `fx.overlay`, `fx.momentary.start`, `fx.momentary.end`, `fx.variation`, `fx.latch`, `fx.clearLatches` added to `src/audio/commands.ts`, on the existing ordered command + ack path. Rejected activations ack `rejected` and leave audio and LEDs untouched.
+One `input-capture-processor` worklet (shared): metering, onset detection, bounded look-back ring (default 4 s stereo ≈ 1.5 MiB), grid-punch history, chunk emission. Its PCM is routed to the *armed* track's writer only.
 
-**5. Signal graph — permanent FX bus and split gains (corrections 2 and 3)**
-```text
-Node tape out ── handoff envelope ─┐
-                                   ├→ FxRackInput (permanent, never disconnected)
-Worklet out ──── handoff envelope ─┘
+Rejected: **A** (extending `TapeProcessor`) — couples capture to tape lifetime, breaks Node-engine mode, and every Node↔Worklet migration would interrupt capture. **B** (per-track recorder processors) — duplicates onset/look-back four times and quadruples ring RAM for a device that can only arm one input source at a time.
 
-FxRackInput → filter → beatRepeat ─┬→ directGate ──────────────┐
-                                   ├→ echoInput → echoReturn ──┤
-                                   └→ reverbInput → revReturn ─┤
-                                                               ↓
-                                                          faderGain (post-FX, controls tails)
-                                                               ↓
-                                                          soloGain (separate, smoothed)
-                                                               ↓
-                                                            master
-```
-Engine migration crossfades the two tape sources into the stable input — no re-parenting, no bypass window, tails/Beat-Repeat/filter state survive.
-The existing combined `trackGain` splits into `directGate`, `echoInput`, `reverbInput`, `faderGain`, `soloGain`. Mute closes `directGate`/`echoInput`/`reverbInput` only and leaves feedback returns decaying. FX release closes only that FX's input, never the track gate. Solo never mutates saved mute state:
-```ts
-audibleBySolo = anySolo ? track.soloed : true;
-inputOpen = audibleBySolo && (!track.muted || track.soloed);
-```
+Ownership: audio thread owns write position and frame counting; the worker owns bytes; the main thread owns only manifests and UI. Playback of a finished take uses an ordinary `AudioBufferSourceNode`/worklet layer connected at the track's existing `input` node, so it inherits filter → FX → fader → solo untouched. Migration is **rejected while `recording`/`finalizing`** with an honest ack; queued migration runs at finalize. Processor failure keeps all flushed chunks; the manifest is marked `interrupted`, never `ready`. No second retained copy of stems: takes are separate layers, never a re-render of the base stem.
 
-**6. FX families — `src/audio/fx/` (lazy, truly bypassed when inactive)**
-- **Filter (correction 4)**: one per-stem processor, three-layer state model — base Tape filter (`FN+Fader 4`), momentary FX preset override, latched FX state. Momentary press snapshots the underlying tape filter; unlatched release restores that snapshot (not forced dry); latching commits. Single automation owner for cutoff/type/Q. Variations: Warm LP, Resonant LP, Clean HP, Resonant HP. Centre remains the existing sample-identical true-dry bypass with complementary fades.
-- **Echo (correction 5)**: 1/4, 1/8, dotted 1/8, 1/8 triplet. `effectiveBpm[track] = baseBpm * Math.abs(trackRate[track])` — per stem, so unlinked stems follow their own rate; BPM source hierarchy grid → manual → provisional 120. Division/rate changes use **two delay taps with a short crossfade**, not `delayTime` smoothing (no Doppler glide). Named, clamped feedback constants.
-- **Reverb**: locally generated algorithmic FDN, no IR fetch. Tight Room, Plate, Hall, Atmospheric Wash with decay ceiling and output limiter.
-- **Beat Repeat (correction 6)**: new `public/beat-repeat-processor.js` worklet, bounded rolling per-stem buffer sized from 1/2 note at the minimum supported effective BPM, counted in project diagnostics and the operation-level memory approval. Activation captures the immediately preceding **completed** division ending at the activation frame and begins repeating within one render quantum via a seam crossfade; with insufficient buffered audio it enters a visible **arming** state until one full division exists — never repeats stale memory. Underlying playhead untouched; release and division changes crossfade. An extreme tempo/rate that exceeds the buffer allowance rejects Beat Repeat only, with a clear ack. Restored latches re-arm and refill; ring-buffer contents are never persisted.
+`MediaRecorder` is not used anywhere.
 
-**7. Link/unlink audio semantics (correction 7)**
-Unlinking is phase-continuous and never restarts the stem. Global Play/Stop still gates every stem. Tape operations target the linked group when the active stem is linked, and only that stem when it is unlinked; other unlinked stems keep their independent state. Relink happens at the next shared seam through the existing handoff envelopes, drift ≤ 2 frames.
+## D. Frame and tape-coordinate model
 
-**8. Storage schema bump and lifecycle (correction 8)**
-Saved-project schema version bump with migration defaults for older projects: all stems linked, no solos, no latches, variation 1 per family. On song switch, stem replacement or deletion: clear momentary state, fade out DSP history, clear Beat Repeat buffers, keep stored FX configuration in recoverable trash where appropriate. Undo restores configuration and explicitly does not claim to restore tails or ring-buffer audio.
+**Chosen: store real-time PCM + a rate/direction mapping curve, render on playback.** Rationale: resampling-on-write bakes in an irreversible decision, loses editability, and compounds error across glides; storing raw + curve keeps takes portable, exportable dry, and re-renderable. Cost is playback-side interpolation, which the existing cubic interpolator already implements.
 
-**9. LED priority table (corrections 9 and 10 of the LED spec)**
-Explicit deterministic priority in `src/machine/surface.ts` (no LED writes from handlers): error > recording (Phase 6 reserved) > momentary FX > latched FX > soloed > unlinked > active > muted > base. Overlay on: both Function LEDs alternate-pulse; track LEDs show stem state (active brighter, soloed solid, non-solo faint, unlinked double pulse). Side LEDs 1–4 = Filter/Echo/Reverb/BeatRepeat for the active stem: dark / breathing (momentary) / solid (latched); during variation selection they show the variation number (5 = all four) then time out. Diagnostics render both the full underlying state and the winning pattern with the reason it won.
+Mapping: each captured block records `contextFrame`; tape position comes from `TapeTimeline.positionAt(contextFrame / sampleRate)` — the same integral used for seams, never React state or rAF. The take stores a sampled rate/direction curve (one node per 128 frames, run-length compressed) plus loop/window and grid snapshots. Loop wrap is written as segment boundaries at the exact seam frame. Unlinked stems use their own timeline instance; relink only changes future scheduling, never stored take data.
 
-**10. Diagnostics + Mapping Lab** (`src/device/DiagnosticPanel.tsx`)
-Layer, active stem, solo/link masks, tape target, all 16 slot states, per-stem effective BPM + source, echo division/time, reverb preset, repeat division + buffer frames + arming state, recognized ordered chord, suppressed commands, rejected activations, engine source, FX state before/after migration, worklet load, tunable timings/preset params, JSON export, and a fallback to clear all project latches.
+**Reverse recording in 6B is rejected with an explicit ack** ("reverse recording is not supported in this build") rather than guessed; backward-write is a 6C/Phase 8 candidate pending physical verification.
 
-## Verification and numeric acceptance (correction 11)
+## E. Recording state machine
 
-Objective thresholds asserted in tests, not just captured WAVs:
-- peak sample-to-sample discontinuity at any transition ≤ 0.02 full-scale
-- short-window (5 ms) RMS energy jump ≤ 3 dB across seams, mute, FX release, relink
-- relink drift ≤ 2 frames
-- Beat Repeat slice length exact to the frame for every division at the tested BPM/rate
-- Echo tap timing within 1 frame of `60/effectiveBpm × divisionRatio`
-- Filter centre vs true dry: null difference ≤ −120 dBFS (sample-identical path)
-- all-16-slot test asserts audible DSP output per slot (measured wet/dry delta), not enabled flags
+`idle → arming → waiting-for-sound → (waiting-for-grid) → recording | overdubbing → stopping → finalizing → ready`, plus `interrupted` and `failed`. It lives on the audio thread for trigger/punch decisions and is mirrored into `surface.ts` for LEDs. Arm = existing `holdStart` at `holdMs`; tap while waiting cancels; tap while recording stops; lost pointer capture forces `stopping` (never stuck). Onset detection: **RMS + peak envelope with hysteresis and minimum-duration gate** (rejects spectral flux as unnecessary DSP weight for percussion/voice/melody).
 
-Also: v2.6 regression 37/37 with the overlay closed and non-conflicting tape gestures still firing with it open; chord ordering/suppression, solo-vs-link overlap timing, overlay short/long/ambiguous volume chord, pointer-cancel cleanup, filter tape→momentary→release and latched→fader-sweep tests, playhead invariance under Beat Repeat, save/reload restore, Node↔Worklet migration parity, `tsgo` clean, zero console errors, and a network-log assertion that no user audio leaves the device.
+## F. Grid and punch
 
-**Browser verification honesty (correction 10):** Playwright at 375 px with an iPhone UA is reported as **mobile emulation only**. I will ship a real-device checklist for you to run in iPhone Safari — multitouch chord reliability, four simultaneous Beat Repeats, four reverbs and four echoes, all 16 slots, background/interruption recovery, Node↔Worklet migration, the large-project memory case, audible glitches and latency — and will not claim iPhone verification until you report results.
+Tap timestamps convert to AudioContext frames; BPM from a median-filtered inter-tap interval with outlier rejection (existing 25 % reject preserved) feeding a light PLL for phase. Hold-to-round and clear-grid rows already exist and are kept. Metronome LEDs schedule from audio frames, not timers. Late-press punch: if the command lands within a tunable late window (default 120 ms or 1/8 beat, whichever is smaller) after a boundary, the take starts from the look-back buffer at that boundary; if within an early window before the next boundary, it schedules forward. Punch-out default: **next loop seam when looping, else immediate** — flagged for physical verification.
 
-## Sequence
+## G. Storage, memory, export
 
-1. Mapping registry + performance state + commands (no audio yet).
-2. Ordered chord arbitration + suppression-before-dispatch + LED priority; re-run 37/37.
-3. Signal-graph split (permanent FX bus, split gains) with filter ownership model.
-4. Echo, reverb, Beat Repeat worklet.
-5. Storage schema bump, lifecycle, migration parity, diagnostics.
-6. Full verification pass, numeric measurements, completion report + iPhone checklist.
+`capture worklet → bounded MessagePort queue (high-water mark, dropped-frame counter) → recording worker → OPFS SyncAccessHandle chunk stream (2 s chunks) → IndexedDB chunk fallback → take manifest`, all behind the existing `projectStore` façade. Manifests checkpoint every chunk so a crash yields a recoverable partial take. Quota checked before arming and during recording via `navigator.storage.estimate()`; storage figures reported separately from decoded RAM (MiB, 1024², per existing convention). Newly recorded material becomes playable from the chunks already resident in the write-through window — no second full PCM copy. Export: streaming WAV encoder worker, 16/24-bit with TPDF dither on reduction; master performance tap after `master`. Record Performance lives in the project drawer, never on the SP-1 artwork.
+
+## H. Privacy, monitoring, safety
+
+Monitoring defaults **off**, headphone warning, hard gain ceiling, never auto-enabled. All audio stays local; the network-log assertion from Phase 5C is extended to recording and export. Every `MediaStreamTrack` is stopped on disable/project-close. Explicit handling planned for disconnect, backgrounding, lock, suspend, song/bank switch, stem delete, memory/quota ceilings, worklet and worker failure, permission revocation, sample-rate change, and refresh during finalize — all resolve to a recoverable state, and a take is never shown as `ready` if frames were dropped.
+
+## I. Ambiguity gates
+
+Heads/PRINT and loaded-track overdub ship **off by default, labelled experimental, excluded from the 37/37 v2.6 parity count**, behind semantic commands and outside the permanent schema. A physical SP-1 checklist (hold latch after release, onset timing, pre-roll, loaded-track record, stop timing, punch in/out, late tolerance, grid learning, heads source/offsets/which three, fourth track, PRINT, fixed vs variable loop while recording) ships with 6C. Web MIDI clock is **deferred to Phase 8** (absent on Safari, hardware sync is firmware-only).
+
+## J. New files
+
+`src/audio/input/inputDevices.ts`, `inputSession.ts`, `recorder.ts`, `takes.ts`, `latency.ts`; `src/audio/export/wavStream.ts`, `performanceRecorder.ts`; `src/workers/recordingWorker.ts`, `wavWorker.ts`; `public/input-capture-processor.js`; `src/machine/recordingState.ts`; `src/device/InputDrawer.tsx`. Extended: `commands.ts`, `engine.ts`, `store.ts` (SCHEMA 3), `stemPerformance.ts` (v4), `surface.ts`, `chordArbiter.ts`, `stemTapeV1Map.ts`, `DiagnosticPanel.tsx`.
+
+## K. Sequence and acceptance
+
+**6A Capture Core** — permissions, devices, metering, monitoring, shared capture worklet, onset + pre-roll, take manifests, chunked persistence, finalize/recovery, dry WAV export. *Accept:* arm an empty track, sound triggers, full attack captured, playback in sync, save/reload, export — no second full copy in RAM.
+
+**6B Overdub & tape coordinates** — layers, loop overdub, rate/glide-aware mapping, unlinked tracks, undo/redo, latency compensation (reported estimate → manual offset → optional loopback wizard), master performance recording. *Accept:* repeated overdubs across speed changes, undo the last pass only, export the audible performance.
+
+**6C Grid, Heads, PRINT** — frame-anchored grid, tap learning, late look-back punch, punch-out, grid LEDs, beatmatch, physical gate, experimental Heads/PRINT. *Accept:* tap a grid, punch a late transient onto the intended beat with its attack intact.
+
+Numeric acceptance per subphase: synthetic capture alignment ≤ 2 frames, punch on the intended frame, zero missing/duplicated frames across chunks, loop wrap exact to 1 frame, duration exact to 1 frame, transition residual ≤ −60 dBFS, fade deviation ≤ 0.25 dB, zero unexplained underruns, exact WAV header/data length, Node↔Worklet parity, no user audio in any network request. Real-device results reported in milliseconds, never as "sample-accurate".
+
+## L. Blockers with recommended defaults
+
+1. Loaded-track hold = overdub — default yes, labelled extension. 2. Punch-out — default next loop seam. 3. Reverse recording — default reject with ack. 4. Heads/PRINT — default off. 5. iOS device selection — default system route, stated honestly. 6. Web MIDI — default deferred.
