@@ -56,15 +56,32 @@ masterBus -> masterGain -> destination      (later: -> recorder tap -> WAV encod
 
 Acceptance: initial start difference 0 samples (proved by OfflineAudioContext impulse fixture), drift 0 after 10 min, after rate changes, and after pause/resume/restart. Unequal stem lengths align at zero, project length = longest, shorter stems are silence, user warned.
 
-## 5. Command → audio adapter
+## 5. Ordered command stream (not snapshot diffing)
+
+Audio is never inferred by diffing reducer snapshots — that loses repeated restarts, optimistic multi-tap actions, rollbacks and duplicate identical commands. One ordered stream feeds both consumers:
 
 ```text
-SVG -> GestureEngine -> v2.6 map -> semantic command -> reducer
-     -> audio adapter (subscribes to reducer) -> AudioEngine
-     -> ack (accepted | completed | rejected | failed) -> state, LEDs, diagnostics
+SVG -> GestureEngine -> v2.6 map -> SemanticCommand{ id, t, type, payload, txnId? }
+     -> reducer (authoritative for serializable project state)
+     -> AudioEngine (same ordered command, same sequence numbers)
+     -> ack { accepted | completed | rejected | failed } -> state, LEDs, diagnostics
 ```
 
-Every command carries an ack. Rejections are first-class and surfaced: not decoded, memory budget exceeded, context won't resume, missing local blob, source creation failed, unsupported codec. A rejected Play must not light the transport LED.
+Rollbacks travel as explicit commands carrying the `txnId` of the optimistic action they revoke, so the engine undoes exactly what it applied. Rejections are first-class: not decoded, memory budget exceeded, context won't resume, missing local blob, source creation failed, unsupported codec. A rejected Play must not light the transport LED.
+
+Required tests: repeated restart; play then immediate stop; optimistic rocker action revoked by double-tap rollback; FN+Play ×2 revised into ×3; two identical master-volume commands; fader preview then commit; rejection with no incorrect LED state.
+
+## 5b. Continuous control bus (live faders)
+
+Fader audio must not wait for pointer-up.
+
+```text
+pointer drag -> rAF-coalesced fader preview -> continuous control bus
+             -> track GainNode AudioParam (setTargetAtTime)
+pointer up   -> faderCommit -> reducer -> persistence
+```
+
+Rules: audio changes continuously during the drag; no React rerender while dragging; SVG still never touches an AudioNode; roughly one coalesced update per animation frame; the committed value is byte-identical to the last audible preview value. Pointer cancel follows one documented rule — **reconcile audio back to the last committed value** (ramped, not stepped). The same bus later carries FN + fader window/filter and heads scrub.
 
 ## 6. Upload experience and format contract
 
@@ -72,11 +89,14 @@ Separate **project drawer** route — never on the SP-1 artwork. Entry points: l
 
 Uploader: four slots, individual or four-at-once selection, desktop drag-drop, native Files picker on iOS/Android, replace-before-load, per-file metadata preview, manual role assignment with filename inference as a *suggestion* (vocal/vox, drum/percussion, bass/808, instrumental/other/music).
 
-Pre-decode report per file: name, extension, size, duration, channels, source sample rate, role, estimated decoded MB, decodability. Validation: exactly four roles, no duplicates, readable, non-empty, duration compatibility warning, memory budget, real decode probe.
+Pre-decode report per file: name, extension, size, duration, channels, source sample rate, role, estimated decoded MB, decodability. Validation: exactly four roles, no duplicates, readable, non-empty, duration compatibility warning, memory budget.
 
-MVP contract: **WAV PCM 16/24-bit, 44.1 or 48 kHz, mono or stereo**, guaranteed. 44.1 vs 48 kHz is never rejected — it is resampled into the context rate and reported. MP3 / M4A-AAC accepted as convenience *only when a real decode probe succeeds*; FLAC/AIFF probed and reported honestly. Compressed files carry an encoder-padding/alignment warning. Export preserves originals or writes normalized WAV — never silent recompression.
+**Validation is header- and decode-based, never MIME/filename alone** — mobile pickers supply missing or wrong MIME types. Each file is sniffed (RIFF/WAVE `fmt ` chunk, ID3/MPEG frame sync, `ftyp`, `fLaC`, `FORM…AIFF`) and then probed with a real short decode. Result is reported as one of: **contract-supported · browser decode-supported · unsupported · malformed · decode failed**.
 
-Allowlist: `audio/wav, audio/x-wav, audio/wave` (.wav) required; `audio/mpeg` (.mp3), `audio/mp4, audio/aac` (.m4a/.aac), `audio/flac` (.flac), `audio/aiff` (.aif/.aiff) probe-gated.
+P4 preferred contract: WAV PCM 16/24-bit, 44.1 or 48 kHz, mono or stereo — described as *preferred*, not "guaranteed", until the browser/device matrix passes. 44.1 vs 48 kHz is never rejected; it resamples into the context rate and the conversion is reported. MP3/M4A-AAC/FLAC/AIFF accepted only when the decode probe succeeds, with an encoder-padding/alignment warning for compressed sources. **No silent downmix** — mono downmix is an explicit, user-chosen mitigation and the original local blob is preserved untouched.
+
+Allowlist (advisory only; sniffing decides): `.wav` (`audio/wav`, `audio/x-wav`, `audio/wave`) preferred; `.mp3`, `.m4a`/`.aac`, `.flac`, `.aif`/`.aiff` probe-gated. Empty or bogus MIME strings are accepted and resolved by sniffing.
+
 
 ## 7. Local storage
 
@@ -84,7 +104,7 @@ Audio never leaves the browser in P4. No Cloud upload.
 
 - **L1 session** — File/Blob in memory, project labelled unsaved.
 - **L2 save on this device** — project JSON (schema version, roles, filenames, fader values, mutes, speed, chop, window, filter, grid, song slot, content hashes) in **IndexedDB**; **audio blobs in OPFS where available, IndexedDB fallback**, behind one `ProjectStore` interface so the engine never knows which backend won.
-- **L3 portable `.stemtape`** — ZIP container with custom extension: `project.json`, `audio/{vocals,drums,bass,instruments}.wav`, `optional/{performance.wav,waveform-peaks/}`. Versioned, recoverable offline.
+- **L3 portable `.stemtape`** — ZIP container with a custom extension. Originals are preserved with their **own** extensions: `audio/vocals.<original-ext>`, with container/codec/sample-rate/bit-depth recorded in `project.json`. If the user instead chooses "export as WAV", the package is explicitly labelled transcoded and writes real WAV bytes. Compressed bytes are never renamed to `.wav`. Plus `optional/{performance.wav,waveform-peaks/}`. Versioned, recoverable offline.
 
 Safety: `navigator.storage.estimate()` shown as used/quota, `persist()` requested on first save, explicit delete flow, partial-write recovery, and plain-language notes that browser storage can be cleared, incognito is unreliable, and export is the real backup. Nothing is deleted silently.
 
@@ -96,16 +116,19 @@ Safety: `navigator.storage.estimate()` shown as used/quota, `persist()` requeste
 
 ## 9. Phase 4 steps
 
-1. `ProjectStore` (IndexedDB + OPFS) and project schema v1.
-2. Uploader + validation + decode probe + memory estimator.
-3. Bundled short demo project (original CC0-licensed stems, no commercial music).
-4. `AudioEngine` (context, graph, transport, scheduled starts, acks).
-5. Reducer→audio adapter for play/restart/fader/mute/master.
-6. Audio diagnostics block in the existing panel.
-7. `/bench` benchmark route.
-8. Offline + Playwright suites, then the device matrix.
+1. Ordered `SemanticCommand` stream + ack channel, emitted alongside the existing reducer dispatch (no second gesture engine, no map changes).
+2. `ProjectStore` (IndexedDB + OPFS) with project schema v1 and the recoverable trash record.
+3. Uploader + header sniffing + decode probe + memory estimator + five-state format report.
+4. Bundled short demo project (original/procedural, license-clear, strong synchronized transients).
+5. `AudioEngine` (single context, persistent graph, scheduled aligned starts, acks).
+6. Continuous control bus for live fader preview; reducer commit on pointer-up.
+7. Command consumers for play/restart/mute/master/track-delete + undo.
+8. Audio diagnostics block in the existing panel (requested vs actual state, drift, memory, storage, source provenance).
+9. `/bench` benchmark route (finalizes platform-specific memory thresholds).
+10. Offline + Playwright suites (including the ordered-command-stream cases), then the device matrix.
 
-Acceptance: upload four WAVs on phone or desktop, press Play on the rendered SP-1, hear one synchronized song, mix with the four faders, mute/unmute, stop and restart reliably, reload a saved local project, and confirm no request carries audio.
+
+Acceptance: upload four WAVs on phone or desktop, press Play on the rendered SP-1, hear one synchronized song, mix with the four faders **with sound changing continuously during the drag**, mute/unmute, delete a track and undo it from the trash, stop and restart reliably, reload a saved local project, and confirm **no network request contains user-selected or user-recorded audio**. Bundled demo stems are ordinary app assets and will legitimately appear as network fetches; diagnostics label each audio source as `bundled-demo` or `user-private` so the two are never confused.
 
 ## 10. Later phases (estimates, high level)
 
@@ -114,9 +137,10 @@ Acceptance: upload four WAVs on phone or desktop, press Play on the rendered SP-
 - **P7 Stem layer + hardening** — solo, effects, Mapping Lab outcomes, `.stemtape`, cross-browser, a11y, PWA.
 - Physical SP-1 firmware stays a separate track and is excluded from these estimates.
 
-## 11. Blocking questions
+## 11. Resolved decisions (approved)
 
-1. `track.delete` (double-tap): unload buffer only, delete the saved blob, or recoverable trash — and is a confirmation allowed outside hardware-faithful mode?
-2. `FN + track` song load: stop transport, crossfade, or wait for explicit Play?
-3. Mobile ceiling: accept a hard duration cap in P4 (e.g. 4:00 stereo) or invest in streaming immediately?
-4. Demo stems: shall I commission generated CC0 material, or will you supply four stems?
+1. **Track delete** — recoverable project trash. Double-tap unloads/removes the track immediately (gesture fidelity preserved) and shows a brief external "Track deleted — Undo" action outside the SP-1 artwork. The saved blob survives until an explicit save/compact or a trash clear.
+2. **FN + track song load** — P4 stops transport, persists the outgoing song's state, loads the target song, and waits for an explicit Play. No crossfade. Flagged for verification against physical Tape Looper hardware.
+3. **Mobile ceiling** — full decode with enforced, tunable memory limits; no streaming in P4. Decoded-memory estimate is the primary limit, not a blanket duration cap; platform-specific warn/block defaults are finalized from `/bench` results.
+4. **Demo content** — short original/procedurally generated, license-clear four-stem demo with obvious synchronized transients so alignment, mute and fader changes are audible instantly. Replaceable with your own stems later.
+
