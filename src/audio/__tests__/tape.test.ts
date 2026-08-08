@@ -97,7 +97,7 @@ describe("tape timeline", () => {
   it("chops subdivide the active window", () => {
     const b = resolveLoop({ ...DEFAULT_WINDOW, start: 0.25, end: 0.75, chopDiv: 4, chopIndex: 2 }, 8);
     expect(Math.abs(b.length - 1)).toBeLessThan(1e-9); // 0.5 * 8 / 4
-    expect(Math.abs(b.start - 3)).toBeLessThan(1e-9); // (0.25 + 2*0.125) * 8
+    expect(Math.abs(b.start - 4)).toBeLessThan(1e-9); // (0.25 + 2*0.125) * 8
   });
 });
 
