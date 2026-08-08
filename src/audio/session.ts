@@ -8,7 +8,7 @@
  */
 
 import type { PreDecodeEstimate, ProbeResult, StemRole } from "./format";
-import type { StoredProject } from "./store";
+import { DERIVED_SCHEMA_VERSION, type StoredProject } from "./store";
 
 export interface DerivedCopy {
   kind: "mono-downmix";
