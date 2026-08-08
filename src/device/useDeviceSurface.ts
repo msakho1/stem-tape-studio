@@ -11,9 +11,11 @@ import {
   type Gesture,
   type RawInputEvent,
 } from "@/input/gestures";
+import { ChordArbiter, type PerfIntent } from "@/machine/chordArbiter";
 import {
   applyFader,
   applyGesture,
+  applyPerfIntent,
   deriveLeds,
   initialSurfaceState,
   observedRows,
@@ -48,6 +50,7 @@ type Action =
   | { type: "press"; control: Control }
   | { type: "release"; control: Control }
   | { type: "gesture"; gesture: Gesture }
+  | { type: "perf"; intent: PerfIntent }
   | { type: "faderCommit"; index: number; value: number };
 
 function reducer(state: SurfaceState, action: Action): SurfaceState {
@@ -57,6 +60,9 @@ function reducer(state: SurfaceState, action: Action): SurfaceState {
     case "release":
       return releaseControl(state, action.control);
 
+    case "perf":
+      // Already arbitrated: exactly one semantic command, nothing to roll back.
+      return applyPerfIntent(state, action.intent);
     case "gesture":
       // Every behaviour is a documented Tape Looper v2.6 row. No experimental
       // Stem Tape mappings are dispatched here (phase 4).
@@ -100,6 +106,15 @@ export function useDeviceSurface() {
 
 
   const engine = useMemo(() => new GestureEngine(), []);
+  /**
+   * Ordered chord arbitration sits BETWEEN raw input and the v2.6 dispatch:
+   * a control claimed by a chord never reaches `applyGesture`, so no base
+   * Play / Volume / Track command is emitted and then undone.
+   */
+  const arbiter = useMemo(
+    () => new ChordArbiter(() => ({ activeStem: stateRef.current.perf.activeStem, fxOverlay: stateRef.current.perf.fxOverlay })),
+    [],
+  );
   const [powerHoldMs, setPowerHoldMsState] = useState(DEFAULT_TIMINGS.powerHoldMs);
 
   const setPowerHoldMs = useCallback(
@@ -131,12 +146,25 @@ export function useDeviceSurface() {
 
 
   useEffect(() => {
+    const offIntent = arbiter.onIntent((intent) => {
+      dispatch({ type: "perf", intent });
+      setGestureLog((prev) =>
+        [{ id: ++gestureId.current, text: `arbitrated → ${intent.type}`, t: performance.now() }, ...prev].slice(0, LOG_LIMIT),
+      );
+    });
     const offRaw = engine.onRaw((e) => {
+      // Arbitration first, always, and in raw order.
+      arbiter.handle(e);
       setRawLog((prev) => [e, ...prev].slice(0, LOG_LIMIT));
       if (e.phase === "down") dispatch({ type: "press", control: e.control });
       else dispatch({ type: "release", control: e.control });
     });
     const offGesture = engine.onGesture((g) => {
+      const control = "control" in g ? g.control : null;
+      if (control && arbiter.isClaimed(control)) return; // suppressed before dispatch
+      if (g.type === "chordStart" || g.type === "chordRelease") {
+        if (g.controls.some((c) => arbiter.isClaimed(c))) return;
+      }
       dispatch({ type: "gesture", gesture: g });
       setGestureLog((prev) =>
         [{ id: ++gestureId.current, text: describeGesture(g), t: g.t }, ...prev].slice(0, LOG_LIMIT),
@@ -145,8 +173,9 @@ export function useDeviceSurface() {
     return () => {
       offRaw();
       offGesture();
+      offIntent();
     };
-  }, [engine]);
+  }, [engine, arbiter]);
 
   useEffect(() => () => engine.dispose(), [engine]);
 
