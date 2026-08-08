@@ -666,8 +666,16 @@ export class AudioEngine {
     const ctx = this.ctx;
     if (!ctx || !this.requestedPlaying) return;
     const now = ctx.currentTime;
+    // Node-engine heads follow varispeed like any other voice; no seams apply
+    // because each head loops on its own loopStart/loopEnd.
+    if (this.heads.active && this.heads.engine === "node") {
+      const rate = Math.abs(this.timeline.currentRate(now)) || 1;
+      for (const v of this.headVoices) if (v) v.node.playbackRate.setTargetAtTime(rate, now, RAMP_TAU);
+    }
     for (const t of this.tracks) {
+      if (this.heads.active && this.heads.engine === "node" && this.heads.source === this.tracks.indexOf(t)) continue;
       if (!t.buffer || !t.loop.enabled) continue;
+
       if (t.committedSeamAt != null && t.committedSeamAt > now) continue;
       const bounds = this.loopBounds(t);
       if (!bounds || bounds.length <= SEAM_FADE_S * 2) continue;
