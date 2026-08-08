@@ -1995,6 +1995,9 @@ export class AudioEngine {
       highMemoryMode: this.highMemoryMode,
       memoryStatement: describeVerdict(this.decodedTotalBytes, this.budget, this.highMemoryMode),
       lastError: this.lastError,
+      heads: this.heads,
+      headsSummary: headsSummary(this.heads),
+
       lastDecodeMs: this.lastDecodeMs,
       enginePreference: this.enginePreference,
       workletSupported:
