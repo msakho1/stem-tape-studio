@@ -2104,9 +2104,13 @@ export class AudioEngine {
           return this.ack(cmd, "completed", `active stem → ${Number(p["stem"]) + 1}`);
         case "fx.overlay":
           return this.ack(cmd, "completed", `FX overlay ${p["on"] ? "open" : "closed"} — tape audio unaffected`);
+        case "fx.bank.select":
+          return this.ack(cmd, "completed", `stem ${Number(p["track"]) + 1} bank ${Number(p["bank"]) + 1} selected — nothing sounded yet`);
         case "fx.momentary.start":
         case "fx.momentary.end":
         case "fx.latch":
+        case "fx.algorithm.cycle":
+        case "fx.macro":
         case "fx.variation":
         case "fx.clearLatches": {
           const id = Number(p["track"]) as TrackId;
@@ -2114,24 +2118,39 @@ export class AudioEngine {
           if (!t) return this.ack(cmd, "rejected", `no track ${id}`);
           if (!this.ctx) return this.ack(cmd, "rejected", "audio not unlocked");
           if (cmd.type === "fx.clearLatches") {
-            for (const f of FX_FAMILIES) void this.setFxActive(id, f, false);
-            return this.ack(cmd, "completed", `stem ${id + 1} latches cleared`);
+            const res = this.clearBanks(id);
+            return this.ack(cmd, res.ok ? "completed" : "rejected", res.detail);
           }
-          const family = String(p["family"]) as FxFamily;
-          if (!FX_FAMILIES.includes(family)) return this.ack(cmd, "rejected", `unknown FX family ${String(p["family"])}`);
           const latched = Boolean(p["latched"]);
+          // Workstream 3 commands carry a bank + algorithm; the legacy
+          // fx.variation command still carries a family.
           if (cmd.type === "fx.variation") {
+            const family = String(p["family"]) as FxFamily;
+            if (!FX_FAMILIES.includes(family)) return this.ack(cmd, "rejected", `unknown FX family ${String(p["family"])}`);
             void this.setFxVariation(id, family, Number(p["variation"]), latched);
             return this.ack(cmd, "completed", `stem ${id + 1} ${family} variation → ${Number(p["variation"])}`);
           }
+          const bank = Number(p["bank"]) as BankIndex;
+          if (!(bank >= 0 && bank <= 3)) return this.ack(cmd, "rejected", `unknown FX bank ${String(p["bank"])}`);
+          const algorithm = Number(p["algorithm"] ?? 0) as AlgorithmIndex;
+          if (cmd.type === "fx.algorithm.cycle") {
+            const res = this.selectBankAlgorithm(id, bank, algorithm);
+            return this.ack(cmd, res.ok ? "completed" : "rejected", res.detail);
+          }
+          if (cmd.type === "fx.macro") {
+            const res = this.setBankMacro(id, bank, algorithm, Number(p["value"]));
+            return this.ack(cmd, res.ok ? "completed" : "rejected", res.detail);
+          }
           const active = cmd.type === "fx.latch" ? Boolean(p["on"]) : cmd.type === "fx.momentary.start";
-          void this.setFxActive(id, family, active, latched);
-          return this.ack(
-            cmd,
-            "completed",
-            `stem ${id + 1} ${family} ${active ? "engaged" : "released"}${latched ? " (latched)" : ""}`,
+          // Accepted immediately (zero hold latency), completed once the wet
+          // ramp is scheduled.
+          this.ack(cmd, "accepted", `stem ${id + 1} bank ${bank + 1} ${active ? "engaging" : "releasing"}`);
+          void this.setBankActive(id, bank, algorithm, active, latched).then((res) =>
+            this.ack(cmd, res.ok ? "completed" : "rejected", res.detail),
           );
+          return;
         }
+
         // ---- Phase 6: recording, grid, heads/PRINT -------------------------
         case "rec.requestInput": {
           const id = Number(p["track"]) as TrackId;
