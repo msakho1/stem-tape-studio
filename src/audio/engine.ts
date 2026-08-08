@@ -1414,7 +1414,167 @@ export class AudioEngine {
     return { ok: true, detail: "heads off — original four tracks, faders and mutes restored, transport untouched" };
   }
 
+  // ------------------------------------------------- audible head scrubbing
+
+  /** Emitted-event trail; the diagnostic panel reads it verbatim. */
+  readonly scrubLog = new ScrubLog();
+  private scrubTrackers: (ScrubTracker | null)[] = [null, null, null, null];
+  /** Node-fallback grain state: absolute read frame + last grain time. */
+  private nodeScrub: ({ pos: number; level: number; lastGrainAt: number } | null)[] = [null, null, null, null];
+  /** Last telemetry frame received from the worklet kernel. */
+  scrubTelemetry: { contextFrame: number; rms: number; heads: (ScrubTelemetryHead | null)[] } | null = null;
+
+  /** Head read position (absolute source frames) right now. */
+  private headFrameNow(i: number): number {
+    const h = this.heads.heads[i]!;
+    const cf = Math.max(1, this.heads.cycleFrames);
+    const sr = this.tracks[this.heads.source ?? 0]?.buffer?.sampleRate ?? this.ctx?.sampleRate ?? 48000;
+    const posFrames = this.ctx ? this.timeline.positionAt(this.ctx.currentTime) * sr : this.heads.cycleStartFrame;
+    return headReadPosition(h, posFrames, this.heads.cycleStartFrame, cf);
+  }
+
+  private logScrub(type: ScrubEvent["type"], headId: number, pointerId: number, normalized: number, target: number) {
+    this.scrubLog.push({
+      type,
+      headId,
+      pointerId,
+      normalizedPosition: normalized,
+      targetSourceFrame: target,
+      contextFrame: this.ctx ? Math.round(this.ctx.currentTime * this.ctx.sampleRate) : 0,
+      inputTimestamp: typeof performance !== "undefined" ? performance.now() : 0,
+    });
+  }
+
+  private scrubWorklet(head: number, phase: "start" | "preview" | "end" | "cancel", pointerId: number, normalized: number, deltaFrames: number) {
+    const src = this.heads.source;
+    const t = src != null ? this.tracks[src] : null;
+    if (this.heads.engine !== "worklet" || !t?.worklet) return false;
+    void t.worklet.headScrub({ head, phase, pointerId, normalizedPosition: normalized, deltaFrames });
+    return true;
+  }
+
+  /**
+   * Node fallback: the head's looping voice is silenced and the movement is
+   * rendered as short overlapping grains whose playbackRate IS the scrub speed.
+   * It is a documented degradation, not a different musical behaviour.
+   */
+  private scrubNodeGrain(head: number, deltaFrames: number, dtS: number) {
+    const ctx = this.ctx;
+    const src = this.heads.source;
+    const t = src != null ? this.tracks[src] : null;
+    const st = this.nodeScrub[head];
+    if (!ctx || !t?.buffer || !this.headsBus || !st) return;
+    const sr = t.buffer.sampleRate;
+    const cf = Math.max(1, this.heads.cycleFrames);
+    const cs = this.heads.cycleStartFrame;
+    const rate = Math.min(MAX_SCRUB_RATE, Math.abs(deltaFrames) / Math.max(1e-4, dtS) / sr);
+    st.pos = cs + (((st.pos + deltaFrames - cs) % cf) + cf) % cf;
+    if (rate < SCRUB_SILENCE_RATE) return;
+    const now = ctx.currentTime;
+    const at = Math.max(now, st.lastGrainAt);
+    const dur = Math.min(0.12, Math.max(0.02, dtS * 1.6));
+    const backwards = deltaFrames < 0;
+    if (backwards && !t.reversed) t.reversed = reverseBuffer(ctx, t.buffer);
+    const buffer = backwards ? t.reversed! : t.buffer;
+    const offsetS = backwards ? buffer.duration - st.pos / sr : st.pos / sr;
+    const g = ctx.createGain();
+    g.connect(this.headsBus);
+    const node = ctx.createBufferSource();
+    node.buffer = buffer;
+    node.playbackRate.value = Math.max(0.02, rate);
+    node.connect(g);
+    const level = st.level * Math.min(1, rate / SCRUB_SILENCE_RATE);
+    const fade = Math.min(0.006, dur / 3);
+    g.gain.setValueAtTime(0, at);
+    g.gain.linearRampToValueAtTime(level, at + fade);
+    g.gain.setValueAtTime(level, at + dur - fade);
+    g.gain.linearRampToValueAtTime(0, at + dur);
+    node.start(at, Math.min(Math.max(0, offsetS), Math.max(0, buffer.duration - 1e-3)), dur * node.playbackRate.value);
+    st.lastGrainAt = at + dur * 0.75;
+    node.onended = () => {
+      try {
+        node.disconnect();
+        g.disconnect();
+      } catch {
+        /* noop */
+      }
+    };
+  }
+
+  beginHeadScrub(head: number, pointerId: number, normalized: number, timestamp: number): { ok: boolean; detail: string } {
+    if (!this.heads.active) return { ok: false, detail: "scrub ignored — heads mode is not active" };
+    const cf = Math.max(1, this.heads.cycleFrames);
+    const at = this.headFrameNow(head);
+    this.scrubTrackers[head] = new ScrubTracker(head, pointerId, this.heads.cycleStartFrame, cf, at, normalized, timestamp);
+    this.logScrub("head.scrub.start", head, pointerId, normalized, at);
+    if (!this.scrubWorklet(head, "start", pointerId, normalized, 0)) {
+      // Node path: silence the looping head voice for the duration of the drag.
+      const h = this.heads.heads[head]!;
+      this.nodeScrub[head] = { pos: at, level: h.muted ? 0 : h.level, lastGrainAt: this.ctx?.currentTime ?? 0 };
+      const v = this.headVoices[head];
+      if (v && this.ctx) this.setGain(v.gain.gain, 0);
+    }
+    return { ok: true, detail: `scrub armed on head ${head + 1} at source frame ${at.toFixed(1)}` };
+  }
+
+  previewHeadScrub(head: number, normalized: number, timestamp: number): { ok: boolean; detail: string } {
+    const tr = this.scrubTrackers[head];
+    if (!tr) return { ok: false, detail: `no scrub gesture open on head ${head + 1}` };
+    const prevT = tr.lastTimestamp;
+    const p = tr.preview(normalized, timestamp);
+    this.logScrub("head.scrub.preview", head, tr.pointerId, normalized, p.targetSourceFrame);
+    if (!this.scrubWorklet(head, "preview", tr.pointerId, normalized, p.deltaFrames)) {
+      this.scrubNodeGrain(head, p.deltaFrames, Math.max(1e-4, (timestamp - prevT) / 1000));
+    }
+    return {
+      ok: true,
+      detail: `head ${head + 1} scrub ${p.direction >= 0 ? "+" : "−"}${Math.abs(p.deltaFrames).toFixed(0)} frames @ ${(p.velocityFramesPerSecond / 1000).toFixed(1)} kframes/s`,
+    };
+  }
+
+  endHeadScrub(head: number, normalized: number): { ok: boolean; detail: string } {
+    const tr = this.scrubTrackers[head];
+    if (!tr) return { ok: false, detail: `no scrub gesture open on head ${head + 1}` };
+    this.scrubTrackers[head] = null;
+    const final = tr.finalFrame(normalized);
+    this.logScrub("head.scrub.end", head, tr.pointerId, normalized, final);
+    this.heads = scrubHead(this.heads, head, normalized);
+    if (!this.scrubWorklet(head, "end", tr.pointerId, normalized, 0)) {
+      this.nodeScrub[head] = null;
+      // Resume normal playback from exactly where the scrub landed.
+      this.restartHeadVoice(head);
+    }
+    return { ok: true, detail: `head ${head + 1} landed on source frame ${final.toFixed(3)} after ${tr.previewCount} previews` };
+  }
+
+  cancelHeadScrub(head: number): { ok: boolean; detail: string } {
+    const tr = this.scrubTrackers[head];
+    if (!tr) return { ok: false, detail: `no scrub gesture open on head ${head + 1}` };
+    this.scrubTrackers[head] = null;
+    this.logScrub("head.scrub.cancel", head, tr.pointerId, tr.lastNormalized, tr.startSourceFrame);
+    if (!this.scrubWorklet(head, "cancel", tr.pointerId, tr.lastNormalized, 0)) {
+      this.nodeScrub[head] = null;
+      this.restartHeadVoice(head);
+    }
+    return { ok: true, detail: `head ${head + 1} scrub cancelled — pre-gesture position restored` };
+  }
+
+  /** Every open scrub is closed safely (heads exit, source relink, teardown). */
+  cancelAllScrubs() {
+    for (let i = 0; i < 4; i++) if (this.scrubTrackers[i]) this.cancelHeadScrub(i);
+  }
+
+  /** Live head level from the continuous bus (HEADS without FUNCTION). */
+  applyHeadLevel(head: number, level: number): void {
+    if (!this.heads.active) return;
+    this.heads = setHeadLevel(this.heads, head, level);
+    const st = this.nodeScrub[head];
+    if (st) st.level = level;
+    this.pushHeads();
+  }
+
   setHeadsSource(id: TrackId): { ok: boolean; detail: string } {
+
     if (!this.heads.active) return { ok: false, detail: "heads mode is not active" };
     const t = this.tracks[id];
     if (!t) return { ok: false, detail: `no track ${id}` };
