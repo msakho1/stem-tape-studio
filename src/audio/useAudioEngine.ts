@@ -28,6 +28,26 @@ export function useAudioEngine(commands: AudioCommand[]) {
     setStatus(engine.status());
   }, [engine]);
 
+  /**
+   * Browser verification fixture. A harness cannot hear the output, so the
+   * engine's own scrub truth is published read-only on the window: live
+   * trackers, the kernel's telemetry (actual frame, velocity, gain, mix, RMS)
+   * and the ordered gesture log. Read-only — it exposes no way to fake a
+   * gesture, so what a harness reads is what the audio path actually did.
+   */
+  useEffect(() => {
+    const w = window as unknown as { __stemTapeScrub?: () => unknown };
+    w.__stemTapeScrub = () => {
+      const d = engine.diagnostics() as { scrub?: unknown; heads?: unknown; headsSummary?: string };
+      return { scrub: d.scrub, heads: d.heads, headsSummary: d.headsSummary, engineReady: engine.ready };
+    };
+    return () => {
+      delete w.__stemTapeScrub;
+    };
+  }, [engine]);
+
+
+
 
   // --- ordered command drain (never a snapshot diff) -----------------------
 
