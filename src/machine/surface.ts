@@ -233,7 +233,8 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
 
       if (c.startsWith("track-button")) {
         const i = trackIndexOf(c);
-        const slice = state.tracks[i]!;
+        const slice = next.tracks[i]!;
+
         if (fn) {
           // FN + track = banks: jump · tap again = next song
           if (g.count === 1) {
