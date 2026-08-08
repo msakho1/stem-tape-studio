@@ -247,7 +247,7 @@ export function InputPanel({ engine }: { engine: AudioEngine }) {
           <dt>pool free / exhaustions</dt>
           <dd>{snap.poolFree} / {snap.poolExhaustions}</dd>
           <dt>pages resident</dt>
-          <dd>{snap.budget.resident} · {(snap.budget.bytes / 1048576).toFixed(1)} MiB of {(snap.budget.limitBytes / 1048576).toFixed(0)} MiB</dd>
+          <dd>{snap.budget.residentPages} · {(snap.budget.residentBytes / 1048576).toFixed(1)} MiB of {(snap.budget.budgetBytes / 1048576).toFixed(0)} MiB</dd>
           <dt>page misses / underruns</dt>
           <dd>{snap.budget.misses} / {snap.budget.underruns}</dd>
         </dl>

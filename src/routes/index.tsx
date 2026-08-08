@@ -6,6 +6,7 @@ import { KEY_HINTS, useDeviceSurface } from "@/device/useDeviceSurface";
 import { CONTROL_LABELS } from "@/device/geometry";
 import { ProjectDrawer } from "@/audio/ProjectDrawer";
 import { WorkletPanel } from "@/audio/WorkletPanel";
+import { InputPanel } from "@/audio/InputPanel";
 import { Waveform } from "@/components/tape/Waveform";
 import { useAudioEngine } from "@/audio/useAudioEngine";
 import { formatBytes } from "@/audio/format";
@@ -347,6 +348,7 @@ function LabPage() {
               </ul>
             </section>
             <WorkletPanel engine={engine} status={status} />
+            <InputPanel engine={engine} />
           </div>
           <DiagnosticPanel
             state={state}
