@@ -5,7 +5,16 @@ import {
   type Control,
 } from "@/device/geometry";
 import { GestureEngine, describeGesture, type Gesture, type RawInputEvent } from "@/input/gestures";
-import { applyFader, applyGesture, deriveLeds, initialSurfaceState, type SurfaceState } from "@/machine/surface";
+import {
+  applyFader,
+  applyGesture,
+  deriveLeds,
+  initialSurfaceState,
+  pressControl,
+  releaseControl,
+  type SurfaceState,
+} from "@/machine/surface";
+
 
 
 const KEY_MAP: Record<string, Control> = {
