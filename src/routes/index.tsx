@@ -58,7 +58,12 @@ function LabPage() {
   const [sess, setSess] = useState<SessionState>(() => session.get());
   const [demoBusy, setDemoBusy] = useState(false);
   useEffect(() => setMounted(true), []);
-  useEffect(() => session.subscribe(setSess), []);
+  useEffect(() => {
+    const off = session.subscribe(setSess);
+    return () => {
+      off();
+    };
+  }, []);
 
   const {
     state,
