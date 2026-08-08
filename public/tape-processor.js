@@ -480,11 +480,11 @@ class TapeProcessor extends AudioWorkletProcessor {
           else if (desired < -this.maxScrubRate) desired = -this.maxScrubRate;
           sc.velocity += (desired - sc.velocity) * 0.004;
           sc.actual += sc.velocity;
-          // Wrap only inside the active heads cycle.
-          let rel = (sc.actual - this.heads.cycleStart) % cf0;
-          if (rel < 0) rel += cf0;
-          sc.actual = this.heads.cycleStart + rel;
-          sc.target = sc.actual + (sc.target - (sc.actual - sc.velocity)) - sc.velocity === sc.target ? sc.target : sc.target;
+          // `actual` and `target` stay unwrapped so the distance (and therefore
+          // the direction of travel) is exact; wrapping happens at read time,
+          // inside the active heads cycle only.
+          void cf0;
+
           // A stationary tape is silent: fade the scrub voice with |velocity|.
           const speed = sc.velocity < 0 ? -sc.velocity : sc.velocity;
           let gTarget = speed / this.scrubSilenceRate;
