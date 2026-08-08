@@ -2143,12 +2143,13 @@ export class AudioEngine {
           }
           const active = cmd.type === "fx.latch" ? Boolean(p["on"]) : cmd.type === "fx.momentary.start";
           // Accepted immediately (zero hold latency), completed once the wet
-          // ramp is scheduled.
-          this.ack(cmd, "accepted", `stem ${id + 1} bank ${bank + 1} ${active ? "engaging" : "releasing"}`);
+          // ramp is scheduled. Distinct acknowledgements, never merged.
+          const accepted = this.ack(cmd, "accepted", `stem ${id + 1} bank ${bank + 1} ${active ? "engaging" : "releasing"}`);
           void this.setBankActive(id, bank, algorithm, active, latched).then((res) =>
             this.ack(cmd, res.ok ? "completed" : "rejected", res.detail),
           );
-          return;
+          return accepted;
+
         }
 
         // ---- Phase 6: recording, grid, heads/PRINT -------------------------
