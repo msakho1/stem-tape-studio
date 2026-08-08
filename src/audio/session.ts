@@ -7,7 +7,7 @@
  * OPFS; only the procedurally generated demo is ever labelled `bundled-demo`.
  */
 
-import type { ProbeResult, StemRole } from "./format";
+import type { PreDecodeEstimate, ProbeResult, StemRole } from "./format";
 import type { StoredProject } from "./store";
 
 export interface DerivedCopy {

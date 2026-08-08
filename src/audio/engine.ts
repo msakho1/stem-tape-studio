@@ -228,7 +228,7 @@ export class AudioEngine {
   adoptBuffer(
     id: TrackId,
     buffer: AudioBuffer,
-    meta: { name: string; provenance: TrackRuntime["provenance"]; decodeMs?: number; reused?: boolean },
+    meta: { name: string; provenance: TrackRuntime["provenance"]; decodeMs?: number | undefined; reused?: boolean | undefined },
   ): { ok: boolean; detail: string; bytes: number } {
     const track = this.tracks[id];
     if (!track) return { ok: false, detail: `no track ${id}`, bytes: 0 };
