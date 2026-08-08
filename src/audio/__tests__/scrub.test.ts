@@ -223,8 +223,9 @@ describe("kernel scrub — audible behaviour", () => {
     h.send({ type: "headScrub", seq: 21, head: 0, phase: "preview", pointerId: 1, normalizedPosition: 0.9, deltaFrames: 0.9 * CYCLE });
     h.render(10);
     h.send({ type: "headScrub", seq: 22, head: 0, phase: "end", pointerId: 1, normalizedPosition: 0.9, deltaFrames: 0 });
-    // Exactly 20 quanta of transport advance at rate 1, nothing else.
-    expect(h.proc.readPosition - before).toBeCloseTo(20 * QUANTUM, 6);
+    // Exactly the 10 rendered quanta of transport advance at rate 1 — the
+    // scrub gesture itself contributes nothing to the underlying pointer.
+    expect(h.proc.readPosition - before).toBeCloseTo(10 * QUANTUM, 6);
   });
 
   it("works on a reversed head and at a non-unity rate", () => {
