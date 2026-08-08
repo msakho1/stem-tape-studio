@@ -297,7 +297,7 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
 
       if (c.startsWith("fader-") && g.count === 2 && state.headsMode) {
         const i = trackIndexOf(c);
-        const rev = !state.tracks[i]!.headReverse;
+        const rev = !next.tracks[i]!.headReverse;
         next = { ...next, tracks: setTrack(next, i, { headReverse: rev }) };
         return fire(next, "heads.scrub", `head ${i + 1} double-tap → ${rev ? "reverse" : "forward"}`, t);
       }
