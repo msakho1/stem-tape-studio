@@ -134,15 +134,15 @@
 
 /*
  * Stem Tape R&D bench tokens.
- * Graphite workbench, bone instrument, single signal red. No purple gradients.
+ * Light paper-like workbench, black instrument ink, single signal red. No purple gradients.
  */
 :root {
-  --bench: oklch(0.19 0.004 250);
-  --bench-raised: oklch(0.235 0.004 250);
-  --bench-line: oklch(0.32 0.004 250);
-  --ink: oklch(0.93 0.003 250);
-  --ink-dim: oklch(0.66 0.004 250);
-  --ink-faint: oklch(0.5 0.004 250);
+  --bench: oklch(0.8123 0.005 250);
+  --bench-raised: oklch(0.85 0.005 250);
+  --bench-line: oklch(0.72 0.005 250);
+  --ink: oklch(0 0 0);
+  --ink-dim: oklch(0.4 0 0);
+  --ink-faint: oklch(0.55 0 0);
   --signal: oklch(0.66 0.19 22);
   --lamp: oklch(0.95 0.06 92);
   --mono: ui-monospace, "SFMono-Regular", "JetBrains Mono", Menlo, monospace;
