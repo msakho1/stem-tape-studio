@@ -1,9 +1,12 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { DeviceSurface } from "@/device/DeviceSurface";
 import { DiagnosticPanel } from "@/device/DiagnosticPanel";
 import { KEY_HINTS, useDeviceSurface } from "@/device/useDeviceSurface";
 import { CONTROL_LABELS } from "@/device/geometry";
+import { ProjectDrawer } from "@/audio/ProjectDrawer";
+import { useAudioEngine } from "@/audio/useAudioEngine";
+import { formatBytes } from "@/audio/format";
 
 export const Route = createFileRoute("/")({
   component: LabPage,
@@ -29,6 +32,10 @@ export const Route = createFileRoute("/")({
 
 function LabPage() {
   const [showHitZones, setShowHitZones] = useState(false);
+  // The AudioContext only exists in the browser: render the locked label until
+  // after hydration so SSR and the first client paint agree.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
   const {
     state,
     leds,
@@ -44,6 +51,19 @@ function LabPage() {
     handlers,
   } = useDeviceSurface();
 
+  const { engine, status, acks, unlock, unlockNote } = useAudioEngine(state.commands);
+  const control = {
+    faders: state.tracks.map((t) => t.volume),
+    mutes: state.tracks.map((t) => t.content === "muted"),
+    masterVolume: state.masterVolume,
+    speed: state.speed,
+    chopDiv: state.chopDiv,
+    window: state.window,
+    filter: { mode: state.filter.mode, amount: state.filter.amount },
+    grid: { bpm: state.grid.bpm, source: state.grid.source },
+    song: state.song,
+  };
+
   return (
     <main className="min-h-screen px-5 py-6 md:px-10 md:py-9">
       <header className="mb-7 flex flex-wrap items-end justify-between gap-4 border-b border-[var(--bench-line)] pb-5">
@@ -55,12 +75,21 @@ function LabPage() {
             Stem Tape — interaction prototype
           </h1>
           <p className="mt-1 max-w-2xl font-mono text-[11px] leading-relaxed text-[var(--ink-dim)]">
-            Phase 3: exact Tape Looper v2.6 behavioural simulation. No audio engine is running — every
-            gesture is recognised, routed through the v2.6 map, logged and arbitrated so the mapping can be
-            validated before a single sample is loaded.
+            Phase 4: the v2.6 surface now drives a real Web Audio engine. Load four stems (or generate the
+            local demo), press PLAY and every mapped gesture — mute, delete, rate, restart, song load — is sent
+            to the engine as an ordered command and answered with an ack.
 
           </p>
         </div>
+        <button
+          type="button"
+          className="st-toggle"
+          data-on={mounted && status.contextState === "running"}
+          data-testid="unlock-audio"
+          onClick={() => void unlock()}
+        >
+          {mounted && status.contextState === "running" ? `audio live · ${status.sampleRate ?? "?"} Hz` : "enable audio"}
+        </button>
         <button
           type="button"
           className="st-toggle"
@@ -116,6 +145,42 @@ function LabPage() {
             faderValuesRef={faderValuesRef}
             svgRef={svgRef}
           />
+
+          <section className="st-card mt-4" data-testid="audio-diagnostics">
+            <h2 className="font-mono text-[11px] uppercase tracking-[0.2em] text-[var(--ink)]">audio engine</h2>
+            <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 font-mono text-[10px] text-[var(--ink-dim)]">
+              <dt>context</dt>
+              <dd className="text-[var(--ink)]" data-testid="ctx-state">{status.contextState}</dd>
+              <dt>requested / actual</dt>
+              <dd className="text-[var(--ink)]">
+                {String(status.requestedPlaying)} / {String(status.actuallyPlaying)}
+              </dd>
+              <dt>position</dt>
+              <dd>{status.position.toFixed(3)}s of {status.duration.toFixed(3)}s</dd>
+              <dt>rate</dt>
+              <dd>{status.rate.toFixed(4)}×</dd>
+              <dt>start spread</dt>
+              <dd data-testid="start-spread">{status.startSpreadMs.toFixed(4)} ms</dd>
+              <dt>decoded</dt>
+              <dd>{formatBytes(status.decodedBytes)}</dd>
+              <dt>last decode</dt>
+              <dd>{status.lastDecodeMs != null ? `${status.lastDecodeMs.toFixed(0)} ms` : "—"}</dd>
+              <dt>last error</dt>
+              <dd>{status.lastError ?? "none"}</dd>
+            </dl>
+            <p className="mt-2 font-mono text-[10px] text-[var(--ink-faint)]">{unlockNote}</p>
+            <ul className="mt-2 grid gap-1" data-testid="ack-log">
+              {acks.slice(0, 10).map((a) => (
+                <li key={a.id} className="font-mono text-[10px] text-[var(--ink-dim)]">
+                  <span className="text-[var(--ink)]">#{a.id} {a.type}</span> · {a.status} · {a.detail}
+                </li>
+              ))}
+            </ul>
+          </section>
+
+          <div className="mt-4">
+            <ProjectDrawer engine={engine} status={status} control={control} />
+          </div>
 
         </aside>
       </div>

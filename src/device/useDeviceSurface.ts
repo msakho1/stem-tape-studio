@@ -22,6 +22,7 @@ import {
   releaseControl,
   type SurfaceState,
 } from "@/machine/surface";
+import { controlBus } from "@/audio/controlBus";
 
 
 
@@ -75,7 +76,13 @@ export function useDeviceSurface() {
   const faderValuesRef = useRef<number[]>([0.78, 0.72, 0.65, 0.7]);
   const dragRef = useRef<{ index: number; pointerId: number } | null>(null);
   const frameRef = useRef<number | null>(null);
-  const pendingCyRef = useRef<{ index: number; cy: number } | null>(null);
+  const pendingCyRef = useRef<{ index: number; cy: number; value: number } | null>(null);
+  /** Latest state, read by imperative pointer handlers without re-binding them. */
+  const stateRef = useRef<SurfaceState>(state);
+  stateRef.current = state;
+  /** Which fader layer is live (FN = chop window, HEADS = scrub, else volume). */
+  const layerRef = useRef<{ fn: boolean; heads: boolean }>({ fn: false, heads: false });
+  layerRef.current = { fn: state.functionHeld, heads: state.headsMode };
 
   /**
    * Application-ready gate. Nothing reaches the gesture engine until the client
@@ -188,9 +195,14 @@ export function useDeviceSurface() {
     return { x: pt.x, y: pt.y };
   }, []);
 
-  /** Fader caps are written straight to the DOM in a rAF — React never re-renders on drag. */
-  const scheduleCap = useCallback((index: number, cy: number) => {
-    pendingCyRef.current = { index, cy };
+  /**
+   * Fader caps are written straight to the DOM in a rAF — React never re-renders
+   * on drag — and the SAME rAF pushes one coalesced preview onto the continuous
+   * control bus, so the audio moves with the finger instead of waiting for
+   * pointer-up. The SVG still never touches an AudioNode.
+   */
+  const scheduleCap = useCallback((index: number, cy: number, value: number) => {
+    pendingCyRef.current = { index, cy, value };
     if (frameRef.current != null) return;
     frameRef.current = requestAnimationFrame(() => {
       frameRef.current = null;
@@ -198,6 +210,13 @@ export function useDeviceSurface() {
       if (!pending) return;
       const cap = capRefs.current[pending.index];
       if (cap) cap.setAttribute("cy", String(pending.cy));
+      const layer = layerRef.current;
+      controlBus.send({
+        channel: layer.fn ? "window" : layer.heads ? "headScrub" : "fader",
+        index: pending.index,
+        value: pending.value,
+        committed: false,
+      });
     });
   }, []);
 
@@ -215,7 +234,7 @@ export function useDeviceSurface() {
         if (p) {
           const value = cyToFaderValue(p.y);
           faderValuesRef.current[index] = value;
-          scheduleCap(index, faderValueToCy(value));
+          scheduleCap(index, faderValueToCy(value), value);
         }
       }
     },
@@ -231,20 +250,45 @@ export function useDeviceSurface() {
       engine.markMoved(control);
       const value = cyToFaderValue(p.y);
       faderValuesRef.current[drag.index] = value;
-      scheduleCap(drag.index, faderValueToCy(value));
+      scheduleCap(drag.index, faderValueToCy(value), value);
     },
     [engine, scheduleCap, toUserSpace],
   );
 
+  /**
+   * Commit: the reducer receives the EXACT value that was last audible, so the
+   * committed gain and the last preview gain are the same number.
+   */
   const endDrag = useCallback(() => {
     const drag = dragRef.current;
     if (!drag) return;
     dragRef.current = null;
-    dispatch({
-      type: "faderCommit",
+    const value = faderValuesRef.current[drag.index] ?? 0;
+    const layer = layerRef.current;
+    controlBus.send({
+      channel: layer.fn ? "window" : layer.heads ? "headScrub" : "fader",
       index: drag.index,
-      value: faderValuesRef.current[drag.index] ?? 0,
+      value,
+      committed: true,
     });
+    dispatch({ type: "faderCommit", index: drag.index, value });
+  }, []);
+
+  /**
+   * Documented cancel rule: a cancelled drag is NOT a commit. Audio is
+   * reconciled back to the last committed value (ramped) and the reducer keeps
+   * the value it already had.
+   */
+  const cancelDrag = useCallback(() => {
+    const drag = dragRef.current;
+    if (!drag) return;
+    dragRef.current = null;
+    const layer = layerRef.current;
+    const channel = layer.fn ? "window" : layer.heads ? "headScrub" : "fader";
+    const committed = controlBus.reconcile(channel, drag.index, stateRef.current.tracks[drag.index]?.volume ?? 0);
+    faderValuesRef.current[drag.index] = committed;
+    const cap = capRefs.current[drag.index];
+    if (cap) cap.setAttribute("cy", String(faderValueToCy(committed)));
   }, []);
 
   const onControlPointerUp = useCallback(
@@ -258,9 +302,9 @@ export function useDeviceSurface() {
   const onControlPointerCancel = useCallback(
     (control: Control, e: React.PointerEvent) => {
       engine.cancel(control, e.pointerId);
-      endDrag();
+      cancelDrag();
     },
-    [endDrag, engine],
+    [cancelDrag, engine],
   );
 
   const leds = useMemo(() => deriveLeds(state), [state]);
