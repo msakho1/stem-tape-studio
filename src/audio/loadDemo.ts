@@ -22,7 +22,7 @@ export async function loadDemoProject(
       provenance: "bundled-demo" as const,
     })),
     {
-      signal: opts.signal,
+      ...(opts.signal ? { signal: opts.signal } : {}),
       onResult: (r) => opts.onResult?.(r.ok, `${ROLE_LABEL[r.role]} — ${r.detail}`),
     },
   );
