@@ -1454,9 +1454,10 @@ export class AudioEngine {
     }
     const rendered = renderHeadsCycle(read.channels, 0, frames, this.heads.heads);
     const peak = peakOf(rendered);
-    const sr = this.tracks[this.heads.source]!.buffer?.sampleRate ?? this.ctx.sampleRate;
+    const srcIdx = this.heads.source ?? 0;
+    const sr = this.tracks[srcIdx]?.buffer?.sampleRate ?? this.ctx.sampleRate;
     const buffer = this.ctx.createBuffer(rendered.length, frames, sr);
-    for (let c = 0; c < rendered.length; c++) buffer.copyToChannel(rendered[c]!, c);
+    for (let c = 0; c < rendered.length; c++) buffer.copyToChannel(new Float32Array(rendered[c]!), c);
 
     this.heads = { ...this.heads, print: { target, phase: "finalising", detail: "committing", cycleFrames: frames } };
     const detail = `PRINT ${frames} frames (${(frames / sr).toFixed(3)}s) @ ${sr} Hz · ${rendered.length}ch · peak ${peak.toFixed(3)} · ${headsSummary(this.heads)}`;
