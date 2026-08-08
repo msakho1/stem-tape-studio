@@ -1,0 +1,90 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { Ack, AudioCommand } from "./commands";
+import { controlBus } from "./controlBus";
+import { getAudioEngine, type EngineStatus } from "./engine";
+
+/**
+ * Drains the reducer's ordered command stream into the AudioEngine by
+ * watermark, feeds the continuous control bus straight to AudioParams, keeps
+ * lifecycle honest (a suspended context can never read as "playing") and
+ * exposes engine truth for diagnostics.
+ */
+export function useAudioEngine(commands: AudioCommand[]) {
+  const engine = useMemo(() => getAudioEngine(), []);
+  const watermark = useRef(0);
+  const [acks, setAcks] = useState<Ack[]>([]);
+  const [status, setStatus] = useState<EngineStatus>(() => engine.status());
+  const [unlockNote, setUnlockNote] = useState<string>("audio locked — press PLAY or enable audio");
+
+  // --- ordered command drain (never a snapshot diff) -----------------------
+  useEffect(() => {
+    const pending = commands.filter((c) => c.id > watermark.current);
+    if (pending.length === 0) return;
+    watermark.current = pending[pending.length - 1]!.id;
+    const produced: Ack[] = [];
+    for (const cmd of pending) {
+      if (cmd.type === "transport.play" && !engine.ready) {
+        // Unlock, then re-run this exact command — the id is preserved so the
+        // ack still maps to the originating gesture.
+        void engine.unlock().then((r) => {
+          setUnlockNote(r.detail);
+          const ack = engine.execute(cmd);
+          setAcks((prev) => [ack, ...prev].slice(0, 60));
+          setStatus(engine.status());
+        });
+        continue;
+      }
+      produced.push(engine.execute(cmd));
+    }
+    if (produced.length) setAcks((prev) => [...produced.reverse(), ...prev].slice(0, 60));
+    setStatus(engine.status());
+  }, [commands, engine]);
+
+  // --- continuous control bus → AudioParam --------------------------------
+  useEffect(() => {
+    const off = controlBus.subscribe((e) => {
+      if (e.channel !== "fader") return; // window / heads land in Phase 5
+      engine.applyTrackGain(e.index as 0 | 1 | 2 | 3, e.value);
+    });
+    return () => {
+      off();
+    };
+  }, [engine]);
+
+  // --- lifecycle: suspension, backgrounding, route changes ----------------
+  useEffect(() => {
+    const reconcile = () => {
+      void engine.reconcileLifecycle().then(() => setStatus(engine.status()));
+    };
+    document.addEventListener("visibilitychange", reconcile);
+    window.addEventListener("pagehide", reconcile);
+    return () => {
+      document.removeEventListener("visibilitychange", reconcile);
+      window.removeEventListener("pagehide", reconcile);
+    };
+  }, [engine]);
+
+  // --- status polling (display only; the playhead itself is derived) ------
+  useEffect(() => {
+    let raf = 0;
+    let last = 0;
+    const tick = (t: number) => {
+      if (t - last > 100) {
+        last = t;
+        setStatus(engine.status());
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [engine]);
+
+  const unlock = useCallback(async () => {
+    const r = await engine.unlock();
+    setUnlockNote(r.detail);
+    setStatus(engine.status());
+    return r;
+  }, [engine]);
+
+  return { engine, status, acks, unlock, unlockNote };
+}

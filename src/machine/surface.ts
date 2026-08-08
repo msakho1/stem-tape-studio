@@ -1,3 +1,4 @@
+import { COMMAND_LOG_LIMIT, makeCommand, type AudioCommand, type AudioCommandType } from "@/audio/commands";
 import type { Control, TrackIndex } from "@/device/geometry";
 import { TEMPO_TAP_IDLE_MS, type Gesture } from "@/input/gestures";
 import { V26_ROW_BY_ID } from "@/machine/v26map";
@@ -88,6 +89,13 @@ export interface SurfaceState {
   /** v2.6 songs.length: to 8:00 · longer with the tape slowed. */
   maxTakeSeconds: number;
 
+  /**
+   * Ordered audio command stream (Phase 4). Append-only, monotonic ids, drained
+   * by the AudioEngine on a watermark. Audio is NEVER inferred from snapshot
+   * diffs: repeats, optimistic taps and rollbacks would be lost.
+   */
+  commands: AudioCommand[];
+
   fired: FiredRow[];
   coverage: Record<string, number>;
   note: string;
@@ -136,6 +144,16 @@ export function restoreSnapshot(s: SurfaceState, snap: TxnSnapshot): SurfaceStat
 export const STEM_ROLES = ["vocals", "drums", "bass", "instruments"] as const;
 
 const FIRED_LIMIT = 60;
+
+/** Append one ordered audio command. Pure: returns a new state. */
+function emit(
+  state: SurfaceState,
+  type: AudioCommandType,
+  payload: AudioCommand["payload"],
+  opts: { rowId?: string; txnId?: string; t?: number } = {},
+): SurfaceState {
+  return { ...state, commands: [...state.commands, makeCommand(type, payload, opts)].slice(-COMMAND_LOG_LIMIT) };
+}
 let firedSeq = 0;
 
 function track(stem: TrackSlice["stem"], volume: number): TrackSlice {
@@ -175,10 +193,11 @@ export function initialSurfaceState(): SurfaceState {
     songMemory: {},
     maxTakeSeconds: 480,
 
+    commands: [],
 
     fired: [],
     coverage: {},
-    note: "phase 3 — Tape Looper v2.6 behavioural simulation, no audio engine",
+    note: "phase 4 — v2.6 simulation + ordered audio command stream",
   };
 }
 
@@ -250,7 +269,20 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
       // behind (rocker ×1 +1 BPM must not compound into the ×2 semitone, and
       // FN+PLAY ×2's 1.0× snap must not survive into ×3 heads mode).
       if (g.count > 1 && state.txn && state.txn.control === c) {
-        next = restoreSnapshot(next, state.txn.snapshot);
+        // Revoke the optimistic ×1 action in the engine too, before ×2/×3 runs.
+        // The payload carries the pre-tap truth the engine must re-assert:
+        // rate plus the per-track mute mask (an optimistic mute must not stick).
+        next = emit(
+          restoreSnapshot(next, state.txn.snapshot),
+          "rollback",
+          {
+            control: c,
+            toCount: g.count,
+            rate: state.txn.snapshot.speed,
+            mutes: state.txn.snapshot.tracks.map((t) => (t.content === "muted" ? 1 : 0)).join(""),
+          },
+          { txnId: `${c}:${state.txn.count}`, t },
+        );
         next = { ...next, txn: { control: c, count: g.count, snapshot: state.txn.snapshot } };
       } else if (g.count === 1) {
         next = { ...next, txn: { control: c, count: 1, snapshot: snapshotOf(state) } };
@@ -274,10 +306,11 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
         }
         if (fn && g.count === 2) {
           next = { ...next, speed: 1 };
-          return fire(next, "play.snap", "speed snapped to 1.000×", t);
+          return fire(emit(next, "rate.set", { rate: 1 }, { rowId: "play.snap", t }), "play.snap", "speed snapped to 1.000×", t);
         }
         if (!fn && g.count === 1) {
           next = { ...next, playing: !next.playing };
+          next = emit(next, next.playing ? "transport.play" : "transport.stop", {}, { rowId: "play.toggle", t });
           return fire(next, "play.toggle", next.playing ? "play" : "stop", t);
         }
         return next;
@@ -334,12 +367,17 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
           }
           const song = (next.bank * 4 + (((next.song % 4) + 1) % 4)) % 16;
           next = { ...loadSong(next, song), bankJumpArmed: true };
-          return fire(next, "track.bank", `tap again → next song (${song + 1}/16)`, t);
+          // P4 song load: stop the transport, hold the position, wait for Play.
+          next = emit({ ...next, playing: false }, "song.load", { song }, { rowId: "track.bank", t });
+          return fire(next, "track.bank", `tap again → next song (${song + 1}/16) — transport stopped, waiting for PLAY`, t);
         }
 
         if (g.count === 2) {
           next = { ...next, tracks: setTrack(next, i, { content: "empty" }), activeTrack: i };
-          return fire(next, "track.delete", `track ${i + 1} deleted`, t);
+          // Recoverable trash: the surface loses the track immediately (gesture
+          // fidelity) but the engine keeps the buffer and the blob survives.
+          next = emit(next, "track.delete", { track: i }, { rowId: "track.delete", t });
+          return fire(next, "track.delete", `track ${i + 1} deleted → recoverable trash (undo available)`, t);
         }
         next = { ...next, activeTrack: i };
         if (slice.content === "recording" || slice.content === "armed") {
@@ -349,6 +387,7 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
         if (slice.content === "empty") return fire(next, "track.tap", `track ${i + 1} empty — nothing to stop or mute`, t);
         const muted = slice.content === "muted";
         next = { ...next, tracks: setTrack(next, i, { content: muted ? "loaded" : "muted" }) };
+        next = emit(next, muted ? "track.unmute" : "track.mute", { track: i }, { rowId: "track.tap", t });
         return fire(next, "track.tap", `track ${i + 1} ${muted ? "unmute" : "mute"}`, t);
       }
 
@@ -365,12 +404,12 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
         }
         if (g.count === 2) {
           const speed = next.speed * Math.pow(2, dir / 12);
-          next = { ...next, speed };
+          next = emit({ ...next, speed }, "rate.set", { rate: speed }, { rowId: "rocker.semitone", t });
           return fire(next, "rocker.semitone", `exact semitone ${dir > 0 ? "+1" : "−1"} → ${speed.toFixed(4)}×`, t);
         }
         const bpmBase = next.grid.bpm ?? 120;
         const speed = next.speed * ((bpmBase + dir) / bpmBase);
-        next = { ...next, speed };
+        next = emit({ ...next, speed }, "rate.set", { rate: speed }, { rowId: "rocker.speed", txnId: `${c}:1`, t });
 
         return fire(next, "rocker.speed", `${dir > 0 ? "+" : "−"}1 BPM → ${speed.toFixed(4)}×`, t);
       }
@@ -383,7 +422,7 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
           return fire(next, "volume.chopWindow", `chop window → ${chopWindowOffset.toFixed(3)}`, t);
         }
         const masterVolume = clamp01(next.masterVolume + dir * 0.0625);
-        next = { ...next, masterVolume };
+        next = emit({ ...next, masterVolume }, "master.gain", { level: masterVolume }, { rowId: "volume.master", t });
         return fire(next, "volume.master", `master → ${masterVolume.toFixed(3)}`, t);
       }
 
@@ -404,7 +443,12 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
           return fire(next, "play.lights", `lights ${next.lights}`, t);
         }
         if (g.level === "hold" && !fn)
-          return fire({ ...next, playing: true }, "play.restart", "restart from the top", t);
+          return fire(
+            emit({ ...next, playing: true }, "transport.restart", {}, { rowId: "play.restart", t }),
+            "play.restart",
+            "restart from the top",
+            t,
+          );
         return next;
       }
       if (c.startsWith("track-button") && g.level === "hold") {
@@ -516,6 +560,7 @@ export function releaseControl(state: SurfaceState, control: Control): SurfaceSt
   if (!shouldToggle) return next;
   const power = state.power === "on" ? "off" : "on";
   next = { ...next, power, playing: power === "off" ? false : next.playing };
+  if (power === "off") next = emit(next, "transport.stop", {}, { rowId: "fn.power" });
   return fire(next, "fn.power", `power ${power}`, performance.now());
 }
 
@@ -546,8 +591,15 @@ export function applyFader(state: SurfaceState, index: number, value: number): S
       t,
     );
   }
+  // Commit value MUST equal the last audible preview value pushed by the
+  // continuous control bus during the drag — same number, no re-derivation.
   return fire(
-    { ...state, tracks: setTrack(state, index, { volume: value }) },
+    emit(
+      { ...state, tracks: setTrack(state, index, { volume: value }) },
+      "track.gain",
+      { track: index, level: value },
+      { rowId: "fader.trackVolume", t },
+    ),
     "fader.trackVolume",
     `track ${index + 1} volume → ${value.toFixed(3)}`,
     t,
