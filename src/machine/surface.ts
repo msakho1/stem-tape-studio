@@ -124,6 +124,10 @@ export function initialSurfaceState(): SurfaceState {
     grid: { bpm: null, rejected: false, source: "none" },
     fnTapTimes: [],
     fnTapCount: 0,
+    fnHoldReached: false,
+    fnModifierUsed: false,
+    pendingUndo: null,
+
     fired: [],
     coverage: {},
     note: "phase 3 — Tape Looper v2.6 behavioural simulation, no audio engine",
