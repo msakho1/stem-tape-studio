@@ -168,3 +168,34 @@ export function missingRoles(): StemRole[] {
   const stems = session.get().stems;
   return STEM_ROLE_LIST.filter((r) => !stems[r] || stems[r]!.trashed);
 }
+
+/**
+ * Phase 5B failure recovery: re-decode one track from its stored original (or
+ * the Memory Saver derived working copy when one is in use). This is the ONLY
+ * fallback path — a second PCM copy is never retained as insurance.
+ */
+export function installRedecode(engine: AudioEngine): void {
+  engine.redecode = async (id: TrackId): Promise<AudioBuffer | null> => {
+    if (!engine.ctx) return null;
+    const role = (Object.keys(ROLE_TRACK) as StemRole[]).find((r) => ROLE_TRACK[r] === id);
+    if (!role) return null;
+    const stem = session.get().stems[role];
+    if (!stem) return null;
+    const key = stem.derived?.derivedKey ?? stem.blobKey;
+    const blob = (await projectStore.getBlob(key)) ?? stem.blob;
+    if (!blob) return null;
+    try {
+      const started = performance.now();
+      const buffer = await engine.ctx.decodeAudioData(await blob.arrayBuffer());
+      const adopted = engine.adoptBuffer(id, buffer, {
+        name: stem.filename,
+        provenance: stem.provenance,
+        decodeMs: performance.now() - started,
+        reused: false,
+      });
+      return adopted.ok ? buffer : null;
+    } catch {
+      return null;
+    }
+  };
+}

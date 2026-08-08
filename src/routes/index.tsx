@@ -5,6 +5,7 @@ import { DiagnosticPanel } from "@/device/DiagnosticPanel";
 import { KEY_HINTS, useDeviceSurface } from "@/device/useDeviceSurface";
 import { CONTROL_LABELS } from "@/device/geometry";
 import { ProjectDrawer } from "@/audio/ProjectDrawer";
+import { WorkletPanel } from "@/audio/WorkletPanel";
 import { useAudioEngine } from "@/audio/useAudioEngine";
 import { formatBytes } from "@/audio/format";
 
@@ -180,6 +181,7 @@ function LabPage() {
 
           <div className="mt-4">
             <ProjectDrawer engine={engine} status={status} control={control} />
+            <WorkletPanel engine={engine} status={status} />
           </div>
 
         </aside>
