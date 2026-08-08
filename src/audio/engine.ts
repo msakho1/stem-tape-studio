@@ -1143,6 +1143,318 @@ export class AudioEngine {
     return this.tracks.map((t) => t.fxRack?.snapshot() ?? null);
   }
 
+  // ------------------------------------------------- Phase 6 heads / PRINT
+
+  heads: HeadsState = emptyHeads();
+  /** Node-engine head voices. Empty while heads are served by the worklet. */
+  private headVoices: ({ node: AudioBufferSourceNode; gain: GainNode } | null)[] = [null, null, null, null];
+  private headsBus: GainNode | null = null;
+  /** Mute mask of the non-source tracks, restored verbatim on heads exit. */
+  private preHeadsMutes: boolean[] | null = null;
+  /** PRINT commit hook, installed by the ingest layer (persist + adopt). */
+  commitPrint:
+    | ((target: TrackId, buffer: AudioBuffer, detail: string) => Promise<{ ok: boolean; detail: string }>)
+    | null = null;
+
+  private headCandidates(): SourceCandidate[] {
+    return this.tracks.map((t, i) => ({
+      index: i,
+      loaded: t.buffer != null || (t.engineMode === "worklet" && (t.worklet?.pcmBytes ?? 0) > 0),
+      playing: t.sources.length > 0 || (t.engineMode === "worklet" && this.requestedPlaying),
+      muted: t.muted,
+    }));
+  }
+
+  /** Cycle geometry of one track in SOURCE frames (window/chop resolved). */
+  private cycleOf(id: TrackId): { startFrame: number; frames: number; startS: number; lengthS: number; sr: number } | null {
+    const t = this.tracks[id];
+    if (!t) return null;
+    const duration = t.buffer?.duration ?? t.sourceDurationS;
+    if (!(duration > 0)) return null;
+    const sr = t.buffer?.sampleRate ?? this.ctx?.sampleRate ?? 48000;
+    const b = resolveLoop(t.loop, duration);
+    return { startFrame: Math.round(b.start * sr), frames: Math.round(b.length * sr), startS: b.start, lengthS: b.length, sr };
+  }
+
+  private headBufferAndOffset(t: TrackRuntime, h: HeadState, cycleStartS: number, cycleLenS: number) {
+    const buf = t.buffer!;
+    const posS = cycleStartS + h.offset * cycleLenS;
+    if (!h.reverse) return { buffer: buf, offset: posS, loopStart: cycleStartS, loopEnd: cycleStartS + cycleLenS };
+    if (!t.reversed) t.reversed = reverseBuffer(this.ctx!, buf);
+    const d = buf.duration;
+    return {
+      buffer: t.reversed,
+      offset: d - posS,
+      loopStart: d - (cycleStartS + cycleLenS),
+      loopEnd: d - cycleStartS,
+    };
+  }
+
+  private spawnHeadVoice(t: TrackRuntime, i: number, at: number, fadeIn: boolean) {
+    const ctx = this.ctx!;
+    const cyc = this.cycleOf(this.heads.source as TrackId);
+    if (!cyc || !t.buffer || !this.headsBus) return;
+    const h = this.heads.heads[i]!;
+    const { buffer, offset, loopStart, loopEnd } = this.headBufferAndOffset(t, h, cyc.startS, cyc.lengthS);
+    const gain = ctx.createGain();
+    gain.connect(this.headsBus);
+    const node = ctx.createBufferSource();
+    node.buffer = buffer;
+    node.loop = true;
+    node.loopStart = Math.max(0, loopStart);
+    node.loopEnd = Math.min(buffer.duration, Math.max(loopStart + 1e-3, loopEnd));
+    node.playbackRate.value = Math.abs(this.timeline.currentRate(ctx.currentTime)) || 1;
+    node.connect(gain);
+    const level = h.muted ? 0 : h.level;
+    if (fadeIn) {
+      gain.gain.setValueAtTime(0, at);
+      gain.gain.setValueCurveAtTime(sampleCurve(equalPower, "b").map((v) => v * level) as unknown as Float32Array, at, SEAM_FADE_S);
+      gain.gain.setValueAtTime(level, at + SEAM_FADE_S);
+    } else {
+      gain.gain.setValueAtTime(level, at);
+    }
+    node.start(at, Math.min(Math.max(0, offset), Math.max(0, buffer.duration - 1e-4)));
+    this.headVoices[i] = { node, gain };
+  }
+
+  private killHeadVoice(i: number, at: number, fadeOut: boolean) {
+    const v = this.headVoices[i];
+    if (!v) return;
+    this.headVoices[i] = null;
+    try {
+      if (fadeOut) {
+        v.gain.gain.cancelScheduledValues(at);
+        v.gain.gain.setValueCurveAtTime(sampleCurve(equalPower, "a").map((x) => x * v.gain.gain.value) as unknown as Float32Array, at, SEAM_FADE_S);
+        v.node.stop(at + SEAM_FADE_S);
+      } else v.node.stop(at);
+    } catch {
+      /* already stopped */
+    }
+    setTimeout(() => {
+      try {
+        v.node.disconnect();
+        v.gain.disconnect();
+      } catch {
+        /* noop */
+      }
+    }, 200);
+  }
+
+  private teardownHeadVoices() {
+    const at = this.ctx?.currentTime ?? 0;
+    for (let i = 0; i < 4; i++) this.killHeadVoice(i, at, false);
+    if (this.headsBus) {
+      try {
+        this.headsBus.disconnect();
+      } catch {
+        /* noop */
+      }
+      this.headsBus = null;
+    }
+  }
+
+  /** Push the current head table to whichever engine is serving heads. */
+  private pushHeads() {
+    const src = this.heads.source;
+    if (src == null) return;
+    const t = this.tracks[src];
+    if (!t) return;
+    if (this.heads.engine === "worklet" && t.worklet) {
+      void t.worklet.setHeads(
+        this.heads.heads.map((h) => ({ offset: h.offset, level: h.muted ? 0 : h.level, muted: h.muted, reverse: h.reverse })),
+        this.heads.cycleFrames > 0 ? this.heads.cycleStartFrame : 0,
+        Math.max(1, this.heads.cycleFrames),
+      );
+      return;
+    }
+    // Node engine: levels/mutes ride the per-head gain, geometry changes respawn.
+    const now = this.ctx?.currentTime ?? 0;
+    for (let i = 0; i < 4; i++) {
+      const v = this.headVoices[i];
+      const h = this.heads.heads[i]!;
+      if (v) this.setGain(v.gain.gain, h.muted ? 0 : h.level);
+      void now;
+    }
+  }
+
+  /** Respawn one node head (reverse flip or absolute scrub) through a seam. */
+  private restartHeadVoice(i: number) {
+    if (this.heads.engine !== "node" || this.heads.source == null || !this.ctx) return;
+    const t = this.tracks[this.heads.source]!;
+    const at = this.ctx.currentTime + 0.01;
+    this.killHeadVoice(i, at, true);
+    this.spawnHeadVoice(t, i, at, true);
+  }
+
+  enterHeadsMode(): { ok: boolean; detail: string } {
+    if (!this.ctx) return { ok: false, detail: "audio not unlocked" };
+    if (this.heads.active) return { ok: true, detail: "heads already active" };
+    const source = chooseSource(this.headCandidates());
+    const cyc = source != null ? this.cycleOf(source as TrackId) : null;
+    const t = source != null ? this.tracks[source] : null;
+    const engine: "worklet" | "node" = t?.engineMode === "worklet" && t.worklet ? "worklet" : "node";
+    const res = enterHeads(this.heads, {
+      source,
+      cycleFrames: cyc?.frames ?? 0,
+      cycleStartFrame: cyc?.startFrame ?? 0,
+      engine,
+      fallback: engine === "node" ? "served by the node engine — four AudioBufferSourceNode voices over one shared PCM" : null,
+      frame: Math.round(this.ctx.currentTime * this.ctx.sampleRate),
+    });
+    if (!res.ok) return { ok: false, detail: res.detail };
+    this.heads = res.state;
+
+    // Everything except the source is silenced for the duration; the saved mute
+    // states are restored verbatim on exit.
+    this.preHeadsMutes = this.tracks.map((tr) => tr.muted);
+    this.tracks.forEach((tr, i) => {
+      if (i !== source) tr.muted = true;
+      this.applyAudibility(i as TrackId);
+    });
+
+    if (engine === "worklet") {
+      this.pushHeads();
+    } else {
+      const at = this.ctx.currentTime + LOOKAHEAD_S;
+      const bus = this.ctx.createGain();
+      bus.gain.value = 1;
+      bus.connect(t!.input);
+      this.headsBus = bus;
+      for (const s of t!.sources) {
+        try {
+          s.node.onended = null;
+          s.node.stop(at);
+        } catch {
+          /* noop */
+        }
+      }
+      t!.sources = [];
+      t!.committedSeamAt = null;
+      for (let i = 0; i < 4; i++) this.spawnHeadVoice(t!, i, at, false);
+    }
+    return { ok: true, detail: `${res.detail}${this.heads.fallback ? ` · ${this.heads.fallback}` : ""}` };
+  }
+
+  exitHeadsMode(): { ok: boolean; detail: string } {
+    if (!this.heads.active) return { ok: true, detail: "heads already off" };
+    const src = this.heads.source;
+    const engine = this.heads.engine;
+    const t = src != null ? this.tracks[src] : null;
+    if (engine === "worklet" && t?.worklet) {
+      // The underlying pointer never moved, so exit is phase-correct by design.
+      void t.worklet.setHeads(null, 0, 1);
+    } else {
+      this.teardownHeadVoices();
+      if (t && this.ctx && this.requestedPlaying) {
+        const pos = this.position();
+        const bounds = t.loop.enabled ? this.loopBounds(t) : null;
+        this.spawn(t, this.ctx.currentTime + 0.01, bounds ? Math.max(pos, bounds.start) : pos, true);
+        t.committedSeamAt = null;
+      }
+    }
+    if (this.preHeadsMutes) {
+      const mask = this.preHeadsMutes;
+      this.tracks.forEach((tr, i) => {
+        tr.muted = mask[i] ?? false;
+        this.applyAudibility(i as TrackId);
+      });
+      this.preHeadsMutes = null;
+    }
+    this.heads = exitHeads(this.heads);
+    return { ok: true, detail: "heads off — original four tracks, faders and mutes restored, transport untouched" };
+  }
+
+  setHeadsSource(id: TrackId): { ok: boolean; detail: string } {
+    if (!this.heads.active) return { ok: false, detail: "heads mode is not active" };
+    const t = this.tracks[id];
+    if (!t) return { ok: false, detail: `no track ${id}` };
+    const cyc = this.cycleOf(id);
+    if (!cyc || cyc.frames <= 1) return { ok: false, detail: `track ${id + 1} has no audible cycle to read` };
+    // Relink = leave heads mode geometry, re-enter against the new source.
+    const keep = this.heads.heads;
+    this.exitHeadsMode();
+    // Force the chosen track to be the candidate winner.
+    const saved = this.tracks.map((tr) => tr.muted);
+    this.tracks.forEach((tr, i) => {
+      tr.muted = i === id ? false : true;
+    });
+    const res = this.enterHeadsMode();
+    this.preHeadsMutes = saved;
+    if (!res.ok) {
+      this.tracks.forEach((tr, i) => {
+        tr.muted = saved[i] ?? false;
+        this.applyAudibility(i as TrackId);
+      });
+      return res;
+    }
+    this.heads = relinkSource({ ...this.heads, heads: keep }, id, cyc.frames, cyc.startFrame);
+    this.pushHeads();
+    if (this.heads.engine === "node") for (let i = 0; i < 4; i++) this.restartHeadVoice(i);
+    return { ok: true, detail: `heads source → track ${id + 1} · cycle ${cyc.frames} frames · ${headsSummary(this.heads)}` };
+  }
+
+  /** Source PCM for one whole audible cycle, from whichever engine owns it. */
+  private async readCyclePcm(): Promise<{ ok: boolean; channels: Float32Array[]; detail: string }> {
+    const src = this.heads.source;
+    if (src == null) return { ok: false, channels: [], detail: "no heads source" };
+    const t = this.tracks[src]!;
+    const start = this.heads.cycleStartFrame;
+    const frames = this.heads.cycleFrames;
+    if (t.buffer) {
+      const chans: Float32Array[] = [];
+      for (let c = 0; c < t.buffer.numberOfChannels; c++) {
+        const arr = new Float32Array(frames);
+        const src32 = t.buffer.getChannelData(c);
+        for (let i = 0; i < frames; i++) arr[i] = start + i < src32.length ? src32[start + i]! : 0;
+        chans.push(arr);
+      }
+      return { ok: true, channels: chans, detail: `read ${frames} frames from the node buffer` };
+    }
+    if (t.worklet) return t.worklet.readRange(start, frames);
+    return { ok: false, channels: [], detail: `track ${src + 1} holds no readable PCM` };
+  }
+
+  /**
+   * PRINT (§4): bake exactly one audible cycle of the four-head performance
+   * into an EMPTY track. Positions, directions, levels and mutes are baked;
+   * rate, FX and master are not, so the printed loop is never resampled twice.
+   */
+  async printHeads(target: TrackId): Promise<{ ok: boolean; detail: string }> {
+    if (!this.ctx) return { ok: false, detail: "audio not unlocked" };
+    if (!this.heads.active || this.heads.source == null) return { ok: false, detail: "PRINT requires heads mode to be active" };
+    if (target === this.heads.source) return { ok: false, detail: "PRINT target cannot be the heads source" };
+    const tt = this.tracks[target];
+    if (!tt) return { ok: false, detail: `no track ${target}` };
+    if (tt.buffer || tt.engineMode === "worklet")
+      return { ok: false, detail: `track ${target + 1} is not empty — PRINT only ever writes into an empty track` };
+
+    const frames = this.heads.cycleFrames;
+    this.heads = { ...this.heads, print: { target, phase: "rendering", detail: "reading one cycle", cycleFrames: frames } };
+    const read = await this.readCyclePcm();
+    if (!read.ok || read.channels.length === 0) {
+      this.heads = { ...this.heads, print: { target, phase: "failed", detail: read.detail, cycleFrames: frames } };
+      return { ok: false, detail: `PRINT failed — ${read.detail}. Target left empty, heads still audible.` };
+    }
+    const rendered = renderHeadsCycle(read.channels, 0, frames, this.heads.heads);
+    const peak = peakOf(rendered);
+    const sr = this.tracks[this.heads.source]!.buffer?.sampleRate ?? this.ctx.sampleRate;
+    const buffer = this.ctx.createBuffer(rendered.length, frames, sr);
+    for (let c = 0; c < rendered.length; c++) buffer.copyToChannel(rendered[c]!, c);
+
+    this.heads = { ...this.heads, print: { target, phase: "finalising", detail: "committing", cycleFrames: frames } };
+    const detail = `PRINT ${frames} frames (${(frames / sr).toFixed(3)}s) @ ${sr} Hz · ${rendered.length}ch · peak ${peak.toFixed(3)} · ${headsSummary(this.heads)}`;
+    if (!this.commitPrint) {
+      // No persistence layer installed: adopt in memory rather than lose the bake.
+      const adopted = this.adoptBuffer(target, buffer, { name: `print ${target + 1}`, provenance: "user-private", decodeMs: 0, reused: true });
+      this.heads = { ...this.heads, print: { target, phase: adopted.ok ? "done" : "failed", detail: adopted.detail, cycleFrames: frames } };
+      return { ok: adopted.ok, detail: `${detail} · ${adopted.detail} · not persisted (no storage layer installed)` };
+    }
+    const commit = await this.commitPrint(target, buffer, detail);
+    this.heads = { ...this.heads, print: { target, phase: commit.ok ? "done" : "failed", detail: commit.detail, cycleFrames: frames } };
+    return { ok: commit.ok, detail: commit.ok ? `${detail} · ${commit.detail}` : `PRINT failed — ${commit.detail}. Target left empty, heads still audible.` };
+  }
+
+
   // --------------------------------------------------------------- commands
 
 
