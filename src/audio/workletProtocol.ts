@@ -82,7 +82,13 @@ export interface WorkletAck {
   /** readRange payload: transferred copies of the requested source range. */
   channels?: ArrayBuffer[];
   frames?: number;
+  /** Live scrub telemetry (status === "telemetry"). */
+  scrubHeads?: (ScrubTelemetryHead | null)[];
+  contextFrame?: number;
+  /** Output RMS measured by the kernel while a scrub is live. */
+  rms?: number;
 }
+
 
 
 export const PROCESSOR_NAME = "tape-processor";
