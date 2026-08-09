@@ -537,15 +537,20 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
 
       if (c === "rocker-fwd" || c === "rocker-rwd") {
         const dir = c === "rocker-fwd" ? 1 : -1;
-        if (fn) {
-          // Stem Tape v1 override (supersedes rocker.chop). The v2.6 row is kept
-          // verbatim in v26map.ts as historical source truth; chop moves to the
-          // double-tap so the single tap can scrub all four stems together.
+        // Stem Tape extension `rocker.chop.play`: chop lives on PLAY + rocker.
+        // The arbiter claims PLAY before dispatch, so the transport never fires.
+        if (state.pressed.includes("play")) {
           if (g.count === 2) {
-            const chopDiv = Math.min(16, Math.max(1, dir > 0 ? next.chopDiv * 2 : next.chopDiv / 2));
-            next = { ...next, chopDiv };
-            return fire(next, "rocker.chop", `chop ${dir > 0 ? "double" : "half"} → 1/${chopDiv}`, t);
+            next = { ...next, chopDiv: 1, chopWindowOffset: 0, chopGlide: false };
+            for (let i = 0; i < 4; i++) next = emit(next, "loop.chop", { track: i, div: 1, index: 0 }, { rowId: "rocker.chop.play", t });
+            return fire(next, "rocker.chop.play", "chop reset → 1/1 (transport untouched)", t);
           }
+          const chopDiv = Math.min(16, Math.max(1, dir > 0 ? next.chopDiv * 2 : next.chopDiv / 2));
+          next = { ...next, chopDiv };
+          for (let i = 0; i < 4; i++) next = emit(next, "loop.chop", { track: i, div: chopDiv, index: 0 }, { rowId: "rocker.chop.play", t });
+          return fire(next, "rocker.chop.play", `chop ${dir > 0 ? "double" : "half"} → 1/${chopDiv} (transport untouched)`, t);
+        }
+        if (fn) {
           const seconds = dir * SCRUB_STEP_S;
           next = emit(next, "transport.scrub", { seconds }, { rowId: "rocker.scrub", t });
           return fire(
@@ -566,6 +571,7 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
 
         return fire(next, "rocker.speed", `${dir > 0 ? "+" : "−"}1 BPM → ${speed.toFixed(4)}×`, t);
       }
+
 
       if (c === "volume-plus" || c === "volume-minus") {
         const dir = c === "volume-plus" ? 1 : -1;
