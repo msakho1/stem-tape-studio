@@ -59,6 +59,11 @@ export function ProjectDrawer({ engine, status, control }: Props) {
       const r = await ingestStem(engine, role, file, "user-private", { signal: controller.signal });
       note(r.ok, `${ROLE_LABEL[role]} — ${r.detail}`);
       session.set({ source: "upload", saved: false });
+      // Tempo is detected from the audio itself on every stem change.
+      setBusy("detecting tempo grid…");
+      const grid = await analyzeGridForSession(engine);
+      note(!!grid, grid ? `grid — ${describeGrid(grid)}` : "grid — no periodic structure detected");
+
       abort.current = null;
       setBusy(null);
       void refresh();
@@ -161,6 +166,10 @@ export function ProjectDrawer({ engine, status, control }: Props) {
         note(r.ok, `${ROLE_LABEL[stem.role]} — ${useDerived ? "mono working copy · " : ""}${r.detail}`);
       }
       abort.current = null;
+      // Restored stems are re-analysed: the grid is derived from audio, not trusted from disk.
+      setBusy("detecting tempo grid…");
+      const grid = await analyzeGridForSession(engine);
+      note(!!grid, grid ? `grid — ${describeGrid(grid)}` : "grid — no periodic structure detected");
       // Amendment 2: a song load stops the transport and waits for PLAY.
       engine.execute({ id: -1, t: performance.now(), type: "song.load", payload: { song: 0 } });
       setBusy(null);
