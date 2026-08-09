@@ -121,6 +121,11 @@ export function useDeviceSurface() {
   /** Latest state, read by imperative pointer handlers without re-binding them. */
   const stateRef = useRef<SurfaceState>(state);
   stateRef.current = state;
+  // Harness bridge: publish reducer state + control-bus traffic for browser
+  // acceptance runs. Read-only; it never dispatches.
+  useEffect(() => installDiagnostics(), []);
+  publishSurface(state);
+
   /** Which fader layer is live (FN = chop window, HEADS = scrub, else volume). */
   const layerRef = useRef<{ fn: boolean; heads: boolean }>({ fn: false, heads: false });
   layerRef.current = { fn: state.functionHeld, heads: state.headsMode };
