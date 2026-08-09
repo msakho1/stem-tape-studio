@@ -1813,6 +1813,7 @@ export class AudioEngine {
     if (!gs || !ctx) return;
     const before = gs.pos;
     gs.pos = Math.min(this.duration, Math.max(0, gs.pos + gs.dir * GLOBAL_SCRUB_RATE * dtS));
+    gs.posCtxTime = ctx.currentTime;
     // ONE shared playhead: the timeline is re-anchored, every stem reads it.
     this.timeline.anchor(ctx.currentTime, gs.pos);
     this.timelineFrozenAt = ctx.currentTime;
@@ -1821,6 +1822,7 @@ export class AudioEngine {
     const now = ctx.currentTime;
     const dur = Math.min(0.12, Math.max(0.03, dtS * 1.6));
     const backwards = gs.dir < 0;
+    const gen = gs.gen;
     let emitted = 0;
     for (let i = 0; i < this.tracks.length; i++) {
       const t = this.tracks[i]!;
@@ -1858,7 +1860,11 @@ export class AudioEngine {
       gs.lastGrainAt[i] = at + dur * 0.8;
       pt.grains++;
       emitted++;
+      const rec = { node, gain: g, at, endAt: at + dur, gen };
+      (gs.live[i] ??= []).push(rec);
       node.onended = () => {
+        const cur = this.globalScrub;
+        if (cur) cur.live[i] = (cur.live[i] ?? []).filter((r) => r !== rec);
         try {
           node.disconnect();
           g.disconnect();
@@ -1870,6 +1876,7 @@ export class AudioEngine {
     if (emitted > 0) gs.grains++;
     this.sampleScrubTaps();
   }
+
 
   /**
    * PCM for a track whose node buffer was released after worklet handoff.
