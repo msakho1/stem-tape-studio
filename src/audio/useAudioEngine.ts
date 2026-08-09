@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Ack, AudioCommand } from "./commands";
 import { controlBus } from "./controlBus";
 import { getAudioEngine, type EngineStatus } from "./engine";
-import { installPrintCommit } from "./print";
+
 
 
 /**
@@ -29,8 +29,6 @@ export function useAudioEngine(commands: AudioCommand[]) {
   // tier is adopted here. Resolving during render would mismatch hydration.
   useEffect(() => {
     engine.resolveBudget();
-    // PRINT persists through the same single-decode ingest path as a user file.
-    installPrintCommit(engine);
     setStatus(engine.status());
   }, [engine]);
 

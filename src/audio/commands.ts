@@ -62,7 +62,7 @@ export type AudioCommandType =
   | "heads.mute"
   | "heads.reverse"
   | "heads.scrub"
-  | "heads.print"
+  
   | "rollback";
 
 

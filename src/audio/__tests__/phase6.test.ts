@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { emptyGrid, tapGrid, decidePunch, nextBoundary } from "@/audio/grid";
 import { wavHeader, wavTotalBytes, encodeChunk, parseWavHeader, exportPlan } from "@/audio/export/wavStream";
 import { emptyManifest, verifyDurability } from "@/audio/input/takes";
-import { initialRecordingModel, recordingReduce } from "@/machine/recordingState";
+
 import { RECORDING_ROWS, STEM_TAPE_V1_MAP } from "@/machine/stemTapeV1Map";
 
 const SR = 48000;
@@ -100,34 +100,8 @@ describe("phase 6 — take durability", () => {
   });
 });
 
-describe("phase 6 — recording state table", () => {
-  it("hold arms an empty track and waits for sound; tap cancels", () => {
-    let m = initialRecordingModel(["empty", "loaded", "empty", "empty"]);
-    m = recordingReduce(m, { type: "rec.inputEnabled" });
-    m = recordingReduce(m, { type: "rec.arm", track: 0 });
-    expect(m.tracks[0]!.phase).toBe("waiting-for-sound");
-    m = recordingReduce(m, { type: "rec.tap", track: 0 });
-    expect(m.tracks[0]!.phase).toBe("idle");
-  });
-
-  it("only one external-input target is armed at a time", () => {
-    let m = recordingReduce(initialRecordingModel(), { type: "rec.inputEnabled" });
-    m = recordingReduce(m, { type: "rec.arm", track: 0 });
-    m = recordingReduce(m, { type: "rec.arm", track: 2 });
-    const armed = m.tracks.filter((t) => t.phase !== "idle").length;
-    expect(armed).toBe(1);
-    expect(m.target).toBe(2);
-  });
-
-  it("arming is refused before input is enabled", () => {
-    const m = recordingReduce(initialRecordingModel(), { type: "rec.arm", track: 1 });
-    expect(m.tracks[1]!.phase).toBe("idle");
-    expect(m.lastAck).toMatch(/input/i);
-  });
-});
-
 describe("phase 6 — mapping registry", () => {
-  it("registers the recording rows with tutorial metadata and keeps ids unique", () => {
+  it("registers the remaining rows with tutorial metadata and keeps ids unique", () => {
     const ids = STEM_TAPE_V1_MAP.map((r) => r.id);
     expect(new Set(ids).size).toBe(ids.length);
     for (const r of RECORDING_ROWS) {
@@ -136,8 +110,11 @@ describe("phase 6 — mapping registry", () => {
     }
   });
 
-  it("PRINT stays reserved in the registry", () => {
-    const print = RECORDING_ROWS.find((r) => r.id === "print.reserved")!;
-    expect(print.command).toMatch(/RESERVED/);
+  it("no live-input recording or PRINT row survives in the registry", () => {
+    for (const r of STEM_TAPE_V1_MAP) {
+      expect(r.id).not.toMatch(/^rec\./);
+      expect(r.id).not.toMatch(/^print\./);
+      expect(r.command).not.toMatch(/heads\.print/);
+    }
   });
 });
