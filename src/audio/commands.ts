@@ -45,13 +45,7 @@ export type AudioCommandType =
 
   | "fx.latch"
   | "fx.clearLatches"
-  // Phase 6 — recording, overdub, grid, heads/PRINT and export.
-  | "rec.arm"
-  | "rec.tap"
-  | "rec.undoPass"
-  | "rec.requestInput"
-  | "rec.cancelInput"
-  | "rec.recover"
+  // Phase 6 — grid and export.
   | "grid.tap"
   | "grid.quantise"
   // Heads mode is a first-class Stem Tape v1 feature, not a reserved gesture.
