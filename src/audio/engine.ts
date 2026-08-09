@@ -3400,23 +3400,35 @@ export class AudioEngine {
           const r = this.exitHeadsMode();
           return this.ack(cmd, r.ok ? "completed" : "rejected", r.detail);
         }
-        case "heads.source": {
-          const r = this.setHeadsSource(Number(p["track"]) as TrackId);
-          return this.ack(cmd, r.ok ? "completed" : "rejected", r.detail);
-        }
         case "heads.level": {
           if (!this.heads.active) return this.ack(cmd, "rejected", "heads mode is not active");
           const i = Number(p["head"]);
-          this.heads = setHeadLevel(this.heads, i, Number(p["level"]));
-          this.pushHeads();
-          return this.ack(cmd, "completed", `head ${i + 1} level → ${this.heads.heads[i]!.level.toFixed(3)}`);
+          this.headLanes.setLevel(i, Number(p["level"]));
+          return this.ack(cmd, "completed", `head ${i + 1} level → ${Number(p["level"]).toFixed(3)}`);
         }
         case "heads.mute": {
-          if (!this.heads.active) return this.ack(cmd, "rejected", "heads mode is not active");
-          const i = Number(p["head"]);
-          this.heads = toggleHeadMute(this.heads, i);
-          this.pushHeads();
-          return this.ack(cmd, "completed", `head ${i + 1} ${this.heads.heads[i]!.muted ? "muted" : "unmuted"} — still a head, geometry unchanged`);
+          const r = this.headLanes.toggleMute(Number(p["head"]));
+          return this.ack(cmd, r.ok ? "completed" : "rejected", r.detail);
+        }
+        case "heads.play.hold": {
+          const r = this.headLanes.setHeld(String(p["mask"] ?? ""));
+          return this.ack(cmd, r.ok ? "completed" : "rejected", r.detail);
+        }
+        case "heads.latch": {
+          const r = this.headLanes.toggleLatch(Number(p["head"]));
+          return this.ack(cmd, r.ok ? "completed" : "rejected", r.detail);
+        }
+        case "heads.loop.capture": {
+          const r = this.headLanes.captureLoop(Number(p["head"]), Math.max(0.25, Number(p["bars"] ?? 1)));
+          return this.ack(cmd, r.ok ? "completed" : "rejected", r.detail);
+        }
+        case "heads.loop.resize": {
+          const r = this.headLanes.resizeLoop(Number(p["head"]), Number(p["direction"]) < 0 ? -1 : 1);
+          return this.ack(cmd, r.ok ? "completed" : "rejected", r.detail);
+        }
+        case "heads.reverse": {
+          const r = this.headLanes.toggleReverse(Number(p["head"]));
+          return this.ack(cmd, r.ok ? "completed" : "rejected", r.detail);
         }
         // ---- universal lane layer ------------------------------------------
         // ONE implementation for Tape, Heads and the FX overlay. In heads mode
@@ -3503,19 +3515,8 @@ export class AudioEngine {
         }
 
         case "heads.scrub": {
-          if (!this.heads.active) return this.ack(cmd, "rejected", "heads mode is not active");
-          const i = Number(p["head"]);
-          const pos = Number(p["position"]);
-          const already = Math.abs((this.heads.heads[i]?.offset ?? -1) - ((pos % 1) + 1) % 1) < 1e-9;
-          this.heads = scrubHead(this.heads, i, pos);
-          if (already) {
-            // The audible gesture already landed this head; re-seaming the
-            // voice here would add a second, inaudible-but-real restart.
-            return this.ack(cmd, "completed", `head ${i + 1} landing confirmed at ${(this.heads.heads[i]!.offset * 100).toFixed(1)}% (audible scrub already applied)`);
-          }
-          this.pushHeads();
-          this.restartHeadVoice(i);
-          return this.ack(cmd, "completed", `head ${i + 1} scrubbed to ${(this.heads.heads[i]!.offset * 100).toFixed(1)}% of the cycle`);
+          const r = this.headLanes.endScrub(Number(p["head"]), Number(p["position"]));
+          return this.ack(cmd, r.ok ? "completed" : "rejected", r.detail);
         }
 
         default:
