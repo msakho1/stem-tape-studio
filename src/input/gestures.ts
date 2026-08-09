@@ -36,6 +36,13 @@ export interface GestureTimings {
   longHoldMs: number;
   /** Max gap between taps for a multi-tap sequence. */
   multiTapGapMs: number;
+  /**
+   * DEFERRED Track decision window. Track controls must NOT fire optimistically:
+   * a first tap that mutes and then un-mutes when the second tap arrives is
+   * audible. The first release opens this window; a timeout confirms one tap, a
+   * second press claims the double-tap.
+   */
+  trackDecisionMs: number;
   /** Max gap between a tap's release and a following press for tap-then-hold. */
   tapThenHoldGapMs: number;
   /** Two controls pressed within this window count as a chord. */
@@ -63,10 +70,23 @@ export const DEFAULT_TIMINGS: GestureTimings = {
   powerHoldMs: 1200,
   longHoldMs: 5000,
   multiTapGapMs: 300,
+  // 200 ms sits inside the approved 180–220 ms band: short enough that a single
+  // musical mute still feels immediate, long enough for a deliberate double-tap.
+  trackDecisionMs: 200,
   tapThenHoldGapMs: 300,
   chordWindowMs: 120,
   chordReleaseSpreadMs: 120,
 };
+
+/**
+ * Controls whose taps are DEFERRED instead of optimistic. Only the four Track
+ * buttons: they are the only controls whose ×1 action is audible and
+ * irreversible-sounding (mute / loop release).
+ */
+export function isDeferredControl(control: Control): boolean {
+  return control.startsWith("track-button");
+}
+
 
 
 interface PressRecord {
