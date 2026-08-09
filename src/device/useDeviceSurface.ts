@@ -487,7 +487,26 @@ export function useDeviceSurface() {
         /* capture unavailable for this pointer */
       }
       const p = toUserSpace(e.clientX, e.clientY);
+
+      // Touch parity for the keyboard F+Q/A shuttle: FUNCTION held (on-screen)
+      // + a rocker zone pressed = held four-stem shuttle. The rocker is never
+      // pressed into the gesture engine, so no varispeed / step-scrub row can
+      // fire underneath it, and FUNCTION is consumed exactly as on keyboard.
+      if (
+        (control === "rocker-fwd" || control === "rocker-rwd") &&
+        stateRef.current.functionHeld
+      ) {
+        scrubPointersRef.current.set(e.pointerId, control === "rocker-fwd" ? 1 : -1);
+        if (!scrubUsedFnRef.current) {
+          scrubUsedFnRef.current = true;
+          engine.cancel("function", "keyboard");
+        }
+        dispatch({ type: "globalScrub", dir: control === "rocker-fwd" ? 1 : -1 });
+        return;
+      }
+
       engine.press(control, e.pointerId, performance.now(), p?.x, p?.y);
+
 
       if (control.startsWith("fader-")) {
         const index = (Number(control.slice(-1)) - 1) as FaderIndex;
