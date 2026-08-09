@@ -14,6 +14,12 @@ import { installPrintCommit } from "./print";
 export function useAudioEngine(commands: AudioCommand[]) {
   const engine = useMemo(() => getAudioEngine(), []);
   const watermark = useRef(0);
+  /**
+   * Audio unlock is asynchronous on mobile. Keep one promise tail so a quick
+   * touch release cannot execute scrub.end before scrub.start's unlock retry.
+   * This preserves reducer command order across every async audio boundary.
+   */
+  const commandTail = useRef<Promise<void>>(Promise.resolve());
   const [acks, setAcks] = useState<Ack[]>([]);
   const [status, setStatus] = useState<EngineStatus>(() => engine.status());
   const [unlockNote, setUnlockNote] = useState<string>("audio locked — press PLAY or enable audio");
@@ -84,31 +90,22 @@ export function useAudioEngine(commands: AudioCommand[]) {
     const pending = commands.filter((c) => c.id > watermark.current);
     if (pending.length === 0) return;
     watermark.current = pending[pending.length - 1]!.id;
-    const produced: Ack[] = [];
     for (const cmd of pending) {
-      // Root cause 2: only transport.play carried the unlock-and-retry path,
-      // so the very first FUNCTION + rocker shuttle of a session was rejected
-      // with "audio not unlocked" and produced no sound and no movement.
-      const needsAudio =
-        cmd.type.startsWith("transport.") ||
-        cmd.type.startsWith("stem.") ||
-        cmd.type.startsWith("tape.") ||
-        cmd.type.startsWith("fx.");
-      if (needsAudio && !engine.ready) {
-        // Unlock, then re-run this exact command — the id is preserved so the
-        // ack still maps to the originating gesture.
-        void engine.unlock().then((r) => {
-          setUnlockNote(r.detail);
-          const ack = engine.execute(cmd);
-          setAcks((prev) => [ack, ...prev].slice(0, 60));
-          setStatus(engine.status());
-        });
-        continue;
-      }
-      produced.push(engine.execute(cmd));
+      commandTail.current = commandTail.current.then(async () => {
+        const needsAudio =
+          cmd.type.startsWith("transport.") ||
+          cmd.type.startsWith("stem.") ||
+          cmd.type.startsWith("tape.") ||
+          cmd.type.startsWith("fx.");
+        if (needsAudio && !engine.ready) {
+          const result = await engine.unlock();
+          setUnlockNote(result.detail);
+        }
+        const ack = engine.execute(cmd);
+        setAcks((prev) => [ack, ...prev].slice(0, 60));
+        setStatus(engine.status());
+      });
     }
-    if (produced.length) setAcks((prev) => [...produced.reverse(), ...prev].slice(0, 60));
-    setStatus(engine.status());
   }, [commands, engine]);
 
   // --- continuous control bus → AudioParam / scrub kernel -----------------

@@ -26,6 +26,7 @@ import {
   type SurfaceState,
 } from "@/machine/surface";
 import { controlBus, type ContinuousChannel } from "@/audio/controlBus";
+import { getAudioEngine } from "@/audio/engine";
 import { FaderSessionManager, type FaderIndex } from "@/input/faderSessions";
 
 
@@ -506,6 +507,11 @@ export function useDeviceSurface() {
         (fnPointerRef.current != null || stateRef.current.functionHeld)
       ) {
         const dir = control === "rocker-fwd" ? 1 : -1;
+        // Mobile Safari only permits AudioContext creation/resume in the direct
+        // pointer event call stack. Starting the unlock here (before React's
+        // command effect runs) preserves that user activation; the ordered
+        // command stream remains the sole owner of the actual shuttle action.
+        void getAudioEngine().unlock();
         scrubPointersRef.current.set(e.pointerId, dir);
         if (!scrubUsedFnRef.current) {
           scrubUsedFnRef.current = true;
