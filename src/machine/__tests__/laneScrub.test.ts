@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { applyGlobalScrub, initialSurfaceState, pressControl, releaseControl, type Control, type SurfaceState } from "@/machine/surface";
+import { applyGlobalScrub, initialSurfaceState, pressControl, releaseControl, type SurfaceState } from "@/machine/surface";
 
 function commands(s: SurfaceState) {
   return s.commands.map((c: { type: string }) => c.type);
 }
 
 function hold(s: SurfaceState, control: string): SurfaceState {
-  return pressControl(s, control as Control);
+  return pressControl(s, control as never);
 }
 
 describe("FUNCTION + Track + rocker → per-lane shuttle", () => {
@@ -57,7 +57,7 @@ describe("FUNCTION + Track + rocker → per-lane shuttle", () => {
     s = hold(s, "track-button-1");
     s = hold(s, "track-button-2");
     s = applyGlobalScrub(s, 1, 6);
-    s = releaseControl(s, "track-button-2" as Control);
+    s = releaseControl(s, "track-button-2" as never);
     s = applyGlobalScrub(s, 1, 21);
     expect(s.laneScrub[0]).toBe(1);
     expect(s.laneScrub[1]).toBe(0);
