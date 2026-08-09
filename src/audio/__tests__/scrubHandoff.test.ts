@@ -241,7 +241,7 @@ async function rig(opts: { markEvery?: number } = {}): Promise<Rig> {
   for (let i = 0; i < 4; i++) {
     engine.adoptBuffer(i as 0 | 1 | 2 | 3, makeBuffer(1, SR * 8, SR, opts.markEvery ?? 0), {
       name: `stem ${i + 1}`,
-      provenance: "demo",
+      provenance: "bundled-demo",
     });
   }
   const advance = (s: number) => {
