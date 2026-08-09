@@ -41,13 +41,20 @@ FN + Rocker stays the **global** four-stem shuttle — untouched, and per-lane s
 | PLAY + Track long | `stem.link` / `stem.unlink` — unchanged |
 | FN + Track single | bank / song navigation — unchanged |
 
-### Heads mode
+### Heads mode — four independent head lanes
 
-Same as Tape, except FN + Track single has **no** action (source moves to the panel). Track hold no longer selects source and never triggers PRINT. Track tap on a looping lane releases the loop instead of muting.
+Heads state is keyed by `laneId` (1–4), and `sourceStem` lives **inside** the lane record — it is not "per-stem". Default on entry is unchanged: all four lanes take the currently selected stem at offsets 0 / 25 / 50 / 75 %, preserving the existing symphony effect. The Heads panel may then reassign any single lane to a different stem.
+
+Each head lane scrubs, loops and reverses independently through the same universal gestures as Tape.
+
+Changing a lane's source is a transaction, in order: release that lane's active loop safely (at the next boundary, hidden-pointer rejoin), clear that lane's scrub candidate, equal-power crossfade the lane from old to new source at the lane's current read position, bump that lane's generation counter. The other three lanes are never restarted, repositioned or re-levelled.
+
+FN + Track single has **no** action in Heads (source moves to the panel). Track hold no longer selects source and never triggers PRINT. Track tap on a looping lane releases that lane's loop instead of muting.
 
 ### FX overlay
 
-Bare Track = FX-bank select; Track hold = momentary FX; Track + Vol −/+ = algorithm cycle; FN + Track **single** = latch/unlatch — all unchanged. The four universal FN-qualified gestures are added on top and target the **physical stem lane**, not the FX bank.
+Bare Track = FX-bank select; Track hold = momentary FX; Track + Vol −/+ = algorithm cycle; FN + Track **single** = latch/unlatch — all unchanged. **A bare Track tap in the FX overlay never releases a loop**: active loops keep playing and are routed through the selected FX. Loop release is available again as soon as the overlay is closed. The four universal FN-qualified gestures (scrub, reverse, resize) work inside the overlay and target the **physical stem/head lane**, not the FX bank.
+
 
 ## 2. Displaced mappings and their new homes
 
