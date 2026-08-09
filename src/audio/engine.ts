@@ -102,6 +102,8 @@ const GLOBAL_SCRUB_LEVEL = 0.85;
 /** Single-lane shuttle rate. Slower than the global shuttle: it is an edit
  *  gesture on one stem, not a transport move. */
 const LANE_SCRUB_RATE = 1.5;
+/** Ceiling for finger-driven (FUNCTION + fader) per-lane scrubbing. */
+const MAX_FADER_SCRUB_RATE = 8;
 /**
  * Scrub → playback handoff, seconds. The release must NOT use the 80 ms
  * transport lookahead: that overshoots audibly after key release. One shared
@@ -2364,6 +2366,151 @@ export class AudioEngine {
       detail: `lane ${lane + 1} landed at ${landing.toFixed(3)}s (frame ${Math.round(landing * sr)}) after ${ls.grains} grains — candidate stored for loop capture`,
     };
   }
+
+  /**
+   * FUNCTION + fader = positional per-lane scrub.
+   *
+   * Unlike the rocker shuttle (constant rate, signed direction) this is a
+   * *travelling read pointer driven by the finger*: the fader's normalized
+   * value maps onto song time, every rAF-coalesced move renders an audible
+   * grain in the direction the finger travelled, and the release stores the
+   * exact landing second as that lane's loop-capture candidate — which the
+   * following Track double-tap consumes to place a one-bar loop.
+   */
+  private laneFaderScrub: ({
+    pos: number;
+    lastNorm: number;
+    lastTs: number;
+    lastGrainAt: number;
+    grains: number;
+    live: { node: AudioBufferSourceNode; gain: GainNode; at: number }[];
+  } | null)[] = [null, null, null, null];
+
+  laneFaderScrubState(lane: number) {
+    const s = this.laneFaderScrub[lane];
+    return s ? { pos: s.pos, grains: s.grains, live: s.live.length } : null;
+  }
+
+  beginLaneFaderScrub(lane: number, normalized: number, timestamp: number): { ok: boolean; detail: string } {
+    const ctx = this.ctx;
+    if (!ctx) return { ok: false, detail: "audio not unlocked" };
+    if (ctx.state !== "running") void ctx.resume();
+    if (this.duration === 0) return { ok: false, detail: "no stems decoded" };
+    if (!this.tracks[lane]) return { ok: false, detail: `no lane ${lane + 1}` };
+    if (this.laneFaderScrub[lane]) return { ok: true, detail: `lane ${lane + 1} fader scrub already live` };
+    const pos = Math.min(this.duration, Math.max(0, normalized * this.duration));
+    this.laneFaderScrub[lane] = {
+      pos,
+      lastNorm: normalized,
+      lastTs: timestamp,
+      lastGrainAt: ctx.currentTime,
+      grains: 0,
+      live: [],
+    };
+    // Only this lane goes quiet; the other three keep the shared timeline.
+    this.stopTrackSources(lane);
+    return { ok: true, detail: `lane ${lane + 1} fader scrub from ${pos.toFixed(3)}s` };
+  }
+
+  previewLaneFaderScrub(lane: number, normalized: number, timestamp: number): { ok: boolean; detail: string } {
+    if (!this.laneFaderScrub[lane]) {
+      // Keyboard lanes (F + Y/H, U/J, I/K, O/L) and mid-drag rebases never send
+      // an explicit start; the first movement opens the gesture.
+      const opened = this.beginLaneFaderScrub(lane, normalized, timestamp);
+      if (!opened.ok) return opened;
+    }
+    const s = this.laneFaderScrub[lane];
+    const ctx = this.ctx;
+    const t = this.tracks[lane];
+    if (!s || !ctx || !t) return { ok: false, detail: `no lane ${lane + 1} fader scrub` };
+    const dt = Math.min(0.25, Math.max(1e-3, (timestamp - s.lastTs) / 1000));
+    const target = Math.min(this.duration, Math.max(0, normalized * this.duration));
+    const delta = target - s.pos;
+    s.lastNorm = normalized;
+    s.lastTs = timestamp;
+    s.pos = target;
+    if (Math.abs(delta) < 1e-4) return { ok: true, detail: "stationary" };
+    const backwards = delta < 0;
+    const rate = Math.min(MAX_FADER_SCRUB_RATE, Math.max(0.25, Math.abs(delta) / dt));
+    const src = t.buffer ?? this.scrubPcm(t);
+    if (!src) return { ok: false, detail: "no pcm" };
+    if (backwards && !t.reversed) t.reversed = reverseBuffer(ctx, src);
+    const buffer = backwards ? t.reversed : src;
+    if (!buffer) return { ok: false, detail: "no pcm" };
+    const now = ctx.currentTime;
+    const dur = Math.min(0.12, Math.max(0.03, dt * 1.6));
+    const at = Math.max(now, s.lastGrainAt);
+    const offsetS = backwards ? buffer.duration - target : target;
+    const g = ctx.createGain();
+    g.connect(t.input);
+    const tap = this.scrubTap(lane);
+    if (tap) g.connect(tap);
+    const node = ctx.createBufferSource();
+    node.buffer = buffer;
+    node.playbackRate.value = rate;
+    node.connect(g);
+    const fade = Math.min(0.006, dur / 3);
+    g.gain.setValueAtTime(0, at);
+    g.gain.linearRampToValueAtTime(GLOBAL_SCRUB_LEVEL, at + fade);
+    g.gain.setValueAtTime(GLOBAL_SCRUB_LEVEL, at + dur - fade);
+    g.gain.linearRampToValueAtTime(0, at + dur);
+    node.start(at, Math.min(Math.max(0, offsetS), Math.max(0, buffer.duration - 1e-3)), dur * rate);
+    s.lastGrainAt = at + dur * 0.8;
+    s.grains++;
+    const rec = { node, gain: g, at };
+    s.live.push(rec);
+    this.liveScrubPaths.add(node);
+    node.onended = () => {
+      const cur = this.laneFaderScrub[lane];
+      if (cur) cur.live = cur.live.filter((r) => r !== rec);
+      this.liveScrubPaths.delete(node);
+      try {
+        node.disconnect();
+        g.disconnect();
+      } catch {
+        /* noop */
+      }
+    };
+    this.sampleScrubTaps();
+    return { ok: true, detail: `lane ${lane + 1} scrub → ${target.toFixed(3)}s at ${rate.toFixed(2)}×` };
+  }
+
+  endLaneFaderScrub(lane: number, normalized: number, cancelled = false): { ok: boolean; detail: string } {
+    const s = this.laneFaderScrub[lane];
+    const ctx = this.ctx;
+    if (!s || !ctx) return { ok: false, detail: `no lane ${lane + 1} fader scrub` };
+    const landing = Math.min(this.duration, Math.max(0, normalized * this.duration));
+    const quantum = 128 / ctx.sampleRate;
+    const handoff = ctx.currentTime + Math.max(2 * quantum, SCRUB_HANDOFF_MIN_S);
+    for (const rec of s.live) {
+      try {
+        rec.gain.gain.cancelScheduledValues(handoff);
+        if (rec.at >= handoff) {
+          rec.gain.gain.setValueAtTime(0, handoff);
+          rec.node.stop(handoff);
+        } else {
+          rec.gain.gain.setValueAtTime(complementary(0).a * GLOBAL_SCRUB_LEVEL, handoff);
+          rec.gain.gain.linearRampToValueAtTime(0, handoff + SCRUB_HANDOFF_FADE_S);
+          rec.node.stop(handoff + SCRUB_HANDOFF_FADE_S);
+        }
+      } catch {
+        /* already stopped */
+      }
+    }
+    const grains = s.grains;
+    s.live = [];
+    this.laneFaderScrub[lane] = null;
+    if (!cancelled) this.setScrubCandidate(lane, landing);
+    if (this.requestedPlaying) this.restartTrack(lane, this.position());
+    return {
+      ok: true,
+      detail: cancelled
+        ? `lane ${lane + 1} fader scrub cancelled after ${grains} grains`
+        : `lane ${lane + 1} parked at ${landing.toFixed(3)}s (frame ${Math.round(landing * ctx.sampleRate)}) after ${grains} grains — double-tap Track ${lane + 1} to capture one bar there`,
+    };
+  }
+
+
 
   endGlobalScrub(): { ok: boolean; detail: string } {
     const gs = this.globalScrub;

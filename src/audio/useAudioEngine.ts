@@ -110,6 +110,11 @@ export function useAudioEngine(commands: AudioCommand[]) {
   useEffect(() => {
     const off = controlBus.subscribe((e) => {
       const head = e.index as 0 | 1 | 2 | 3;
+      // Leaving the FUNCTION layer mid-gesture must close any live lane scrub
+      // instead of leaving a silenced lane behind.
+      if (e.channel !== "laneScrub" && engine.laneFaderScrubState(head)) {
+        engine.endLaneFaderScrub(head, e.value);
+      }
       if (e.channel === "headScrub") {
         // The whole gesture is audible: start latches the origin, every
         // rAF-coalesced move travels the tape, release lands it exactly.
@@ -118,6 +123,16 @@ export function useAudioEngine(commands: AudioCommand[]) {
         else if (e.phase === "cancel") engine.cancelHeadScrub(head);
         else if (e.committed || e.phase === "end") engine.endHeadScrub(head, e.value);
         else engine.previewHeadScrub(head, e.value, ts);
+        return;
+      }
+      if (e.channel === "laneScrub") {
+        // FUNCTION + fader N = audible positional scrub of lane N. Release
+        // parks the lane and stores the loop-capture candidate.
+        const ts = e.timestamp ?? performance.now();
+        if (e.phase === "start") engine.beginLaneFaderScrub(head, e.value, ts);
+        else if (e.phase === "cancel") engine.endLaneFaderScrub(head, e.value, true);
+        else if (e.committed || e.phase === "end") engine.endLaneFaderScrub(head, e.value);
+        else engine.previewLaneFaderScrub(head, e.value, ts);
         return;
       }
       if (e.channel === "headLevel") {
