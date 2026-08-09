@@ -2124,6 +2124,8 @@ export class AudioEngine {
     live: { node: AudioBufferSourceNode; gain: GainNode; at: number; gen: number }[];
   } | null)[] = [null, null, null, null];
 
+  /** Live normalized read position of a head shuttle, per head. */
+  private headLaneScrubNorm: ((() => number) | null)[] = [null, null, null, null];
   private headLaneTimer: (ReturnType<typeof setInterval> | null)[] = [null, null, null, null];
 
   /** Cycle length of the heads engine in seconds (0 when there is no cycle). */
@@ -2230,21 +2232,21 @@ export class AudioEngine {
     // Heads mode: the head lane scrubs at its own 1.5× ceiling inside the
     // heads engine; the tape lanes are untouched.
     if (this.heads.active) {
-      // In Heads mode the lane IS a head: shuttling moves that head's offset
-      // inside the cycle at the same 1.5× ceiling, and the head voice restarts
-      // so the movement is audible on the head itself, not on the tape mix.
-      const cycleS = this.headCycleSeconds();
-      if (cycleS <= 0) return { ok: false, detail: "heads have no cycle yet" };
-      const step = (LANE_SCRUB_RATE * (GLOBAL_SCRUB_INTERVAL_MS / 1000)) / cycleS;
+      // Heads v2: the lane IS an independent head, so the shuttle drives that
+      // head's OWN normalized read position through the heads engine at the
+      // same 1.5x ceiling. The tape lanes and the song playhead never move.
+      const dur = this.headLanes.duration(lane);
+      if (dur <= 0) return { ok: false, detail: `head ${lane + 1} has no source` };
+      this.headLanes.beginScrub(lane);
+      let norm = this.headLanes.position(lane) / dur;
+      const step = (LANE_SCRUB_RATE * (GLOBAL_SCRUB_INTERVAL_MS / 1000)) / dur;
       const timer = setInterval(() => {
-        const cur = this.heads.heads[lane];
-        if (!cur) return;
-        this.heads = scrubHead(this.heads, lane, cur.offset + dir * step);
-        this.pushHeads();
-        this.restartHeadVoice(lane);
+        norm = Math.min(1, Math.max(0, norm + dir * step));
+        this.headLanes.previewScrub(lane, norm);
       }, GLOBAL_SCRUB_INTERVAL_MS);
       this.headLaneTimer[lane] = timer;
-      return { ok: true, detail: `head ${lane + 1} shuttle ${dir > 0 ? "forward" : "backward"} at ${LANE_SCRUB_RATE}× of its cycle` };
+      this.headLaneScrubNorm[lane] = () => norm;
+      return { ok: true, detail: `head ${lane + 1} shuttle ${dir > 0 ? "forward" : "backward"} at ${LANE_SCRUB_RATE}x of its own source` };
     }
     const existing = this.laneScrub[lane];
     if (existing) {
@@ -2280,9 +2282,9 @@ export class AudioEngine {
       const timer = this.headLaneTimer[lane];
       if (timer) clearInterval(timer);
       this.headLaneTimer[lane] = null;
-      const off = this.heads.heads[lane]?.offset ?? 0;
-      this.restartHeadVoice(lane);
-      return { ok: true, detail: `head ${lane + 1} landed at offset ${off.toFixed(4)} of its cycle` };
+      const norm = this.headLaneScrubNorm[lane]?.() ?? 0;
+      this.headLaneScrubNorm[lane] = null;
+      return this.headLanes.endScrub(lane, norm);
     }
     const ls = this.laneScrub[lane];
     const ctx = this.ctx;
