@@ -1,101 +1,130 @@
-# Phase 7 (reduced) — Performance Essentials Tutorial
+# Track Performance Controls, Automatic Grid, Recording Removal
 
-One guided tutorial, ten lessons, ~10–15 minutes, run on the user's own uploaded stems. Everything from the previous Phase 7 plan not listed below is dropped (feature registry, coverage dashboard, analysis worker, tutorial IndexedDB, modules 0–12, Tutorial Copies, recording/PRINT lessons, portable import/export, guide generation).
+## 1. Verified current state
 
-## 1. Preconditions (fix and browser-verify before lesson work)
+Everything below was read in this session.
 
-| # | Defect | Current state (verified) | Gate |
-|---|---|---|---|
-| P1 | Global scrub audible | scrub path implemented; release handoff landed | re-verify in Chromium + WebKit |
-| P2 | Scrub release overlap | handoff frame + generation invalidation implemented, unit-tested | browser-verify: no flam, 1 path/stem |
-| P3 | Keyboard faders | `keyboardMap.ts:88-105` defines Y/H U/J I/K O/L; no browser proof | Playwright: 2+ channels overlapping in one batchFrame |
-| P4 | Chop mapping | still FN+rocker double-deflect (`surface.ts:541-547`) — **not** Play+Rocker | remap + arbitration |
-| P5 | FX stem switch inside overlay | `engine.ts:2956` `fx.overlay` acks with "tape audio unaffected"; no overlay-preserving side effect proven | verify `stem.select` keeps overlay open |
-| P6 | Pump audible | `banks.ts` pump present; no measured envelope | measured periodic gain modulation |
-| P7 | Heads scrub audible | `scrub.ts` + worklet chase implemented, unit-tested | browser-verify head-path output |
+**Track buttons (`src/machine/surface.ts:447-540`, `:612-700`)** — the bare-Track table is recording-first:
 
-Lesson 6 (scrub) and Lesson 9 (heads) do not ship until P1/P2 and P7 pass. If a gate fails at build time the lesson ships marked *unavailable* rather than faked.
+- `count === 2` on a loaded/muted track emits `track.delete` (`:485-492`) → recoverable trash.
+- `count === 1` on loaded/muted emits `track.mute` / `track.unmute` (`:529-532`).
+- `holdStart` level `hold` with `!inputEnabled` emits `rec.requestInput` (`:645+`); with input enabled it emits `rec.arm`.
+- Heads mode claims Track gestures first (`:451-464`): double-tap = `heads.reverse`, tap = `heads.mute`; hold = `heads.source` / `heads.print` (`:620-640`).
+- FN + track = bank jump / next song (`:466-477`).
+- FX overlay Track rows live in `src/machine/stemTapeV1Map.ts:213-260` (momentary FX, variation stepping, FN-latch) and already declare `suppresses: ["track.mute","track.unmute"]`.
+- `stem.solo` today is a PLAY + Track chord (`stemTapeV1Map.ts:92-108`, `surface.ts:890-894`) — a *latching* solo, handled by `src/machine/chordArbiter.ts`.
 
-## 2. Tutorial session setup
+**Gesture engine (`src/input/gestures.ts`)** — taps fire **optimistically** on release with `count = 1`, then re-fire with `count = 2` inside `multiTapGapMs: 300` (`:104-113`, `DEFAULT_TIMINGS:63-71`). `holdMs: 450`. This directly violates the requirement "the first tap of a double-tap must never mute the stem" and "arbitration before dispatch".
 
-1. Requires a loaded project with four stems (otherwise the Learn button routes to PROJECTS with a hint).
-2. Prompt: play the song, stop at a section where several stems are audible, press **Use this section**.
-3. Build a temporary loop 8–16 s around that position (window/loop commands only — no audio copy, no re-decode, no blob duplication).
-4. Snapshot control state before entry (see §5).
-5. On completion or exit: **Keep my changes** / **Restore my original settings**.
+**Grid (`src/audio/grid.ts`)** — scalar only: `GridState { bpm, anchorFrame, sampleRate, source: "none"|"tapped"|"rounded"|"manual", intervals }`. BPM is null until 3+ FN taps (`tapGrid`). Persisted as `control.grid = { bpm, source }` (`src/audio/store.ts` `StoredProject`). No beat/bar frame map, no analysis. Consumers: `rocker.speed` (`surface.ts:~570`), `decidePunch`/`decidePunchOut` (recording only), FX tempo (`src/audio/fx/banks.ts:38`).
 
-## 3. Lessons and milestones
+**Loops** — per-track normalized `window {start,end,shift,reverse}` + `chopDiv`, shared across tracks via link mask; `setLinked` (`engine.ts:1384`), link mask in `engine.ts:3028`. Dual-source equal-power relocation already exists (`engine.ts:820`, `:926`, `:1139`) with per-track `generation` counters (`engine.ts:143`, `:679`) — this is the machinery the bar loop will reuse. Audibility funnels through `applyAudibility` (`engine.ts:1230-1245`).
 
-Each milestone: entry watermark on `AudioCommand.id`, expected command type, required ack (`accepted`/`completed`), engine assertion.
+**Recording** — `src/machine/recordingState.ts`, `src/audio/input/*`, `src/audio/InputPanel.tsx` (mounted from `src/device/SystemPage.tsx:340`), `public/input-capture-processor.js`, `src/workers/recordingWorker.ts`, `src/workers/takePageWorker.ts`. **Critical shared dependency:** `src/audio/export/performanceRecorder.ts:30,43,47` loads `input-capture-processor.js` **and** `recordingWorker.ts`; `src/workers/wavWorker.ts:9` imports `chunkStore`. So the capture worklet, recording worker and chunk store are *retained infrastructure*, not deletable.
 
-| # | Lesson | Ordered milestones | Engine assertion | Restore |
-|---|---|---|---|---|
-| 1 | Meet the controls | highlight tour only; desktop opens Keyboard Controls panel | none | none |
-| 2 | Play / stop / resume / cue | `transport.play` → `transport.stop` → `transport.play` → `transport.cue` (hold) → `transport.play` | transport state + cue at frame 0 | leave playing |
-| 3 | Mix the stems | one fader move → two overlapping → opposing directions | gain change on each channel; touch: ≥2 pointerIds in one `batchFrame`; keyboard: ≥2 channels with overlapping held intervals in one `batchFrame` | fader values |
-| 4 | Individual stems | `track.mute` → `track.unmute` → `stem.select` (Play+Volume) → `stem.solo` (Play+Track) → `stem.link` | mute map, selection, solo mask, link mask | solo + link |
-| 5 | Tape speed | `rate.set` ±1 BPM → hold glide → double-deflect semitone → FN+Play ×2 snap `1.0` | last rate exactly 1.0 | rate → 1.0 |
-| 6 | Scrub | `transport.scrub.start` → 4 read pointers moving on a shared frame → track-level scrub-path output above floor → visible position move → `transport.scrub.end` → prior rate restored, landing error ≤2 frames | per-track scrub telemetry | none |
-| 7 | Shape and chop | `filter.set` (FN+Fader) → `loop.chop` half/double (Play+Rocker) → double-deflect reset → hold glide → FN×4 grid tap | chopDiv / window / grid state; **zero** transport commands during chop gestures | window, filter, chop |
-| 8 | FX | `fx.overlay` open → algorithm change (+/−) → momentary (hold Track) → latch (FN+Track) → `stem.select` with overlay still open | wet-path output differs from dry; overlay never closes | close overlay, clear momentary/latch |
-| 9 | Heads | FN+Play ×3 enter → fader head levels → FN+Fader head scrub (audible head-path output) → exit | head level + head pointer movement | head state |
-| 10 | Guided performance | cue+launch, multi-fader, mute/solo, rate move, scrub, chop, FX throw, in-overlay stem switch, heads in/out, stop | each step reuses its lesson's assertion, single pass, no retry gating | per user choice |
+## 2. Conflicts found (must be resolved, not disabled)
 
-Ending card: "You can perform with Stem Tape." → Perform again / Keep these settings / Restore my original settings / Exit tutorial.
+| # | Conflict | Resolution |
+|---|---|---|
+| C1 | Optimistic `count=1` tap → mute fires before a double-tap is known | Add Track-button arbitration: defer tap dispatch by `trackTapWindowMs` (200 ms, tunable 180–220) |
+| C2 | Double-tap currently = `track.delete` | Delete removed from the surface entirely; double-tap = bar-loop capture |
+| C3 | Hold currently = `rec.arm` / `rec.requestInput` | Hold = momentary audition; all `rec.*` emissions deleted from arbitration |
+| C4 | PLAY+Track latching solo vs new momentary solo | Chord arbiter keeps priority: with PLAY held, the chord wins and no audition starts. Momentary audition only when PLAY is not pressed |
+| C5 | Heads mode claims Track tap/double-tap/hold | Unchanged — Heads/PRINT precedence preserved; new bindings apply only when `!headsMode && !fxOverlay` |
+| C6 | FX overlay Track rows | Unchanged, already suppress `track.mute` |
+| C7 | FN + Track = bank/song | Unchanged, FN checked before the new layer |
+| C8 | Bar loop vs linked-track window targeting | Bar loop is a **separate per-stem layer**, never routed through link mask |
+| C9 | Grid persisted as scalar `{bpm, source}` | Schema bumped additively to carry the frame map; old projects re-analyzed on load |
 
-## 4. Files
+Full combination table (single/double/hold, 2–3–4 holds, muted stem held, persistent solo + audition, pointercancel, double-tap while another held, capture while stopped/cued/playing/scrubbing, tap during scheduled activation, simultaneous releases, rate change during loop, song switch, FX, Heads, node vs worklet, keyboard vs multitouch, legacy projects with takes) will be delivered as a filled precedence/ack table in the implementation's first commit and mirrored as a unit-test matrix.
 
-**Add (4)**
-- `src/onboarding/performanceSteps.ts` — 10 lesson definitions + ordered milestone arrays (data only).
-- `src/onboarding/tutorialState.ts` — snapshot/restore, temporary loop creation, localStorage completion/dismissal.
-- `src/onboarding/usePerformanceTutorial.ts` — subscribes to the existing command/ack stream, watermarking, milestone evaluation, failure classification.
-- `src/onboarding/PerformanceTutorial.tsx` — card, coach pill, highlight driver, Retry/Skip/Exit.
+## 3. State machines
 
-**Change (2)**
-- `src/device/DeviceSurface.tsx` — `pointer-events:none` highlight overlay driven from existing hit-zone geometry.
-- `src/routes/index.tsx` — Learn button + tutorial mount.
+**Track gesture arbiter** (new `src/input/trackGestures.ts`, fed raw down/up/cancel per control):
+`idle → pressed → (t ≥ holdMs) auditioning → released` or `pressed → awaitingSecond (≤200 ms) → tapConfirmed | doubleConfirmed`.
+Crossing `holdMs` cancels the pending tap window. Cancel/blur/lostpointercapture route to the same `release(reason)` path; a normal release is never `cancel`.
 
-Nothing else changes. No new tests infrastructure beyond `src/onboarding/__tests__/{milestones,snapshot}.test.ts` plus `tests/e2e/tutorial.spec.ts`.
+**Momentary audition** (`src/machine/audition.ts`): `inactive → active(set)`; snapshot of `{mutes[], solos[]}` taken on first hold; `held` is a Set; releasing a member updates the group; empty set → restore snapshot exactly and clear. Never persisted.
 
-## 5. Snapshot / restore
+**Bar loop, per stem**: `inactive → capturing → scheduled → looping → releasing → inactive`.
 
-Snapshot is a structured clone of the reducer's serialisable surface state plus the engine's control-level state — fader values, mute map, solo mask, link mask, selected stem, rate/glide, window/filter, chopDiv/offset, grid, FX bank+algorithm+latch/momentary, heads state, loop bounds, transport position. No audio, no blob keys, no takes.
+## 4. Commands
 
-Restore replays the inverse as ordinary semantic commands (same path the UI uses), then asserts state equality against the snapshot; a mismatch surfaces as a restore warning rather than a silent divergence. Temporary loop bounds are always released on exit regardless of Keep/Restore choice.
-
-## 6. Failure handling
-
-If the expected command, ack, or engine result does not arrive within the milestone window: "This control did not respond as expected." with Retry · Skip · Open Diagnostics. The lesson id and the latest command/ack pair are appended to the existing diagnostics log (`DiagnosticPanel` / SYSTEM). No auto-advance, no new report system, no downloads.
-
-## 7. UI
-
-```text
- ┌──────────────────────────────────────┐
- │  rendered SP-1 surface               │
- │     ▢ highlighted control (ring)     │
- │                                      │
- │                                      │
- ├──────────────────────────────────────┤
- │ 3/10  Mix the stems                  │  <- card, docked opposite the highlight
- │ Move two faders at the same time.    │
- │ Desktop: Y/H and U/J                 │
- │ [Retry] [Skip]            [Exit]     │
- └──────────────────────────────────────┘
-
- during a fader gesture the card collapses to:
- ( 3/10  two faders at once … )   <- coach pill, 40px, corner
 ```
+track.mute { track }            track.unmute { track }
+audition.start { held:number[], snapshotId }
+audition.update { held:number[] }
+audition.end { snapshotId }
+barloop.capture { track, bar, startFrame, endFrame, activateAtFrame }
+barloop.release { track, releaseAtFrame }
+grid.installed { gridId, source:"analysis" } | grid.replaced { gridId }
+grid.correct  { anchorFrame, bpm, source:"manual" }
+```
+Rejections ack `rejected` with a reason, mutate nothing (audio, LEDs, mute/solo/loop untouched).
 
-Card docks to whichever edge is farthest from the active highlight so a taught control is never covered; verified at 375/390/420 px, tablet, desktop. Desktop shows key equivalents, touch shows finger instructions. Reduced motion honoured; card is focus-trappable and keyboard-operable.
+## 5. Automatic grid
 
-## 8. Estimate
+New `src/audio/gridAnalysis.ts` + `src/workers/gridWorker.ts`. Runs after ingest/restore, before performance-ready.
 
-- Preconditions P3–P7: the bulk of the work — remap + arbitration for chop, FX overlay verification, pump/heads measurement, keyboard-fader browser proof.
-- Tutorial itself: 4 new files, ~900–1200 lines total, 2 small edits.
-- Roughly 1 implementation pass for preconditions, 1 for the tutorial, 1 for browser verification.
+- Read the **already-decoded** channel data in sequential bounded chunks (no second decode, no second full copy) — transferable Float32 slices, ~4 s hop, peak working set reported into `src/audio/memory.ts`.
+- Per chunk: spectral-flux onset envelope (downsampled ~344 Hz), summed across stems with transient-rich stems weighted higher.
+- Tempo: autocorrelation / comb-filter over the summed envelope, 60–200 BPM, with explicit half/double-time disambiguation by comparing beat-level onset energy at f, 2f, f/2.
+- Phase: cross-correlate the beat pulse train; downbeat by 4-beat energy accumulation (beatsPerBar 4 default).
+- Output a **frame map**, not a scalar:
 
-## 9. Blockers
+```ts
+interface SongGrid {
+  gridId: string; sampleRate: number; beatsPerBar: number;
+  originFrame: number;
+  beats: Int32Array;            // beat frames @ sampleRate
+  bars: Int32Array;             // downbeat frames
+  segments: { startFrame: number; bpm: number }[];
+  normalized: Float64Array;     // portable 0..1 positions for SR restoration
+  sourceHashes: string[];       // stem contentHash list
+}
+```
+Restoration converts through `normalized` × new frame length, guaranteeing ≤1 converted frame at 44.1↔48 kHz. Grid recomputes when `sourceHashes` change; restores directly when they match. No confidence score, no "AI" labelling anywhere.
 
-1. **P4 chop remap** is a behaviour change to the locked v2.6/v1 map; Lesson 7 is unbuildable until Play+Rocker is authoritative and `supersedes` is recorded.
-2. **P5** — no evidence yet that `stem.select` preserves the FX overlay; if it does not, Lesson 8's final milestone needs an engine change first.
-3. Lessons 6 and 9 are contingent on browser proof, not code presence.
+`src/audio/grid.ts` keeps `tapGrid` as the *optional* FN ×4 correction path, writing `source:"manual"` segments over the analyzed grid.
+
+## 6. Bar loop signal flow
+
+Capture (double-tap accepted at frame F): find bar `b` containing F from `bars`, capture `[bars[b], bars[b+1])` in **source frames** for that stem, schedule activation at `bars[b+1]` (shared context frame across simultaneous captures). Reuse `engine.ts` dual-source crossfade (`:820`, `:926`) with a new per-track `barLoop` slot, its own generation counter.
+
+Two pointers are maintained per looping stem: the audible loop read pointer, and a hidden song pointer advanced by the same integrated rate curve as the transport (so varispeed and reverse behave tape-style). Release schedules at the next bar boundary, crossfades from loop grain to a fresh source started at the hidden pointer, then tears down the loop path so exactly one playback path remains. Beyond source end → silence, no wrap or stretch. Fader gain is never automated; FX rack position unchanged. The worklet kernel (`public/tape-processor.js`) gets the same bar-loop window + hidden-pointer fields so node and worklet behave identically.
+
+LEDs: new `barloop` tier in the `LED_PRIORITY` table in `surface.ts` (between `soloed` and `unlinked`), patterns `scheduled` = fast breathe, `looping` = double-blink, `releasing` = chase. Written only by the arbiter.
+
+## 7. Recording removal — audit and migration
+
+**Delete from the visible product (immediately):** `src/audio/InputPanel.tsx` and its mount in `SystemPage.tsx:340`; all `rec.*` emissions in `surface.ts`; `rec.*` rows in `stemTapeV1Map.ts:284-340`; recording LED tiers in `surface.ts` (`REC_LED_TIERS` usage); `armed`/`recording`/`overdubbing`/`printing`-except-PRINT branches of the Track table.
+
+**Must temporarily remain (backward compatibility / read-only recovery):** `src/audio/input/takes.ts`, `src/audio/input/takePages.ts`, `src/workers/takePageWorker.ts`, take manifest fields in the project schema — kept so existing stored takes stay exportable during migration.
+
+**Shared with retained features — never delete:** `public/input-capture-processor.js` and `src/workers/recordingWorker.ts` (used by `performanceRecorder.ts:30,43,47`), `src/audio/input/chunkStore.ts` (used by `wavWorker.ts:9` and `takePageWorker.ts`), `src/audio/wav.ts`, `src/audio/export/*`, `src/audio/print.ts`.
+
+**Removable once compatibility is proven:** `src/machine/recordingState.ts`, `src/audio/input/recorder.ts`, `src/audio/input/latency.ts`, `src/audio/__tests__/phase6.test.ts` recording sections.
+
+Migration is additive and non-destructive: no stem blob, project row or take chunk is deleted; new projects simply never create recording state. A one-time "legacy takes" export affordance in Projects lets a user pull old takes to WAV before cleanup.
+
+## 8. Implementation order
+
+1. Recording removal from arbitration + UI (no `rec.*` reachable, no `getUserMedia` path).
+2. Track gesture arbiter + momentary audition + mute/unmute commands.
+3. Grid analysis worker, `SongGrid` schema, persistence + restore.
+4. Bar loop: engine (node), worklet parity, LED tier, diagnostics.
+5. Rewire tempo FX (Echo, Pump, Beat Repeat, chop) to the frame map.
+6. Test matrix + browser/device evidence.
+
+## 9. Evidence to be produced
+
+- Unit: gesture arbitration matrix (single/double/hold, all 2/3/4 hold combinations, random release order, cancel/blur), audition snapshot restore equality, grid fixtures (straight 4/4, sparse intro, half/double ambiguity, drift, 44.1/48 kHz, unequal lengths, save/reload, stem replacement) asserted in frames with stated tolerances, bar-loop capture/activation/release-rejoin (≤2 frames), 100 capture/release cycles with zero source leak, node/worklet parity, anti-click peak-discontinuity and RMS seam thresholds.
+- Playwright (Chromium + WebKit): zero `getUserMedia` calls, no permission prompt, no recording controls in DOM, no `rec.*` in the command stream, PRINT + master performance recording + WAV export still succeed, no user audio in network requests, zero console errors.
+- Real device: iPhone/iPad 2/3/4-finger Track holds, loop capture/release listening test, background-interruption recovery.
+- Reported numbers: measured single-tap latency and the final chosen `trackTapWindowMs` / `holdMs`.
+
+## 10. Open decisions
+
+1. **PLAY + Track latching solo** — keep it alongside momentary audition, or retire it now that hold gives momentary solo?
+2. **Track double-tap in Heads mode** currently toggles head reverse. Keep Heads precedence (my assumption), or should bar-loop capture win there too?
+3. **Legacy takes** — is a one-time export affordance wanted, or should stored takes simply remain untouched and invisible?
