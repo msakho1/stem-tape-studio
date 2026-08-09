@@ -3030,14 +3030,55 @@ export class AudioEngine {
           this.pushHeads();
           return this.ack(cmd, "completed", `head ${i + 1} ${this.heads.heads[i]!.muted ? "muted" : "unmuted"} — still a head, geometry unchanged`);
         }
-        case "heads.reverse": {
-          if (!this.heads.active) return this.ack(cmd, "rejected", "heads mode is not active");
-          const i = Number(p["head"]);
-          this.heads = toggleHeadReverse(this.heads, i);
-          this.pushHeads();
-          this.restartHeadVoice(i);
-          return this.ack(cmd, "completed", `head ${i + 1} → ${this.heads.heads[i]!.reverse ? "reverse" : "forward"} (crossfaded, no reversed PCM copy on the worklet path)`);
+        // ---- universal lane layer ------------------------------------------
+        // ONE implementation for Tape, Heads and the FX overlay. In heads mode
+        // the lane is a head; otherwise it is the tape track. `heads.reverse`
+        // no longer exists as a command type.
+        case "lane.reverse": {
+          const i = Number(p["lane"]);
+          if (this.heads.active) {
+            this.heads = toggleHeadReverse(this.heads, i);
+            this.pushHeads();
+            this.restartHeadVoice(i);
+            return this.ack(cmd, "completed", `lane ${i + 1} (head) → ${this.heads.heads[i]!.reverse ? "reverse" : "forward"} — pointer negated, no reversed PCM`);
+          }
+          return this.execute({ ...cmd, type: "tape.reverse", payload: { track: i, on: Boolean(p["reverse"]) } });
         }
+        case "lane.audition": {
+          const mask = String(p["mask"] ?? "");
+          this.setAudition(mask);
+          return this.ack(
+            cmd,
+            "completed",
+            mask.includes("1")
+              ? `momentary audition ${mask} — mutes and latched solo untouched`
+              : "audition released — prior mix restored exactly",
+          );
+        }
+        case "loop.capture":
+        case "loop.release":
+        case "loop.resize": {
+          const i = Number(p["lane"]) as TrackId;
+          const t = this.tracks[i];
+          if (!t) return this.ack(cmd, "rejected", `no lane ${i}`);
+          const bars = Math.max(0.25, Number(p["bars"] ?? 1));
+          if (cmd.type === "loop.release") {
+            return this.execute({ ...cmd, type: "loop.set", payload: { track: i, enabled: false } });
+          }
+          // One bar of the detected grid, resolved on the SAME musical clock the
+          // grid analyser published, so a resize never drifts from the beat.
+          const bpm = this.baseBpm || 120;
+          const lengthS = (bars * 4 * 60) / bpm;
+          const start = Math.max(0, this.position());
+          const dur = this.duration || lengthS;
+          const res = this.execute({
+            ...cmd,
+            type: "loop.set",
+            payload: { track: i, enabled: true, start: start / dur, end: Math.min(1, (start + lengthS) / dur) },
+          });
+          return this.ack(cmd, res.status, `lane ${i + 1} loop ${bars} bar (${lengthS.toFixed(3)}s @ ${bpm.toFixed(2)} BPM) — ${res.detail}`);
+        }
+
         case "heads.scrub": {
           if (!this.heads.active) return this.ack(cmd, "rejected", "heads mode is not active");
           const i = Number(p["head"]);
