@@ -455,20 +455,12 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
         next = { ...next, activeTrack: i };
 
         // ---- approved bare-Track state table (§2.1) -------------------------
+        // Double-tap NEVER deletes. Delete has been removed from the surface
+        // entirely; double-tap is reserved for `loop.capture` (Step 7).
         if (g.count === 2) {
-          switch (slice.content) {
-            case "loaded":
-            case "muted": {
-              // Recoverable delete: the surface drops the track immediately,
-              // the engine keeps the buffer and the blob survives in trash.
-              next = { ...next, tracks: setTrack(next, i, { content: "empty" }) };
-              next = emit(next, "track.delete", { track: i }, { rowId: "track.delete", t });
-              return fire(next, "track.delete", `track ${i + 1} deleted → recoverable trash (undo available)`, t);
-            }
-            default:
-              return fire(next, "track.tap", `track ${i + 1} is ${slice.content} — double-tap never deletes in this state`, t);
-          }
+          return fire(next, "track.tap", `track ${i + 1} double-tap → loop capture (engine lands in Step 7); delete removed from the surface`, t);
         }
+
 
         switch (slice.content) {
           case "empty":
