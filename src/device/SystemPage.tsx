@@ -299,8 +299,6 @@ export function SystemPage({ engine, status, acks, unlockNote, ...diag }: Props)
         </>
       )}
 
-      {sysTab === "input" && <InputPanel engine={engine} />}
-
       {sysTab === "diagnostics" && (
         <div className="grid gap-4">
           <ShuttleHandoffCard engine={engine} />
