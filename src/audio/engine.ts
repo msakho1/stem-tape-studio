@@ -102,6 +102,8 @@ const GLOBAL_SCRUB_LEVEL = 0.85;
 /** Single-lane shuttle rate. Slower than the global shuttle: it is an edit
  *  gesture on one stem, not a transport move. */
 const LANE_SCRUB_RATE = 1.5;
+/** Ceiling for finger-driven (FUNCTION + fader) per-lane scrubbing. */
+const MAX_FADER_SCRUB_RATE = 8;
 /**
  * Scrub → playback handoff, seconds. The release must NOT use the 80 ms
  * transport lookahead: that overshoots audibly after key release. One shared
