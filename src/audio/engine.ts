@@ -634,6 +634,10 @@ export class AudioEngine {
   /** Derived playhead. Never incremented by a timer. */
   position(): number {
     if (!this.ctx) return this.timeline.positionAt(0);
+    // Root cause 3: during a held shuttle `requestedPlaying` is false, so the
+    // frozen branch pinned the reported playhead even while the tape moved.
+    // The shuttle owns the position while it is open.
+    if (this.globalScrub) return Math.min(this.duration, Math.max(0, this.globalScrub.pos));
     if (!this.requestedPlaying) return this.timeline.positionAt(this.timelineFrozenAt);
     return Math.min(this.duration, this.timeline.positionAt(this.ctx.currentTime));
   }
