@@ -110,6 +110,11 @@ export function useAudioEngine(commands: AudioCommand[]) {
   useEffect(() => {
     const off = controlBus.subscribe((e) => {
       const head = e.index as 0 | 1 | 2 | 3;
+      // Leaving the FUNCTION layer mid-gesture must close any live lane scrub
+      // instead of leaving a silenced lane behind.
+      if (e.channel !== "laneScrub" && engine.laneFaderScrubState(head)) {
+        engine.endLaneFaderScrub(head, e.value);
+      }
       if (e.channel === "headScrub") {
         // The whole gesture is audible: start latches the origin, every
         // rAF-coalesced move travels the tape, release lands it exactly.

@@ -2413,6 +2413,12 @@ export class AudioEngine {
   }
 
   previewLaneFaderScrub(lane: number, normalized: number, timestamp: number): { ok: boolean; detail: string } {
+    if (!this.laneFaderScrub[lane]) {
+      // Keyboard lanes (F + Y/H, U/J, I/K, O/L) and mid-drag rebases never send
+      // an explicit start; the first movement opens the gesture.
+      const opened = this.beginLaneFaderScrub(lane, normalized, timestamp);
+      if (!opened.ok) return opened;
+    }
     const s = this.laneFaderScrub[lane];
     const ctx = this.ctx;
     const t = this.tracks[lane];
