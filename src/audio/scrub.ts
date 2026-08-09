@@ -30,6 +30,11 @@ export interface ScrubEvent {
 
 /** Maximum read speed, in source frames per output frame (± this value). */
 export const MAX_SCRUB_RATE = 32;
+/**
+ * Per-head heads-mode scrub ceiling, in playback-rate multiples of the tape.
+ * A head shuttle is musical, not a rewind: 1.5× is the documented top speed.
+ */
+export const HEAD_SCRUB_MAX_RATE = 1.5;
 /** Below this |rate| the tape is effectively stationary and must fade out. */
 export const SCRUB_SILENCE_RATE = 0.02;
 /** Exponential lag: how long the audible pointer takes to reach the target. */
