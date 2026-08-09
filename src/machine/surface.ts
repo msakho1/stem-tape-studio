@@ -19,7 +19,7 @@ import {
   type FxFamily,
   type StemPerformanceState,
 } from "@/machine/stemPerformance";
-import { BANKS, algorithmDef } from "@/machine/fx12";
+import { BANKS, algorithmDef, bankOfButton } from "@/machine/fx12";
 
 
 export type LedPattern = "dark" | "faint" | "solid" | "pulse" | "blink" | "breathe" | "chase";
@@ -134,6 +134,8 @@ export interface SurfaceState {
 
   /** Held global four-stem shuttle: +1 forward, -1 backward, 0 idle. */
   globalScrub: 0 | 1 | -1;
+  /** Per-lane shuttle direction (FUNCTION + Track held + rocker). 0 = idle. */
+  laneScrub: (0 | 1 | -1)[];
 
   /** Phase 5C stem-performance layer (serializable, no audio objects). */
   perf: StemPerformanceState;
@@ -252,6 +254,7 @@ export function initialSurfaceState(): SurfaceState {
 
     commands: [],
     globalScrub: 0,
+    laneScrub: [0, 0, 0, 0],
 
     perf: initialStemPerformance(),
 
@@ -267,22 +270,65 @@ export function initialSurfaceState(): SurfaceState {
  * discrete `transport.scrub` step row is never dispatched while it is held.
  */
 export function applyGlobalScrub(state: SurfaceState, dir: 1 | -1 | null, t = 0): SurfaceState {
-  if (dir === null) {
-    if (state.globalScrub === 0) return state;
+  // Universal lane qualifier: with Track buttons held, the shuttle is scoped to
+  // those lanes and the shared transport is never moved.
+  const held = state.pressed.filter((x) => x.startsWith("track-button")).map(trackIndexOf);
+  const active = state.laneScrub.map((v, i) => (v !== 0 ? i : -1)).filter((i) => i >= 0);
+  if (dir === null || held.length === 0) {
+    let next = state;
+    if (active.length > 0) {
+      const laneScrub = [...next.laneScrub] as (0 | 1 | -1)[];
+      for (const i of active) {
+        laneScrub[i] = 0;
+        next = emit(next, "lane.scrub.end", { lane: i }, { rowId: "lane.scrub", t });
+      }
+      next = { ...next, laneScrub, lastGesture: `lane shuttle release (${active.map((i) => i + 1).join(",")})` };
+      if (dir === null) return next;
+    }
+    if (dir === null) {
+      if (next.globalScrub === 0) return next;
+      return emit(
+        { ...next, globalScrub: 0, lastGesture: "global shuttle release" },
+        "transport.scrub.end",
+        {},
+        { rowId: "transport.scrub.global", t },
+      );
+    }
+    if (next.globalScrub === dir) return next;
     return emit(
-      { ...state, globalScrub: 0, lastGesture: "global shuttle release" },
-      "transport.scrub.end",
-      {},
+      { ...next, globalScrub: dir, lastGesture: `global shuttle ${dir > 0 ? "forward" : "backward"}` },
+      "transport.scrub.start",
+      { direction: dir },
       { rowId: "transport.scrub.global", t },
     );
   }
-  if (state.globalScrub === dir) return state;
-  return emit(
-    { ...state, globalScrub: dir, lastGesture: `global shuttle ${dir > 0 ? "forward" : "backward"}` },
-    "transport.scrub.start",
-    { direction: dir },
-    { rowId: "transport.scrub.global", t },
-  );
+  // Lane-scoped shuttle. Release any global shuttle first so only one shuttle
+  // scope can ever be sounding.
+  let next = state;
+  if (next.globalScrub !== 0) {
+    next = emit({ ...next, globalScrub: 0 }, "transport.scrub.end", {}, { rowId: "transport.scrub.global", t });
+  }
+  const laneScrub = [...next.laneScrub] as (0 | 1 | -1)[];
+  let changed = false;
+  for (const i of held) {
+    if (laneScrub[i] === dir) continue;
+    laneScrub[i] = dir;
+    changed = true;
+    next = emit(next, "lane.scrub.start", { lane: i, direction: dir }, { rowId: "lane.scrub", t });
+  }
+  // Lanes released from the chord stop shuttling immediately.
+  for (const i of active) {
+    if (held.some((h) => h === i)) continue;
+    laneScrub[i] = 0;
+    changed = true;
+    next = emit(next, "lane.scrub.end", { lane: i }, { rowId: "lane.scrub", t });
+  }
+  if (!changed) return next;
+  return {
+    ...next,
+    laneScrub,
+    lastGesture: `lane shuttle ${dir > 0 ? "forward" : "backward"} · ${held.map((i) => i + 1).join(",")}`,
+  };
 }
 
 function fire(state: SurfaceState, rowId: string, detail: string, t: number): SurfaceState {
@@ -1031,24 +1077,26 @@ export function deriveLeds(state: SurfaceState): LedFrame {
     const id = `side-led-${i + 1}` as LedId;
     if (off) frame[id] = { pattern: "dark", reason: "powered off", priority: 100 };
     else if (state.perf.fxOverlay) {
-      // Side LEDs 1–4 = Filter / Echo / Reverb / Beat Repeat for the ACTIVE stem.
-      const family = FX_FAMILIES[i] as FxFamily;
-      const slot = state.perf.tracks[state.perf.activeStem]!.fx[family];
-      if (slot.rejected)
-        frame[id] = { pattern: "blink", reason: `${family} rejected: ${slot.rejected}`, priority: LED_PRIORITY.error };
-      else if (slot.arming)
-        frame[id] = { pattern: "blink", reason: `${family} arming — buffering one full division`, priority: LED_PRIORITY.error - 1 };
-      else if (slot.momentary)
-        frame[id] = { pattern: "breathe", reason: `${family} momentary (held)`, priority: LED_PRIORITY.momentaryFx };
-      else if (slot.latched)
-        frame[id] = { pattern: "solid", reason: `${family} latched`, priority: LED_PRIORITY.latchedFx };
-      else frame[id] = { pattern: "dark", reason: `${family} inactive`, priority: LED_PRIORITY.base };
+      // Side LEDs 1–4 = the four BANKS (physical order) for the ACTIVE stem,
+      // read from the authoritative twelve-FX state, not the legacy families.
+      const bankIndex = bankOfButton(i);
+      const bank = state.perf.tracks[state.perf.activeStem]!.fx12.banks[bankIndex]!;
+      const def = algorithmDef(bankIndex, bank.selectedAlgorithm);
+      const alg = bank.algorithms[bank.selectedAlgorithm]!;
+      if (alg.rejected)
+        frame[id] = { pattern: "blink", reason: `${def.label} rejected: ${alg.rejected}`, priority: LED_PRIORITY.error };
+      else if (bank.momentary)
+        frame[id] = { pattern: "breathe", reason: `${def.label} momentary (held)`, priority: LED_PRIORITY.momentaryFx };
+      else if (bank.latched)
+        frame[id] = { pattern: "solid", reason: `${def.label} latched`, priority: LED_PRIORITY.latchedFx };
+      else frame[id] = { pattern: "dark", reason: `${def.label} inactive`, priority: LED_PRIORITY.base };
     } else if (state.bankJumpArmed && i === state.bank)
       frame[id] = { pattern: "blink", reason: "blink = bank (v2.6 song row)", priority: 40 };
     else if (i === state.song % 4)
       frame[id] = { pattern: "solid", reason: "solid = song (v2.6 song row)", priority: 20 };
     else frame[id] = { pattern: "dark", reason: "no song in this slot", priority: 0 };
   }
+
 
   frame["play-indicator"] = off
     ? { pattern: "dark", reason: "powered off", priority: 100 }

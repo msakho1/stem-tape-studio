@@ -164,25 +164,29 @@ describe("Correction 6 — one ordered timeline event stream", () => {
   });
 });
 
-describe("Correction 8 / RHYTHM button", () => {
-  it("RHYTHM is zero-indexed buttonIndex 3 === physical Button 4", () => {
-    const rhythm = BANKS.find((b) => b.id === "rhythm")!;
+describe("Correction 8 / MOD button", () => {
+  it("MOD is zero-indexed buttonIndex 3 === physical Button 4", () => {
+    const rhythm = BANKS.find((b) => b.id === "mod")!;
     expect(rhythm.buttonIndex).toBe(3);
     expect(physicalButtonOf(BANKS.indexOf(rhythm) as 0 | 1 | 2 | 3)).toBe(4);
-    expect(BANKS[bankOfButton(3)]!.id).toBe("rhythm");
+    expect(BANKS[bankOfButton(3)]!.id).toBe("mod");
     expect(BANK_BY_BUTTON.length).toBe(4);
   });
 
-  it("one − from Beat Repeat reaches Pump", () => {
+  it("one − from Reel Flange wraps to Rhythmic Gate", () => {
     const fx = initialStemFx();
     const bank = bankOfButton(3);
     let b = fx.banks[bank]!;
-    expect(BANKS[bank]!.algorithms[b.selectedAlgorithm]!.id).toBe("beatRepeat");
+    expect(BANKS[bank]!.algorithms[b.selectedAlgorithm]!.id).toBe("reelFlange");
     b = cycleAlgorithm(b, -1);
-    expect(BANKS[bank]!.algorithms[b.selectedAlgorithm]!.id).toBe("pump");
+    expect(BANKS[bank]!.algorithms[b.selectedAlgorithm]!.id).toBe("gate");
+    b = cycleAlgorithm(b, 1);
+    expect(BANKS[bank]!.algorithms[b.selectedAlgorithm]!.id).toBe("reelFlange");
+    b = cycleAlgorithm(b, 1);
+    expect(BANKS[bank]!.algorithms[b.selectedAlgorithm]!.id).toBe("formantShift");
   });
 
-  it("tempo-derived effects read the MUSICAL rate, so a wind-down cannot silence Pump", () => {
+  it("tempo-derived effects read the MUSICAL rate, so a wind-down cannot silence the gate", () => {
     const tl = new TapeTimeline(1);
     tl.anchor(0, 0);
     const down = makeInertiaSegment({

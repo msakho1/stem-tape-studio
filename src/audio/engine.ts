@@ -50,6 +50,14 @@ import { TapeTimelineBus, type TapeTimelineEvent } from "./timelineEvents";
 import { PerformanceRecorder } from "./export/performanceRecorder";
 import { emptyGrid, tapGrid, type GridState } from "./grid";
 import {
+  analyzeSongGrid,
+  barStartAt,
+  describeGrid,
+  nextBarAfter,
+  type AnalysisInput,
+  type SongGrid,
+} from "./gridAnalysis";
+import {
   chooseSource,
   emptyHeads,
   enterHeads,
@@ -91,6 +99,9 @@ const GLOBAL_SCRUB_RATE = 1.6;
 const GLOBAL_SCRUB_INTERVAL_MS = 45;
 /** Grain level; the shuttle is deliberately quieter than normal playback. */
 const GLOBAL_SCRUB_LEVEL = 0.85;
+/** Single-lane shuttle rate. Slower than the global shuttle: it is an edit
+ *  gesture on one stem, not a transport move. */
+const LANE_SCRUB_RATE = 1.5;
 /**
  * Scrub → playback handoff, seconds. The release must NOT use the 80 ms
  * transport lookahead: that overshoots audibly after key release. One shared
@@ -221,6 +232,11 @@ export interface EngineStatus {
   effectiveBpm: number[];
   bpmSource: "grid" | "manual" | "provisional";
   baseBpm: number;
+  /** Automatic song grid (§8). Null means the project is not performance-ready. */
+  songGrid: SongGrid | null;
+  gridDetail: string;
+  /** Transient per-lane scrub landings, in song seconds. */
+  scrubCandidates: (number | null)[];
   soloMask: string;
   linkMask: string;
   lastFxRejection: string | null;
@@ -288,6 +304,85 @@ export class AudioEngine {
   grid: GridState = emptyGrid(48000);
   lastGridTapFrame: number | null = null;
   quantisePunch = false;
+
+  // ------------------------------------------------ automatic song grid (§8)
+
+  /**
+   * Analysed shared song grid. Present automatically whenever stems are
+   * loaded; a null grid means the project is NOT performance-ready.
+   */
+  songGrid: SongGrid | null = null;
+  gridAnalysisDetail = "not analysed — no stems loaded";
+  gridAnalysisMs: number | null = null;
+  /** Generation of the analysis, bumped on every source change. */
+  gridGeneration = 0;
+
+  /**
+   * Sequential, bounded analysis over the ALREADY-DECODED buffers. Reads the
+   * channel views in place (no second decode, no duplicate PCM) and yields
+   * between stems so the surface stays responsive.
+   */
+  async analyzeGrid(hashes: string[] = []): Promise<SongGrid | null> {
+    const started = typeof performance !== "undefined" ? performance.now() : 0;
+    const inputs: AnalysisInput[] = [];
+    for (let i = 0; i < this.tracks.length; i++) {
+      const buf = this.tracks[i]?.buffer;
+      if (!buf) continue;
+      inputs.push({ channel: buf.getChannelData(0), sampleRate: buf.sampleRate, hash: hashes[i] ?? "" });
+      // Bounded: hand the main thread back between stems.
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    if (inputs.length === 0) {
+      this.songGrid = null;
+      this.gridAnalysisDetail = "not analysed — no decoded stems";
+      return null;
+    }
+    const grid = analyzeSongGrid(inputs);
+    this.gridAnalysisMs = (typeof performance !== "undefined" ? performance.now() : 0) - started;
+    this.gridGeneration += 1;
+    if (!grid) {
+      this.songGrid = null;
+      this.gridAnalysisDetail = "analysis found no periodic structure — tap Function ×4 to set the tempo";
+      return null;
+    }
+    this.songGrid = grid;
+    this.setBaseBpm(grid.bpm, "grid");
+    this.grid = {
+      ...this.grid,
+      bpm: grid.bpm,
+      sampleRate: grid.analysisSampleRate,
+      source: "tapped",
+      rejected: false,
+    };
+    this.gridAnalysisDetail = `${describeGrid(grid)} · ${inputs.length} stem(s) analysed in ${this.gridAnalysisMs.toFixed(0)} ms · single decode`;
+    return grid;
+  }
+
+  /** Bar length in seconds from the analysed grid (falls back to baseBpm). */
+  barSeconds(): number {
+    return this.songGrid ? this.songGrid.barSeconds : (4 * 60) / (this.baseBpm || 120);
+  }
+
+  /**
+   * Per-lane scrub landing candidate, in song-time seconds. Transient by
+   * design: replaced by the next scrub, cleared on song switch or source
+   * replacement, consumed by loop capture, never persisted.
+   */
+  scrubCandidate: (number | null)[] = [null, null, null, null];
+
+  setScrubCandidate(lane: number, seconds: number | null) {
+    if (lane < 0 || lane > 3) return;
+    this.scrubCandidate[lane] = seconds != null && Number.isFinite(seconds) ? Math.max(0, seconds) : null;
+  }
+
+  clearScrubCandidates(reason: string) {
+    this.scrubCandidate = [null, null, null, null];
+    void reason;
+  }
+
+
+
+
 
   private perfRecorder: PerformanceRecorder | null = null;
 
@@ -395,7 +490,7 @@ export class AudioEngine {
       wet.connect(preFx);
       // Phase 5C / Workstream 3:
       //   preFx → FxRack (tape filter + Beat Repeat worklet)
-      //         → BankRack (TONE → RHYTHM → MOTION → SPACE)
+      //         → BankRack (TONE → MOD → MOTION → SPACE)
       //         → fader → solo → analyser → master.
       const bankRack = new BankRack(ctx);
       const fxRack = new FxRack(ctx, bankRack.input);
@@ -419,8 +514,8 @@ export class AudioEngine {
         soloGain,
         soloed: false,
         linked: true,
-        fxVariation: { filter: 1, echo: 1, reverb: 1, beatRepeat: 1 },
-        fxActive: { filter: false, echo: false, reverb: false, beatRepeat: false },
+        fxVariation: { filter: 1, echo: 1, reverb: 1 },
+        fxActive: { filter: false, echo: false, reverb: false },
         dry,
         wet,
         filter,
@@ -1230,11 +1325,6 @@ export class AudioEngine {
       case "reverb":
         t.fxRack.setReverb(active, vi);
         return { ok: true, detail: `reverb ${active ? "on" : "released (tail decaying)"} · variation ${vi + 1}` };
-      case "beatRepeat": {
-        const res = await t.fxRack.setBeatRepeat(active, vi, this.effectiveBpm(id));
-        if (!res.ok) this.lastFxRejection = res.detail;
-        return res;
-      }
     }
   }
 
@@ -1255,14 +1345,6 @@ export class AudioEngine {
 
   // ------------------------------------------------- Workstream 3: 12 FX ---
 
-  /**
-   * Beat Repeat is the one algorithm that stays on its sample-accurate
-   * worklet inside the legacy rack; its bank stage is a passthrough.
-   */
-  private isWorkletAlgorithm(bank: BankIndex, algorithm: AlgorithmIndex): boolean {
-    return algorithmDef(bank, algorithm).id === "beatRepeat";
-  }
-
   /** Zero hold latency: the wet ramp starts at the current context time. */
   async setBankActive(
     id: TrackId,
@@ -1274,9 +1356,6 @@ export class AudioEngine {
     const t = this.tracks[id];
     if (!t?.bankRack || !this.ctx) return { ok: false, detail: "audio not unlocked" };
     const def = algorithmDef(bank, algorithm);
-    if (this.isWorkletAlgorithm(bank, algorithm)) {
-      return this.setFxActive(id, "beatRepeat", active, latched);
-    }
     const stage = t.bankRack.stage(bank);
     stage.setTempo(this.effectiveBpm(id), this.ctx.currentTime);
     stage.select(algorithm, this.ctx.currentTime);
@@ -1298,17 +1377,7 @@ export class AudioEngine {
     const t = this.tracks[id];
     if (!t?.bankRack || !this.ctx) return { ok: false, detail: "audio not unlocked" };
     const stage = t.bankRack.stage(bank);
-    const wasWorklet = this.isWorkletAlgorithm(bank, stage.selected);
-    const active = stage.isActive || (wasWorklet && t.fxActive.beatRepeat);
-    // Leaving Beat Repeat must silence its worklet, not leave it running.
-    if (wasWorklet && !this.isWorkletAlgorithm(bank, algorithm) && t.fxActive.beatRepeat) {
-      void this.setFxActive(id, "beatRepeat", false);
-    }
     stage.select(algorithm, this.ctx.currentTime);
-    if (active && this.isWorkletAlgorithm(bank, algorithm)) {
-      stage.setActive(false, this.ctx.currentTime);
-      void this.setFxActive(id, "beatRepeat", true);
-    }
     return { ok: true, detail: `stem ${id + 1} bank ${bank + 1} → ${algorithmDef(bank, algorithm).label}` };
   }
 
@@ -1318,10 +1387,6 @@ export class AudioEngine {
     if (!t?.bankRack || !this.ctx) return { ok: false, detail: "audio not unlocked" };
     const v = Math.min(1, Math.max(0, value));
     t.bankRack.stage(bank).setMacro(algorithm, v, this.ctx.currentTime);
-    if (this.isWorkletAlgorithm(bank, algorithm)) {
-      // The legacy Beat Repeat exposes four presets; the macro selects one.
-      void this.setFxVariation(id, "beatRepeat", Math.min(4, Math.max(1, Math.round(v * 3) + 1)));
-    }
     return { ok: true, detail: `stem ${id + 1} ${algorithmDef(bank, algorithm).label} macro → ${v.toFixed(2)}` };
   }
 
@@ -1329,7 +1394,6 @@ export class AudioEngine {
     const t = this.tracks[id];
     if (!t?.bankRack || !this.ctx) return { ok: false, detail: "audio not unlocked" };
     for (const stage of t.bankRack.stages) stage.setActive(false, this.ctx.currentTime);
-    void this.setFxActive(id, "beatRepeat", false);
     return { ok: true, detail: `stem ${id + 1} all four banks released` };
   }
 
@@ -2080,6 +2144,227 @@ export class AudioEngine {
    * (correlated material — an equal-power fade would bump +3 dB). Exactly one
    * playback path per stem survives.
    */
+  // ------------------------------------------------- per-lane audible scrub
+  /**
+   * ONE lane shuttles while the other three keep playing normally. The lane is
+   * a head in Heads mode and a tape track otherwise — the same universal lane
+   * meaning as `lane.reverse`. Grains are rendered through the lane's own input
+   * node, so its fader, mute, solo and FX all stay in the path; on release the
+   * landing frame is stored as the lane's scrub candidate so a following
+   * `loop.capture` snaps to the bar the performer actually parked on.
+   */
+  private laneScrub: ({
+    dir: 1 | -1;
+    pos: number;
+    startPos: number;
+    posCtxTime: number;
+    timer: ReturnType<typeof setInterval> | null;
+    last: number;
+    lastGrainAt: number;
+    grains: number;
+    gen: number;
+    live: { node: AudioBufferSourceNode; gain: GainNode; at: number; gen: number }[];
+  } | null)[] = [null, null, null, null];
+
+  private headLaneTimer: (ReturnType<typeof setInterval> | null)[] = [null, null, null, null];
+
+  /** Cycle length of the heads engine in seconds (0 when there is no cycle). */
+  private headCycleSeconds(): number {
+    const sr = this.ctx?.sampleRate ?? 48000;
+    return this.heads.cycleFrames > 0 ? this.heads.cycleFrames / sr : 0;
+  }
+
+  /** Silence one lane's normal playback without touching the other three. */
+  private stopTrackSources(lane: number) {
+    const t = this.tracks[lane];
+    if (!t) return;
+    for (const src of t.sources) {
+      try {
+        src.node.stop();
+        src.node.disconnect();
+      } catch {
+        /* already stopped */
+      }
+    }
+    t.sources = [];
+  }
+
+  /** Rejoin one lane to the SHARED playhead — it never gets its own clock. */
+  private restartTrack(lane: number, offset: number) {
+    const t = this.tracks[lane];
+    if (!t?.buffer || !this.ctx) return;
+    this.stopTrackSources(lane);
+    const bounds = t.loop.enabled ? this.loopBounds(t) : null;
+    const from = bounds ? Math.max(offset, bounds.start) : offset;
+    this.spawn(t, this.ctx.currentTime + LOOKAHEAD_S, from, false);
+  }
+
+  laneScrubState(lane: number) {
+    const ls = this.laneScrub[lane];
+    if (!ls) return null;
+    return { dir: ls.dir, pos: ls.pos, startPos: ls.startPos, grains: ls.grains, live: ls.live.length };
+  }
+
+  private laneScrubTick(lane: number) {
+    const ls = this.laneScrub[lane];
+    const ctx = this.ctx;
+    const t = this.tracks[lane];
+    if (!ls || !ctx || !t) return;
+    const nowMs = typeof performance !== "undefined" ? performance.now() : Date.now();
+    const dt = Math.min(0.2, Math.max(0, (nowMs - ls.last) / 1000));
+    ls.last = nowMs;
+    if (dt <= 0) return;
+    const rate = LANE_SCRUB_RATE;
+    const before = ls.pos;
+    ls.pos = Math.min(this.duration, Math.max(0, ls.pos + ls.dir * rate * dt));
+    ls.posCtxTime = ctx.currentTime;
+    if (ls.pos === before) return;
+    const src = t.buffer ?? this.scrubPcm(t);
+    if (!src) return;
+    const backwards = ls.dir < 0;
+    if (backwards && !t.reversed) t.reversed = reverseBuffer(ctx, src);
+    const buffer = backwards ? t.reversed : src;
+    if (!buffer) return;
+    const now = ctx.currentTime;
+    const dur = Math.min(0.12, Math.max(0.03, dt * 1.6));
+    const at = Math.max(now, ls.lastGrainAt);
+    const offsetS = backwards ? buffer.duration - ls.pos : ls.pos;
+    const g = ctx.createGain();
+    g.connect(t.input);
+    const tap = this.scrubTap(lane);
+    if (tap) g.connect(tap);
+    const node = ctx.createBufferSource();
+    node.buffer = buffer;
+    node.playbackRate.value = rate;
+    node.connect(g);
+    const fade = Math.min(0.006, dur / 3);
+    g.gain.setValueAtTime(0, at);
+    g.gain.linearRampToValueAtTime(GLOBAL_SCRUB_LEVEL, at + fade);
+    g.gain.setValueAtTime(GLOBAL_SCRUB_LEVEL, at + dur - fade);
+    g.gain.linearRampToValueAtTime(0, at + dur);
+    node.start(at, Math.min(Math.max(0, offsetS), Math.max(0, buffer.duration - 1e-3)), dur * rate);
+    ls.lastGrainAt = at + dur * 0.8;
+    ls.grains++;
+    const rec = { node, gain: g, at, gen: ls.gen };
+    ls.live.push(rec);
+    this.liveScrubPaths.add(node);
+    node.onended = () => {
+      const cur = this.laneScrub[lane];
+      if (cur) cur.live = cur.live.filter((r) => r !== rec);
+      this.liveScrubPaths.delete(node);
+      try {
+        node.disconnect();
+        g.disconnect();
+      } catch {
+        /* noop */
+      }
+    };
+    this.sampleScrubTaps();
+  }
+
+  beginLaneScrub(lane: number, dir: 1 | -1): { ok: boolean; detail: string } {
+    const ctx = this.ctx;
+    if (!ctx) return { ok: false, detail: "audio not unlocked" };
+    if (ctx.state !== "running") void ctx.resume();
+    if (this.duration === 0) return { ok: false, detail: "no stems decoded" };
+    const t = this.tracks[lane];
+    if (!t) return { ok: false, detail: `no lane ${lane + 1}` };
+    // Heads mode: the head lane scrubs at its own 1.5× ceiling inside the
+    // heads engine; the tape lanes are untouched.
+    if (this.heads.active) {
+      // In Heads mode the lane IS a head: shuttling moves that head's offset
+      // inside the cycle at the same 1.5× ceiling, and the head voice restarts
+      // so the movement is audible on the head itself, not on the tape mix.
+      const cycleS = this.headCycleSeconds();
+      if (cycleS <= 0) return { ok: false, detail: "heads have no cycle yet" };
+      const step = (LANE_SCRUB_RATE * (GLOBAL_SCRUB_INTERVAL_MS / 1000)) / cycleS;
+      const timer = setInterval(() => {
+        const cur = this.heads.heads[lane];
+        if (!cur) return;
+        this.heads = scrubHead(this.heads, lane, cur.offset + dir * step);
+        this.pushHeads();
+        this.restartHeadVoice(lane);
+      }, GLOBAL_SCRUB_INTERVAL_MS);
+      this.headLaneTimer[lane] = timer;
+      return { ok: true, detail: `head ${lane + 1} shuttle ${dir > 0 ? "forward" : "backward"} at ${LANE_SCRUB_RATE}× of its cycle` };
+    }
+    const existing = this.laneScrub[lane];
+    if (existing) {
+      existing.dir = dir;
+      return { ok: true, detail: `lane ${lane + 1} shuttle → ${dir > 0 ? "forward" : "backward"}` };
+    }
+    const now = ctx.currentTime;
+    const pos = this.position();
+    this.laneScrub[lane] = {
+      dir,
+      pos,
+      startPos: pos,
+      posCtxTime: now,
+      timer: null,
+      last: typeof performance !== "undefined" ? performance.now() : Date.now(),
+      lastGrainAt: now,
+      grains: 0,
+      gen: 1,
+      live: [],
+    };
+    // The lane's own normal playback is silenced for the duration of the
+    // shuttle; the other three lanes keep running on the shared timeline.
+    this.stopTrackSources(lane);
+    this.laneScrub[lane]!.timer = setInterval(() => this.laneScrubTick(lane), GLOBAL_SCRUB_INTERVAL_MS);
+    return {
+      ok: true,
+      detail: `lane ${lane + 1} shuttle ${dir > 0 ? "forward" : "backward"} at ${LANE_SCRUB_RATE}× from ${pos.toFixed(3)}s — the other three lanes keep playing`,
+    };
+  }
+
+  endLaneScrub(lane: number): { ok: boolean; detail: string } {
+    if (this.heads.active) {
+      const timer = this.headLaneTimer[lane];
+      if (timer) clearInterval(timer);
+      this.headLaneTimer[lane] = null;
+      const off = this.heads.heads[lane]?.offset ?? 0;
+      this.restartHeadVoice(lane);
+      return { ok: true, detail: `head ${lane + 1} landed at offset ${off.toFixed(4)} of its cycle` };
+    }
+    const ls = this.laneScrub[lane];
+    const ctx = this.ctx;
+    if (!ls || !ctx) return { ok: false, detail: `no lane ${lane + 1} scrub active` };
+    if (ls.timer) clearInterval(ls.timer);
+    ls.timer = null;
+    const sr = ctx.sampleRate;
+    const quantum = 128 / sr;
+    const handoff = ctx.currentTime + Math.max(2 * quantum, SCRUB_HANDOFF_MIN_S);
+    const dt = Math.max(0, handoff - ls.posCtxTime);
+    const landing = Math.min(this.duration, Math.max(0, ls.pos + ls.dir * LANE_SCRUB_RATE * dt));
+    // Invalidate the scheduler generation FIRST: no further grains, ever.
+    ls.gen++;
+    for (const rec of ls.live) {
+      try {
+        rec.gain.gain.cancelScheduledValues(handoff);
+        if (rec.at >= handoff) {
+          rec.gain.gain.setValueAtTime(0, handoff);
+          rec.node.stop(handoff);
+        } else {
+          rec.gain.gain.setValueAtTime(complementary(0).a * GLOBAL_SCRUB_LEVEL, handoff);
+          rec.gain.gain.linearRampToValueAtTime(0, handoff + SCRUB_HANDOFF_FADE_S);
+          rec.node.stop(handoff + SCRUB_HANDOFF_FADE_S);
+        }
+      } catch {
+        /* already stopped */
+      }
+    }
+    ls.live = [];
+    this.laneScrub[lane] = null;
+    // The landing frame becomes the lane's loop-capture candidate.
+    this.setScrubCandidate(lane, landing);
+    // Rejoin the shared transport: the lane is NOT given its own playhead.
+    if (this.requestedPlaying) this.restartTrack(lane, this.position());
+    return {
+      ok: true,
+      detail: `lane ${lane + 1} landed at ${landing.toFixed(3)}s (frame ${Math.round(landing * sr)}) after ${ls.grains} grains — candidate stored for loop capture`,
+    };
+  }
+
   endGlobalScrub(): { ok: boolean; detail: string } {
     const gs = this.globalScrub;
     const ctx = this.ctx;
@@ -3044,6 +3329,17 @@ export class AudioEngine {
           }
           return this.execute({ ...cmd, type: "tape.reverse", payload: { track: i, on: Boolean(p["reverse"]) } });
         }
+        case "lane.scrub.start": {
+          const i = Number(p["lane"]);
+          const dir: 1 | -1 = Number(p["direction"] ?? 1) < 0 ? -1 : 1;
+          const r = this.beginLaneScrub(i, dir);
+          return this.ack(cmd, r.ok ? "accepted" : "rejected", r.detail);
+        }
+        case "lane.scrub.end": {
+          const i = Number(p["lane"]);
+          const r = this.endLaneScrub(i);
+          return this.ack(cmd, r.ok ? "completed" : "rejected", r.detail);
+        }
         case "lane.audition": {
           const mask = String(p["mask"] ?? "");
           this.setAudition(mask);
@@ -3065,18 +3361,42 @@ export class AudioEngine {
           if (cmd.type === "loop.release") {
             return this.execute({ ...cmd, type: "loop.set", payload: { track: i, enabled: false } });
           }
-          // One bar of the detected grid, resolved on the SAME musical clock the
-          // grid analyser published, so a resize never drifts from the beat.
-          const bpm = this.baseBpm || 120;
-          const lengthS = (bars * 4 * 60) / bpm;
-          const start = Math.max(0, this.position());
+          // Length and start both come from the ANALYSED song grid: bars are
+          // real bars of the detected tempo, and a capture begins on the bar
+          // containing the accepted double-tap (or the stored scrub landing).
+          const grid = this.songGrid;
+          const barS = this.barSeconds();
+          const lengthS = bars * barS;
           const dur = this.duration || lengthS;
+          const here = Math.max(0, this.position());
+          let start: number;
+          let origin: string;
+          if (cmd.type === "loop.resize") {
+            // Resize keeps the existing loop start fixed.
+            start = Math.max(0, resolveLoop(t.loop, dur).start);
+            origin = "existing loop start held";
+          } else if (this.scrubCandidate[i] != null) {
+            start = Math.max(0, this.scrubCandidate[i]!);
+            origin = `scrub landing ${start.toFixed(3)}s`;
+            this.scrubCandidate[i] = null; // consumed, never persisted
+          } else if (grid) {
+            start = Math.max(0, barStartAt(grid, here));
+            origin = `grid bar containing ${here.toFixed(3)}s`;
+          } else {
+            start = here;
+            origin = "no grid — captured at the playhead";
+          }
           const res = this.execute({
             ...cmd,
             type: "loop.set",
             payload: { track: i, enabled: true, start: start / dur, end: Math.min(1, (start + lengthS) / dur) },
           });
-          return this.ack(cmd, res.status, `lane ${i + 1} loop ${bars} bar (${lengthS.toFixed(3)}s @ ${bpm.toFixed(2)} BPM) — ${res.detail}`);
+          const activateAt = grid ? nextBarAfter(grid, here) : here;
+          return this.ack(
+            cmd,
+            res.status,
+            `lane ${i + 1} loop ${bars} bar (${lengthS.toFixed(3)}s @ ${(grid?.bpm ?? this.baseBpm).toFixed(2)} BPM, ${origin}, active at ${activateAt.toFixed(3)}s) — ${res.detail}`,
+          );
         }
 
         case "heads.scrub": {
@@ -3160,6 +3480,9 @@ export class AudioEngine {
       effectiveBpm: this.tracks.map((_t, i) => this.effectiveBpm(i as TrackId)),
       bpmSource: this.bpmSource,
       baseBpm: this.baseBpm,
+      songGrid: this.songGrid,
+      gridDetail: this.gridAnalysisDetail,
+      scrubCandidates: [...this.scrubCandidate],
       soloMask: this.tracks.map((t) => (t.soloed ? "1" : "0")).join(""),
       linkMask: this.tracks.map((t) => (t.linked ? "1" : "0")).join(""),
       lastFxRejection: this.lastFxRejection,

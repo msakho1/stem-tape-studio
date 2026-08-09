@@ -66,6 +66,26 @@ export interface StoredProject {
     window: { start: number; end: number; shift: number; reverse: boolean };
     filter: { mode: string; amount: number };
     grid: { bpm: number | null; source: string };
+    /**
+     * Automatic song grid, persisted TIME-FIRST (seconds). Frames and sample
+     * rate are cross-checks only: stems can differ in length and encoder
+     * padding, so restore converts round(seconds × decodedContextSampleRate).
+     */
+    songGrid?: {
+      bpm: number;
+      beatsPerBar: number;
+      firstBeatS: number;
+      firstDownbeatS: number;
+      beatSeconds: number;
+      barSeconds: number;
+      analysisSampleRate: number;
+      analysisFrames: number;
+      durationS: number;
+      segments: { startS: number; bpm: number }[];
+      normalizedDownbeat: number;
+      source: string;
+      sourceHashes: string[];
+    } | null;
     song: number;
   };
   blobBackend: "opfs" | "indexeddb";
