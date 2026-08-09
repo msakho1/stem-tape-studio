@@ -336,8 +336,14 @@ export function ProjectDrawer({ engine, status, control }: Props) {
       <div className="st-pj-tiles">
         <div className="st-pj-tile" data-testid="bpm-field">
           <p className="st-pj-tile__k">tempo</p>
-          <p className="st-pj-tile__v">{sess.bpm} bpm</p>
-          <p className="st-pj-tile__sub">{sess.bpmSource === "provisional" ? "provisional" : sess.bpmSource}</p>
+          <p className="st-pj-tile__v">{sess.songGrid ? sess.songGrid.bpm.toFixed(2) : sess.bpm} bpm</p>
+          <p className="st-pj-tile__sub">
+            {sess.songGrid
+              ? `detected · ${describeGrid(sess.songGrid)}`
+              : sess.bpmSource === "manual"
+                ? "manual"
+                : "no stems loaded"}
+          </p>
         </div>
         <div className="st-pj-tile">
           <p className="st-pj-tile__k">local storage</p>
