@@ -701,13 +701,21 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
         }
 
         // ---- momentary audition (§2.1) --------------------------------------
-        // Bare Track hold auditions that lane alone for as long as it is held.
+        // Bare Track hold auditions the HELD lanes for as long as they are
+        // held. Two or three Track buttons together audition as a CHORD.
         // It writes NOTHING into mute or latched-solo state, so the release
         // restores the previous mix exactly.
-        const mask = [0, 1, 2, 3].map((k) => (k === i ? "1" : "0")).join("");
-        next = { ...next, activeTrack: i };
+        const lanes = heldTrackLanes(next, i);
+        const mask = maskOf(lanes);
+        next = { ...next, activeTrack: i, auditionChord: lanes.length > 1 ? lanes : [] };
         next = emit(next, "lane.audition", { mask }, { rowId: "lane.audition", t });
-        return fire(next, "lane.audition", `lane ${i + 1} momentary audition — mask ${mask}`, t);
+        return fire(
+          next,
+          "lane.audition",
+          `${lanes.length > 1 ? "chord" : `lane ${i + 1}`} momentary audition — mask ${mask}`,
+          t,
+        );
+
       }
 
 
