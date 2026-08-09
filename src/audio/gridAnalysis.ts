@@ -177,8 +177,32 @@ export function estimateTempo(
   return { bpm: 60 / (refined * hopSeconds), lagHops: refined, strength: y1 };
 }
 
-/** Comb search: the phase offset (in seconds) whose beat slots carry most onset energy. */
-export function estimateBeatPhase(env: Float32Array, beatHops: number, hopSeconds = HOP_SECONDS): number {
+/**
+ * Analysis latency of the flux frames.
+ *
+ * Frame `i` measures energy over [i·hop, i·hop + win). Compared with frame
+ * `i-1`, the ONLY new audio in it is its last hop, [i·hop + win − hop,
+ * i·hop + win). So a transient at time `T` first raises the flux at the frame
+ * whose start is `T − (win − hop)`: reading the frame start as the onset time
+ * reports every beat (win − hop) = 30 ms EARLY. Every phase result therefore
+ * adds this constant back.
+ */
+export function onsetLatency(hopSeconds = HOP_SECONDS, windowSeconds = WINDOW_SECONDS): number {
+  return Math.max(0, windowSeconds - hopSeconds);
+}
+
+/**
+ * Comb search: the phase offset (in seconds) whose beat slots carry most onset
+ * energy, corrected for the window latency above and folded into the first
+ * beat period so the result is the EARLIEST beat of the song, not an arbitrary
+ * later one.
+ */
+export function estimateBeatPhase(
+  env: Float32Array,
+  beatHops: number,
+  hopSeconds = HOP_SECONDS,
+  windowSeconds = WINDOW_SECONDS,
+): number {
   if (env.length === 0 || beatHops <= 0) return 0;
   const steps = Math.max(1, Math.round(beatHops));
   let bestOffset = 0;
@@ -194,8 +218,12 @@ export function estimateBeatPhase(env: Float32Array, beatHops: number, hopSecond
       bestOffset = off;
     }
   }
-  return bestOffset * hopSeconds;
+  const beatSeconds = beatHops * hopSeconds;
+  const corrected = bestOffset * hopSeconds + onsetLatency(hopSeconds, windowSeconds);
+  // Fold to the earliest beat at or after t = 0.
+  return ((corrected % beatSeconds) + beatSeconds) % beatSeconds;
 }
+
 
 /** Which beat of the bar carries the most energy — that beat is the downbeat. */
 export function estimateDownbeat(
@@ -231,25 +259,34 @@ export function mergeEnvelopes(envelopes: Float32Array[]): Float32Array {
  */
 export function analyzeSongGrid(
   inputs: AnalysisInput[],
-  opts: { beatsPerBar?: number; hopSeconds?: number } = {},
+  opts: { beatsPerBar?: number; hopSeconds?: number; windowSeconds?: number } = {},
 ): SongGrid | null {
   const usable = inputs.filter((i) => i.channel.length > 0 && i.sampleRate > 0);
   if (usable.length === 0) return null;
   const hopSeconds = opts.hopSeconds ?? HOP_SECONDS;
+  const windowSeconds = opts.windowSeconds ?? WINDOW_SECONDS;
   const beatsPerBar = opts.beatsPerBar ?? 4;
   const sampleRate = usable[0]!.sampleRate;
 
-  const envelopes = usable.map((i) => normalizeEnvelope(onsetEnvelope(i.channel, i.sampleRate, hopSeconds)));
+  const envelopes = usable.map((i) =>
+    normalizeEnvelope(onsetEnvelope(i.channel, i.sampleRate, hopSeconds, windowSeconds)),
+  );
   const env = mergeEnvelopes(envelopes);
   const tempo = estimateTempo(env, hopSeconds);
   if (!tempo) return null;
 
   const beatSeconds = 60 / tempo.bpm;
   const beatHops = tempo.lagHops;
-  const phaseS = estimateBeatPhase(env, beatHops, hopSeconds);
-  const downbeatIndex = estimateDownbeat(env, beatHops, phaseS / hopSeconds, beatsPerBar);
+  // Latency-corrected, folded into the first beat period.
+  const phaseS = estimateBeatPhase(env, beatHops, hopSeconds, windowSeconds);
+  // The downbeat search indexes RAW envelope frames, so undo the correction.
+  const rawPhaseHops = (phaseS - onsetLatency(hopSeconds, windowSeconds)) / hopSeconds;
+  const downbeatIndex = estimateDownbeat(env, beatHops, rawPhaseHops, beatsPerBar);
   const firstBeatS = phaseS;
-  const firstDownbeatS = phaseS + downbeatIndex * beatSeconds;
+  const barSeconds = beatSeconds * beatsPerBar;
+  // Earliest downbeat at or after t = 0, never an arbitrary later bar line.
+  const firstDownbeatS = ((((phaseS + downbeatIndex * beatSeconds) % barSeconds) + barSeconds) % barSeconds);
+
 
   const analysisFrames = usable.reduce((m, i) => Math.max(m, i.channel.length), 0);
   const durationS = usable.reduce((m, i) => Math.max(m, i.channel.length / i.sampleRate), 0);
@@ -260,7 +297,7 @@ export function analyzeSongGrid(
     firstBeatS,
     firstDownbeatS,
     beatSeconds,
-    barSeconds: beatSeconds * beatsPerBar,
+    barSeconds,
     analysisSampleRate: sampleRate,
     analysisFrames,
     durationS,

@@ -98,3 +98,39 @@ describe("grid persistence contract", () => {
     expect(roundTrip.normalizedDownbeat).toBeCloseTo(grid.firstDownbeatS / grid.durationS, 12);
   });
 });
+
+describe("beat phase and downbeat land on the actual transients", () => {
+  /** Ground truth: beats at 0, 0.6, 1.2 …; downbeats at 0, 2.4, 4.8 … */
+  it("100 BPM train starting at t=0 reports beat/downbeat at 0, not a window early", () => {
+    const grid = analyzeSongGrid([{ channel: clicks(100, 19.2), sampleRate: SR }])!;
+    expect(grid.bpm).toBeCloseTo(100, 0);
+    const beatErr = Math.min(grid.firstBeatS, Math.abs(grid.firstBeatS - grid.beatSeconds));
+    expect(beatErr).toBeLessThanOrEqual(0.012);
+    const barErr = Math.min(grid.firstDownbeatS, Math.abs(grid.firstDownbeatS - grid.barSeconds));
+    expect(barErr).toBeLessThanOrEqual(0.012);
+  });
+
+  it("recovers an offset phase to within one hop and keeps it inside one beat", () => {
+    const phase = 0.25;
+    const grid = analyzeSongGrid([{ channel: clicks(120, 16, phase), sampleRate: SR }])!;
+    expect(grid.firstBeatS).toBeGreaterThanOrEqual(0);
+    expect(grid.firstBeatS).toBeLessThan(grid.beatSeconds);
+    const err = Math.min(
+      Math.abs(grid.firstBeatS - phase),
+      Math.abs(grid.firstBeatS - phase + grid.beatSeconds),
+      Math.abs(grid.firstBeatS - phase - grid.beatSeconds),
+    );
+    expect(err).toBeLessThanOrEqual(0.012);
+  });
+
+  it("never reports a downbeat past the first bar", () => {
+    for (const bpm of [93, 100, 120, 140]) {
+      const grid = analyzeSongGrid([{ channel: clicks(bpm, 20, 0.3), sampleRate: SR }])!;
+      expect(grid.firstDownbeatS).toBeGreaterThanOrEqual(0);
+      expect(grid.firstDownbeatS).toBeLessThan(grid.barSeconds + 1e-9);
+      // The accented click is a real downbeat of the analysed grid.
+      const k = Math.round((grid.firstDownbeatS - grid.firstBeatS) / grid.beatSeconds);
+      expect(Math.abs(grid.firstDownbeatS - (grid.firstBeatS + k * grid.beatSeconds))).toBeLessThan(1e-9);
+    }
+  });
+});
