@@ -1826,6 +1826,9 @@ export class AudioEngine {
         scrubPeak: pt?.peak ?? 0,
       })),
       lastRejection: this.lastScrubRejection,
+      /** Release evidence: one record per stem for the most recent handoff. */
+      handoff: this.lastScrubHandoff,
+
     };
   }
 
