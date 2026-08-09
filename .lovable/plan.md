@@ -41,13 +41,20 @@ FN + Rocker stays the **global** four-stem shuttle — untouched, and per-lane s
 | PLAY + Track long | `stem.link` / `stem.unlink` — unchanged |
 | FN + Track single | bank / song navigation — unchanged |
 
-### Heads mode
+### Heads mode — four independent head lanes
 
-Same as Tape, except FN + Track single has **no** action (source moves to the panel). Track hold no longer selects source and never triggers PRINT. Track tap on a looping lane releases the loop instead of muting.
+Heads state is keyed by `laneId` (1–4), and `sourceStem` lives **inside** the lane record — it is not "per-stem". Default on entry is unchanged: all four lanes take the currently selected stem at offsets 0 / 25 / 50 / 75 %, preserving the existing symphony effect. The Heads panel may then reassign any single lane to a different stem.
+
+Each head lane scrubs, loops and reverses independently through the same universal gestures as Tape.
+
+Changing a lane's source is a transaction, in order: release that lane's active loop safely (at the next boundary, hidden-pointer rejoin), clear that lane's scrub candidate, equal-power crossfade the lane from old to new source at the lane's current read position, bump that lane's generation counter. The other three lanes are never restarted, repositioned or re-levelled.
+
+FN + Track single has **no** action in Heads (source moves to the panel). Track hold no longer selects source and never triggers PRINT. Track tap on a looping lane releases that lane's loop instead of muting.
 
 ### FX overlay
 
-Bare Track = FX-bank select; Track hold = momentary FX; Track + Vol −/+ = algorithm cycle; FN + Track **single** = latch/unlatch — all unchanged. The four universal FN-qualified gestures are added on top and target the **physical stem lane**, not the FX bank.
+Bare Track = FX-bank select; Track hold = momentary FX; Track + Vol −/+ = algorithm cycle; FN + Track **single** = latch/unlatch — all unchanged. **A bare Track tap in the FX overlay never releases a loop**: active loops keep playing and are routed through the selected FX. Loop release is available again as soon as the overlay is closed. The four universal FN-qualified gestures (scrub, reverse, resize) work inside the overlay and target the **physical stem/head lane**, not the FX bank.
+
 
 ## 2. Displaced mappings and their new homes
 
@@ -56,7 +63,7 @@ Bare Track = FX-bank select; Track hold = momentary FX; Track + Vol −/+ = algo
 | `fader.window` (FN+1/2/3 window start/end/shift) | **Advanced Loop panel** (new UI in the Tape page) driving the existing `window` engine commands unchanged |
 | `fader.windowReverse` (start past end) | Advanced Loop panel derives it from start/end exactly as `surface.ts:848` does today |
 | `fader.filter` (FN+4) | Retired — Filter remains in the TONE FX bank |
-| `heads.source` / `heads.print` Track hold | **Heads panel**: per-lane source assignment among Vocals / Drums / Bass / Instruments, persisted per song (`StoredProject.control.heads.laneSources`) |
+| `heads.source` / `heads.print` Track hold | **Heads panel**: per-lane source assignment among Vocals / Drums / Bass / Instruments, persisted per song as `StoredProject.control.heads.lanes[laneId] = { sourceStem, offsetPercent, reverse }` |
 | `heads.reverse` (Heads-only) | Replaced by universal `lane.reverse` |
 | `track.delete` (Track double-tap) | Removed from the surface entirely |
 | all `rec.*` Track gestures | Removed |
@@ -77,20 +84,27 @@ idle
  ├─ up ──────────────────► awaitingSecond (≤ trackTapWindowMs, 200ms, tunable 180–220)
  awaitingSecond
  ├─ timeout ─────────────► tapConfirmed
- ├─ down ────────────────► doubleConfirmed
+ ├─ down ────────────────► doubleClaimed      (claim only — nothing emitted yet)
+ doubleClaimed
+ ├─ up before holdMs, no chord qualifier ──► doubleConfirmed → loop.capture
+ ├─ t ≥ holdMs ────────────────────────────► auditioning (double abandoned)
+ ├─ FN / PLAY / Volume qualifies the press ─► that chord wins, double abandoned
+ ├─ cancel|blur|lostpointercapture ────────► release("cancel"), nothing emitted
  auditioning / any ── cancel|blur|lostpointercapture ──► release("cancel")
 ```
+
+The second press **claims** the double-tap on pointer/key down (so no tap-level mute can fire), but `loop.capture` is **finalized only on that second press's valid release**. A second press that turns into a hold, is cancelled, or becomes part of a qualified chord never captures a loop.
 
 **FN-qualified arbiter (runs first when FUNCTION is held):**
 
 ```text
 fnTrackDown
  ├─ Volume −/+ pressed while Track held ─► resizeClaimed   (highest precedence)
- ├─ second Track down within window ─────► reverseClaimed
+ ├─ second Track down within window ─────► reverseClaimed (finalized on valid release)
  └─ window expires, Track released ──────► fnSingleClaimed (layer-specific)
 ```
 
-Precedence, evaluated in order: `resize` → `reverse` → layer-specific FN+Track single → bare Track double → bare Track hold → bare Track tap.
+Precedence, evaluated in order: FN + Track + Volume → `resize`; FN + double-tap Track → `reverse`; FN + Track single → layer action; bare Track double-tap → `loop.capture`; bare Track hold → `audition`; bare Track tap → mute/release (bank-select in the FX overlay, never release).
 
 **Suppression sets** (declared on the map rows so the audit table is generated, not hand-written):
 
@@ -143,21 +157,44 @@ State per lane: `sourceStem`, `startFrame`, `endFrame`, `lengthBars`, `origin: "
 - **No loop:** create a reversible performance playback layer for that lane starting at its current audible source position; the hidden forward song pointer keeps advancing; toggling off crossfades back to the hidden position. Other lanes never restart or reposition.
 - Worklet uses the negative read step (no extra PCM). Node fallback uses the existing gated reverse-copy path and its allocation goes through the operation-level memory gate in `src/audio/memory.ts`.
 
-## 8. Automatic grid (unchanged, approved)
+## 8. Automatic grid + portable persistence
 
 `src/audio/gridAnalysis.ts` + `src/workers/gridWorker.ts`, run after ingest/restore, before performance-ready. Reads already-decoded channel data in sequential bounded chunks (no second decode, no cloud, no AI terminology, no confidence score). Spectral-flux onset envelope → autocorrelation/comb tempo over 60–200 BPM with explicit half/double disambiguation → phase by pulse-train correlation → downbeats by 4-beat energy accumulation.
 
+The grid belongs to the **song timeline**, not to any individual stem's length. Time in seconds is the authority; frames are derived.
+
 ```ts
 interface SongGrid {
-  gridId: string; sampleRate: number; beatsPerBar: number; originFrame: number;
-  beats: Int32Array; bars: Int32Array;
-  segments: { startFrame: number; bpm: number }[];
-  normalized: Float64Array;   // sample-rate-portable
+  gridId: string;
+  beatsPerBar: number;
+  analysisSampleRate: number;      // rate the analysis ran at
+  analysisOriginFrame: number;     // origin in analysis frames
+  songDurationSeconds: number;     // song-timeline duration at analysis time
+  beatTimesSeconds: Float64Array;  // AUTHORITATIVE
+  barTimesSeconds: Float64Array;   // AUTHORITATIVE
+  beatFramesAtAnalysis: Int32Array; // original analysis frames (audit)
+  normalized: Float64Array;        // cross-check only
+  segments: { startSeconds: number; bpm: number; source: "auto" | "manual" }[];
   sourceHashes: string[];
 }
 ```
 
-Persisted additively on `StoredProject.control.grid`; restored through `normalized` (≤1 frame at 44.1↔48 kHz); recomputed when `sourceHashes` change. FN ×4 tap remains the optional manual correction, writing `source: "manual"` segments. PerformanceLoop and tempo FX (`fx/banks.ts:38`, chop, Echo, Pump, Beat Repeat) read the frame map.
+**Restore:** primary computation is `frame = Math.round(beatTimeSeconds * decodedContextSampleRate)`. The rate-scaled form (`beatFramesAtAnalysis * ctxRate / analysisSampleRate`) and `normalized * songDurationFrames` are computed as **validators only**. Disagreement beyond 2 frames logs a diagnostic and keeps the seconds-derived value; disagreement beyond 50 ms marks the grid stale and re-runs analysis. `normalized` is never used to reconstruct positions when seconds are present, so unequal stem lengths, encoder padding and small decode-duration drift cannot shift the grid.
+
+Persisted additively on `StoredProject.control.grid`; recomputed when `sourceHashes` change. FN ×4 tap remains the optional manual correction, writing `source: "manual"` segments.
+
+**Grid consumers:** Tempo Echo, Pitch Echo (when synchronized), Reel Flange modulation (when synchronized), Rhythmic Gate, performance loops, chop and other grid transitions. Formant Shift does not consume the grid.
+
+## 8b. FX registry correction — Pump and Beat Repeat removed
+
+Button 4's bank is final: **MOD → Reel Flange → Formant Shift → Rhythmic Gate**.
+
+Every reference is updated in one pass: FX registry and bank names (`src/audio/fx/banks.ts`), `fx.*` commands and acknowledgements, persistence schema + migration, diagnostics, LED/readout labels, mapping export, DSP tests, grid consumers.
+
+**Deleted:** Pump DSP and its tests; Beat Repeat processor (`public/beat-repeat-processor.js`) and its dedicated ring-buffer infrastructure. Shared LFO, delay-line and worklet utilities are **retained** wherever another retained effect still uses them; deletion is only permitted after a reference check shows zero remaining importers.
+
+**Saved-project migration:** Beat Repeat slot → Reel Flange; Pump slot → Formant Shift; Rhythmic Gate state preserved verbatim. Migration clears any momentary or latched activation on the two remapped slots, so a project can never load with a different effect unexpectedly engaged. Parameter values from the removed effects are dropped, not reinterpreted; the replacement loads at its documented defaults.
+
 
 ## 9. Removal dependency audit
 
@@ -184,7 +221,7 @@ loop.release { lane, releaseAtFrame }
 grid.installed | grid.replaced | grid.correct
 ```
 
-Schema additions: `control.grid` → `SongGrid`; `control.heads.laneSources`. Removed: PRINT state fields where no legacy record references them. Rejections ack with a reason and mutate nothing.
+Schema additions: `control.grid` → `SongGrid` (seconds-authoritative); `control.heads.lanes[laneId] = { sourceStem, offsetPercent, reverse }`; `heads.lane.setSource { lane, sourceStem }` command (releases loop, clears candidate, crossfades that lane only). FX slot migration as in §8b. Removed: PRINT state fields where no legacy record references them. Rejections ack with a reason and mutate nothing.
 
 ## 11. Diagnostics and LEDs
 
@@ -202,7 +239,7 @@ LED arbitration gains distinct tiers for momentary audition, persistent solo, lo
 6. Automatic grid analysis + persistence.
 7. Shared PerformanceLoop: scrub capture, resize, hidden timeline, release.
 8. Universal reverse in node and worklet.
-9. Rewire tempo FX and deeper loop tools to the frame map.
+9. FX registry correction (Pump/Beat Repeat → Formant Shift/Reel Flange) + saved-project migration; rewire grid consumers to the frame map.
 10. LED/diagnostic changes + full browser/device matrix.
 
 ## 13. Evidence that will be produced
@@ -215,7 +252,8 @@ LED arbitration gains distinct tiers for momentary audition, persistent solo, lo
 
 **Measured latencies reported:** bare Track tap, FN+Track single, FN+double-tap Track, FN+Track+Volume resize — with the final chosen `trackTapWindowMs` and `holdMs`.
 
-## 14. Genuine unresolved decisions
+Added to §13: per-lane head source reassignment leaves the other three lanes' pointers and levels bit-identical; FX-overlay Track tap selects a bank while an active loop keeps sounding through it and is still releasable after the overlay closes; second-press-that-becomes-a-hold never emits `loop.capture`; grid restore at 44.1 ↔ 48 kHz agrees within 2 frames across all three representations; migrated Beat Repeat/Pump projects load as Reel Flange/Formant Shift with zero active momentary or latch state and Rhythmic Gate untouched.
 
-1. **Heads lane count vs stem count.** Heads runs four phase-offset heads over *one* source (`src/audio/heads.ts`). "FN + Fader scrubs that lane's source" is unambiguous in Tape (lane = stem) but in Heads all four lanes may share one source. Should Heads lanes 1–4 scrub/reverse/loop the *four heads independently over the shared source*, or should the Heads panel's per-lane source assignment make each lane a genuinely separate stem first? The panel spec implies the latter — confirm.
-2. **FX overlay bare-Track vs looping lane.** In the FX overlay a bare Track tap selects an FX bank. If that physical lane has an active performance loop, does the tap still select the bank (loop released only from Tape/Heads), or does loop release take precedence there too?
+## 14. Unresolved decisions
+
+None. Both previously open questions are resolved by this revision: Heads is four independent lanes keyed by `laneId` with per-lane `sourceStem` (§1), and an FX-overlay bare Track tap selects the bank and never releases a loop (§1).
