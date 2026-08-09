@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DEMO_NOTICE, buildDemoProject } from "@/audio/demo";
 import { ROLE_LABEL, STEM_ROLE_LIST, formatBytes, type StemRole } from "@/audio/format";
-import { ingestSequential, ingestStem, ROLE_TRACK } from "@/audio/ingest";
+import { analyzeGridForSession, ingestSequential, ingestStem, ROLE_TRACK } from "@/audio/ingest";
+import { describeGrid } from "@/audio/gridAnalysis";
 import { describeVerdict, formatMiB, judge, reverseCostBytes } from "@/audio/memory";
 import { downmixToMonoWav, persistDerived, predictMonoDownmix } from "@/audio/saver";
 import { resolveBpm, session, toStoredProject, type SessionState } from "@/audio/session";
