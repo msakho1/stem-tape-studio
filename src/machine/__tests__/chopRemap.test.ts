@@ -15,10 +15,20 @@ import { STEM_TAPE_ROW_BY_ID } from "@/machine/stemTapeV1Map";
 import type { Gesture } from "@/input/gestures";
 import type { Control } from "@/device/geometry";
 
-const tap = (control: "rocker-fwd" | "rocker-rwd", count = 1): Gesture =>
-  ({ control, level: "tap", count, t: 0, downMs: 40 }) as unknown as Gesture;
-const hold = (control: "rocker-fwd" | "rocker-rwd"): Gesture =>
-  ({ control, level: "hold", count: 1, t: 0, downMs: 900 }) as unknown as Gesture;
+let clock = 0;
+const tap = (control: "rocker-fwd" | "rocker-rwd", count = 1): Gesture => ({
+  type: "tap",
+  control,
+  count,
+  t: (clock += 1000),
+});
+const hold = (control: "rocker-fwd" | "rocker-rwd"): Gesture => ({
+  type: "holdStart",
+  control,
+  level: "hold",
+  duration: 500,
+  t: (clock += 1000),
+});
 
 function withPlayHeld() {
   return pressControl(initialSurfaceState(), "play");
