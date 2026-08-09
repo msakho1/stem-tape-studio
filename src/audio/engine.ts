@@ -1692,7 +1692,61 @@ export class AudioEngine {
     lastGrainAt: number[];
     grains: number;
     startedAt: number;
+    /** Per-track evidence — the shuttle is proven per stem, never by master RMS. */
+    perTrack: {
+      mode: "node" | "worklet";
+      startPos: number;
+      pos: number;
+      grains: number;
+      peak: number;
+      rms: number;
+    }[];
   } | null = null;
+
+  /**
+   * Per-track scrub-path analysers. The shuttle grains are tapped BEFORE the
+   * track input so the measurement can never be satisfied by the ordinary stem
+   * signal — a silent scrub processor reads zero here even while music plays.
+   */
+  private scrubTaps: (AnalyserNode | null)[] = [null, null, null, null];
+  private scrubTapBuf: Float32Array | null = null;
+
+  private scrubTap(id: number): AnalyserNode | null {
+    const ctx = this.ctx;
+    if (!ctx) return null;
+    let a = this.scrubTaps[id] ?? null;
+    if (!a) {
+      a = ctx.createAnalyser();
+      a.fftSize = 2048;
+      this.scrubTaps[id] = a;
+    }
+    return a;
+  }
+
+  /** Sample every scrub tap; called on each shuttle tick. */
+  private sampleScrubTaps() {
+    const gs = this.globalScrub;
+    if (!gs) return;
+    for (let i = 0; i < gs.perTrack.length; i++) {
+      const a = this.scrubTaps[i];
+      if (!a) continue;
+      if (!this.scrubTapBuf || this.scrubTapBuf.length !== a.fftSize) this.scrubTapBuf = new Float32Array(a.fftSize);
+      const buf = this.scrubTapBuf;
+      a.getFloatTimeDomainData(buf);
+      let sum = 0;
+      let peak = 0;
+      for (let k = 0; k < buf.length; k++) {
+        const v = buf[k]!;
+        sum += v * v;
+        const av = v < 0 ? -v : v;
+        if (av > peak) peak = av;
+      }
+      const rms = Math.sqrt(sum / buf.length);
+      const pt = gs.perTrack[i]!;
+      if (rms > pt.rms) pt.rms = rms;
+      if (peak > pt.peak) pt.peak = peak;
+    }
+  }
 
   globalScrubState() {
     const gs = this.globalScrub;
@@ -1703,8 +1757,23 @@ export class AudioEngine {
       grains: gs?.grains ?? 0,
       wasPlaying: gs?.wasPlaying ?? false,
       musicalRate: gs?.musicalRate ?? this.timeline.musicalRate(),
+      /** Read pointer + scrub-path output per stem — the four-pointer proof. */
+      tracks: (gs?.perTrack ?? this.tracks.map(() => null)).map((pt, i) => ({
+        id: i,
+        scrubActive: gs != null && pt != null,
+        mode: pt?.mode ?? this.tracks[i]?.engineMode ?? "node",
+        readPosition: pt?.pos ?? this.position(),
+        displacement: pt ? pt.pos - pt.startPos : 0,
+        grains: pt?.grains ?? 0,
+        scrubRms: pt?.rms ?? 0,
+        scrubPeak: pt?.peak ?? 0,
+      })),
+      lastRejection: this.lastScrubRejection,
     };
   }
+
+  /** Why the most recent shuttle attempt was refused, for the diagnostic record. */
+  lastScrubRejection: string | null = null;
 
   private scrubGrainAll(dtS: number) {
     const gs = this.globalScrub;
