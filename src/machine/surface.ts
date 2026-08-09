@@ -739,11 +739,21 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
         return { ...next, speedGlide: false, chopGlide: false };
       }
       if (g.control.startsWith("track-button") && g.level === "hold") {
-        // End the momentary audition. An empty mask is the explicit "restore"
-        // instruction — the engine never has to remember what it overrode.
-        next = emit(next, "lane.audition", { mask: "" }, { rowId: "lane.audition", t });
-        return fire(next, "lane.audition", "audition released — prior mix restored", t);
+        // One member of a chord audition can lift while the others stay down:
+        // the audition narrows to whatever is still held. An empty mask is the
+        // explicit "restore" instruction — the engine never remembers state.
+        const lanes = heldTrackLanes(next);
+        const mask = lanes.length ? maskOf(lanes) : "";
+        next = { ...next, auditionChord: lanes.length > 1 ? lanes : next.auditionChord };
+        next = emit(next, "lane.audition", { mask }, { rowId: "lane.audition", t });
+        return fire(
+          next,
+          "lane.audition",
+          mask ? `audition narrowed — mask ${mask}` : "audition released — prior mix restored",
+          t,
+        );
       }
+
       return next;
     }
 
