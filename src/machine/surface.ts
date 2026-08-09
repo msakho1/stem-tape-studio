@@ -199,8 +199,20 @@ function emit(
 let firedSeq = 0;
 
 function track(stem: TrackSlice["stem"], volume: number): TrackSlice {
-  return { content: "loaded", volume, stem, headPos: 0, headReverse: false, headMuted: false, headLevel: 0.8 };
+  return {
+    content: "loaded",
+    volume,
+    stem,
+    headPos: 0,
+    headReverse: false,
+    headMuted: false,
+    headLevel: 0.8,
+    soloLatched: false,
+    laneReverse: false,
+    laneLoop: { active: false, bars: 1 },
+  };
 }
+
 
 
 export function initialSurfaceState(): SurfaceState {
