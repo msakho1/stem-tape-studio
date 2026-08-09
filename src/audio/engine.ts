@@ -710,16 +710,32 @@ export class AudioEngine {
     return resolveLoop(t.loop, buf.duration);
   }
 
+  /**
+   * `offset` is always a SONG position (forward time). When the lane is
+   * reversed the read offset is mirrored into the reversed copy here, so every
+   * caller keeps speaking forward song time.
+   */
   private spawn(t: TrackRuntime, startAt: number, offset: number, fadeIn: boolean): LiveSource | null {
     const ctx = this.ctx!;
     const buf = this.activeBuffer(t);
     if (!buf) return null;
+    const readOffset = t.loop.reverse ? buf.duration - offset : offset;
     const fade = ctx.createGain();
     fade.connect(t.input);
     const node = ctx.createBufferSource();
     node.buffer = buf;
     node.playbackRate.value = this.timeline.currentRate(ctx.currentTime);
     node.connect(fade);
+    // Reversed + looping: ONLY the loop reverses. The node wraps itself inside
+    // the mirrored loop window, so the shared seam scheduler stays out of it.
+    if (t.loop.reverse && t.loop.enabled) {
+      const b = this.loopBounds(t);
+      if (b) {
+        node.loop = true;
+        node.loopStart = Math.max(0, buf.duration - b.end);
+        node.loopEnd = Math.min(buf.duration, buf.duration - b.start);
+      }
+    }
     const gen = ++t.generation;
     const live: LiveSource = { node, fade, gen, startAt, startPos: offset, stopAt: null };
     node.onended = () => {
@@ -736,11 +752,31 @@ export class AudioEngine {
     } else {
       fade.gain.setValueAtTime(1, startAt);
     }
-    node.start(startAt, Math.min(Math.max(0, offset), Math.max(0, buf.duration - 1e-4)));
+    node.start(startAt, Math.min(Math.max(0, readOffset), Math.max(0, buf.duration - 1e-4)));
     t.sources.push(live);
     t.scheduledStartAt = startAt;
     return live;
   }
+
+  /**
+   * Per-lane respawn for a reverse flip. Unlike `relocate` it NEVER anchors the
+   * shared timeline: the hidden song clock keeps running forward underneath
+   * while this one lane reads backwards, which is exactly what lets a
+   * reverse-off rejoin the current song position.
+   */
+  private respawnLane(t: TrackRuntime, songPos: number): boolean {
+    const ctx = this.ctx;
+    if (!ctx || !this.requestedPlaying) return false;
+    const at = ctx.currentTime + 0.01;
+    const outgoing = t.sources[t.sources.length - 1];
+    if (outgoing) this.fadeOutAndStop(t, outgoing, at);
+    const bounds = t.loop.enabled ? this.loopBounds(t) : null;
+    const pos = bounds ? Math.min(Math.max(songPos, bounds.start), bounds.end) : songPos;
+    const live = this.spawn(t, at, pos, true);
+    if (live) t.committedSeamAt = null;
+    return live != null;
+  }
+
 
   private fadeOutAndStop(t: TrackRuntime, live: LiveSource, at: number) {
     live.fade.gain.cancelScheduledValues(at);
