@@ -648,6 +648,22 @@ export function useDeviceSurface() {
   );
 
 
+  // Read-only verification fixture: the ordered command stream and the last
+  // gestures, so a browser harness can prove WHICH row fired (and which did not).
+  useEffect(() => {
+    const w = window as unknown as { __stemTapeSurface?: () => unknown };
+    w.__stemTapeSurface = () => ({
+      commands: stateRef.current.commands.slice(-20).map((c) => ({ id: c.id, type: c.type, payload: c.payload })),
+      lastGesture: stateRef.current.lastGesture,
+      globalScrub: stateRef.current.globalScrub,
+      playing: stateRef.current.playing,
+      power: stateRef.current.power,
+    });
+    return () => {
+      delete w.__stemTapeSurface;
+    };
+  }, []);
+
   const leds = useMemo(() => deriveLeds(state), [state]);
   const observed = useMemo(() => observedRows(state, leds), [state, leds]);
 
