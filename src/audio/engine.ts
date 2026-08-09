@@ -1875,7 +1875,13 @@ export class AudioEngine {
     return this.liveScrubPaths.size;
   }
 
+  /** Live wet/active state of all four FX banks on a stem — measured, not asserted. */
+  bankSnapshots(id: TrackId) {
+    return this.tracks[id]?.bankRack?.snapshot() ?? null;
+  }
+
   /** Live AudioParam value of each stem fader — what is actually audible. */
+
   trackGainValues(): number[] {
     return this.tracks.map((t) => t.gain.gain.value);
   }
