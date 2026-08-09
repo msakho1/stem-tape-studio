@@ -48,6 +48,20 @@ describe("global shuttle command stream", () => {
     expect(s.note).toMatch(/rejected/);
   });
 
+  it("emits one end whichever key is released first (F first or Q/A first)", () => {
+    // Both orders funnel through the same single `dir: null` dispatch in the
+    // keyboard layer, so the reducer must answer identically.
+    for (const _order of ["f-first", "rocker-first"]) {
+      let s = applyGlobalScrub(initialSurfaceState(), 1);
+      s = applyGlobalScrub(s, null);
+      expect(s.commands.filter((c) => c.type === "transport.scrub.end")).toHaveLength(1);
+      // A duplicate cleanup (blur, then Escape) must not fire a second end.
+      s = applyGlobalScrub(s, null);
+      expect(s.commands.filter((c) => c.type === "transport.scrub.end")).toHaveLength(1);
+      expect(s.globalScrub).toBe(0);
+    }
+  });
+
   it("release is a no-op when nothing is shuttling", () => {
     const s = applyGlobalScrub(initialSurfaceState(), null);
     expect(s.commands).toHaveLength(0);

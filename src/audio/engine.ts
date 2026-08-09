@@ -21,7 +21,7 @@
 
 import { ANTI_CLICK_MATRIX } from "./antiClick";
 import type { Ack, AudioCommand } from "./commands";
-import { equalPower, measuredDryWet, sampleCurve, FILTER_FADE_S, SEAM_FADE_S } from "./crossfade";
+import { complementary, equalPower, measuredDryWet, sampleCurve, FILTER_FADE_S, SEAM_FADE_S } from "./crossfade";
 import { bufferBytes } from "./format";
 import { GLIDE_TAU, glideCurve, glideDurationS } from "./glide";
 import { allowed, defaultBudget, describeVerdict, formatMiB, judge, SSR_BUDGET, type MemoryBudget } from "./memory";
@@ -91,6 +91,14 @@ const GLOBAL_SCRUB_RATE = 1.6;
 const GLOBAL_SCRUB_INTERVAL_MS = 45;
 /** Grain level; the shuttle is deliberately quieter than normal playback. */
 const GLOBAL_SCRUB_LEVEL = 0.85;
+/**
+ * Scrub → playback handoff, seconds. The release must NOT use the 80 ms
+ * transport lookahead: that overshoots audibly after key release. One shared
+ * render-quantum-aligned frame instead.
+ */
+export const SCRUB_HANDOFF_MIN_S = 0.003;
+/** Complementary (correlated) fade taking any sounding grain to zero. */
+export const SCRUB_HANDOFF_FADE_S = 0.004;
 
 export type TrackId = 0 | 1 | 2 | 3;
 
@@ -727,8 +735,14 @@ export class AudioEngine {
 
   /** All four stems start at ONE shared, scheduled context time. */
   private startAll(offset: number): { started: number; startAt: number } {
-    const ctx = this.ctx!;
-    const startAt = ctx.currentTime + LOOKAHEAD_S;
+    return this.startAllAt(offset, this.ctx!.currentTime + LOOKAHEAD_S);
+  }
+
+  /**
+   * Start every stem at an EXPLICIT shared context time. The scrub release
+   * uses this with a render-quantum handoff instead of the 80 ms lookahead.
+   */
+  private startAllAt(offset: number, startAt: number): { started: number; startAt: number } {
     let started = 0;
     for (const t of this.tracks) {
       if (!t.buffer) continue;
@@ -739,6 +753,7 @@ export class AudioEngine {
     this.timeline.anchor(startAt, offset);
     return { started, startAt };
   }
+
 
   /** Largest difference between the scheduled start times of live sources. */
   startSpreadMs(): number {
@@ -1165,6 +1180,16 @@ export class AudioEngine {
       if (msg) void t.worklet.post(msg);
     }
   }
+
+  /** Fan out at an EXPLICIT shared frame (scrub release handoff). */
+  private fanoutAt(at: number, build: (t: TrackRuntime, at: number) => Parameters<WorkletTrack["post"]>[0] | null) {
+    for (const t of this.tracks) {
+      if (t.engineMode !== "worklet" || !t.worklet) continue;
+      const msg = build(t, at);
+      if (msg) void t.worklet.post(msg);
+    }
+  }
+
 
   // ------------------------------------------------- Phase 5C stem + FX
 
@@ -1689,6 +1714,8 @@ export class AudioEngine {
     dir: 1 | -1;
     pos: number;
     startPos: number;
+    /** Context time at which `pos` was last integrated — the integral anchor. */
+    posCtxTime: number;
     wasPlaying: boolean;
     musicalRate: number;
     timer: ReturnType<typeof setInterval> | null;
@@ -1696,6 +1723,10 @@ export class AudioEngine {
     lastGrainAt: number[];
     grains: number;
     startedAt: number;
+    /** Scheduler generation. Bumped on release; stale grains are never emitted. */
+    gen: number;
+    /** Every grain currently scheduled or sounding, per track. */
+    live: { node: AudioBufferSourceNode; gain: GainNode; at: number; endAt: number; gen: number }[][];
     /** Per-track evidence — the shuttle is proven per stem, never by master RMS. */
     perTrack: {
       mode: "node" | "worklet";
@@ -1706,6 +1737,26 @@ export class AudioEngine {
       rms: number;
     }[];
   } | null = null;
+
+  /** Release handoff evidence — one record per stem, per release. */
+  lastScrubHandoff: {
+    keyupContextFrame: number;
+    handoffContextFrame: number;
+    fadeMs: number;
+    stems: {
+      id: number;
+      mode: "node" | "worklet";
+      landingFrame: number;
+      restartFrame: number;
+      landingErrorFrames: number;
+      queuedGrainsBefore: number;
+      queuedGrainsAfter: number;
+      activeScrubSources: number;
+      activeNormalSources: number;
+      livePlaybackPaths: number;
+    }[];
+  } | null = null;
+
 
   /**
    * Per-track scrub-path analysers. The shuttle grains are tapped BEFORE the
@@ -1775,6 +1826,9 @@ export class AudioEngine {
         scrubPeak: pt?.peak ?? 0,
       })),
       lastRejection: this.lastScrubRejection,
+      /** Release evidence: one record per stem for the most recent handoff. */
+      handoff: this.lastScrubHandoff,
+
     };
   }
 
@@ -1787,6 +1841,7 @@ export class AudioEngine {
     if (!gs || !ctx) return;
     const before = gs.pos;
     gs.pos = Math.min(this.duration, Math.max(0, gs.pos + gs.dir * GLOBAL_SCRUB_RATE * dtS));
+    gs.posCtxTime = ctx.currentTime;
     // ONE shared playhead: the timeline is re-anchored, every stem reads it.
     this.timeline.anchor(ctx.currentTime, gs.pos);
     this.timelineFrozenAt = ctx.currentTime;
@@ -1795,6 +1850,7 @@ export class AudioEngine {
     const now = ctx.currentTime;
     const dur = Math.min(0.12, Math.max(0.03, dtS * 1.6));
     const backwards = gs.dir < 0;
+    const gen = gs.gen;
     let emitted = 0;
     for (let i = 0; i < this.tracks.length; i++) {
       const t = this.tracks[i]!;
@@ -1832,7 +1888,11 @@ export class AudioEngine {
       gs.lastGrainAt[i] = at + dur * 0.8;
       pt.grains++;
       emitted++;
+      const rec = { node, gain: g, at, endAt: at + dur, gen };
+      (gs.live[i] ??= []).push(rec);
       node.onended = () => {
+        const cur = this.globalScrub;
+        if (cur) cur.live[i] = (cur.live[i] ?? []).filter((r) => r !== rec);
         try {
           node.disconnect();
           g.disconnect();
@@ -1844,6 +1904,7 @@ export class AudioEngine {
     if (emitted > 0) gs.grains++;
     this.sampleScrubTaps();
   }
+
 
   /**
    * PCM for a track whose node buffer was released after worklet handoff.
@@ -1914,9 +1975,13 @@ export class AudioEngine {
       dir,
       pos,
       startPos: pos,
+      posCtxTime: now,
       wasPlaying,
       musicalRate,
+      gen: 1,
+      live: this.tracks.map(() => []),
       timer: null,
+
       last: typeof performance !== "undefined" ? performance.now() : Date.now(),
       lastGrainAt: this.tracks.map(() => now),
       grains: 0,
@@ -1940,54 +2005,156 @@ export class AudioEngine {
     };
   }
 
+  /** Advance the shuttle integral to `atCtx` without emitting a grain. */
+  private integrateScrubTo(atCtx: number): number {
+    const gs = this.globalScrub;
+    if (!gs) return this.position();
+    const dt = Math.max(0, atCtx - gs.posCtxTime);
+    const p = Math.min(this.duration, Math.max(0, gs.pos + gs.dir * GLOBAL_SCRUB_RATE * dt));
+    return p;
+  }
+
   setGlobalScrubDirection(dir: 1 | -1): { ok: boolean; detail: string } {
     const gs = this.globalScrub;
     if (!gs) return this.beginGlobalScrub(dir);
     if (gs.dir !== dir) {
+      const ctx = this.ctx;
+      if (ctx) {
+        gs.pos = this.integrateScrubTo(ctx.currentTime);
+        gs.posCtxTime = ctx.currentTime;
+      }
       gs.dir = dir;
       this.worbletShuttle(dir, gs.pos, true);
     }
     return { ok: true, detail: `shuttle direction → ${dir > 0 ? "forward" : "backward"} at ${gs.pos.toFixed(3)}s` };
   }
 
+  /**
+   * Scrub → playback handoff.
+   *
+   * The release is a single SHARED context frame on the next render quantum —
+   * NOT the 80 ms transport lookahead, which overshoots audibly after key
+   * release. At that frame the scrub integral is evaluated once; the resulting
+   * landing position is authoritative for every stem, node and worklet alike.
+   * The scheduler generation is invalidated in the same call, so no further
+   * grain can be emitted, every queued future grain is stopped outright, and
+   * anything already sounding is taken to zero over a 4 ms COMPLEMENTARY fade
+   * (correlated material — an equal-power fade would bump +3 dB). Exactly one
+   * playback path per stem survives.
+   */
   endGlobalScrub(): { ok: boolean; detail: string } {
     const gs = this.globalScrub;
     const ctx = this.ctx;
     if (!gs || !ctx) return { ok: false, detail: "no global scrub active" };
     if (gs.timer) clearInterval(gs.timer);
-    // Restore forward direction and the musical rate on the worklet kernels
-    // BEFORE the transport decision, so release never leaves a stem at 3×.
-    this.worbletShuttle(1, gs.pos, false);
+    gs.timer = null;
+    const sr = ctx.sampleRate;
+    const keyup = ctx.currentTime;
+    // One shared handoff on the next render quantum (two quanta of margin so
+    // the scheduling itself cannot land in the past).
+    const quantum = 128 / sr;
+    const handoff = keyup + Math.max(2 * quantum, SCRUB_HANDOFF_MIN_S);
+    const landing = this.integrateScrubTo(handoff);
+    const landingFrame = Math.round(landing * sr);
+    const handoffFrame = Math.round(handoff * sr);
+
+    // 1. Invalidate the scheduler generation — no further grains, ever.
+    gs.gen++;
+    const queuedBefore = gs.live.map((l) => l.length);
+
+    // 2. Cancel queued grains, fade sounding ones over the short handoff.
+    const stillSounding: number[] = this.tracks.map(() => 0);
+    for (let i = 0; i < gs.live.length; i++) {
+      for (const rec of gs.live[i] ?? []) {
+        try {
+          rec.gain.gain.cancelScheduledValues(handoff);
+          if (rec.at >= handoff) {
+            // Never started: kill it outright, it cannot be allowed to appear.
+            rec.gain.gain.setValueAtTime(0, handoff);
+            rec.node.stop(handoff);
+          } else {
+            const g = complementary(0).a * GLOBAL_SCRUB_LEVEL;
+            rec.gain.gain.setValueAtTime(g, handoff);
+            rec.gain.gain.linearRampToValueAtTime(0, handoff + SCRUB_HANDOFF_FADE_S);
+            rec.node.stop(handoff + SCRUB_HANDOFF_FADE_S);
+            stillSounding[i] = (stillSounding[i] ?? 0) + 1;
+          }
+        } catch {
+          /* already stopped */
+        }
+      }
+      gs.live[i] = [];
+    }
+
     const evidence = gs.perTrack
       .map((p, i) => `T${i + 1} ${p.mode} Δ${(p.pos - p.startPos).toFixed(3)}s g${p.grains} rms${p.rms.toFixed(4)}`)
       .join(", ");
+    const perTrack = gs.perTrack;
+    const moved = landing - gs.startPos;
     this.globalScrub = null;
-    const now = ctx.currentTime;
-    this.timeline.anchor(now, gs.pos);
-    this.timelineFrozenAt = now;
-    const moved = gs.pos - gs.startPos;
+
+    // 3. Re-anchor every timeline and the visible playhead to the handoff.
+    this.timeline.anchor(handoff, landing);
+    this.timelineFrozenAt = handoff;
+
+    // 4. Start (or park) normal playback at exactly the same shared frame.
+    let started = 0;
     if (gs.wasPlaying) {
       this.requestedPlaying = true;
-      const { started, startAt } = this.startAll(gs.pos);
-      this.fanout((_t, at) => ({
-        type: "start",
-        applyAtContextFrame: at,
-        sourceFrame: Math.round(this.timeline.positionAt(at / ctx.sampleRate) * ctx.sampleRate),
+      started = this.startAllAt(landing, handoff).started;
+      this.fanoutAt(handoffFrame, () => ({ type: "setDirection", applyAtContextFrame: handoffFrame, direction: 1 }));
+      this.fanoutAt(handoffFrame, () => ({
+        type: "setRate",
+        applyAtContextFrame: handoffFrame,
+        rate: gs.musicalRate,
+        rampFrames: 0,
       }));
+      this.fanoutAt(handoffFrame, () => ({ type: "start", applyAtContextFrame: handoffFrame, sourceFrame: landingFrame }));
       this.invalidateSeams();
-      this.timeline.endInertia(startAt, gs.musicalRate);
+      this.timeline.endInertia(handoff, gs.musicalRate);
       this.transportPhase = "playing";
-      return {
-        ok: true,
-        detail: `shuttle released → ${gs.pos.toFixed(3)}s (${moved >= 0 ? "+" : ""}${moved.toFixed(3)}s), ${started} stems resume at ${gs.musicalRate.toFixed(3)}× [${evidence}]`,
-      };
+    } else {
+      this.fanoutAt(handoffFrame, () => ({ type: "setDirection", applyAtContextFrame: handoffFrame, direction: 1 }));
+      this.fanoutAt(handoffFrame, () => ({
+        type: "setRate",
+        applyAtContextFrame: handoffFrame,
+        rate: gs.musicalRate,
+        rampFrames: 0,
+      }));
+      this.fanoutAt(handoffFrame, () => ({ type: "stop", applyAtContextFrame: handoffFrame }));
     }
-    this.fanout((_t, at) => ({ type: "stop", applyAtContextFrame: at }));
+
+    // 5. Evidence, per stem.
+    this.lastScrubHandoff = {
+      keyupContextFrame: Math.round(keyup * sr),
+      handoffContextFrame: handoffFrame,
+      fadeMs: SCRUB_HANDOFF_FADE_S * 1000,
+      stems: this.tracks.map((t, i) => {
+        const restart = t.sources.length > 0 ? Math.round((t.sources[t.sources.length - 1]!.startPos ?? landing) * sr) : landingFrame;
+        const normal = t.buffer ? (gs.wasPlaying ? t.sources.length : 0) : 0;
+        return {
+          id: i,
+          mode: perTrack[i]?.mode ?? "node",
+          landingFrame,
+          restartFrame: restart,
+          landingErrorFrames: Math.abs(restart - landingFrame),
+          queuedGrainsBefore: queuedBefore[i] ?? 0,
+          queuedGrainsAfter: 0,
+          activeScrubSources: 0,
+          activeNormalSources: normal,
+          livePlaybackPaths: normal,
+        };
+      }),
+    };
+
     return {
       ok: true,
-      detail: `shuttle released → parked at ${gs.pos.toFixed(3)}s (${moved >= 0 ? "+" : ""}${moved.toFixed(3)}s, transport stopped) [${evidence}]`,
+      detail: gs.wasPlaying
+        ? `shuttle released → handoff frame ${handoffFrame}, landing ${landing.toFixed(3)}s (${moved >= 0 ? "+" : ""}${moved.toFixed(3)}s), ${started} stems resume at ${gs.musicalRate.toFixed(3)}×, ${stillSounding.reduce((a, b) => a + b, 0)} grains faded over ${(SCRUB_HANDOFF_FADE_S * 1000).toFixed(1)} ms [${evidence}]`
+        : `shuttle released → parked at ${landing.toFixed(3)}s (handoff frame ${handoffFrame}, ${moved >= 0 ? "+" : ""}${moved.toFixed(3)}s, transport stopped) [${evidence}]`,
     };
   }
+
 
   beginHeadScrub(head: number, pointerId: number, normalized: number, timestamp: number): { ok: boolean; detail: string } {
     if (!this.heads.active) return { ok: false, detail: "scrub ignored — heads mode is not active" };
