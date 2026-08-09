@@ -1569,7 +1569,14 @@ export class AudioEngine {
       const bus = this.ctx.createGain();
       bus.gain.value = 1;
       bus.connect(t!.input);
+      // Measurement tap: proves the HEAD path itself is sounding, not the
+      // transport underneath it.
+      const tap = this.ctx.createAnalyser();
+      tap.fftSize = 2048;
+      bus.connect(tap);
+      this.headsTap = tap;
       this.headsBus = bus;
+
       for (const s of t!.sources) {
         try {
           s.node.onended = null;
