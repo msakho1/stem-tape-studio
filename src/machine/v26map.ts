@@ -44,7 +44,7 @@ export const V26_MAP: V26Row[] = [
   // TRACK BUTTONS
   { id: "track.record", group: "track", input: "hold", command: "record — starts on your first sound", status: "state" },
   { id: "track.tap", group: "track", input: "tap", command: "stop the take · mute / unmute", status: "state" },
-  { id: "track.delete", group: "track", input: "double-tap", command: "delete", status: "state" },
+  { id: "loop.capture", group: "track", input: "double-tap", command: "capture one-bar loop (delete removed)", status: "state" },
   { id: "track.bank", group: "track", input: "FN + track", command: "banks: jump · tap again = next song", status: "state" },
 
   // PLAY
