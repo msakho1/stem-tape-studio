@@ -213,7 +213,9 @@ export class GestureEngine {
       const claim = this.pending.get(control);
       if (claim) {
         clearTimeout(claim.timer);
-        this.pending.set(control, { ...claim, count: claim.count + 1 });
+        // count now tracks 1 → 2 → 3; the emit is still deferred to the
+        // release that closes the sequence.
+        this.pending.set(control, { ...claim, count: Math.min(3, claim.count + 1) });
       }
 
       rec.holdTimer = setTimeout(() => {
@@ -304,23 +306,28 @@ export class GestureEngine {
     // ---- deferred Track arbitration -------------------------------------
     if (isDeferredControl(control)) {
       const claim = this.pending.get(control);
-      if (claim && claim.count >= 2) {
-        // Second valid release confirms the double-tap. Exactly one gesture is
-        // emitted for the whole sequence: no ×1 was ever dispatched.
-        clearTimeout(claim.timer);
+      const count = claim ? claim.count : 1;
+      const firstReleaseAt = claim ? claim.firstReleaseAt : t;
+      if (claim) clearTimeout(claim.timer);
+      if (count >= 3) {
+        // The third valid release confirms independent latched playback. One
+        // gesture for the whole sequence: no ×1 and no ×2 was ever dispatched.
         this.pending.delete(control);
-        this.decisionLatencyMs.push(t - claim.firstReleaseAt);
-        this.emit({ type: "tap", control, count: 2, t });
+        this.decisionLatencyMs.push(t - firstReleaseAt);
+        if (this.decisionLatencyMs.length > 50) this.decisionLatencyMs.shift();
+        this.emit({ type: "tap", control, count: 3, t });
         return;
       }
+      // ×1 waits to see whether a ×2 arrives; ×2 waits again for a ×3. Nothing
+      // audible is committed until the window closes.
       const timer = setTimeout(() => {
         this.pending.delete(control);
         const at = performance.now();
-        this.decisionLatencyMs.push(at - t);
+        this.decisionLatencyMs.push(at - firstReleaseAt);
         if (this.decisionLatencyMs.length > 50) this.decisionLatencyMs.shift();
-        this.emit({ type: "tap", control, count: 1, t: at });
+        this.emit({ type: "tap", control, count, t: at });
       }, this.timings.trackDecisionMs);
-      this.pending.set(control, { count: 1, timer, firstReleaseAt: t });
+      this.pending.set(control, { count, timer, firstReleaseAt });
       return;
     }
 

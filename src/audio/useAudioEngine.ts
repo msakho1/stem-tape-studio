@@ -72,9 +72,28 @@ export function useAudioEngine(commands: AudioCommand[]) {
         timelineEvents: engine.timelineBus.log.slice(-40),
       };
     };
+    /**
+     * Heads Mode truth for the browser proof: the four independent head
+     * pointers, their play/latch/hold/loop state, the heads-bus RMS (head-path
+     * output, isolated from the transport) and the ordered heads event log —
+     * alongside the frozen main transport position.
+     */
+    (w as unknown as { __stemTapeHeads?: () => unknown }).__stemTapeHeads = () => {
+      const d = engine.status();
+      return {
+        active: engine.headLanes.active,
+        transportPosition: d.position,
+        transportPlaying: d.actuallyPlaying,
+        headsRms: engine.headsRms(),
+        heads: engine.headLanes.snapshot(),
+        summary: engine.headLanes.summary(),
+        log: engine.headLanes.log.slice(-40),
+      };
+    };
     return () => {
       delete w.__stemTapeScrub;
       delete w.__stemTapeTransport;
+      delete (w as unknown as { __stemTapeHeads?: () => unknown }).__stemTapeHeads;
     };
   }, [engine]);
 
@@ -94,7 +113,8 @@ export function useAudioEngine(commands: AudioCommand[]) {
           cmd.type.startsWith("transport.") ||
           cmd.type.startsWith("stem.") ||
           cmd.type.startsWith("tape.") ||
-          cmd.type.startsWith("fx.");
+          cmd.type.startsWith("fx.") ||
+          cmd.type.startsWith("heads.");
         if (needsAudio && !engine.ready) {
           const result = await engine.unlock();
           setUnlockNote(result.detail);
@@ -116,13 +136,13 @@ export function useAudioEngine(commands: AudioCommand[]) {
         engine.endLaneFaderScrub(head, e.value);
       }
       if (e.channel === "headScrub") {
-        // The whole gesture is audible: start latches the origin, every
-        // rAF-coalesced move travels the tape, release lands it exactly.
-        const ts = e.timestamp ?? performance.now();
-        if (e.phase === "start") engine.beginHeadScrub(head, e.pointerId ?? -1, e.value, ts);
-        else if (e.phase === "cancel") engine.cancelHeadScrub(head);
-        else if (e.committed || e.phase === "end") engine.endHeadScrub(head, e.value);
-        else engine.previewHeadScrub(head, e.value, ts);
+        // Heads v2: FUNCTION + fader N is an audible positional scrub of HEAD N
+        // over lane N. The release parks the landing and stores it as the next
+        // loop start for that head.
+        if (e.phase === "start") engine.headLanes.beginScrub(head);
+        else if (e.phase === "cancel") engine.headLanes.endScrub(head, e.value);
+        else if (e.committed || e.phase === "end") engine.headLanes.endScrub(head, e.value);
+        else engine.headLanes.previewScrub(head, e.value);
         return;
       }
       if (e.channel === "laneScrub") {
@@ -136,7 +156,7 @@ export function useAudioEngine(commands: AudioCommand[]) {
         return;
       }
       if (e.channel === "headLevel") {
-        if (e.phase !== "start") engine.applyHeadLevel(head, e.value);
+        if (e.phase !== "start") engine.headLanes.setLevel(head, e.value);
         return;
       }
       if (e.channel !== "fader") return;
@@ -172,6 +192,8 @@ export function useAudioEngine(commands: AudioCommand[]) {
     const tick = (t: number) => {
       if (t - last > 100) {
         last = t;
+        // Park any unlooped head that has run off the end of its source.
+        engine.headLanes.tick();
         setStatus(engine.status());
       }
       raf = requestAnimationFrame(tick);
