@@ -57,7 +57,18 @@ export interface TrackSlice {
   headReverse: boolean;
   headMuted: boolean;
   headLevel: number;
+  /** PLAY + Track latching solo (§2.1). Independent of momentary audition. */
+  soloLatched: boolean;
+  /**
+   * Universal lane layer. `laneReverse` replaces the old heads-only
+   * `heads.reverse`; one flag serves Tape, Heads and the FX overlay so the
+   * three layers cannot diverge.
+   */
+  laneReverse: boolean;
+  /** Dedicated one-bar (or resized) capture loop for this lane. */
+  laneLoop: { active: boolean; bars: number };
 }
+
 
 
 export interface FiredRow {
@@ -188,8 +199,20 @@ function emit(
 let firedSeq = 0;
 
 function track(stem: TrackSlice["stem"], volume: number): TrackSlice {
-  return { content: "loaded", volume, stem, headPos: 0, headReverse: false, headMuted: false, headLevel: 0.8 };
+  return {
+    content: "loaded",
+    volume,
+    stem,
+    headPos: 0,
+    headReverse: false,
+    headMuted: false,
+    headLevel: 0.8,
+    soloLatched: false,
+    laneReverse: false,
+    laneLoop: { active: false, bars: 1 },
+  };
 }
+
 
 
 export function initialSurfaceState(): SurfaceState {
@@ -424,43 +447,64 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
         const i = trackIndexOf(c);
         const slice = next.tracks[i]!;
 
-        // Heads mappings claim Track gestures before recording, mute/delete and
-        // bank navigation (§3.3). The FX overlay still wins for FX buttons.
+        // ---- universal Function-qualified lane gesture ----------------------
+        // FUNCTION + double-tap Track = lane reverse, in EVERY layer (Tape,
+        // Heads, FX overlay). This is one implementation, not three: the layer
+        // only decides which lane the command lands on, never what it means.
+        if (fn && g.count === 2) {
+          const rev = !slice.laneReverse;
+          next = { ...next, tracks: setTrack(next, i, { laneReverse: rev, headReverse: rev }), activeTrack: i };
+          next = emit(next, "lane.reverse", { lane: i, reverse: rev }, { rowId: "lane.reverse", t });
+          return fire(next, "lane.reverse", `lane ${i + 1} → ${rev ? "reverse" : "forward"}`, t);
+        }
+
+        if (fn) {
+          // FN + track ×1 = bank jump. The next-song row now lives behind the
+          // bank-jump arm rather than FN + double-tap, which lane reverse owns.
+          next = { ...next, bank: i, bankJumpArmed: true, activeTrack: i };
+          return fire(next, "track.bank", `bank jump → bank ${i + 1}`, t);
+        }
+
+        next = { ...next, activeTrack: i };
+
+        // PLAY + Track = LATCHING solo (§2.1). Distinct from the momentary
+        // audition, which is a bare hold and never latches.
+        if (next.pressed.includes("play")) {
+          const on = !slice.soloLatched;
+          next = { ...next, tracks: setTrack(next, i, { soloLatched: on }) };
+          const mask = next.tracks.map((s) => (s.soloLatched ? "1" : "0")).join("");
+          next = emit(next, "stem.solo", { stem: i, on, mask }, { rowId: "track.solo", t });
+          return fire(next, "track.solo", `lane ${i + 1} solo ${on ? "latched" : "released"} — mask ${mask}`, t);
+        }
+
+        // ---- approved bare-Track state table (§2.1) -------------------------
+        // ×2 = capture / release the dedicated lane loop. Delete is gone from
+        // the surface entirely; nothing here is destructive.
+        if (g.count === 2) {
+          const active = !slice.laneLoop.active;
+          next = { ...next, tracks: setTrack(next, i, { laneLoop: { ...slice.laneLoop, active } }) };
+          next = emit(
+            next,
+            active ? "loop.capture" : "loop.release",
+            { lane: i, bars: slice.laneLoop.bars },
+            { rowId: active ? "loop.capture" : "loop.release", t },
+          );
+          return fire(
+            next,
+            active ? "loop.capture" : "loop.release",
+            `lane ${i + 1} ${active ? `loop captured (${slice.laneLoop.bars} bar)` : "loop released"}`,
+            t,
+          );
+        }
+
+        // ×1 = mute / unmute. In heads mode the lane is a head, so the mute
+        // lands on the head level instead of the dry stem.
         if (next.headsMode && !next.perf.fxOverlay) {
-          if (g.count === 2) {
-            const rev = !slice.headReverse;
-            next = { ...next, tracks: setTrack(next, i, { headReverse: rev }) };
-            next = emit(next, "heads.reverse", { head: i, reverse: rev }, { rowId: "heads.reverse", t });
-            return fire(next, "heads.reverse", `head ${i + 1} → ${rev ? "reverse" : "forward"}`, t);
-          }
           const muted = !slice.headMuted;
           next = { ...next, tracks: setTrack(next, i, { headMuted: muted }) };
           next = emit(next, "heads.mute", { head: i, muted }, { rowId: "heads.mute", t });
           return fire(next, "heads.mute", `head ${i + 1} ${muted ? "muted" : "unmuted"}`, t);
         }
-
-        if (fn) {
-          // FN + track = banks: jump · tap again = next song
-          if (g.count === 1) {
-            next = { ...next, bank: i, bankJumpArmed: true, activeTrack: i };
-            return fire(next, "track.bank", `bank jump → bank ${i + 1}`, t);
-          }
-          const song = (next.bank * 4 + (((next.song % 4) + 1) % 4)) % 16;
-          next = { ...loadSong(next, song), bankJumpArmed: true };
-          // P4 song load: stop the transport, hold the position, wait for Play.
-          next = emit({ ...next, playing: false }, "song.load", { song }, { rowId: "track.bank", t });
-          return fire(next, "track.bank", `tap again → next song (${song + 1}/16) — transport stopped, waiting for PLAY`, t);
-        }
-
-        next = { ...next, activeTrack: i };
-
-        // ---- approved bare-Track state table (§2.1) -------------------------
-        // Double-tap NEVER deletes. Delete has been removed from the surface
-        // entirely; double-tap is reserved for `loop.capture` (Step 7).
-        if (g.count === 2) {
-          return fire(next, "track.tap", `track ${i + 1} double-tap → loop capture (engine lands in Step 7); delete removed from the surface`, t);
-        }
-
 
         switch (slice.content) {
           case "empty":
@@ -473,6 +517,7 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
           }
         }
       }
+
 
 
       if (c === "rocker-fwd" || c === "rocker-rwd") {
@@ -516,6 +561,21 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
       if (c === "volume-plus" || c === "volume-minus") {
         const dir = c === "volume-plus" ? 1 : -1;
         if (fn) {
+          // Universal lane loop resize: FUNCTION + Track held + Volume ±.
+          // Halve / double the captured loop of every held lane, in bars, so
+          // the resize is grid-exact instead of a free-running time nudge.
+          const held = next.pressed.filter((x) => x.startsWith("track-button")).map(trackIndexOf);
+          if (held.length > 0) {
+            const notes: string[] = [];
+            for (const i of held) {
+              const slice = next.tracks[i]!;
+              const bars = Math.max(0.25, Math.min(8, dir > 0 ? slice.laneLoop.bars * 2 : slice.laneLoop.bars / 2));
+              next = { ...next, tracks: setTrack(next, i, { laneLoop: { ...slice.laneLoop, bars } }) };
+              next = emit(next, "loop.resize", { lane: i, bars }, { rowId: "loop.resize", t });
+              notes.push(`lane ${i + 1} → ${bars} bar`);
+            }
+            return fire(next, "loop.resize", notes.join(" · "), t);
+          }
           const chopWindowOffset = clamp01(next.chopWindowOffset + dir * 0.0625);
           next = { ...next, chopWindowOffset };
           return fire(next, "volume.chopWindow", `chop window → ${chopWindowOffset.toFixed(3)}`, t);
@@ -524,6 +584,7 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
         next = emit({ ...next, masterVolume }, "master.gain", { level: masterVolume }, { rowId: "volume.master", t });
         return fire(next, "volume.master", `master → ${masterVolume.toFixed(3)}`, t);
       }
+
 
       // Heads reverse is a Track double-tap (§3.3), never a fader double-tap.
 
@@ -553,16 +614,27 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
         const i = trackIndexOf(c);
         const slice = next.tracks[i]!;
 
-        if (state.headsMode && !state.perf.fxOverlay) {
-          // §3.3: a loaded track becomes the heads SOURCE. PRINT is removed.
-          if (slice.content === "empty")
-            return fire(next, "heads.source", `track ${i + 1} is empty — nothing to feed the heads`, t);
-          next = { ...next, headsSource: i };
-          next = emit(next, "heads.source", { track: i }, { rowId: "heads.source", t });
-          return fire(next, "heads.source", `track ${i + 1} is now the heads source`, t);
+        if (fn) {
+          // FUNCTION + Track hold in heads mode assigns the source lane; the
+          // heads source is a PANEL/qualified decision, never a bare hold.
+          if (state.headsMode && !state.perf.fxOverlay) {
+            if (slice.content === "empty")
+              return fire(next, "heads.source", `track ${i + 1} is empty — nothing to feed the heads`, t);
+            next = { ...next, headsSource: i };
+            next = emit(next, "heads.source", { track: i }, { rowId: "heads.source", t });
+            return fire(next, "heads.source", `track ${i + 1} is now the heads source`, t);
+          }
+          return next;
         }
 
-        return fire(next, "track.hold", `track ${i + 1} hold — live input recording has been removed`, t);
+        // ---- momentary audition (§2.1) --------------------------------------
+        // Bare Track hold auditions that lane alone for as long as it is held.
+        // It writes NOTHING into mute or latched-solo state, so the release
+        // restores the previous mix exactly.
+        const mask = [0, 1, 2, 3].map((k) => (k === i ? "1" : "0")).join("");
+        next = { ...next, activeTrack: i };
+        next = emit(next, "lane.audition", { mask }, { rowId: "lane.audition", t });
+        return fire(next, "lane.audition", `lane ${i + 1} momentary audition — mask ${mask}`, t);
       }
 
 
@@ -585,8 +657,15 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
       if (g.control.startsWith("rocker") || g.control.startsWith("volume")) {
         return { ...next, speedGlide: false, chopGlide: false };
       }
+      if (g.control.startsWith("track-button") && g.level === "hold") {
+        // End the momentary audition. An empty mask is the explicit "restore"
+        // instruction — the engine never has to remember what it overrode.
+        next = emit(next, "lane.audition", { mask: "" }, { rowId: "lane.audition", t });
+        return fire(next, "lane.audition", "audition released — prior mix restored", t);
+      }
       return next;
     }
+
 
     case "tapThenHold": {
       if (g.control === "function") {

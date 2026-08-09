@@ -1161,6 +1161,24 @@ export class AudioEngine {
     return this.baseBpm * rate;
   }
 
+  /**
+   * Momentary audition (bare Track hold). A NON-destructive layer that sits on
+   * top of latched solo and mutes: it is never written into track.muted or
+   * track.soloed, so releasing the hold restores the exact prior mix.
+   */
+  private audition: boolean[] = [false, false, false, false];
+
+  /** Lanes currently auditioned — surfaced in diagnostics. */
+  auditionMask(): string {
+    return this.audition.map((a) => (a ? "1" : "0")).join("");
+  }
+
+  /** Apply a whole audition mask at once ("0110", or "" to end the audition). */
+  setAudition(mask: string) {
+    this.audition = [0, 1, 2, 3].map((i) => mask[i] === "1");
+    this.applyAudibilityAll();
+  }
+
   private anySolo(): boolean {
     return this.tracks.some((t) => t.soloed);
   }
@@ -1169,20 +1187,24 @@ export class AudioEngine {
    * Correction 3. Solo never mutates saved mute state:
    *   audibleBySolo = anySolo ? track.soloed : true
    *   inputOpen     = audibleBySolo && (!track.muted || track.soloed)
+   *
+   * Momentary audition overrides both while it is held, and leaves no trace.
    */
   applyAudibility(id: TrackId) {
     const t = this.tracks[id];
     if (!t || !this.ctx) return;
-    const audibleBySolo = this.anySolo() ? t.soloed : true;
+    const auditing = this.audition.some(Boolean);
+    const audibleBySolo = auditing ? this.audition[id] === true : this.anySolo() ? t.soloed : true;
     // Heads layer OVER the dry mix: the four head voices ride the source
     // track's own chain, so the source gate stays open while heads are active
     // even if the user has muted that stem in the dry mixer (which only
     // silences the normal copy — the head voices replace it).
     const headsSource = this.heads.active && this.heads.source === id;
-    const open = audibleBySolo && (headsSource || !t.muted || t.soloed);
+    const open = audibleBySolo && (headsSource || !t.muted || t.soloed || (auditing && this.audition[id] === true));
     t.fxRack?.setInputOpen(open);
     this.setGain(t.soloGain.gain, audibleBySolo ? 1 : 0);
   }
+
 
   private applyAudibilityAll() {
     for (let i = 0; i < this.tracks.length; i++) this.applyAudibility(i as TrackId);
@@ -3008,14 +3030,55 @@ export class AudioEngine {
           this.pushHeads();
           return this.ack(cmd, "completed", `head ${i + 1} ${this.heads.heads[i]!.muted ? "muted" : "unmuted"} — still a head, geometry unchanged`);
         }
-        case "heads.reverse": {
-          if (!this.heads.active) return this.ack(cmd, "rejected", "heads mode is not active");
-          const i = Number(p["head"]);
-          this.heads = toggleHeadReverse(this.heads, i);
-          this.pushHeads();
-          this.restartHeadVoice(i);
-          return this.ack(cmd, "completed", `head ${i + 1} → ${this.heads.heads[i]!.reverse ? "reverse" : "forward"} (crossfaded, no reversed PCM copy on the worklet path)`);
+        // ---- universal lane layer ------------------------------------------
+        // ONE implementation for Tape, Heads and the FX overlay. In heads mode
+        // the lane is a head; otherwise it is the tape track. `heads.reverse`
+        // no longer exists as a command type.
+        case "lane.reverse": {
+          const i = Number(p["lane"]);
+          if (this.heads.active) {
+            this.heads = toggleHeadReverse(this.heads, i);
+            this.pushHeads();
+            this.restartHeadVoice(i);
+            return this.ack(cmd, "completed", `lane ${i + 1} (head) → ${this.heads.heads[i]!.reverse ? "reverse" : "forward"} — pointer negated, no reversed PCM`);
+          }
+          return this.execute({ ...cmd, type: "tape.reverse", payload: { track: i, on: Boolean(p["reverse"]) } });
         }
+        case "lane.audition": {
+          const mask = String(p["mask"] ?? "");
+          this.setAudition(mask);
+          return this.ack(
+            cmd,
+            "completed",
+            mask.includes("1")
+              ? `momentary audition ${mask} — mutes and latched solo untouched`
+              : "audition released — prior mix restored exactly",
+          );
+        }
+        case "loop.capture":
+        case "loop.release":
+        case "loop.resize": {
+          const i = Number(p["lane"]) as TrackId;
+          const t = this.tracks[i];
+          if (!t) return this.ack(cmd, "rejected", `no lane ${i}`);
+          const bars = Math.max(0.25, Number(p["bars"] ?? 1));
+          if (cmd.type === "loop.release") {
+            return this.execute({ ...cmd, type: "loop.set", payload: { track: i, enabled: false } });
+          }
+          // One bar of the detected grid, resolved on the SAME musical clock the
+          // grid analyser published, so a resize never drifts from the beat.
+          const bpm = this.baseBpm || 120;
+          const lengthS = (bars * 4 * 60) / bpm;
+          const start = Math.max(0, this.position());
+          const dur = this.duration || lengthS;
+          const res = this.execute({
+            ...cmd,
+            type: "loop.set",
+            payload: { track: i, enabled: true, start: start / dur, end: Math.min(1, (start + lengthS) / dur) },
+          });
+          return this.ack(cmd, res.status, `lane ${i + 1} loop ${bars} bar (${lengthS.toFixed(3)}s @ ${bpm.toFixed(2)} BPM) — ${res.detail}`);
+        }
+
         case "heads.scrub": {
           if (!this.heads.active) return this.ack(cmd, "rejected", "heads mode is not active");
           const i = Number(p["head"]);

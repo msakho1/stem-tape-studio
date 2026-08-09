@@ -36,6 +36,13 @@ export interface GestureTimings {
   longHoldMs: number;
   /** Max gap between taps for a multi-tap sequence. */
   multiTapGapMs: number;
+  /**
+   * DEFERRED Track decision window. Track controls must NOT fire optimistically:
+   * a first tap that mutes and then un-mutes when the second tap arrives is
+   * audible. The first release opens this window; a timeout confirms one tap, a
+   * second press claims the double-tap.
+   */
+  trackDecisionMs: number;
   /** Max gap between a tap's release and a following press for tap-then-hold. */
   tapThenHoldGapMs: number;
   /** Two controls pressed within this window count as a chord. */
@@ -63,10 +70,23 @@ export const DEFAULT_TIMINGS: GestureTimings = {
   powerHoldMs: 1200,
   longHoldMs: 5000,
   multiTapGapMs: 300,
+  // 200 ms sits inside the approved 180–220 ms band: short enough that a single
+  // musical mute still feels immediate, long enough for a deliberate double-tap.
+  trackDecisionMs: 200,
   tapThenHoldGapMs: 300,
   chordWindowMs: 120,
   chordReleaseSpreadMs: 120,
 };
+
+/**
+ * Controls whose taps are DEFERRED instead of optimistic. Only the four Track
+ * buttons: they are the only controls whose ×1 action is audible and
+ * irreversible-sounding (mute / loop release).
+ */
+export function isDeferredControl(control: Control): boolean {
+  return control.startsWith("track-button");
+}
+
 
 
 interface PressRecord {
@@ -109,15 +129,21 @@ export function isContinuousControl(control: Control): boolean {
  * Deliberately framework-free: no React, no DOM queries. Components feed it
  * normalised control events; it emits semantic gestures.
  *
- * Multi-tap without sluggishness: a tap fires OPTIMISTICALLY on release with
- * count = 1, and a following tap inside the window emits the same control again
- * with count = 2, 3, 4... Consumers treat a higher count as a revision of the
- * lower one rather than waiting out the window, so a single musical tap is
- * never delayed.
+ * Two tap policies:
+ *  - NON-deferred controls (Play, rocker, volume, FUNCTION, faders) keep the
+ *    optimistic policy: `count = 1` fires on release and a following tap
+ *    revises it upward, protected by the reducer's TxnSnapshot rollback.
+ *  - DEFERRED controls (the four Track buttons) never fire optimistically. The
+ *    first release opens a `trackDecisionMs` window; the timeout confirms one
+ *    tap, a second press claims the double-tap and the second valid release
+ *    confirms it. Crossing the hold threshold cancels the pending decision and
+ *    the momentary audition owns the gesture instead.
  */
 export class GestureEngine {
   private presses = new Map<Control, PressRecord>();
   private taps = new Map<Control, TapRecord>();
+  /** Deferred Track decisions awaiting a timeout or a second press. */
+  private pending = new Map<Control, { count: number; timer: ReturnType<typeof setTimeout>; firstReleaseAt: number }>();
   private gestureListeners = new Set<GestureListener>();
   private rawListeners = new Set<RawListener>();
   private chordActive: Control[] | null = null;
@@ -125,8 +151,12 @@ export class GestureEngine {
   private chordReleased: Control[] = [];
   private chordTimer: ReturnType<typeof setTimeout> | null = null;
   private seq = 0;
+  /** Measured latency, first release → emitted tap, per deferred control. */
+  readonly decisionLatencyMs: number[] = [];
 
   timings: GestureTimings = { ...DEFAULT_TIMINGS };
+
+
 
   onGesture(fn: GestureListener): () => void {
     this.gestureListeners.add(fn);
@@ -177,8 +207,20 @@ export class GestureEngine {
       const isTapThenHold =
         prevTap != null && prevTap.count > 0 && t - prevTap.lastReleaseAt <= this.timings.tapThenHoldGapMs;
 
+      // Deferred second press: claim the double-tap now, stop the timeout that
+      // would otherwise have confirmed a single tap. Nothing is emitted until
+      // the second RELEASE, so an aborted second press cannot fake a double-tap.
+      const claim = this.pending.get(control);
+      if (claim) {
+        clearTimeout(claim.timer);
+        this.pending.set(control, { ...claim, count: claim.count + 1 });
+      }
+
       rec.holdTimer = setTimeout(() => {
         rec.holdFired = true;
+        // Crossing the hold threshold cancels any pending tap/double-tap: the
+        // gesture becomes a momentary audition and emits nothing else.
+        this.dropPending(control);
         if (isTapThenHold) {
           this.emit({ type: "tapThenHold", control, t: performance.now() });
           this.clearTaps(control);
@@ -192,6 +234,7 @@ export class GestureEngine {
           t: performance.now(),
         });
       }, this.timings.holdMs);
+
 
       // Power gets its own threshold, only on FUNCTION (the v2.6 power row).
       if (control === "function") {
@@ -258,6 +301,28 @@ export class GestureEngine {
     }
 
 
+    // ---- deferred Track arbitration -------------------------------------
+    if (isDeferredControl(control)) {
+      const claim = this.pending.get(control);
+      if (claim && claim.count >= 2) {
+        // Second valid release confirms the double-tap. Exactly one gesture is
+        // emitted for the whole sequence: no ×1 was ever dispatched.
+        clearTimeout(claim.timer);
+        this.pending.delete(control);
+        this.decisionLatencyMs.push(t - claim.firstReleaseAt);
+        this.emit({ type: "tap", control, count: 2, t });
+        return;
+      }
+      const timer = setTimeout(() => {
+        this.pending.delete(control);
+        const at = performance.now();
+        this.decisionLatencyMs.push(at - t);
+        if (this.decisionLatencyMs.length > 50) this.decisionLatencyMs.shift();
+        this.emit({ type: "tap", control, count: 1, t: at });
+      }, this.timings.trackDecisionMs);
+      this.pending.set(control, { count: 1, timer, firstReleaseAt: t });
+      return;
+    }
 
     // Optimistic tap: fire now, revise upward if more taps arrive.
     const prev = this.taps.get(control);
@@ -276,6 +341,7 @@ export class GestureEngine {
     this.clearTimers(rec);
     this.presses.delete(control);
     this.clearTaps(control);
+    this.dropPending(control);
     if (this.chordActive?.includes(control)) this.registerChordRelease(control, t);
     this.emitRaw({ id: ++this.seq, control, phase: "cancel", pointerId, t });
     this.emit({ type: "cancel", control, t });
@@ -286,6 +352,15 @@ export class GestureEngine {
     for (const control of [...this.presses.keys()]) {
       this.cancel(control, this.presses.get(control)!.pointerId, t);
     }
+    for (const control of [...this.pending.keys()]) this.dropPending(control);
+  }
+
+  /** Discard a pending Track decision without emitting anything. */
+  private dropPending(control: Control) {
+    const claim = this.pending.get(control);
+    if (!claim) return;
+    clearTimeout(claim.timer);
+    this.pending.delete(control);
   }
 
   private clearTimers(rec: PressRecord) {
@@ -300,6 +375,7 @@ export class GestureEngine {
     if (prev?.timer) clearTimeout(prev.timer);
     this.taps.delete(control);
   }
+
 
   private evaluateChordStart(t: number) {
     if (this.chordActive) return;
