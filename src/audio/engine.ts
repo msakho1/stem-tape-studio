@@ -1951,6 +1951,12 @@ export class AudioEngine {
     const ctx = this.ctx;
     if (!gs || !ctx) return { ok: false, detail: "no global scrub active" };
     if (gs.timer) clearInterval(gs.timer);
+    // Restore forward direction and the musical rate on the worklet kernels
+    // BEFORE the transport decision, so release never leaves a stem at 3×.
+    this.worbletShuttle(1, gs.pos, false);
+    const evidence = gs.perTrack
+      .map((p, i) => `T${i + 1} ${p.mode} Δ${(p.pos - p.startPos).toFixed(3)}s g${p.grains} rms${p.rms.toFixed(4)}`)
+      .join(", ");
     this.globalScrub = null;
     const now = ctx.currentTime;
     this.timeline.anchor(now, gs.pos);
@@ -1969,12 +1975,13 @@ export class AudioEngine {
       this.transportPhase = "playing";
       return {
         ok: true,
-        detail: `shuttle released → ${gs.pos.toFixed(3)}s (${moved >= 0 ? "+" : ""}${moved.toFixed(3)}s), ${started} stems resume at ${gs.musicalRate.toFixed(3)}×`,
+        detail: `shuttle released → ${gs.pos.toFixed(3)}s (${moved >= 0 ? "+" : ""}${moved.toFixed(3)}s), ${started} stems resume at ${gs.musicalRate.toFixed(3)}× [${evidence}]`,
       };
     }
+    this.fanout((_t, at) => ({ type: "stop", applyAtContextFrame: at }));
     return {
       ok: true,
-      detail: `shuttle released → parked at ${gs.pos.toFixed(3)}s (${moved >= 0 ? "+" : ""}${moved.toFixed(3)}s, transport stopped)`,
+      detail: `shuttle released → parked at ${gs.pos.toFixed(3)}s (${moved >= 0 ? "+" : ""}${moved.toFixed(3)}s, transport stopped) [${evidence}]`,
     };
   }
 
