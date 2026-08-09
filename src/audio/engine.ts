@@ -1181,6 +1181,16 @@ export class AudioEngine {
     }
   }
 
+  /** Fan out at an EXPLICIT shared frame (scrub release handoff). */
+  private fanoutAt(at: number, build: (t: TrackRuntime, at: number) => Parameters<WorkletTrack["post"]>[0] | null) {
+    for (const t of this.tracks) {
+      if (t.engineMode !== "worklet" || !t.worklet) continue;
+      const msg = build(t, at);
+      if (msg) void t.worklet.post(msg);
+    }
+  }
+
+
   // ------------------------------------------------- Phase 5C stem + FX
 
   /** BPM source hierarchy: grid → manual → provisional 120. */
