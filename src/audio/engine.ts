@@ -1835,6 +1835,25 @@ export class AudioEngine {
   /** Why the most recent shuttle attempt was refused, for the diagnostic record. */
   lastScrubRejection: string | null = null;
 
+  /**
+   * Every scrub grain node that is currently alive. Registered on creation and
+   * removed by the node's own `onended`, so `scrubPathCount()` is a measurement
+   * of the graph rather than an assertion about it.
+   */
+  readonly liveScrubPaths = new Set<AudioBufferSourceNode>();
+
+  /** Active scrub audio paths right now (0 once a release has settled). */
+  scrubPathCount(): number {
+    return this.liveScrubPaths.size;
+  }
+
+  /** Normal (non-scrub) playback paths per stem — 1 per loaded, playing stem. */
+  playbackPathCounts(): number[] {
+    return this.tracks.map((t) => t.sources.length);
+  }
+
+
+
   private scrubGrainAll(dtS: number) {
     const gs = this.globalScrub;
     const ctx = this.ctx;
