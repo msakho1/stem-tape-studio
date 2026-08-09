@@ -1161,6 +1161,24 @@ export class AudioEngine {
     return this.baseBpm * rate;
   }
 
+  /**
+   * Momentary audition (bare Track hold). A NON-destructive layer that sits on
+   * top of latched solo and mutes: it is never written into track.muted or
+   * track.soloed, so releasing the hold restores the exact prior mix.
+   */
+  private audition: boolean[] = [false, false, false, false];
+
+  /** Lanes currently auditioned — surfaced in diagnostics. */
+  auditionMask(): string {
+    return this.audition.map((a) => (a ? "1" : "0")).join("");
+  }
+
+  /** Apply a whole audition mask at once ("0110", or "" to end the audition). */
+  setAudition(mask: string) {
+    this.audition = [0, 1, 2, 3].map((i) => mask[i] === "1");
+    this.applyAudibilityAll();
+  }
+
   private anySolo(): boolean {
     return this.tracks.some((t) => t.soloed);
   }
@@ -1169,20 +1187,24 @@ export class AudioEngine {
    * Correction 3. Solo never mutates saved mute state:
    *   audibleBySolo = anySolo ? track.soloed : true
    *   inputOpen     = audibleBySolo && (!track.muted || track.soloed)
+   *
+   * Momentary audition overrides both while it is held, and leaves no trace.
    */
   applyAudibility(id: TrackId) {
     const t = this.tracks[id];
     if (!t || !this.ctx) return;
-    const audibleBySolo = this.anySolo() ? t.soloed : true;
+    const auditing = this.audition.some(Boolean);
+    const audibleBySolo = auditing ? this.audition[id] === true : this.anySolo() ? t.soloed : true;
     // Heads layer OVER the dry mix: the four head voices ride the source
     // track's own chain, so the source gate stays open while heads are active
     // even if the user has muted that stem in the dry mixer (which only
     // silences the normal copy — the head voices replace it).
     const headsSource = this.heads.active && this.heads.source === id;
-    const open = audibleBySolo && (headsSource || !t.muted || t.soloed);
+    const open = audibleBySolo && (headsSource || !t.muted || t.soloed || (auditing && this.audition[id] === true));
     t.fxRack?.setInputOpen(open);
     this.setGain(t.soloGain.gain, audibleBySolo ? 1 : 0);
   }
+
 
   private applyAudibilityAll() {
     for (let i = 0; i < this.tracks.length; i++) this.applyAudibility(i as TrackId);
