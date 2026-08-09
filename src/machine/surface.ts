@@ -543,8 +543,17 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
           );
         }
 
+        // ×1 while the lane loop is running = EXIT the loop and return to the
+        // song. It must not touch mute: the lane keeps sounding, unlooped.
+        if (slice.laneLoop.active) {
+          next = { ...next, tracks: setTrack(next, i, { laneLoop: { ...slice.laneLoop, active: false } }) };
+          next = emit(next, "loop.release", { lane: i, bars: slice.laneLoop.bars }, { rowId: "loop.release", t });
+          return fire(next, "loop.release", `lane ${i + 1} loop released — back to the song`, t);
+        }
+
         // ×1 = mute / unmute. In heads mode the lane is a head, so the mute
         // lands on the head level instead of the dry stem.
+
         if (next.headsMode && !next.perf.fxOverlay) {
           const muted = !slice.headMuted;
           next = { ...next, tracks: setTrack(next, i, { headMuted: muted }) };
