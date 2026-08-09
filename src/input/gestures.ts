@@ -207,8 +207,20 @@ export class GestureEngine {
       const isTapThenHold =
         prevTap != null && prevTap.count > 0 && t - prevTap.lastReleaseAt <= this.timings.tapThenHoldGapMs;
 
+      // Deferred second press: claim the double-tap now, stop the timeout that
+      // would otherwise have confirmed a single tap. Nothing is emitted until
+      // the second RELEASE, so an aborted second press cannot fake a double-tap.
+      const claim = this.pending.get(control);
+      if (claim) {
+        clearTimeout(claim.timer);
+        this.pending.set(control, { ...claim, count: claim.count + 1 });
+      }
+
       rec.holdTimer = setTimeout(() => {
         rec.holdFired = true;
+        // Crossing the hold threshold cancels any pending tap/double-tap: the
+        // gesture becomes a momentary audition and emits nothing else.
+        this.dropPending(control);
         if (isTapThenHold) {
           this.emit({ type: "tapThenHold", control, t: performance.now() });
           this.clearTaps(control);
@@ -222,6 +234,7 @@ export class GestureEngine {
           t: performance.now(),
         });
       }, this.timings.holdMs);
+
 
       // Power gets its own threshold, only on FUNCTION (the v2.6 power row).
       if (control === "function") {
