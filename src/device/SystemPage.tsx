@@ -341,6 +341,7 @@ export function SystemPage({ engine, status, acks, unlockNote, ...diag }: Props)
 
       {sysTab === "diagnostics" && (
         <div className="grid gap-4">
+          <ShuttleHandoffCard engine={engine} />
           <WorkletPanel engine={engine} status={status} />
           <DiagnosticPanel {...diag} />
         </div>
@@ -348,3 +349,42 @@ export function SystemPage({ engine, status, acks, unlockNote, ...diag }: Props)
     </section>
   );
 }
+
+/**
+ * Scrub → playback handoff evidence, per stem, for the most recent release.
+ * Expected after the fade: 0 scrub sources, exactly 1 playback path, landing
+ * error ≤ 2 frames, all four stems on ONE shared landing frame.
+ */
+function ShuttleHandoffCard({ engine }: { engine: AudioEngine }) {
+  const [, setNow] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setNow((n) => n + 1), 500);
+    return () => clearInterval(t);
+  }, []);
+  const h = engine.globalScrubState().handoff;
+  return (
+    <div className="st-pj-card" data-testid="shuttle-handoff">
+      <p className="st-pj-card__title">shuttle handoff</p>
+      {!h ? (
+        <p className="st-sys-cell__k">no release recorded yet — hold FUNCTION + rocker, then let go</p>
+      ) : (
+        <>
+          <p className="st-sys-cell__k">
+            keyup frame {h.keyupContextFrame} → handoff frame {h.handoffContextFrame} ·{" "}
+            {(((h.handoffContextFrame - h.keyupContextFrame) / 48000) * 1000).toFixed(1)} ms · fade {h.fadeMs.toFixed(1)} ms
+          </p>
+          <div className="grid gap-1 pt-2 font-mono text-xs">
+            {h.stems.map((s) => (
+              <p key={s.id}>
+                T{s.id + 1} {s.mode} · landing {s.landingFrame} · restart {s.restartFrame} · err {s.landingErrorFrames}f · grains{" "}
+                {s.queuedGrainsBefore}→{s.queuedGrainsAfter} · scrub {s.activeScrubSources} · normal {s.activeNormalSources} · paths{" "}
+                {s.livePlaybackPaths}
+              </p>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
