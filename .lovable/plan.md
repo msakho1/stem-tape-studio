@@ -84,20 +84,27 @@ idle
  ├─ up ──────────────────► awaitingSecond (≤ trackTapWindowMs, 200ms, tunable 180–220)
  awaitingSecond
  ├─ timeout ─────────────► tapConfirmed
- ├─ down ────────────────► doubleConfirmed
+ ├─ down ────────────────► doubleClaimed      (claim only — nothing emitted yet)
+ doubleClaimed
+ ├─ up before holdMs, no chord qualifier ──► doubleConfirmed → loop.capture
+ ├─ t ≥ holdMs ────────────────────────────► auditioning (double abandoned)
+ ├─ FN / PLAY / Volume qualifies the press ─► that chord wins, double abandoned
+ ├─ cancel|blur|lostpointercapture ────────► release("cancel"), nothing emitted
  auditioning / any ── cancel|blur|lostpointercapture ──► release("cancel")
 ```
+
+The second press **claims** the double-tap on pointer/key down (so no tap-level mute can fire), but `loop.capture` is **finalized only on that second press's valid release**. A second press that turns into a hold, is cancelled, or becomes part of a qualified chord never captures a loop.
 
 **FN-qualified arbiter (runs first when FUNCTION is held):**
 
 ```text
 fnTrackDown
  ├─ Volume −/+ pressed while Track held ─► resizeClaimed   (highest precedence)
- ├─ second Track down within window ─────► reverseClaimed
+ ├─ second Track down within window ─────► reverseClaimed (finalized on valid release)
  └─ window expires, Track released ──────► fnSingleClaimed (layer-specific)
 ```
 
-Precedence, evaluated in order: `resize` → `reverse` → layer-specific FN+Track single → bare Track double → bare Track hold → bare Track tap.
+Precedence, evaluated in order: FN + Track + Volume → `resize`; FN + double-tap Track → `reverse`; FN + Track single → layer action; bare Track double-tap → `loop.capture`; bare Track hold → `audition`; bare Track tap → mute/release (bank-select in the FX overlay, never release).
 
 **Suppression sets** (declared on the map rows so the audit table is generated, not hand-written):
 
