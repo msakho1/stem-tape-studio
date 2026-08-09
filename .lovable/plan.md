@@ -239,7 +239,7 @@ LED arbitration gains distinct tiers for momentary audition, persistent solo, lo
 6. Automatic grid analysis + persistence.
 7. Shared PerformanceLoop: scrub capture, resize, hidden timeline, release.
 8. Universal reverse in node and worklet.
-9. Rewire tempo FX and deeper loop tools to the frame map.
+9. FX registry correction (Pump/Beat Repeat → Formant Shift/Reel Flange) + saved-project migration; rewire grid consumers to the frame map.
 10. LED/diagnostic changes + full browser/device matrix.
 
 ## 13. Evidence that will be produced
