@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { DiagnosticPanel } from "@/device/DiagnosticPanel";
 import { WorkletPanel } from "@/audio/WorkletPanel";
-import { InputPanel } from "@/audio/InputPanel";
+
 import { V26_MAP } from "@/machine/v26map";
 import { formatMiB } from "@/audio/memory";
 import type { AudioEngine, EngineStatus } from "@/audio/engine";
-import type { RecorderSnapshot } from "@/audio/input/recorder";
+
 
 type DiagProps = React.ComponentProps<typeof DiagnosticPanel>;
 
@@ -16,10 +16,9 @@ interface Props extends DiagProps {
   unlockNote: string;
 }
 
-type SysTab = "status" | "input" | "diagnostics";
+type SysTab = "status" | "diagnostics";
 const SYS_TABS: { id: SysTab; label: string }[] = [
   { id: "status", label: "status" },
-  { id: "input", label: "input" },
   { id: "diagnostics", label: "diagnostics" },
 ];
 
@@ -75,14 +74,6 @@ const Doc = () => (
 export function SystemPage({ engine, status, acks, unlockNote, ...diag }: Props) {
   const [sysTab, setSysTab] = useState<SysTab>("status");
   const [open, setOpen] = useState<string | null>(null);
-  const [snap, setSnap] = useState<RecorderSnapshot | null>(null);
-
-  useEffect(() => {
-    const tick = () => setSnap(engine.recording()?.snapshot() ?? null);
-    tick();
-    const t = setInterval(tick, 700);
-    return () => clearInterval(t);
-  }, [engine]);
 
   const coverage = useMemo(() => {
     const satisfied = (r: (typeof V26_MAP)[number]) =>
@@ -271,41 +262,12 @@ export function SystemPage({ engine, status, acks, unlockNote, ...diag }: Props)
 
           <div className="st-pj-card">
             <p className="st-pj-card__title">input &amp; recording</p>
-            <div className="st-sys-input">
-              <button type="button" className="st-sys-switch" onClick={() => setSysTab("input")}>
-                <span className="st-sys-cell__k">input</span>
-                <span className="st-sys-switch__track" data-on={snap?.inputEnabled ?? false}>
-                  <i />
-                </span>
-                <span className="st-sys-cell__v">{snap?.inputEnabled ? "on" : "off"}</span>
-              </button>
-              <div className="st-sys-monitor">
-                <p className="st-sys-cell__k">monitor</p>
-                <div className="st-sys-seg">
-                  {(["off", "dry", "fx"] as const).map((m) => (
-                    <span key={m} className="st-sys-seg__i" data-on={(snap?.monitor ?? "off") === m}>
-                      {m}
-                    </span>
-                  ))}
-                </div>
-              </div>
-              <div className="st-sys-quad__c">
-                <p className="st-sys-cell__k">bit depth</p>
-                <p className="st-sys-cell__v">{snap?.settings ? "24 bit" : "24 bit"}</p>
-              </div>
-              <div className="st-sys-quad__c">
-                <p className="st-sys-cell__k">latency</p>
-                <p className="st-sys-cell__v">
-                  {snap?.latency
-                    ? `${(
-                        (snap.latency.baseLatencyS + snap.latency.outputLatencyS + snap.latency.inputLatencyS) * 1000 +
-                        snap.latency.manualOffsetMs
-                      ).toFixed(1)} ms`
-                    : "—"}
-                </p>
-              </div>
-            </div>
+            <p className="mt-2 font-mono text-[10px] text-[var(--ink-faint)]">
+              live input recording has been removed — master performance recording and WAV export are unaffected, and no
+              microphone permission is ever requested.
+            </p>
           </div>
+
 
           <div className="st-pj-card">
             <p className="st-pj-card__title">advanced diagnostics</p>
@@ -336,8 +298,6 @@ export function SystemPage({ engine, status, acks, unlockNote, ...diag }: Props)
           </button>
         </>
       )}
-
-      {sysTab === "input" && <InputPanel engine={engine} />}
 
       {sysTab === "diagnostics" && (
         <div className="grid gap-4">
