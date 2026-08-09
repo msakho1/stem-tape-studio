@@ -91,6 +91,14 @@ const GLOBAL_SCRUB_RATE = 1.6;
 const GLOBAL_SCRUB_INTERVAL_MS = 45;
 /** Grain level; the shuttle is deliberately quieter than normal playback. */
 const GLOBAL_SCRUB_LEVEL = 0.85;
+/**
+ * Scrub → playback handoff, seconds. The release must NOT use the 80 ms
+ * transport lookahead: that overshoots audibly after key release. One shared
+ * render-quantum-aligned frame instead.
+ */
+export const SCRUB_HANDOFF_MIN_S = 0.003;
+/** Complementary (correlated) fade taking any sounding grain to zero. */
+export const SCRUB_HANDOFF_FADE_S = 0.004;
 
 export type TrackId = 0 | 1 | 2 | 3;
 
