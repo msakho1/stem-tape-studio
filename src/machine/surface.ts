@@ -503,6 +503,14 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
         const i = trackIndexOf(c);
         const slice = next.tracks[i]!;
 
+        // A Track button that took part in a CHORD audition never toggles mute
+        // or loop on release: the chord already consumed that press.
+        if (next.auditionChord.includes(i)) {
+          next = { ...next, auditionChord: next.auditionChord.filter((k) => k !== i), activeTrack: i };
+          return fire(next, "lane.audition", `lane ${i + 1} chord press consumed`, t);
+        }
+
+
         // ---- universal Function-qualified lane gesture ----------------------
         // FUNCTION + double-tap Track = lane reverse, in EVERY layer (Tape,
         // Heads, FX overlay). This is one implementation, not three: the layer
