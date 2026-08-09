@@ -1730,9 +1730,11 @@ export class AudioEngine {
     for (let i = 0; i < gs.perTrack.length; i++) {
       const a = this.scrubTaps[i];
       if (!a) continue;
-      if (!this.scrubTapBuf || this.scrubTapBuf.length !== a.fftSize) this.scrubTapBuf = new Float32Array(a.fftSize);
+      if (!this.scrubTapBuf || this.scrubTapBuf.length !== a.fftSize) {
+        this.scrubTapBuf = new Float32Array(new ArrayBuffer(a.fftSize * 4));
+      }
       const buf = this.scrubTapBuf;
-      a.getFloatTimeDomainData(buf);
+      a.getFloatTimeDomainData(buf as Float32Array<ArrayBuffer>);
       let sum = 0;
       let peak = 0;
       for (let k = 0; k < buf.length; k++) {
