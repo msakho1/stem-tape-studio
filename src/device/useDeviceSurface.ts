@@ -241,6 +241,10 @@ export function useDeviceSurface() {
       engine.releaseAll();
       heldKeysRef.current.clear();
       scrubKeysRef.current.clear();
+      scrubPointersRef.current.clear();
+      fnPointerRef.current = null;
+      scrubUsedFnRef.current = false;
+
       syncHeld();
       dispatch({ type: "globalScrub", dir: null });
     };
