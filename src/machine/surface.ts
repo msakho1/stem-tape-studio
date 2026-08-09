@@ -263,6 +263,8 @@ export function initialSurfaceState(): SurfaceState {
     commands: [],
     globalScrub: 0,
     laneScrub: [0, 0, 0, 0],
+    auditionChord: [],
+
 
     perf: initialStemPerformance(),
 
