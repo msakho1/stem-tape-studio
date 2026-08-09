@@ -15,6 +15,7 @@ import { ChordArbiter, type PerfIntent } from "@/machine/chordArbiter";
 import {
   applyFader,
   applyGesture,
+  applyGlobalScrub,
   applyPerfIntent,
   deriveLeds,
   initialSurfaceState,
@@ -71,6 +72,7 @@ type Action =
   | { type: "release"; control: Control }
   | { type: "gesture"; gesture: Gesture }
   | { type: "perf"; intent: PerfIntent }
+  | { type: "globalScrub"; dir: 1 | -1 | null }
   | { type: "faderCommit"; index: number; value: number; claimed?: ContinuousChannel };
 
 
@@ -88,6 +90,8 @@ function reducer(state: SurfaceState, action: Action): SurfaceState {
       // Every behaviour is a documented Tape Looper v2.6 row. No experimental
       // Stem Tape mappings are dispatched here (phase 4).
       return applyGesture({ ...state, lastGesture: describeGesture(action.gesture) }, action.gesture);
+    case "globalScrub":
+      return applyGlobalScrub(state, action.dir, performance.now());
     case "faderCommit":
       return applyFader(state, action.index, action.value, action.claimed);
   }
@@ -129,6 +133,12 @@ export function useDeviceSurface() {
    */
   const [ready, setReady] = useState(false);
   const readyRef = useRef(false);
+
+  /** Keys currently down — drives the desktop Keyboard Controls panel lamps. */
+  const [heldKeys, setHeldKeys] = useState<string[]>([]);
+  const heldKeysRef = useRef<Set<string>>(new Set());
+  const scrubKeysRef = useRef<Set<string>>(new Set());
+  const syncHeld = useCallback(() => setHeldKeys([...heldKeysRef.current]), []);
 
   const [rawLog, setRawLog] = useState<RawInputEvent[]>([]);
   const [gestureLog, setGestureLog] = useState<{ id: number; text: string; t: number }[]>([]);
@@ -220,29 +230,66 @@ export function useDeviceSurface() {
 
   // Never leave a control stuck down when the tab loses input.
   useEffect(() => {
-    const bail = () => engine.releaseAll();
+    const bail = () => {
+      engine.releaseAll();
+      heldKeysRef.current.clear();
+      scrubKeysRef.current.clear();
+      syncHeld();
+      dispatch({ type: "globalScrub", dir: null });
+    };
     window.addEventListener("blur", bail);
     document.addEventListener("visibilitychange", bail);
     return () => {
       window.removeEventListener("blur", bail);
       document.removeEventListener("visibilitychange", bail);
     };
-  }, [engine]);
+  }, [engine, syncHeld]);
 
   // Keyboard parity for every button control.
   useEffect(() => {
+    const endScrub = () => {
+      if (scrubKeysRef.current.size === 0) return;
+      scrubKeysRef.current.clear();
+      dispatch({ type: "globalScrub", dir: null });
+    };
     const down = (e: KeyboardEvent) => {
-      const control = KEY_MAP[e.code];
-      if (!readyRef.current || !control || e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
-
       const target = e.target as HTMLElement | null;
       if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
+      if (e.code === "Escape") {
+        // Safety release: nothing stays latched, the shuttle stops.
+        endScrub();
+        engine.releaseAll();
+        heldKeysRef.current.clear();
+        syncHeld();
+        return;
+      }
+      const control = KEY_MAP[e.code];
+      if (!readyRef.current || !control || e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
       e.preventDefault();
+      heldKeysRef.current.add(e.code);
+      syncHeld();
+      // FUNCTION + rocker held = global four-stem shuttle. The rocker is NEVER
+      // pressed into the gesture engine here, so no varispeed / step-scrub row
+      // can fire underneath the shuttle.
+      if ((e.code === "KeyQ" || e.code === "KeyA") && heldKeysRef.current.has("KeyF")) {
+        scrubKeysRef.current.add(e.code);
+        dispatch({ type: "globalScrub", dir: e.code === "KeyQ" ? 1 : -1 });
+        return;
+      }
       engine.press(control, "keyboard");
     };
     const up = (e: KeyboardEvent) => {
       const control = KEY_MAP[e.code];
       if (!control) return;
+      heldKeysRef.current.delete(e.code);
+      syncHeld();
+      if (scrubKeysRef.current.delete(e.code)) {
+        const remaining = [...scrubKeysRef.current][0];
+        if (remaining) dispatch({ type: "globalScrub", dir: remaining === "KeyQ" ? 1 : -1 });
+        else dispatch({ type: "globalScrub", dir: null });
+        return;
+      }
+      if (e.code === "KeyF") endScrub();
       engine.release(control, "keyboard");
     };
     window.addEventListener("keydown", down);
@@ -251,7 +298,7 @@ export function useDeviceSurface() {
       window.removeEventListener("keydown", down);
       window.removeEventListener("keyup", up);
     };
-  }, [engine]);
+  }, [engine, syncHeld]);
 
   /** Screen -> viewBox user units via the inverse CTM (no manual scale math). */
   const toUserSpace = useCallback((clientX: number, clientY: number) => {
