@@ -1875,7 +1875,25 @@ export class AudioEngine {
     return this.liveScrubPaths.size;
   }
 
+  /** Live AudioParam value of each stem fader — what is actually audible. */
+  trackGainValues(): number[] {
+    return this.tracks.map((t) => t.gain.gain.value);
+  }
+
+  /** Per-stem post-FX RMS — proves a stem's own path is sounding. */
+  trackRms(): number[] {
+    return this.tracks.map((t) => {
+      const a = t.analyser;
+      const buf = new Float32Array(a.fftSize);
+      a.getFloatTimeDomainData(buf);
+      let sum = 0;
+      for (let i = 0; i < buf.length; i++) sum += buf[i]! * buf[i]!;
+      return Math.sqrt(sum / buf.length);
+    });
+  }
+
   /** Normal (non-scrub) playback paths per stem — 1 per loaded, playing stem. */
+
   playbackPathCounts(): number[] {
     return this.tracks.map((t) => t.sources.length);
   }
