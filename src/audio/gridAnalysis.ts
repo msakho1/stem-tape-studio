@@ -297,7 +297,7 @@ export function analyzeSongGrid(
     firstBeatS,
     firstDownbeatS,
     beatSeconds,
-    barSeconds: beatSeconds * beatsPerBar,
+    barSeconds,
     analysisSampleRate: sampleRate,
     analysisFrames,
     durationS,
