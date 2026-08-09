@@ -447,43 +447,64 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
         const i = trackIndexOf(c);
         const slice = next.tracks[i]!;
 
-        // Heads mappings claim Track gestures before recording, mute/delete and
-        // bank navigation (§3.3). The FX overlay still wins for FX buttons.
+        // ---- universal Function-qualified lane gesture ----------------------
+        // FUNCTION + double-tap Track = lane reverse, in EVERY layer (Tape,
+        // Heads, FX overlay). This is one implementation, not three: the layer
+        // only decides which lane the command lands on, never what it means.
+        if (fn && g.count === 2) {
+          const rev = !slice.laneReverse;
+          next = { ...next, tracks: setTrack(next, i, { laneReverse: rev, headReverse: rev }), activeTrack: i };
+          next = emit(next, "lane.reverse", { lane: i, reverse: rev }, { rowId: "lane.reverse", t });
+          return fire(next, "lane.reverse", `lane ${i + 1} → ${rev ? "reverse" : "forward"}`, t);
+        }
+
+        if (fn) {
+          // FN + track ×1 = bank jump. The next-song row now lives behind the
+          // bank-jump arm rather than FN + double-tap, which lane reverse owns.
+          next = { ...next, bank: i, bankJumpArmed: true, activeTrack: i };
+          return fire(next, "track.bank", `bank jump → bank ${i + 1}`, t);
+        }
+
+        next = { ...next, activeTrack: i };
+
+        // PLAY + Track = LATCHING solo (§2.1). Distinct from the momentary
+        // audition, which is a bare hold and never latches.
+        if (next.pressed.includes("play")) {
+          const on = !slice.soloLatched;
+          next = { ...next, tracks: setTrack(next, i, { soloLatched: on }) };
+          const mask = next.tracks.map((s) => (s.soloLatched ? "1" : "0")).join("");
+          next = emit(next, "stem.solo", { stem: i, on, mask }, { rowId: "track.solo", t });
+          return fire(next, "track.solo", `lane ${i + 1} solo ${on ? "latched" : "released"} — mask ${mask}`, t);
+        }
+
+        // ---- approved bare-Track state table (§2.1) -------------------------
+        // ×2 = capture / release the dedicated lane loop. Delete is gone from
+        // the surface entirely; nothing here is destructive.
+        if (g.count === 2) {
+          const active = !slice.laneLoop.active;
+          next = { ...next, tracks: setTrack(next, i, { laneLoop: { ...slice.laneLoop, active } }) };
+          next = emit(
+            next,
+            active ? "loop.capture" : "loop.release",
+            { lane: i, bars: slice.laneLoop.bars },
+            { rowId: active ? "loop.capture" : "loop.release", t },
+          );
+          return fire(
+            next,
+            active ? "loop.capture" : "loop.release",
+            `lane ${i + 1} ${active ? `loop captured (${slice.laneLoop.bars} bar)` : "loop released"}`,
+            t,
+          );
+        }
+
+        // ×1 = mute / unmute. In heads mode the lane is a head, so the mute
+        // lands on the head level instead of the dry stem.
         if (next.headsMode && !next.perf.fxOverlay) {
-          if (g.count === 2) {
-            const rev = !slice.headReverse;
-            next = { ...next, tracks: setTrack(next, i, { headReverse: rev }) };
-            next = emit(next, "heads.reverse", { head: i, reverse: rev }, { rowId: "heads.reverse", t });
-            return fire(next, "heads.reverse", `head ${i + 1} → ${rev ? "reverse" : "forward"}`, t);
-          }
           const muted = !slice.headMuted;
           next = { ...next, tracks: setTrack(next, i, { headMuted: muted }) };
           next = emit(next, "heads.mute", { head: i, muted }, { rowId: "heads.mute", t });
           return fire(next, "heads.mute", `head ${i + 1} ${muted ? "muted" : "unmuted"}`, t);
         }
-
-        if (fn) {
-          // FN + track = banks: jump · tap again = next song
-          if (g.count === 1) {
-            next = { ...next, bank: i, bankJumpArmed: true, activeTrack: i };
-            return fire(next, "track.bank", `bank jump → bank ${i + 1}`, t);
-          }
-          const song = (next.bank * 4 + (((next.song % 4) + 1) % 4)) % 16;
-          next = { ...loadSong(next, song), bankJumpArmed: true };
-          // P4 song load: stop the transport, hold the position, wait for Play.
-          next = emit({ ...next, playing: false }, "song.load", { song }, { rowId: "track.bank", t });
-          return fire(next, "track.bank", `tap again → next song (${song + 1}/16) — transport stopped, waiting for PLAY`, t);
-        }
-
-        next = { ...next, activeTrack: i };
-
-        // ---- approved bare-Track state table (§2.1) -------------------------
-        // Double-tap NEVER deletes. Delete has been removed from the surface
-        // entirely; double-tap is reserved for `loop.capture` (Step 7).
-        if (g.count === 2) {
-          return fire(next, "track.tap", `track ${i + 1} double-tap → loop capture (engine lands in Step 7); delete removed from the surface`, t);
-        }
-
 
         switch (slice.content) {
           case "empty":
@@ -496,6 +517,7 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
           }
         }
       }
+
 
 
       if (c === "rocker-fwd" || c === "rocker-rwd") {
