@@ -67,7 +67,7 @@ export const V26_MAP: V26Row[] = [
   { id: "heads.toggle", group: "heads", input: "FN + triple-tap PLAY", command: "heads on / off", status: "state" },
   { id: "heads.replay", group: "heads", input: "heads on", command: "3 tracks replay the source, a quarter apart", status: "audio" },
   { id: "heads.scrub", group: "heads", input: "FN + faders · double-tap", command: "scrub the heads · double-tap = reverse", status: "state" },
-  { id: "heads.print", group: "heads", input: "hold a track", command: "loaded = tape, empty = PRINT", status: "state" },
+  
 
   // LIGHTS / SONGS (documentation rows the LED arbitration implements)
   { id: "lights.base", group: "lights", input: "track lights", command: "dark = empty · faint = muted content", status: "visual" },
