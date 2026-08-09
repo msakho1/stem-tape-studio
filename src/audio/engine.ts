@@ -68,7 +68,7 @@ import {
   headReadPosition,
 } from "./heads";
 import {
-  MAX_SCRUB_RATE,
+  HEAD_SCRUB_MAX_RATE,
   SCRUB_SILENCE_RATE,
   ScrubLog,
   ScrubTracker,
