@@ -137,6 +137,14 @@ export interface SurfaceState {
   /** Per-lane shuttle direction (FUNCTION + Track held + rocker). 0 = idle. */
   laneScrub: (0 | 1 | -1)[];
 
+  /**
+   * Lanes currently claimed by a Track-button CHORD audition. Pressing two or
+   * three Track buttons together auditions those lanes as a chord; the taps
+   * that arrive on release are consumed here so the chord never toggles mute.
+   */
+  auditionChord: number[];
+
+
   /** Phase 5C stem-performance layer (serializable, no audio objects). */
   perf: StemPerformanceState;
 
