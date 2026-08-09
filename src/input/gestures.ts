@@ -129,15 +129,21 @@ export function isContinuousControl(control: Control): boolean {
  * Deliberately framework-free: no React, no DOM queries. Components feed it
  * normalised control events; it emits semantic gestures.
  *
- * Multi-tap without sluggishness: a tap fires OPTIMISTICALLY on release with
- * count = 1, and a following tap inside the window emits the same control again
- * with count = 2, 3, 4... Consumers treat a higher count as a revision of the
- * lower one rather than waiting out the window, so a single musical tap is
- * never delayed.
+ * Two tap policies:
+ *  - NON-deferred controls (Play, rocker, volume, FUNCTION, faders) keep the
+ *    optimistic policy: `count = 1` fires on release and a following tap
+ *    revises it upward, protected by the reducer's TxnSnapshot rollback.
+ *  - DEFERRED controls (the four Track buttons) never fire optimistically. The
+ *    first release opens a `trackDecisionMs` window; the timeout confirms one
+ *    tap, a second press claims the double-tap and the second valid release
+ *    confirms it. Crossing the hold threshold cancels the pending decision and
+ *    the momentary audition owns the gesture instead.
  */
 export class GestureEngine {
   private presses = new Map<Control, PressRecord>();
   private taps = new Map<Control, TapRecord>();
+  /** Deferred Track decisions awaiting a timeout or a second press. */
+  private pending = new Map<Control, { count: number; timer: ReturnType<typeof setTimeout>; firstReleaseAt: number }>();
   private gestureListeners = new Set<GestureListener>();
   private rawListeners = new Set<RawListener>();
   private chordActive: Control[] | null = null;
@@ -145,8 +151,12 @@ export class GestureEngine {
   private chordReleased: Control[] = [];
   private chordTimer: ReturnType<typeof setTimeout> | null = null;
   private seq = 0;
+  /** Measured latency, first release → emitted tap, per deferred control. */
+  readonly decisionLatencyMs: number[] = [];
 
   timings: GestureTimings = { ...DEFAULT_TIMINGS };
+
+
 
   onGesture(fn: GestureListener): () => void {
     this.gestureListeners.add(fn);
