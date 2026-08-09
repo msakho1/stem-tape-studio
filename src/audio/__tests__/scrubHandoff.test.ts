@@ -284,7 +284,8 @@ async function scrubAndRelease(opts: { dir: 1 | -1; ticks: number; dtS: number; 
   r.advance(0.001);
   const keyup = r.ctx.currentTime;
   r.engine.execute(cmd("transport.scrub.end"));
-  return { ...r, keyup };
+  const handoff = r.engine.globalScrubState().handoff!.handoffContextFrame / SR;
+  return { ...r, keyup, handoff };
 }
 
 // -------------------------------------------------------------------- tests
@@ -316,8 +317,7 @@ describe("global scrub → playback handoff", () => {
   });
 
   it("leaves exactly four audible paths after the fade — one per stem", async () => {
-    const { ctx } = await scrubAndRelease({ dir: 1, ticks: 10, dtS: 0.045 });
-    const handoff = ctx.currentTime + 0.004;
+    const { ctx, handoff } = await scrubAndRelease({ dir: 1, ticks: 10, dtS: 0.045 });
     const after = handoff + SCRUB_HANDOFF_FADE_S + 0.002;
     const paths = audiblePaths(ctx, after);
     expect(paths).toHaveLength(4);
@@ -327,8 +327,7 @@ describe("global scrub → playback handoff", () => {
   });
 
   it("never lets an impulse sound twice around release", async () => {
-    const { ctx } = await scrubAndRelease({ dir: 1, ticks: 10, dtS: 0.045, markEvery: 0.5 });
-    const handoff = ctx.currentTime + 0.004;
+    const { ctx, handoff } = await scrubAndRelease({ dir: 1, ticks: 10, dtS: 0.045, markEvery: 0.5 });
     // Sample densely across the release window and count, per stem, how many
     // distinct read pointers are live. Two live pointers on one stem IS the
     // doubled waveform / echo the bug produced.
@@ -343,8 +342,7 @@ describe("global scrub → playback handoff", () => {
   });
 
   it("stops every queued scrub grain at the handoff", async () => {
-    const { ctx } = await scrubAndRelease({ dir: 1, ticks: 12, dtS: 0.045 });
-    const handoff = ctx.currentTime + 0.004;
+    const { ctx, handoff } = await scrubAndRelease({ dir: 1, ticks: 12, dtS: 0.045 });
     const grains = ctx.started.filter((s) => s.duration != null);
     expect(grains.length).toBeGreaterThan(0);
     for (const g of grains) {
@@ -409,7 +407,8 @@ describe("global scrub → playback handoff", () => {
     }
     r.advance(0.002);
     r.engine.execute(cmd("transport.scrub.end"));
-    const after = r.ctx.currentTime + 0.004 + SCRUB_HANDOFF_FADE_S + 0.002;
+    const handoff = r.engine.globalScrubState().handoff!.handoffContextFrame / SR;
+    const after = handoff + SCRUB_HANDOFF_FADE_S + 0.002;
     expect(audiblePaths(r.ctx, after)).toHaveLength(0);
     const h = r.engine.globalScrubState().handoff!;
     expect(h.stems.every((s) => s.activeScrubSources === 0)).toBe(true);
