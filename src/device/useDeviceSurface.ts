@@ -355,7 +355,8 @@ export function useDeviceSurface() {
   const resolveChannel = useCallback((): ContinuousChannel => {
     const layer = layerRef.current;
     if (layer.heads) return layer.fn ? "headScrub" : "headLevel";
-    return layer.fn ? "window" : "fader";
+    // FUNCTION + fader scrubs that fader's own lane (audible, positional).
+    return layer.fn ? "laneScrub" : "fader";
   }, []);
 
   /**
@@ -473,7 +474,7 @@ export function useDeviceSurface() {
         ? "headScrub"
         : "headLevel"
       : layerRef.current.fn
-        ? "window"
+        ? "laneScrub"
         : "fader";
     for (const session of faders.current.sessions()) {
       if (session.channel === channel) continue;

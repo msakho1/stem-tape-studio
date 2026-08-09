@@ -12,7 +12,7 @@
  * SVG components never see an AudioNode — they call the bus.
  */
 
-export type ContinuousChannel = "fader" | "window" | "headScrub" | "headLevel";
+export type ContinuousChannel = "fader" | "window" | "laneScrub" | "headScrub" | "headLevel";
 
 /** Gesture lifecycle. `move` events are rAF-coalesced; the rest are discrete. */
 export type ContinuousPhase = "start" | "move" | "end" | "cancel";

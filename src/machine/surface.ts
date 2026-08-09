@@ -893,7 +893,7 @@ export function applyFader(
   state: SurfaceState,
   index: number,
   value: number,
-  claimed?: "headScrub" | "headLevel" | "window" | "fader",
+  claimed?: "headScrub" | "headLevel" | "window" | "laneScrub" | "fader",
 ): SurfaceState {
   const t = performance.now();
   // Heads claims the fader layer before the v2.6 FN window/filter rows (§3.3).
@@ -916,6 +916,18 @@ export function applyFader(
       { rowId: "heads.level", t },
     );
     return fire(next, "heads.level", `head ${index + 1} level → ${value.toFixed(3)}`, t);
+  }
+  if (claimed === "laneScrub") {
+    // FUNCTION + fader parked lane N at this point in the song. The audio has
+    // already travelled on the control bus; this is the semantic record, and
+    // the landing is what the next Track double-tap captures one bar from.
+    const next = emit(state, "lane.scrub.park", { lane: index, position: value }, { rowId: "lane.scrub", t });
+    return fire(
+      next,
+      "lane.scrub.park",
+      `lane ${index + 1} parked at ${(value * 100).toFixed(1)}% — double-tap track ${index + 1} to capture one bar`,
+      t,
+    );
   }
   if (claimed === "window" || (!claimed && state.functionHeld)) {
 
