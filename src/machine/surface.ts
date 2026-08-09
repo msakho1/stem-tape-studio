@@ -57,7 +57,18 @@ export interface TrackSlice {
   headReverse: boolean;
   headMuted: boolean;
   headLevel: number;
+  /** PLAY + Track latching solo (§2.1). Independent of momentary audition. */
+  soloLatched: boolean;
+  /**
+   * Universal lane layer. `laneReverse` replaces the old heads-only
+   * `heads.reverse`; one flag serves Tape, Heads and the FX overlay so the
+   * three layers cannot diverge.
+   */
+  laneReverse: boolean;
+  /** Dedicated one-bar (or resized) capture loop for this lane. */
+  laneLoop: { active: boolean; bars: number };
 }
+
 
 
 export interface FiredRow {
