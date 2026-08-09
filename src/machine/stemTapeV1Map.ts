@@ -202,6 +202,11 @@ const FAMILY_ROWS = (family: FxFamily, track: number, label: string): StemTapeRo
     led: `side LED ${track} breathing`,
     provenance: "extension",
     family,
+    tutorial: {
+      plainLanguage: `Hold key ${track} to apply ${label} to the active stem for as long as you hold it.`,
+      highlight: [`track-button-${track}`],
+      expected: `Side LED ${track} breathes while the effect sounds.`,
+    },
   },
   {
     id: `fx.${family}.variation`,
@@ -213,6 +218,11 @@ const FAMILY_ROWS = (family: FxFamily, track: number, label: string): StemTapeRo
     led: `side LEDs show the variation number, then time out`,
     provenance: "extension",
     family,
+    tutorial: {
+      plainLanguage: `Hold key ${track} and tap a volume key to step through the four ${label} variations.`,
+      highlight: [`track-button-${track}`, "volume-plus"],
+      expected: "The side LEDs briefly show the variation number.",
+    },
   },
   {
     id: `fx.${family}.latch`,
@@ -224,6 +234,11 @@ const FAMILY_ROWS = (family: FxFamily, track: number, label: string): StemTapeRo
     led: `side LED ${track} solid while latched`,
     provenance: "extension",
     family,
+    tutorial: {
+      plainLanguage: `Hold FUNCTION and press key ${track} to leave ${label} latched on until you toggle it off.`,
+      highlight: ["function", `track-button-${track}`],
+      expected: `Side LED ${track} stays solid while the effect is latched.`,
+    },
   },
 ];
 
