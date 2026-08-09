@@ -109,7 +109,16 @@ export function keyboardBindings(): KeyBinding[] {
       detail: `Head ${n} level; hold F as well to scrub head ${n}.`,
       source: "shell",
     });
+    out.push({
+      id: `fader.${n}.scrub`,
+      codes: [up, down],
+      label: `F + ${CODE_LABEL[up]} / ${CODE_LABEL[down]}`,
+      context: "fx",
+      detail: `Scrub stem ${n} audibly; release to park it, then double-tap track ${n} to capture one bar there.`,
+      source: "shell",
+    });
   }
+
   out.push({
     id: "shell.release",
     codes: ["Escape"],
