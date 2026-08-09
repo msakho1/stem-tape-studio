@@ -34,6 +34,8 @@ export interface StemTapeRow {
   led: string;
   provenance: Provenance;
   family?: FxFamily;
+  /** Desktop keyboard bindings, "KeyF+KeyQ" for chords. Panel is derived from these. */
+  keys?: string[];
   /** Phase 6 tutorial metadata — drives the Guide without duplicating the map. */
   tutorial?: {
     plainLanguage: string;
