@@ -598,16 +598,27 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
         const i = trackIndexOf(c);
         const slice = next.tracks[i]!;
 
-        if (state.headsMode && !state.perf.fxOverlay) {
-          // §3.3: a loaded track becomes the heads SOURCE. PRINT is removed.
-          if (slice.content === "empty")
-            return fire(next, "heads.source", `track ${i + 1} is empty — nothing to feed the heads`, t);
-          next = { ...next, headsSource: i };
-          next = emit(next, "heads.source", { track: i }, { rowId: "heads.source", t });
-          return fire(next, "heads.source", `track ${i + 1} is now the heads source`, t);
+        if (fn) {
+          // FUNCTION + Track hold in heads mode assigns the source lane; the
+          // heads source is a PANEL/qualified decision, never a bare hold.
+          if (state.headsMode && !state.perf.fxOverlay) {
+            if (slice.content === "empty")
+              return fire(next, "heads.source", `track ${i + 1} is empty — nothing to feed the heads`, t);
+            next = { ...next, headsSource: i };
+            next = emit(next, "heads.source", { track: i }, { rowId: "heads.source", t });
+            return fire(next, "heads.source", `track ${i + 1} is now the heads source`, t);
+          }
+          return next;
         }
 
-        return fire(next, "track.hold", `track ${i + 1} hold — live input recording has been removed`, t);
+        // ---- momentary audition (§2.1) --------------------------------------
+        // Bare Track hold auditions that lane alone for as long as it is held.
+        // It writes NOTHING into mute or latched-solo state, so the release
+        // restores the previous mix exactly.
+        const mask = [0, 1, 2, 3].map((k) => (k === i ? "1" : "0")).join("");
+        next = { ...next, activeTrack: i };
+        next = emit(next, "lane.audition", { mask }, { rowId: "lane.audition", t });
+        return fire(next, "lane.audition", `lane ${i + 1} momentary audition — mask ${mask}`, t);
       }
 
 
@@ -630,8 +641,15 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
       if (g.control.startsWith("rocker") || g.control.startsWith("volume")) {
         return { ...next, speedGlide: false, chopGlide: false };
       }
+      if (g.control.startsWith("track-button") && g.level === "hold") {
+        // End the momentary audition. An empty mask is the explicit "restore"
+        // instruction — the engine never has to remember what it overrode.
+        next = emit(next, "lane.audition", { mask: "" }, { rowId: "lane.audition", t });
+        return fire(next, "lane.audition", "audition released — prior mix restored", t);
+      }
       return next;
     }
+
 
     case "tapThenHold": {
       if (g.control === "function") {
