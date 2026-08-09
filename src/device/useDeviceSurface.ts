@@ -393,11 +393,15 @@ export function useDeviceSurface() {
       // A pointer already owns this fader: the pointer wins, keys are ignored.
       if (faders.current.owner(spec.index) != null) return;
       keyFadersRef.current.set(e.code, { ...spec, last: performance.now() });
+      heldKeysRef.current.add(e.code);
+      syncHeld();
       if (keyFrameRef.current == null) keyFrameRef.current = requestAnimationFrame(keyFrame);
     };
     const up = (e: KeyboardEvent) => {
       const spec = FADER_KEYS[e.code];
       if (!spec) return;
+      heldKeysRef.current.delete(e.code);
+      syncHeld();
       if (!keyFadersRef.current.delete(e.code)) return;
       const value = faderValuesRef.current[spec.index] ?? 0;
       const channel = resolveChannel();
@@ -425,7 +429,7 @@ export function useDeviceSurface() {
       keyFrameRef.current = null;
       keyFadersRef.current.clear();
     };
-  }, [keyFrame, resolveChannel]);
+  }, [keyFrame, resolveChannel, syncHeld]);
 
   /**
    * True rebase: FUNCTION or HEADS changing while faders are still down
