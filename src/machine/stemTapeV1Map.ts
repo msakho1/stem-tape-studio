@@ -67,6 +67,11 @@ export const STEM_ROWS: StemTapeRow[] = [
     rollback: "none",
     led: "active stem LED brightens",
     provenance: "extension",
+    tutorial: {
+      plainLanguage: "Hold PLAY and tap volume up to move to the next stem: Vocals, Drums, Bass, Instruments.",
+      highlight: ["play", "volume-plus"],
+      expected: "The newly selected stem's LED brightens.",
+    },
   },
   {
     id: "stem.select.prev",
@@ -77,6 +82,11 @@ export const STEM_ROWS: StemTapeRow[] = [
     rollback: "none",
     led: "active stem LED brightens",
     provenance: "extension",
+    tutorial: {
+      plainLanguage: "Hold PLAY and tap volume down to step back to the previous stem.",
+      highlight: ["play", "volume-minus"],
+      expected: "The newly selected stem's LED brightens.",
+    },
   },
   {
     id: "stem.solo",
@@ -152,6 +162,11 @@ export const SYSTEM_ROWS: StemTapeRow[] = [
     rollback: "none",
     led: "both FUNCTION LEDs alternate-pulse while open",
     provenance: "reinterpreted",
+    tutorial: {
+      plainLanguage: "Press both volume keys together to open or close the effects layer.",
+      highlight: ["volume-minus", "volume-plus"],
+      expected: "Both FUNCTION LEDs alternate-pulse while the effects layer is open.",
+    },
   },
   {
     id: "system.pairing",
