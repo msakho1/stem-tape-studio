@@ -57,6 +57,10 @@ export interface TrackSlice {
   headReverse: boolean;
   headMuted: boolean;
   headLevel: number;
+  /** Heads v2: triple-tap independent playback for this head. */
+  headLatched: boolean;
+  /** Heads v2: this head is repeating a captured loop. */
+  headLoop: { active: boolean; bars: number };
   /** PLAY + Track latching solo (§2.1). Independent of momentary audition. */
   soloLatched: boolean;
   /**
@@ -217,6 +221,8 @@ function track(stem: TrackSlice["stem"], volume: number): TrackSlice {
     headReverse: false,
     headMuted: false,
     headLevel: 0.8,
+    headLatched: false,
+    headLoop: { active: false, bars: 1 },
     soloLatched: false,
     laneReverse: false,
     laneLoop: { active: false, bars: 1 },
@@ -553,6 +559,43 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
           return fire(next, "track.solo", `lane ${i + 1} solo ${on ? "latched" : "released"} — mask ${mask}`, t);
         }
 
+        // ---- Heads Mode v2: the four Tracks ARE the four heads ---------------
+        // Deferred recognition guarantees exactly one of ×1 / ×2 / ×3 reaches
+        // the engine: no mute or loop command is ever fired and then undone.
+        if (next.headsMode && !next.perf.fxOverlay) {
+          if (g.count === 3) {
+            const latched = !slice.headLatched;
+            next = { ...next, tracks: setTrack(next, i, { headLatched: latched }) };
+            next = emit(next, "heads.latch", { head: i, latched }, { rowId: "heads.latch", t });
+            return fire(next, "heads.latch", `head ${i + 1} independent playback ${latched ? "latched" : "released"} — transport untouched`, t);
+          }
+          if (g.count === 2) {
+            if (fn) {
+              const reverse = !slice.headReverse;
+              next = { ...next, tracks: setTrack(next, i, { headReverse: reverse }) };
+              next = emit(next, "heads.reverse", { head: i, reverse }, { rowId: "heads.reverse", t });
+              return fire(next, "heads.reverse", `head ${i + 1} → ${reverse ? "reverse" : "forward"}`, t);
+            }
+            const active = !slice.headLoop.active;
+            next = {
+              ...next,
+              tracks: setTrack(next, i, { headLoop: { ...slice.headLoop, active }, headLatched: active ? true : slice.headLatched }),
+            };
+            next = emit(next, "heads.loop.capture", { head: i, bars: slice.headLoop.bars }, { rowId: "heads.loop", t });
+            return fire(next, "heads.loop", `head ${i + 1} ${active ? `captured a ${slice.headLoop.bars} bar loop` : "loop released"}`, t);
+          }
+          // ×1: release the loop if one is running, otherwise mute / unmute.
+          if (slice.headLoop.active) {
+            next = { ...next, tracks: setTrack(next, i, { headLoop: { ...slice.headLoop, active: false } }) };
+            next = emit(next, "heads.mute", { head: i, muted: slice.headMuted }, { rowId: "heads.loop", t });
+            return fire(next, "heads.loop", `head ${i + 1} loop released — back into normal playback`, t);
+          }
+          const muted = !slice.headMuted;
+          next = { ...next, tracks: setTrack(next, i, { headMuted: muted }) };
+          next = emit(next, "heads.mute", { head: i, muted }, { rowId: "heads.mute", t });
+          return fire(next, "heads.mute", `head ${i + 1} ${muted ? "muted" : "unmuted"}`, t);
+        }
+
         // ---- approved bare-Track state table (§2.1) -------------------------
         // ×2 = capture / release the dedicated lane loop. Delete is gone from
         // the surface entirely; nothing here is destructive.
@@ -584,12 +627,7 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
         // ×1 = mute / unmute. In heads mode the lane is a head, so the mute
         // lands on the head level instead of the dry stem.
 
-        if (next.headsMode && !next.perf.fxOverlay) {
-          const muted = !slice.headMuted;
-          next = { ...next, tracks: setTrack(next, i, { headMuted: muted }) };
-          next = emit(next, "heads.mute", { head: i, muted }, { rowId: "heads.mute", t });
-          return fire(next, "heads.mute", `head ${i + 1} ${muted ? "muted" : "unmuted"}`, t);
-        }
+
 
         switch (slice.content) {
           case "empty":
@@ -702,13 +740,8 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
         if (fn) {
           // FUNCTION + Track hold in heads mode assigns the source lane; the
           // heads source is a PANEL/qualified decision, never a bare hold.
-          if (state.headsMode && !state.perf.fxOverlay) {
-            if (slice.content === "empty")
-              return fire(next, "heads.source", `track ${i + 1} is empty — nothing to feed the heads`, t);
-            next = { ...next, headsSource: i };
-            next = emit(next, "heads.source", { track: i }, { rowId: "heads.source", t });
-            return fire(next, "heads.source", `track ${i + 1} is now the heads source`, t);
-          }
+          // Heads v2 has NO source assignment: head N is lane N. FUNCTION +
+          // Track hold is only a qualifier here (for Volume ± loop resize).
           return next;
         }
 
