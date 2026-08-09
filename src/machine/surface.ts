@@ -137,6 +137,14 @@ export interface SurfaceState {
   /** Per-lane shuttle direction (FUNCTION + Track held + rocker). 0 = idle. */
   laneScrub: (0 | 1 | -1)[];
 
+  /**
+   * Lanes currently claimed by a Track-button CHORD audition. Pressing two or
+   * three Track buttons together auditions those lanes as a chord; the taps
+   * that arrive on release are consumed here so the chord never toggles mute.
+   */
+  auditionChord: number[];
+
+
   /** Phase 5C stem-performance layer (serializable, no audio objects). */
   perf: StemPerformanceState;
 
@@ -255,6 +263,8 @@ export function initialSurfaceState(): SurfaceState {
     commands: [],
     globalScrub: 0,
     laneScrub: [0, 0, 0, 0],
+    auditionChord: [],
+
 
     perf: initialStemPerformance(),
 
@@ -345,6 +355,18 @@ function fire(state: SurfaceState, rowId: string, detail: string, t: number): Su
 
 const clamp01 = (n: number) => (n < 0 ? 0 : n > 1 ? 1 : n);
 const trackIndexOf = (control: Control) => (Number(control.slice(-1)) - 1) as TrackIndex;
+
+/** Lanes whose Track button is currently held (plus `extra`, deduped, sorted). */
+function heldTrackLanes(state: SurfaceState, extra?: number): number[] {
+  const set = new Set<number>();
+  for (const c of state.pressed) if (c.startsWith("track-button")) set.add(trackIndexOf(c));
+  if (extra != null) set.add(extra);
+  return [...set].sort((a, b) => a - b);
+}
+
+/** Four-character audibility mask, "1" for every lane in `lanes`. */
+const maskOf = (lanes: number[]) => [0, 1, 2, 3].map((k) => (lanes.includes(k) ? "1" : "0")).join("");
+
 
 function setTrack(state: SurfaceState, i: number, patch: Partial<TrackSlice>): SurfaceState["tracks"] {
   const tracks = [...state.tracks] as SurfaceState["tracks"];
@@ -492,6 +514,14 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
       if (c.startsWith("track-button")) {
         const i = trackIndexOf(c);
         const slice = next.tracks[i]!;
+
+        // A Track button that took part in a CHORD audition never toggles mute
+        // or loop on release: the chord already consumed that press.
+        if (next.auditionChord.includes(i)) {
+          next = { ...next, auditionChord: next.auditionChord.filter((k) => k !== i), activeTrack: i };
+          return fire(next, "lane.audition", `lane ${i + 1} chord press consumed`, t);
+        }
+
 
         // ---- universal Function-qualified lane gesture ----------------------
         // FUNCTION + double-tap Track = lane reverse, in EVERY layer (Tape,
@@ -683,13 +713,21 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
         }
 
         // ---- momentary audition (§2.1) --------------------------------------
-        // Bare Track hold auditions that lane alone for as long as it is held.
+        // Bare Track hold auditions the HELD lanes for as long as they are
+        // held. Two or three Track buttons together audition as a CHORD.
         // It writes NOTHING into mute or latched-solo state, so the release
         // restores the previous mix exactly.
-        const mask = [0, 1, 2, 3].map((k) => (k === i ? "1" : "0")).join("");
-        next = { ...next, activeTrack: i };
+        const lanes = heldTrackLanes(next, i);
+        const mask = maskOf(lanes);
+        next = { ...next, activeTrack: i, auditionChord: lanes.length > 1 ? lanes : [] };
         next = emit(next, "lane.audition", { mask }, { rowId: "lane.audition", t });
-        return fire(next, "lane.audition", `lane ${i + 1} momentary audition — mask ${mask}`, t);
+        return fire(
+          next,
+          "lane.audition",
+          `${lanes.length > 1 ? "chord" : `lane ${i + 1}`} momentary audition — mask ${mask}`,
+          t,
+        );
+
       }
 
 
@@ -713,11 +751,21 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
         return { ...next, speedGlide: false, chopGlide: false };
       }
       if (g.control.startsWith("track-button") && g.level === "hold") {
-        // End the momentary audition. An empty mask is the explicit "restore"
-        // instruction — the engine never has to remember what it overrode.
-        next = emit(next, "lane.audition", { mask: "" }, { rowId: "lane.audition", t });
-        return fire(next, "lane.audition", "audition released — prior mix restored", t);
+        // One member of a chord audition can lift while the others stay down:
+        // the audition narrows to whatever is still held. An empty mask is the
+        // explicit "restore" instruction — the engine never remembers state.
+        const lanes = heldTrackLanes(next);
+        const mask = lanes.length ? maskOf(lanes) : "";
+        next = { ...next, auditionChord: lanes.length > 1 ? lanes : next.auditionChord };
+        next = emit(next, "lane.audition", { mask }, { rowId: "lane.audition", t });
+        return fire(
+          next,
+          "lane.audition",
+          mask ? `audition narrowed — mask ${mask}` : "audition released — prior mix restored",
+          t,
+        );
       }
+
       return next;
     }
 
@@ -738,14 +786,35 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
       return next;
     }
 
+    case "chordStart": {
+      // Two or three Track buttons pressed together = an IMMEDIATE chord
+      // audition. It must not wait for the 450 ms hold threshold, and it must
+      // not be replaced lane-by-lane as each individual hold matures.
+      const lanes = g.controls.filter((c) => c.startsWith("track-button")).map(trackIndexOf);
+      if (lanes.length >= 2 && lanes.length === g.controls.length && !fn && !next.pressed.includes("play")) {
+        const mask = maskOf(lanes);
+        next = { ...next, auditionChord: lanes, activeTrack: lanes[0] as TrackIndex };
+        next = emit(next, "lane.audition", { mask }, { rowId: "lane.audition", t });
+        return fire(next, "lane.audition", `chord audition — mask ${mask}`, t);
+      }
+      return next;
+    }
+
     case "chordRelease": {
       const set = g.controls;
       if (set.includes("function") && set.includes("play") && g.releaseSpreadMs <= 120) {
         next = { ...next, loopMode: state.loopMode === "fixed" ? "variable" : "fixed" };
         return fire(next, "play.loopMode", `released together → ${next.loopMode} loops`, t);
       }
+      if (set.every((c) => c.startsWith("track-button")) && set.length >= 2) {
+        const lanes = heldTrackLanes(next);
+        const mask = lanes.length ? maskOf(lanes) : "";
+        next = emit(next, "lane.audition", { mask }, { rowId: "lane.audition", t });
+        return fire(next, "lane.audition", mask ? `chord narrowed — mask ${mask}` : "chord released — prior mix restored", t);
+      }
       return next;
     }
+
 
     default:
       return next;
