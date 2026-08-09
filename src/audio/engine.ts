@@ -1231,7 +1231,12 @@ export class AudioEngine {
     const t = this.tracks[id];
     if (!t || !this.ctx) return;
     const audibleBySolo = this.anySolo() ? t.soloed : true;
-    const open = audibleBySolo && (!t.muted || t.soloed);
+    // Heads layer OVER the dry mix: the four head voices ride the source
+    // track's own chain, so the source gate stays open while heads are active
+    // even if the user has muted that stem in the dry mixer (which only
+    // silences the normal copy — the head voices replace it).
+    const headsSource = this.heads.active && this.heads.source === id;
+    const open = audibleBySolo && (headsSource || !t.muted || t.soloed);
     t.fxRack?.setInputOpen(open);
     this.setGain(t.soloGain.gain, audibleBySolo ? 1 : 0);
   }
