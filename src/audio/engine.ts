@@ -735,8 +735,14 @@ export class AudioEngine {
 
   /** All four stems start at ONE shared, scheduled context time. */
   private startAll(offset: number): { started: number; startAt: number } {
-    const ctx = this.ctx!;
-    const startAt = ctx.currentTime + LOOKAHEAD_S;
+    return this.startAllAt(offset, this.ctx!.currentTime + LOOKAHEAD_S);
+  }
+
+  /**
+   * Start every stem at an EXPLICIT shared context time. The scrub release
+   * uses this with a render-quantum handoff instead of the 80 ms lookahead.
+   */
+  private startAllAt(offset: number, startAt: number): { started: number; startAt: number } {
     let started = 0;
     for (const t of this.tracks) {
       if (!t.buffer) continue;
@@ -747,6 +753,7 @@ export class AudioEngine {
     this.timeline.anchor(startAt, offset);
     return { started, startAt };
   }
+
 
   /** Largest difference between the scheduled start times of live sources. */
   startSpreadMs(): number {
