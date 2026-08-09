@@ -275,7 +275,12 @@ export function useDeviceSurface() {
       // can fire underneath the shuttle.
       if ((e.code === "KeyQ" || e.code === "KeyA") && heldKeysRef.current.has("KeyF")) {
         scrubKeysRef.current.add(e.code);
-        scrubUsedFnRef.current = true;
+        if (!scrubUsedFnRef.current) {
+          scrubUsedFnRef.current = true;
+          // FUNCTION is consumed by the shuttle the moment it starts: cancel it
+          // so neither its hold (power) nor its release (tap) row can fire.
+          engine.cancel("function", "keyboard");
+        }
         dispatch({ type: "globalScrub", dir: e.code === "KeyQ" ? 1 : -1 });
         return;
       }
@@ -295,11 +300,8 @@ export function useDeviceSurface() {
       if (e.code === "KeyF") {
         endScrub();
         if (scrubUsedFnRef.current) {
-          // The modifier is consumed by the shuttle: cancel it so no FUNCTION
-          // tap row (which would stop the tape) fires on release.
           scrubUsedFnRef.current = false;
-          engine.cancel(control, "keyboard");
-          return;
+          return; // already cancelled at shuttle start — nothing to release
         }
       }
       engine.release(control, "keyboard");
