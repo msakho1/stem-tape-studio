@@ -662,9 +662,13 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
 
 
       if ((c === "rocker-fwd" || c === "rocker-rwd") && g.level === "hold") {
-        if (fn) return fire({ ...next, chopGlide: true }, "rocker.chop", "hold = glide (chop glides)", t);
+        // Hold PLAY + rocker = chop glide. FN + rocker is the audible shuttle,
+        // which owns its own hold and must not also start a glide.
+        if (state.pressed.includes("play")) return fire({ ...next, chopGlide: true }, "rocker.chop.play", "hold PLAY + rocker = chop glide", t);
+        if (fn) return next;
         return fire({ ...next, speedGlide: true }, "rocker.speed", "hold = continuous speed glide", t);
       }
+
       if ((c === "volume-plus" || c === "volume-minus") && g.level === "hold" && fn) {
         return fire({ ...next, chopGlide: true }, "volume.chopWindow", "hold = glide", t);
       }
