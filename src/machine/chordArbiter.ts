@@ -240,6 +240,22 @@ export class ChordArbiter {
       }
     }
 
+    // Play + Rocker = the chop family (Stem Tape extension, supersedes the v2.6
+    // `rocker.chop` row). The deflection claims PLAY the instant it arrives, so
+    // the pending Play tap transaction is cancelled BEFORE dispatch and no
+    // transport.play / transport.stop / transport.cue can leak out.
+    if (isRocker(control) && this.down.has("play")) {
+      this.claim("play");
+      this.log.unshift({
+        t,
+        controls: ["play", control],
+        intent: "none",
+        suppressed: ["play"],
+        detail: "PLAY claimed by rocker deflection — chop family, transport suppressed",
+      });
+      if (this.log.length > 60) this.log.length = 60;
+    }
+
     // Play-first chords are resolved on RELEASE (they need a duration), but the
     // modifier is claimed as soon as the partner arrives.
     if (isVolume(control) && this.modifierFresh("play", t)) this.claim("play");
