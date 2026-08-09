@@ -494,18 +494,23 @@ export function useDeviceSurface() {
       // fire underneath it, and FUNCTION is consumed exactly as on keyboard.
       if (
         (control === "rocker-fwd" || control === "rocker-rwd") &&
-        stateRef.current.functionHeld
+        (fnPointerRef.current != null || stateRef.current.functionHeld)
       ) {
-        scrubPointersRef.current.set(e.pointerId, control === "rocker-fwd" ? 1 : -1);
+        const dir = control === "rocker-fwd" ? 1 : -1;
+        scrubPointersRef.current.set(e.pointerId, dir);
         if (!scrubUsedFnRef.current) {
           scrubUsedFnRef.current = true;
-          engine.cancel("function", "keyboard");
+          // FUNCTION is consumed by the shuttle: cancel it so neither its hold
+          // (power) nor its release (tap) row can fire underneath.
+          engine.cancel("function", fnPointerRef.current ?? "keyboard");
         }
-        dispatch({ type: "globalScrub", dir: control === "rocker-fwd" ? 1 : -1 });
+        dispatch({ type: "globalScrub", dir });
         return;
       }
+      if (control === "function") fnPointerRef.current = e.pointerId;
 
       engine.press(control, e.pointerId, performance.now(), p?.x, p?.y);
+
 
 
       if (control.startsWith("fader-")) {
