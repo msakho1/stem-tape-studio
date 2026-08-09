@@ -68,7 +68,7 @@ import {
   headReadPosition,
 } from "./heads";
 import {
-  MAX_SCRUB_RATE,
+  HEAD_SCRUB_MAX_RATE,
   SCRUB_SILENCE_RATE,
   ScrubLog,
   ScrubTracker,
@@ -1231,7 +1231,12 @@ export class AudioEngine {
     const t = this.tracks[id];
     if (!t || !this.ctx) return;
     const audibleBySolo = this.anySolo() ? t.soloed : true;
-    const open = audibleBySolo && (!t.muted || t.soloed);
+    // Heads layer OVER the dry mix: the four head voices ride the source
+    // track's own chain, so the source gate stays open while heads are active
+    // even if the user has muted that stem in the dry mixer (which only
+    // silences the normal copy — the head voices replace it).
+    const headsSource = this.heads.active && this.heads.source === id;
+    const open = audibleBySolo && (headsSource || !t.muted || t.soloed);
     t.fxRack?.setInputOpen(open);
     this.setGain(t.soloGain.gain, audibleBySolo ? 1 : 0);
   }
@@ -1575,13 +1580,11 @@ export class AudioEngine {
     if (!res.ok) return { ok: false, detail: res.detail };
     this.heads = res.state;
 
-    // Everything except the source is silenced for the duration; the saved mute
-    // states are restored verbatim on exit.
-    this.preHeadsMutes = this.tracks.map((tr) => tr.muted);
-    this.tracks.forEach((tr, i) => {
-      if (i !== source) tr.muted = true;
-      this.applyAudibility(i as TrackId);
-    });
+    // Heads mode LAYERS over the dry mix: no stem is muted on entry. Existing
+    // mute states are preserved verbatim (drums stay audible; a muted musical
+    // source keeps its normal copy silent while its heads still sound).
+    this.preHeadsMutes = null;
+    this.applyAudibilityAll();
 
     if (engine === "worklet") {
       this.pushHeads();
@@ -1636,11 +1639,12 @@ export class AudioEngine {
       const mask = this.preHeadsMutes;
       this.tracks.forEach((tr, i) => {
         tr.muted = mask[i] ?? false;
-        this.applyAudibility(i as TrackId);
       });
       this.preHeadsMutes = null;
     }
     this.heads = exitHeads(this.heads);
+    // Re-close the source gate now that heads no longer bypass its mute.
+    this.applyAudibilityAll();
     return { ok: true, detail: "heads off — original four tracks, faders and mutes restored, transport untouched" };
   }
 
@@ -1697,7 +1701,7 @@ export class AudioEngine {
     const sr = t.buffer.sampleRate;
     const cf = Math.max(1, this.heads.cycleFrames);
     const cs = this.heads.cycleStartFrame;
-    const rate = Math.min(MAX_SCRUB_RATE, Math.abs(deltaFrames) / Math.max(1e-4, dtS) / sr);
+    const rate = Math.min(HEAD_SCRUB_MAX_RATE, Math.abs(deltaFrames) / Math.max(1e-4, dtS) / sr);
     st.pos = cs + (((st.pos + deltaFrames - cs) % cf) + cf) % cf;
     if (rate < SCRUB_SILENCE_RATE) return;
     const now = ctx.currentTime;

@@ -85,7 +85,9 @@ class TapeProcessor extends AudioWorkletProcessor {
     this.headScrubs = [null, null, null, null];
     this.scrubLag = Math.max(1, 0.03 * sampleRate);
     this.scrubXfadeFrames = Math.max(1, Math.round(0.012 * sampleRate));
-    this.maxScrubRate = 32;
+    // Per-head heads-mode scrub tops out at 1.5× tape speed (musical shuttle,
+    // not a rewind). The global four-stem shuttle keeps its own faster limit.
+    this.maxScrubRate = 1.5;
     this.scrubSilenceRate = 0.02;
     /** Telemetry accumulators (read by the diagnostics panel). */
     this.telemetryCountdown = 0;
