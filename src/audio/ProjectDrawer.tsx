@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DEMO_NOTICE, buildDemoProject } from "@/audio/demo";
 import { ROLE_LABEL, STEM_ROLE_LIST, formatBytes, type StemRole } from "@/audio/format";
-import { ingestSequential, ingestStem, ROLE_TRACK } from "@/audio/ingest";
+import { analyzeGridForSession, ingestSequential, ingestStem, ROLE_TRACK } from "@/audio/ingest";
+import { describeGrid } from "@/audio/gridAnalysis";
 import { describeVerdict, formatMiB, judge, reverseCostBytes } from "@/audio/memory";
 import { downmixToMonoWav, persistDerived, predictMonoDownmix } from "@/audio/saver";
 import { resolveBpm, session, toStoredProject, type SessionState } from "@/audio/session";
@@ -59,6 +60,11 @@ export function ProjectDrawer({ engine, status, control }: Props) {
       const r = await ingestStem(engine, role, file, "user-private", { signal: controller.signal });
       note(r.ok, `${ROLE_LABEL[role]} — ${r.detail}`);
       session.set({ source: "upload", saved: false });
+      // Tempo is detected from the audio itself on every stem change.
+      setBusy("detecting tempo grid…");
+      const grid = await analyzeGridForSession(engine);
+      note(!!grid, grid ? `grid — ${describeGrid(grid)}` : "grid — no periodic structure detected");
+
       abort.current = null;
       setBusy(null);
       void refresh();
@@ -161,6 +167,10 @@ export function ProjectDrawer({ engine, status, control }: Props) {
         note(r.ok, `${ROLE_LABEL[stem.role]} — ${useDerived ? "mono working copy · " : ""}${r.detail}`);
       }
       abort.current = null;
+      // Restored stems are re-analysed: the grid is derived from audio, not trusted from disk.
+      setBusy("detecting tempo grid…");
+      const grid = await analyzeGridForSession(engine);
+      note(!!grid, grid ? `grid — ${describeGrid(grid)}` : "grid — no periodic structure detected");
       // Amendment 2: a song load stops the transport and waits for PLAY.
       engine.execute({ id: -1, t: performance.now(), type: "song.load", payload: { song: 0 } });
       setBusy(null);
@@ -326,8 +336,14 @@ export function ProjectDrawer({ engine, status, control }: Props) {
       <div className="st-pj-tiles">
         <div className="st-pj-tile" data-testid="bpm-field">
           <p className="st-pj-tile__k">tempo</p>
-          <p className="st-pj-tile__v">{sess.bpm} bpm</p>
-          <p className="st-pj-tile__sub">{sess.bpmSource === "provisional" ? "provisional" : sess.bpmSource}</p>
+          <p className="st-pj-tile__v">{sess.songGrid ? sess.songGrid.bpm.toFixed(2) : sess.bpm} bpm</p>
+          <p className="st-pj-tile__sub">
+            {sess.songGrid
+              ? `detected · ${describeGrid(sess.songGrid)}`
+              : sess.bpmSource === "manual"
+                ? "manual"
+                : "no stems loaded"}
+          </p>
         </div>
         <div className="st-pj-tile">
           <p className="st-pj-tile__k">local storage</p>

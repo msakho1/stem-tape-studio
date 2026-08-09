@@ -161,19 +161,34 @@ export async function ingestSequential(
     opts.onResult?.(r);
     await yieldToBrowser();
   }
-  // Requirement 8: a grid must exist automatically whenever stems are loaded.
+  await analyzeGridForSession(engine);
+  return results;
+}
+
+/**
+ * Requirement 8: a detected grid must exist automatically whenever the decoded
+ * stem set changes — single-stem picks and project restores included. Local,
+ * deterministic DSP; never a provisional placeholder. A tempo the musician set
+ * by hand is authoritative and is never overwritten.
+ */
+export async function analyzeGridForSession(engine: AudioEngine) {
   // Sources changed, so any stored scrub landing is stale.
   engine.clearScrubCandidates("stems replaced");
-  const stems = session.get().stems;
+  const state = session.get();
+  const stems = state.stems;
   const hashes: string[] = [];
   for (const [role, track] of Object.entries(ROLE_TRACK) as [StemRole, TrackId][]) {
     hashes[track] = stems[role]?.contentHash ?? "";
   }
   const grid = await engine.analyzeGrid(hashes);
   // Persist the analysed grid with the song (seconds first).
-  session.set({ songGrid: grid, ...(grid ? { bpm: grid.bpm, bpmSource: "tempo-grid" as const } : {}) });
-  return results;
+  session.set({
+    songGrid: grid,
+    ...(grid && state.bpmSource !== "manual" ? { bpm: grid.bpm, bpmSource: "tempo-grid" as const } : {}),
+  });
+  return grid;
 }
+
 
 export function missingRoles(): StemRole[] {
   const stems = session.get().stems;
