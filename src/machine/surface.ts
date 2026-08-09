@@ -786,14 +786,35 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
       return next;
     }
 
+    case "chordStart": {
+      // Two or three Track buttons pressed together = an IMMEDIATE chord
+      // audition. It must not wait for the 450 ms hold threshold, and it must
+      // not be replaced lane-by-lane as each individual hold matures.
+      const lanes = g.controls.filter((c) => c.startsWith("track-button")).map(trackIndexOf);
+      if (lanes.length >= 2 && lanes.length === g.controls.length && !fn && !next.pressed.includes("play")) {
+        const mask = maskOf(lanes);
+        next = { ...next, auditionChord: lanes, activeTrack: lanes[0] as TrackIndex };
+        next = emit(next, "lane.audition", { mask }, { rowId: "lane.audition", t });
+        return fire(next, "lane.audition", `chord audition — mask ${mask}`, t);
+      }
+      return next;
+    }
+
     case "chordRelease": {
       const set = g.controls;
       if (set.includes("function") && set.includes("play") && g.releaseSpreadMs <= 120) {
         next = { ...next, loopMode: state.loopMode === "fixed" ? "variable" : "fixed" };
         return fire(next, "play.loopMode", `released together → ${next.loopMode} loops`, t);
       }
+      if (set.every((c) => c.startsWith("track-button")) && set.length >= 2) {
+        const lanes = heldTrackLanes(next);
+        const mask = lanes.length ? maskOf(lanes) : "";
+        next = emit(next, "lane.audition", { mask }, { rowId: "lane.audition", t });
+        return fire(next, "lane.audition", mask ? `chord narrowed — mask ${mask}` : "chord released — prior mix restored", t);
+      }
       return next;
     }
+
 
     default:
       return next;
