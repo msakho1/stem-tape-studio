@@ -1940,9 +1940,13 @@ export class AudioEngine {
       dir,
       pos,
       startPos: pos,
+      posCtxTime: now,
       wasPlaying,
       musicalRate,
+      gen: 1,
+      live: this.tracks.map(() => []),
       timer: null,
+
       last: typeof performance !== "undefined" ? performance.now() : Date.now(),
       lastGrainAt: this.tracks.map(() => now),
       grains: 0,
