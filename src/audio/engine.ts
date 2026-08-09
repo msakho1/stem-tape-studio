@@ -21,7 +21,7 @@
 
 import { ANTI_CLICK_MATRIX } from "./antiClick";
 import type { Ack, AudioCommand } from "./commands";
-import { equalPower, measuredDryWet, sampleCurve, FILTER_FADE_S, SEAM_FADE_S } from "./crossfade";
+import { complementary, equalPower, measuredDryWet, sampleCurve, FILTER_FADE_S, SEAM_FADE_S } from "./crossfade";
 import { bufferBytes } from "./format";
 import { GLIDE_TAU, glideCurve, glideDurationS } from "./glide";
 import { allowed, defaultBudget, describeVerdict, formatMiB, judge, SSR_BUDGET, type MemoryBudget } from "./memory";
