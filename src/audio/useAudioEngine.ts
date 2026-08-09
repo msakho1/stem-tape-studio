@@ -86,7 +86,15 @@ export function useAudioEngine(commands: AudioCommand[]) {
     watermark.current = pending[pending.length - 1]!.id;
     const produced: Ack[] = [];
     for (const cmd of pending) {
-      if (cmd.type === "transport.play" && !engine.ready) {
+      // Root cause 2: only transport.play carried the unlock-and-retry path,
+      // so the very first FUNCTION + rocker shuttle of a session was rejected
+      // with "audio not unlocked" and produced no sound and no movement.
+      const needsAudio =
+        cmd.type.startsWith("transport.") ||
+        cmd.type.startsWith("stem.") ||
+        cmd.type.startsWith("tape.") ||
+        cmd.type.startsWith("fx.");
+      if (needsAudio && !engine.ready) {
         // Unlock, then re-run this exact command — the id is preserved so the
         // ack still maps to the originating gesture.
         void engine.unlock().then((r) => {
