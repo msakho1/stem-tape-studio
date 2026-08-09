@@ -138,8 +138,13 @@ export function useDeviceSurface() {
   const [heldKeys, setHeldKeys] = useState<string[]>([]);
   const heldKeysRef = useRef<Set<string>>(new Set());
   const scrubKeysRef = useRef<Set<string>>(new Set());
+  /** Touch parity: pointers currently holding a rocker zone as the shuttle. */
+  const scrubPointersRef = useRef<Map<number, 1 | -1>>(new Map());
+  /** Pointer id currently holding the on-screen FUNCTION button, if any. */
+  const fnPointerRef = useRef<number | null>(null);
   /** FUNCTION acted as the shuttle modifier: its release must NOT fire a tap. */
   const scrubUsedFnRef = useRef(false);
+
   const syncHeld = useCallback(() => setHeldKeys([...heldKeysRef.current]), []);
 
   const [rawLog, setRawLog] = useState<RawInputEvent[]>([]);
