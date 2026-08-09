@@ -138,8 +138,13 @@ export function useDeviceSurface() {
   const [heldKeys, setHeldKeys] = useState<string[]>([]);
   const heldKeysRef = useRef<Set<string>>(new Set());
   const scrubKeysRef = useRef<Set<string>>(new Set());
+  /** Touch parity: pointers currently holding a rocker zone as the shuttle. */
+  const scrubPointersRef = useRef<Map<number, 1 | -1>>(new Map());
+  /** Pointer id currently holding the on-screen FUNCTION button, if any. */
+  const fnPointerRef = useRef<number | null>(null);
   /** FUNCTION acted as the shuttle modifier: its release must NOT fire a tap. */
   const scrubUsedFnRef = useRef(false);
+
   const syncHeld = useCallback(() => setHeldKeys([...heldKeysRef.current]), []);
 
   const [rawLog, setRawLog] = useState<RawInputEvent[]>([]);
@@ -236,6 +241,10 @@ export function useDeviceSurface() {
       engine.releaseAll();
       heldKeysRef.current.clear();
       scrubKeysRef.current.clear();
+      scrubPointersRef.current.clear();
+      fnPointerRef.current = null;
+      scrubUsedFnRef.current = false;
+
       syncHeld();
       dispatch({ type: "globalScrub", dir: null });
     };
@@ -487,7 +496,31 @@ export function useDeviceSurface() {
         /* capture unavailable for this pointer */
       }
       const p = toUserSpace(e.clientX, e.clientY);
+
+      // Touch parity for the keyboard F+Q/A shuttle: FUNCTION held (on-screen)
+      // + a rocker zone pressed = held four-stem shuttle. The rocker is never
+      // pressed into the gesture engine, so no varispeed / step-scrub row can
+      // fire underneath it, and FUNCTION is consumed exactly as on keyboard.
+      if (
+        (control === "rocker-fwd" || control === "rocker-rwd") &&
+        (fnPointerRef.current != null || stateRef.current.functionHeld)
+      ) {
+        const dir = control === "rocker-fwd" ? 1 : -1;
+        scrubPointersRef.current.set(e.pointerId, dir);
+        if (!scrubUsedFnRef.current) {
+          scrubUsedFnRef.current = true;
+          // FUNCTION is consumed by the shuttle: cancel it so neither its hold
+          // (power) nor its release (tap) row can fire underneath.
+          engine.cancel("function", fnPointerRef.current ?? "keyboard");
+        }
+        dispatch({ type: "globalScrub", dir });
+        return;
+      }
+      if (control === "function") fnPointerRef.current = e.pointerId;
+
       engine.press(control, e.pointerId, performance.now(), p?.x, p?.y);
+
+
 
       if (control.startsWith("fader-")) {
         const index = (Number(control.slice(-1)) - 1) as FaderIndex;
@@ -631,21 +664,55 @@ export function useDeviceSurface() {
   }, []);
 
 
-  const onControlPointerUp = useCallback(
-    (control: Control, e: React.PointerEvent) => {
-      engine.release(control, e.pointerId);
-      endDrag(e.pointerId);
+  /**
+   * Releasing either half of the touch shuttle: if the other rocker zone is
+   * still held the shuttle continues in that direction, otherwise it ends.
+   * Releasing FUNCTION ends the shuttle outright, exactly like the keyboard.
+   */
+  const endTouchScrub = useCallback((pointerId: number) => {
+    if (!scrubPointersRef.current.delete(pointerId)) return false;
+    const remaining = [...scrubPointersRef.current.values()][0];
+    dispatch({ type: "globalScrub", dir: remaining ?? null });
+    return true;
+  }, []);
+
+  const releaseControlPointer = useCallback(
+    (control: Control, e: React.PointerEvent, cancelled: boolean) => {
+      if (endTouchScrub(e.pointerId)) return;
+      if (control === "function") {
+        fnPointerRef.current = null;
+        if (scrubPointersRef.current.size) {
+          scrubPointersRef.current.clear();
+          dispatch({ type: "globalScrub", dir: null });
+        }
+        if (scrubUsedFnRef.current) {
+          // Already cancelled at shuttle start — nothing left to release.
+          scrubUsedFnRef.current = false;
+          cancelDrag(e.pointerId);
+          return;
+        }
+      }
+      if (cancelled) {
+        engine.cancel(control, e.pointerId);
+        cancelDrag(e.pointerId);
+      } else {
+        engine.release(control, e.pointerId);
+        endDrag(e.pointerId);
+      }
     },
-    [endDrag, engine],
+    [cancelDrag, endDrag, endTouchScrub, engine],
+  );
+
+  const onControlPointerUp = useCallback(
+    (control: Control, e: React.PointerEvent) => releaseControlPointer(control, e, false),
+    [releaseControlPointer],
   );
 
   const onControlPointerCancel = useCallback(
-    (control: Control, e: React.PointerEvent) => {
-      engine.cancel(control, e.pointerId);
-      cancelDrag(e.pointerId);
-    },
-    [cancelDrag, engine],
+    (control: Control, e: React.PointerEvent) => releaseControlPointer(control, e, true),
+    [releaseControlPointer],
   );
+
 
 
   // Read-only verification fixture: the ordered command stream and the last
