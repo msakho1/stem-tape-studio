@@ -1,171 +1,241 @@
-# Phase 7 — Learn Stem Tape: Onboarding Wizard + Control-Map Reconciliation
+# Phase 7 — Learn Stem Tape: Full Interactive Tutorial + Functionality Validation
 
-Revised plan. No production code until approved.
+Plan only. Every current-state claim below is backed by a read of the repository in this turn; each is cited `file:line`.
 
-## 1. Reconciled final gesture table (authoritative)
+---
 
-Rocker block, as approved. "Suppresses" = commands the arbiter must block **before dispatch**.
+## 1. Capability audit (verified this turn)
 
-| Row id | Controls (ordered) | Command | Suppresses | Provenance | Change |
-|---|---|---|---|---|---|
-| `rocker.speed` | rocker fwd/rwd | `rate.set` ±1 BPM | — | v2.6 stock | unchanged |
-| `rocker.glide` | rocker hold | `rate.set` glide | — | v2.6 stock | unchanged |
-| `rocker.semitone` | rocker ×2 | `rate.set` ×2^(±1/12) | — | v2.6 stock | unchanged |
-| `rocker.scrub` | function + rocker | `transport.scrub` (all four stems, continuous) | `fn.*` tap actions | extension, supersedes `rocker.chop` | **now exclusive — chop removed from FN layer** |
-| `chop.step` | play + rocker fwd/rwd | `loop.chop` half/double | `transport.play`, `transport.stop`, `transport.cue`, play multi-tap txn | extension | **new binding** |
-| `chop.reset` | play + rocker ×2 | `loop.chop` reset to window | same as above | extension | **new binding** |
-| `chop.glide` | hold play + rocker | `loop.chop` continuous | same as above | extension | **moved off FN** |
+### 1.1 Command chain is complete
+All 48 `AudioCommandType` values (`commands.ts:14-66`) have a matching `case` in the engine dispatch (`engine.ts:2157-2810`), plus a `default:` that acks `"unknown command type"` (`engine.ts:2808`). Commands carry a monotonic `id` (`commands.ts:72`, `nextCommandId()` `commands.ts:95-97`), an optional `txnId`/`rowId`, and acks use `AckStatus = "accepted" | "completed" | "rejected" | "failed"` (`commands.ts:83`) broadcast from `engine.ack()` (`engine.ts:369-374`). This is exactly the substrate the completion model needs — no new command plumbing required.
 
-Current code contradicts this at `surface.ts:508-526`: `fn` + rocker double-tap owns chop, and there is no play+rocker branch. The fix is a rocker-ownership claim in `chordArbiter.ts` that (a) marks Play as *claimed* the moment a rocker deflection arrives while Play is physically down, (b) cancels the pending Play tap/hold/multi-tap transaction before any command is emitted, and (c) routes the rocker to the chop family. Function+rocker keeps the scrub branch and loses its `g.count === 2` chop case.
+### 1.2 Matrix
 
-Other reconciliations:
+| Feature | Class | Evidence |
+|---|---|---|
+| FN+Rocker four-stem scrub (command contract) | verified-working | `surface.ts:268-287` emits paired `transport.scrub.start/end`, rejects while recording; `globalScrub.test.ts` |
+| …its audible output | implemented-but-unverified | `engine.ts:1684-1806` real grain scheduler (`GLOBAL_SCRUB_RATE=3`); no automated audio assertion |
+| Keyboard scrub F+Q / F+A | implemented-but-unverified | `keyboardMap.ts:16-17`, intercepted in `useDeviceSurface.ts` |
+| Keyboard faders Y/H U/J I/K O/L | implemented-but-unverified | `keyboardMap.ts:38-45,88-105`; no test |
+| Multi-pointer simultaneous faders | implemented-but-unverified | `faderSessions.ts` per-pointer sessions, `flush()` shared `batchFrame`; no multi-pointer test file exists |
+| One-tap play/stop/resume | verified-working | `surface.ts:400-405`; `engine.ts:2158,2233`; `transportCue.test.ts`, `tape.test.ts` |
+| Hold Play → cue frame 0 | verified-working | `surface.ts:594-603`; `engine.ts:2279`; `transportCue.test.ts` |
+| Wind-up / wind-down inertia curve | implemented-but-unverified | `inertia.ts`; no dedicated curve assertion found |
+| rate.set ±1 BPM / semitone / snap 1.0 / glide | verified-working | `surface.ts:558-567`, `396-399`, `658-661`; `engine.ts:2409-2437` emits `RateChange`+`GlideChange` |
+| Window start/end/shift/reverse | verified-working | `surface.ts:829-844`; `engine.ts:2460`, `WindowChange` emitted at `engine.ts:2471-2472` |
+| Filter fader | verified-working | `surface.ts:831-834`; `engine.ts:2565` |
+| Chop half/double/reset/glide | implemented, **mapped to FN+Rocker double-tap** | `surface.ts:544-548` (`if (fn) { if (g.count===2) … }`); `engine.ts:2500` emits `ChopChange:2508`. **There is no Play+Rocker chop branch anywhere.** |
+| 11 of 12 FX algorithms | verified-working (DSP present) | `banks.ts` — filter `79`, isolator `99`, dirt `134`, gate `176`, pump `204-208`, echo `239`, pitchEcho `254`, scatter `298`, reverb `354`, shimmer `383`, freeze `426` |
+| Beat Repeat inside banks stage | audio-not-connected in `banks.ts` (delegated) | `banks.ts:488-491` returns `null`; DSP lives in `public/beat-repeat-processor.js` |
+| Pump gain envelope | implemented-but-unverified | `banks.ts:204-208` real LFO VCA, duck depth 0.325; no measured-envelope test |
+| Heavy-FX rejection | **known-bug / not-enforced** | `fx12.ts:48,96` declare `heavy: true` for scatter/shimmer/freeze, but grep for `.heavy` in `engine.ts`, `fx/rack.ts`, `workletBudget.ts` returns **zero hits** — the flag is never read |
+| FX overlay stem switching | implemented-but-unverified | `stem.select` (`engine.ts:2632`) has no overlay side effect; no test asserts overlay stays open |
+| Heads enter/exit, 0/25/50/75 %, level | verified-working | `surface.ts:381-393`, `820-827`; `engine.ts:2750-2767`; `heads.test.ts` |
+| Audible head scrub | verified-working (engine restarts voices) | `engine.ts:2784-2797` `scrubHead` + `restartHeadVoice`; `scrub.ts`; `scrub.test.ts` |
+| Heads mute / reverse / source | implemented-but-unverified | `surface.ts:453-464`, `610-621`; `engine.ts:2758-2782` |
+| PRINT commit path | verified-working | `print.ts:33-47` encode → `ingestStem` → local blob, nothing uploaded; `engine.ts:2800-2807` accepted-then-completed acks |
+| PRINT render fidelity / inclusion-exclusion | VERIFY | `printHeads()` render path not proven; the guide claim cannot be taught until measured |
+| Input enable / cancel / recover | verified-working | `surface.ts:752-768`, `524-527`; `engine.ts:2685-2711` |
+| Monitoring off / dry / fx | verified-working | `InputPanel.tsx:134-140`, `recorder.ts` `MonitorMode` |
+| Grid tap / quantise punch | implemented-but-unverified | `grid.ts`; `engine.ts:2727-2748` |
+| Latency compensation | implemented-but-unverified | `input/latency.ts:13-58` model + impulse detection; not wired into an assertion |
+| **Take undo (`rec.undoPass`)** | **mapped-but-unreachable** | Handler at `engine.ts:2716`; grep for `undoPass` across `src` returns only `commands.ts:51` and that handler — **nothing ever emits it** |
+| Timeline `RateChange`, `GlideChange`, `ChopChange`, `WindowChange`, `LinkChange` | verified-working | `engine.ts:2437, 2418, 2508, 2472, 2629` |
+| Timeline **`LoopWrap`** | **not-implemented** | Only emitted inside `transportCue.test.ts:157`; no engine emit site |
+| Timeline **`DirectionChange`** | **known-bug** | Consumed at `engine.ts:331` (recorder rejects reverse) but never emitted by engine — that guard is dead code |
+| Master performance recorder | implemented-but-unverified | `PerformanceRecorder` `engine.ts:342-345`; UI trigger exists at `InputPanel.tsx:250-256` |
+| **Shift+R keybinding** | **not-implemented** | `useDeviceSurface.ts` handles only `Escape` (`:260`) and `shiftKey` for fader grouping (`:512`) |
+| WAV export, 16/24-bit, dither, fallback | verified-working | `wavStream.ts:57-60,113-120`; `exportTake.ts:31`, used at `InputPanel.tsx:223` |
+| 16 songs / 4 banks | verified-working | `surface.ts:325,472` |
+| Recoverable trash | verified-working | `session.ts:38`, `store.ts:47-48`, `engine.ts:2375,2396` |
+| High Memory Mode / Memory Saver | verified-working | `memory.ts:18,46,65-81`; `saver.ts`; `ProjectDrawer.tsx:171,200-204` |
+| **`.stemtape` import/export** | **not-implemented** | Case-insensitive grep for `stemtape`, `exportProject`, `importProject` across `src` returns nothing |
+| `DeviceSurface` highlight layer | not-implemented | No `highlight` reference in `DeviceSurface.tsx`; only `tutorial.highlight` data exists in the registry |
+| Registry tutorial coverage | partially-implemented | 16 of 18 `STEM_ROWS` have `tutorial:`; `V26_ROWS_AS_REGISTRY` (`stemTapeV1Map.ts:50-57`) carry none |
+| `controlBus` pointerId + batchFrame | verified-working | `controlBus.ts:27,36`; `faderSessions.ts` monotonic `batchFrame` |
 
-- **Track double-tap** — taught exactly as implemented (`surface.ts:452-474`, `recordingState.ts:198-204`): loaded+idle → recoverable delete; armed/waiting → cancel only; recording/overdubbing → stop only; stopping/finalising → acknowledgement only. `rec.undoPass` (`commands.ts:49`) stays unreachable from hardware; if the Input/Performance drawer exposes it, the lesson lives there and is marked VERIFY until the control is confirmed present.
-- **LED priority** taught in full: error > failed PRINT > PRINT in progress > recording > overdubbing > armed/waiting > momentary FX > latched FX > Heads > soloed > unlinked > active > muted > base (matches `surface.ts:958-973`). Lessons state both the winning indication and the state hidden under it.
+### 1.3 Blocking defects to fix before the course is executable
+Per your decision (**fix first, then teach**), these ship inside Phase 7:
 
-## 2. Source of truth
+1. `rec.undoPass` unreachable — no gesture or UI emits it.
+2. `LoopWrap` never emitted — Module 10 cannot prove SOS segment tracking.
+3. `DirectionChange` never emitted — reverse-during-record guard is dead.
+4. Heavy-FX `heavy` flag never read — no rejection path to teach or test.
+5. No `Shift+R` binding.
+6. No `.stemtape` import/export — Module 11 lesson is otherwise fiction.
+7. Chop ownership contradicts the approved map (FN+Rocker double-tap today; approved map says Play+Rocker).
+8. `DeviceSurface` cannot highlight a control.
 
-`stemTapeV1Map.ts` becomes the single registry. Existing `StemTapeRow` gains a complete, non-optional-by-default `tutorial` block:
+---
+
+## 2. Chop remap and arbitration
+
+Approved final map, replacing `surface.ts:541-548`:
+
+| Gesture | Command | Suppresses |
+|---|---|---|
+| FN + rocker (single) | `transport.scrub.start/end` | fn tap actions |
+| Play + rocker fwd/rwd | `loop.chop` half/double | `transport.play/stop/cue`, pending play txn |
+| Play + rocker ×2 | `loop.chop` reset | same |
+| Hold Play + rocker | `loop.chop` glide | same |
+| Bare rocker | `rate.set` | — |
+
+`chordArbiter.ts` gains a rocker-ownership claim: the moment a rocker deflection arrives while Play is physically down, Play is marked *claimed*, its pending tap/hold/multi-tap transaction is cancelled **before dispatch**, and the rocker routes to the chop family. FN+rocker keeps scrub and loses its `g.count === 2` chop case. The 37-row v2.6 suite stays green; each remap is recorded in `stemTapeV1Map.ts` as `supersedes`.
+
+---
+
+## 3. Unified feature/tutorial registry
+
+`stemTapeV1Map.ts` becomes the only source of truth. `StemTapeRow.tutorial` is widened from today's single `plainLanguage` string to:
 
 ```ts
 interface TutorialMeta {
-  gestureName: string;          // "Play + Rocker forward"
-  doThis: string;               // imperative, plain language
-  watchFor: string;             // visual result
-  listenFor: string;            // audible result
-  highlight: ControlId[];       // geometry.ts ids, ordered
-  keyboard?: string[];          // "Space + Q"
-  ledExplanation: string;       // winning tier + what it hides
-  safety?: "modifies-audio" | "modifies-project" | "requires-input" | "none";
-  restrictions?: MapLayer[];    // contexts where the row is inert
-  completion: CompletionSpec;   // §4
-  cleanup?: CleanupSpec;        // commands to restore entry state
+  gestureName: string;
+  whatThisDoes: string; doThis: string; watchFor: string;
+  listenFor: string; whyUseIt: string; tryInPerformance: string;
+  highlight: ControlId[];          // geometry.ts ids
+  keyboard?: string[];             // "KeyF+KeyQ"
+  ledExplanation: string;          // winning tier + what it hides
+  restrictions?: MapLayer[];
+  verification: "verified" | "unverified" | "blocked" | "reference-only";
+  lessonIds: string[];
   eligibility: "quick-start" | "curriculum" | "excluded";
-  excludedReason?: string;      // required when excluded
+  excludedReason?: string;
 }
 ```
 
-Derived (never re-authored): onboarding instructions, GUIDE-tab atlas, `KEY_HINTS`, the mapping JSON export, and `guideCorrections.json`. Composite lessons reference row ids and add ordering only.
+Derived, never re-authored: lesson instructions, GUIDE atlas, `keyboardMap.ts` detail text, mapping JSON export, coverage dashboard. A coverage test asserts every `AudioCommandType` maps to ≥1 row with complete non-placeholder metadata or an explicit exclusion (`rollback`, schema-migration paths). Today's gap: `V26_ROWS_AS_REGISTRY` rows get metadata for the first time.
 
-Coverage test: every `AudioCommandType` in `commands.ts` maps to ≥1 registry row with complete non-placeholder `tutorial`, or appears in an explicit exclusion list with a reason (`rollback`, `rec.recover`, schema-migration paths).
+---
 
-## 3. Completion model (event + ack based)
+## 4. Uploaded-audio analysis (full feature analysis, per your choice)
 
-```ts
-interface LessonRuntime {
-  enteredAtSequence: number;      // AudioCommand.id watermark at lesson entry
-  baseline: TutorialBaseline;     // transport phase, rate, mutes, active stem, heads, fx, project id
-  milestones: LessonMilestone[];  // ordered
-  observedCommands: AudioCommand[];
-  acceptedAcks: Ack[];
-  cleanup?: TutorialCleanup;
-}
-interface LessonMilestone {
-  match: (cmd: AudioCommand, ack: Ack | null, ctx: TutorialCtx) => boolean;
-  requireAck: AckStatus[];        // e.g. ["completed"]
-  assert?: (ctx: TutorialCtx) => boolean;  // engine/state result
-  ordered: true;
-}
-```
+Runs once at tutorial start in `src/workers/analysisWorker.ts`, fed **transferred copies of already-decoded channel data, downmixed to mono and decimated to 1 kHz before transfer** — no second full-rate PCM copy is retained. Memory cost: 1 kHz × 4 bytes × 4 stems × duration ≈ **0.9 MiB for a 4-minute song**; feature maps add ~0.3 MiB. Analysis buffers are released after the maps are built.
 
-Rules: a milestone only counts for `cmd.id > enteredAtSequence`; it needs the required ack status from the engine ack stream (`useAudioEngine` already surfaces `acks`); and its `assert` must observe the engine result, not the reducer snapshot alone. Stale state can never complete a lesson.
+Computed per stem: RMS/peak envelope (20 ms hop), spectral-flux transient list, spectral-centroid tonality, sustain score, silence mask; cross-stem overlap map and loop-safe candidate regions (bar-aligned when a grid BPM exists, otherwise transient-aligned).
 
-Continuous controls have no semantic command today (faders go through `controlBus`). Add a **tutorial event stream**: `controlBus` and the fader session manager emit `{ channel, pointerId, value, batchFrame, t }` to a subscribable ring buffer used only by tutorials and diagnostics. Multi-finger lessons require ≥2 distinct `pointerId`s with movement inside the same `batchFrame`.
+Region selection: mixing → highest four-stem overlap; vocal FX → highest tonality on the vocal-role stem; drum FX/chop → highest transient density; Freeze/Scatter → longest sustain, low flux; grid/recording → transient-rich; scrub → longest continuous non-silent range. Every lesson shows the chosen range on the waveform with a "choose another section" control; picks and temporary loops/cues are discarded unless kept.
 
-Worked examples: Play → new `transport.play` + `completed` ack + `status.position` advancing. Mute/return → `track.mute` then `track.unmute` on the same track index, both after entry. Cue → `transport.cue` completed + phase `cued` + position frame 0. Varispeed → `rate.set` away from 1.0, then an independent `rate.set` landing exactly 1.0. FX stem switch → `stem.select` while `fx.overlay` remains open (no `fx.overlay` close command between). Heads scrub → `heads.scrub` accepted + audible read position change reported by the engine.
+---
 
-## 4. Quick Start (10 lessons, ends "You can perform now.")
+## 5. Three surfaces
 
-| # | Lesson | Completion signal | Cleanup |
+- **Quick Start** — 10 lessons, ends "You can perform now."
+- **Learn Stem Tape** — Modules 0-12 plus capstone.
+- **Reference** — searchable, registry-derived atlas: gesture, keyboard, layer, expected LED, expected audio, restrictions, verification badge, launch-lesson button.
+
+Progress (`completed` / `skipped` / `failed`, distinct states) persists in IndexedDB and survives reload.
+
+---
+
+## 6. Completion model
+
+Implemented as specified in your brief (`TutorialLesson` / `TutorialMilestone`). Enforcement rules:
+
+- `enteredAtSequence` watermark from `AudioCommand.id`; only `cmd.id > watermark` counts.
+- `requiredAck` must be observed on the ack stream (`engine.onAck`).
+- `suppressedCommands` present in the window → milestone **fails**, not ignored.
+- `engineAssertion` reads engine state, never the reducer snapshot alone.
+- `audibleAssertion` reads a new master/track RMS + read-pointer telemetry tap (already partially exposed via `useAudioEngine`); scrub and heads lessons require read-pointer movement on all four engines, not a gesture match.
+- `visualAssertion` reads the LED arbitration result from `surface.ts:958-973`.
+- Continuous controls have no semantic command; a tutorial event stream on `controlBus`/`faderSessions` supplies `{channel, pointerId, value, batchFrame, t}`. Multi-finger lessons require ≥2 distinct `pointerId`s inside one `batchFrame` — a sequential single-pointer run is rejected.
+
+### Quick Start (10)
+
+| # | Lesson | Completion | Cleanup |
 |---|---|---|---|
-| 1 | Enable audio + load demo | context `running` + 4 decoded tracks | none |
-| 2 | Play / stop / resume | three separate transport commands, each completed | leave playing |
-| 3 | Two faders at once | 2 pointer ids, same batch frame | restore entry fader values |
-| 4 | Mute and unmute | mute then unmute, same track | restore mute map |
-| 5 | Hold Play to cue, then launch | `transport.cue` completed, then `transport.play` | none |
-| 6 | Select, solo, link/unlink | `stem.select`, `stem.solo`, `stem.link` | clear solo, restore link mask |
-| 7 | ±1 BPM, semitone, snap 1.0× | 3 ordered `rate.set` milestones | rate → 1.0 |
-| 8 | Function + Rocker four-stem scrub | `transport.scrub` accepted, position moves on all four | none |
-| 9 | Window / filter, then Play + Rocker chop | `filter.set` + `loop.chop` without any transport command | restore window, filter, chop |
-| 10 | FX overlay: apply, then switch stems inside it | `fx.momentary.start/end` + `stem.select` with overlay open | close overlay, clear momentary |
+| 1 | Enable audio, confirm four stems and roles | context `running`, 4 decoded tracks | none |
+| 2 | Play / stop / resume | 3 transport commands, each `completed` | leave playing |
+| 3 | Two faders at once | 2 pointer ids in one batchFrame + gain change | restore fader values |
+| 4 | Mute and unmute | `track.mute` then `track.unmute`, same index | restore mute map |
+| 5 | Hold Play to cue, then launch | `transport.cue` completed at frame 0, then `transport.play` | none |
+| 6 | Select, solo, link/unlink | `stem.select`, `stem.solo`, `stem.link` | clear solo, restore mask |
+| 7 | ±1 BPM, semitone, snap 1.0 | 3 ordered `rate.set`, last exactly 1.0 | rate → 1.0 |
+| 8 | FN+Rocker four-stem scrub | scrub start/end + RMS > floor + 4 read pointers move | none |
+| 9 | Window/filter, then Play+Rocker chop | `filter.set` + `loop.chop`, **zero** transport commands | restore window/filter/chop |
+| 10 | FX overlay: apply, then switch stems inside it | `fx.momentary.start/end` + `stem.select` with no `fx.overlay` close | close overlay, clear momentary |
 
-## 5. Full curriculum inventory (modules)
+Modules 0-12 and the capstone follow your brief exactly; per-lesson milestone specs are authored into `src/tutorial/lessons/*` with the same fields.
 
-- **A. Mix and performance** (9 lessons) — roles, levels, 2/3/4-finger moves, opposing moves, mute, active stem, solo, link, linked-vs-independent targeting. Desktop shift-group and keyboard alternatives per lesson.
-- **B. Transport and tape** (11) — play/stop/resume, wind curves, cue, launch profiles (Exact ships; tape pre-roll marked VERIFY/deferred), ±1 BPM, glide, semitone, snap, four-stem scrub, reverse, rapid reversal.
-- **C. Window, chop, loops, grid** (14) — window start/end/shift/reverse, filter fader, chop half/double/reset/glide on the final Play+Rocker map, chop-window slide, fixed vs variable loops, polyrhythmic wraps, FN×4 learning, clear, round, beatmatch + rejection feedback.
-- **D. Twelve FX** (4 bank lessons + 8 concept lessons) — each bank lesson walks all three algorithms; concept lessons cover overlay open/close, bank select, ± cycling, macro, momentary, latch/unlatch, clear all latches, Play+Volume stem switching in-overlay, per-stem retained state, FX in Heads, heavy-effect rejection/recovery, Pump ↔ grid tempo relationship.
-- **E. Heads and PRINT** (11) — enter/exit, 0/25/50/75 %, levels, FN+Fader audible scrub, mute, reverse, source, FX in Heads, PRINT to empty track, PRINT progress/failure/recovery, PRINT inclusion/exclusion (**VERIFY-gated**).
-- **F. Recording and varispeed SOS** (14) — enable/release input, monitoring modes, arm, onset + look-back, stop/finalise, overdub, grid punch + late window, varispeed SOS, multiple passes, undo newest pass via its real UI, interrupted-take recovery, latency compensation, dry WAV export, master performance recording.
-- **G. Projects and songs** (10) — save/open/delete, 16 slots + bank nav, per-song snapshots, local-only storage, OPFS/IndexedDB, storage vs decoded memory, High Memory Mode, Memory Saver, recoverable trash, portable export/import (VERIFY if unimplemented).
-- **H. System and accessibility** (9) — audio unlock, Bluetooth pairing gesture, keyboard map, pointer/multitouch, hit zones, diagnostics, Node vs Worklet engine, background/interruption recovery, privacy guarantee.
+### Lessons runnable today vs blocked
 
-Schema migration is excluded from lessons and stays in developer diagnostics.
+Runnable now: Modules 0, 1, 2, 3 (scrub audibility becomes a proven assertion), 4 (after chop remap), 6 except heavy-FX rejection, 7, 11 except import/export, 12 except Shift+R.
+Blocked until the §1.3 fixes land: take undo (M9), SOS segment proof (M10), heavy-FX rejection (M6), Shift+R (M12), portable project import/export (M11), PRINT inclusion/exclusion claims (VERIFY).
 
-## 6. Tutorial project snapshot / restore
+---
 
-```ts
-interface TutorialSession {
-  id: string; startedAt: number; mode: "quick-start" | "module";
-  previousProject: { id: string; name: string; saved: boolean };
-  previousState: SurfaceState;               // serializable reducer snapshot
-  createdArtifacts: { prints: string[]; takes: string[]; blobKeys: string[] };
-  inputEnabledByTutorial: boolean;
-}
-```
+## 7. Tutorial Copy and restoration
 
-Quick Start uses the ordinary four-stem demo. Entering Heads/PRINT or Recording training prompts to switch to a **training project**: three short demo stems + one deliberately empty track. On switch: persist `TutorialSession` to IndexedDB, snapshot project identity and reducer state, never write to the user's project. On exit or explicit abandon: stop tutorial media tracks and release the microphone, delete tutorial prints/takes/blobs unless the user chose Keep, restore the previous project and reducer state, clear the session record. A reload with a live session record shows a recovery prompt ("resume training / restore my project"). Every lesson with `safety !== "none"` renders a visible banner.
+Performance lessons run on the user's loaded project. PRINT and recording modules require a Tutorial Copy: original blobs untouched, reducer state and project identity snapshotted to IndexedDB, one track emptied — **the user chooses which of the four roles to empty** before the module starts, with the remaining three as backing.
 
-## 7. Keyboard implementation
+Tracked for rollback: windows, loops, chop, FX state, mutes, takes, PRINT buffers, created blob keys, `inputEnabledByTutorial`. After every experiment: Keep this change / Restore lesson / Retry / Exit tutorial. On exit: stop tutorial mic tracks, delete tutorial artifacts unless kept, restore project and reducer state. Reload with a live session offers Resume or Restore Original. Nothing writes into the original project without explicit confirmation.
 
-- `Shift + R` → dispatches a `perf.record` semantic command through the reducer and command stream; the engine's ack drives the UI. `PerformanceRecorder` is never called from the key handler.
-- `Escape` → calls the existing pointer-cancel/blur cleanup path (release held controls, cancel momentary FX, cancel pending multi-tap transactions, reconcile fader sessions). It must not clear latches, delete audio, stop a valid recording, or reset project state.
-- Both handlers ignore `event.repeat`, and ignore events whose target is `input`, `textarea`, `select`, or `[contenteditable]`. Both are added to `KEY_MAP`-derived hints and to the registry's `tutorial.keyboard`.
+---
 
-## 8. Overlay behavior
+## 8. Bug-discovery system
 
-`DeviceSurface` gains `highlight?: ControlId[]`, drawn from existing hit-zone geometry into a `pointer-events:none` layer above the SVG. The lesson card wrapper is `pointer-events:none`; only its own controls opt back in. Placement is target-aware: on mobile the card docks to whichever edge is farthest from the highlighted control, and collapses to a coach pill during multi-touch lessons; desktop uses the right rail. Content is three lines — Do this / Watch / Listen for. `aria-live="polite"`, full keyboard nav, visible focus, reduced-motion respected on the highlight pulse. Auto-advance ~600 ms after the success confirmation. Skip records `skipped`, distinct from `completed`. Exit, restart lesson, restart module, restart all always available. First visit offers Quick Start but never covers a loaded project.
+On a gesture that arrives but fails downstream, the lesson does not advance and does not blame the user. It classifies the first failing layer: gesture-not-recognized, arbitration-conflict, wrong-command, command-rejected, reducer-changed-engine-did-not, engine-changed-audio-silent, visual-state-incorrect, persistence-failed, cleanup-failed, browser-limitation.
 
-## 9. Files
+Diagnostic record (local only, never contains user audio): lesson and feature ids, UA/device, input method, raw gesture sequence, ordered chord, suppressed commands, command ids, acks, state before/after, engine mode (Node vs Worklet), AudioContext state, playhead/read-pointer telemetry, console errors, timings, memory/storage verdict. Actions: Retry, Skip and report, Open diagnostics, Download bug-report JSON.
 
-Add: `src/tutorial/registry.ts` (derivations + coverage), `src/tutorial/lessons/{quickstart,moduleA…moduleH}.ts`, `src/tutorial/runtime.ts` (`LessonRuntime`, milestone evaluation), `src/tutorial/tutorialProject.ts` (snapshot/restore), `src/tutorial/events.ts` (continuous-control tutorial stream), `src/tutorial/useTutorial.ts`, `src/tutorial/TutorialOverlay.tsx`, `src/tutorial/CoachPill.tsx`, `src/tutorial/guideCorrections.ts` + generated `public/guideCorrections.json`, `src/tutorial/__tests__/{coverage,completion,rocker,project}.test.ts`.
+**Creator dashboard ships in this phase** as a fourth SYSTEM sub-tab: passed/failed/skipped lessons, unverified features, first failing layer per failure, overall feature coverage against the registry.
 
-Change: `src/machine/stemTapeV1Map.ts` (full tutorial metadata + new rocker rows), `src/machine/surface.ts` (remove FN+rocker chop; add Play+rocker chop family), `src/machine/chordArbiter.ts` (rocker claims Play with pre-dispatch suppression), `src/audio/commands.ts` (`perf.record`; chop payload), `src/audio/engine.ts` (perf.record handling + ack; expose audible-scrub position for assertions), `src/audio/controlBus.ts` + `src/input/faderSessions.ts` (tutorial event emission with pointer id + batch frame), `src/device/useDeviceSurface.ts` (Shift+R, Escape, safety rules, KEY_HINTS), `src/device/DeviceSurface.tsx` (highlight layer), `src/routes/index.tsx` (learn entry point, overlay mount, code-derived GUIDE tab), `src/device/SystemPage.tsx` (mapping JSON export from registry).
+---
 
-## 10. VERIFY items (excluded from completion-gated lessons until proven)
+## 9. Desktop and touch
 
-Continuous wind reversal and source lifetime; exact dim/full-light hold duration; PRINT signal inclusion/exclusion (`print.ts` only encodes the buffer handed to it — the exclusion claim depends on `engine.ts`'s render path); reverse-direction recording rejection; permission-never-on-load; audible Heads scrubbing at browser level; final FN+Rocker vs Play+Rocker arbitration under all layers; Bluetooth pairing hold timing. Each gets a targeted source read plus an automated or Playwright test in Step 1 below; anything unresolved ships as a read-only "reference" lesson with no completion gate.
+Desktop: dismissible Keyboard Controls panel (already built, `KeyboardPanel.tsx`) gains lesson-scoped emphasis and held-key highlighting; simultaneous fader-key lessons require overlapping keydowns. Touch: genuine multipointer lessons for 2/3/4 fingers, scroll prevented only on the performance surface, pointercancel always releases. Input method is auto-detected and user-overridable at any point in the course. Emulated runs are labelled as emulation, distinct from real-device checks.
 
-## 11. Guide synchronization
+Lesson card: non-modal, `pointer-events:none` wrapper with only its own controls opting in, target-aware placement (docks to the edge farthest from the highlighted control; collapses to a coach pill during multi-touch), `aria-live="polite"`, keyboard-navigable, reduced-motion respected.
 
-`guideCorrections.json` (generated from the registry, not hand-written) carries: final rocker/chop mapping, Track double-tap state table, complete LED priority including PRINT tiers, Bluetooth pairing gesture, Shift+R and Escape once shipped, and any verified PRINT/recording limitations. The wizard does not reproduce the PDF; the PDF stays the reference manual.
+---
 
-## 12. Test and acceptance matrix
+## 10. Files
+
+**Add** — `src/tutorial/registry.ts`, `src/tutorial/lessons/{quickstart,module0…module12,capstone}.ts`, `src/tutorial/runtime.ts`, `src/tutorial/completion.ts`, `src/tutorial/diagnostics.ts`, `src/tutorial/tutorialProject.ts`, `src/tutorial/events.ts`, `src/tutorial/regions.ts`, `src/workers/analysisWorker.ts`, `src/tutorial/useTutorial.ts`, `src/tutorial/TutorialOverlay.tsx`, `src/tutorial/CoachPill.tsx`, `src/tutorial/CoverageDashboard.tsx`, `src/tutorial/__tests__/{coverage,completion,rocker,regions,project,diagnostics}.test.ts`, `src/audio/__tests__/{fxMeasure,timelineSegments,multiFader}.test.ts`.
+
+**Change** — `stemTapeV1Map.ts` (full metadata, chop rows, `supersedes`), `surface.ts` (chop remap, `rec.undoPass` emitter, LED explanations), `chordArbiter.ts` (rocker claims Play), `engine.ts` (`LoopWrap`/`DirectionChange` emission, heavy-FX gating, telemetry tap), `fx/rack.ts` + `workletBudget.ts` (read `heavy`), `controlBus.ts` + `faderSessions.ts` (tutorial event emission), `useDeviceSurface.ts` (Shift+R via command path, Escape safety rules), `DeviceSurface.tsx` (highlight layer), `store.ts` + `ProjectDrawer.tsx` (`.stemtape` import/export), `SystemPage.tsx` (coverage sub-tab, registry-derived mapping export), `routes/index.tsx` (Learn entry, overlay mount, registry-derived GUIDE), `keyboardMap.ts` (derive from widened metadata).
+
+**Storage/schema** — new `tutorial` IndexedDB store: `progress` (lesson id → state, timestamps), `session` (active `TutorialSession` for reload recovery), `diagnostics` (capped ring of bug records). Versioned migration, additive only; existing project stores untouched.
+
+---
+
+## 11. Test matrix
 
 | Area | Test |
 |---|---|
-| Rocker remap | FN+rocker scrubs all four stems; Play+rocker changes chop and emits **no** transport command; hold Play alone still cues frame zero; bare rocker still changes speed; all verified in tape / FX-overlay / Heads layers |
-| v2.6 coverage | existing 37-row suite green; each intentional remap asserted as a Stem Tape extension with `supersedes` |
-| Completion | every lesson rejects pre-entry state; ordered milestones enforced; ack status required |
-| Multi-fader | 2/3/4 distinct pointer ids in one batch frame recognised; single-pointer sequence rejected |
-| FX | overlay stays open across `stem.select`; all twelve algorithms present in curriculum (registry assertion) |
-| Tutorial project | enter/restore leaves user project byte-identical; mic released; temp artifacts deleted; reload recovery |
-| Keyboard | auto-repeat ignored; editable-target ignored; Escape preserves latches/recording/project |
-| Layout | no overlay covers a required control at 375 / 390 / 420 px, tablet, desktop (Playwright screenshots) |
-| Persistence | skipped ≠ completed; both survive reload |
-| Regression | audio, recording, Heads, FX, transport suites green; `tsgo --noEmit` clean; zero console errors; network log contains no user audio |
+| Chop remap | Play+rocker changes chop and emits **no** transport command; FN+rocker still scrubs; hold Play alone still cues frame 0; bare rocker still sets rate; verified in tape / FX-overlay / Heads layers |
+| v2.6 regression | 37-row suite green; each remap asserted as an extension with `supersedes` |
+| Completion | pre-entry state never completes; ordered milestones; ack required; suppression violation fails |
+| Multi-fader | 2/3/4 distinct pointer ids in one batchFrame accepted; sequential single-pointer rejected |
+| FX | all twelve algorithms produce measurable wet/dry difference offline; Pump produces a tempo-related gain envelope; heavy-FX rejection returns `rejected` and does not mark the bank rejected |
+| SOS | timeline emits `RateChange`, `GlideChange`, `LoopWrap`, `LinkChange`, `DirectionChange` during a varispeed overdub; constant-rate manifest rejected |
+| Undo | `rec.undoPass` reachable from real UI; removes only the newest pass |
+| Scrub / Heads | Playwright: master RMS above floor, all four read pointers move, head scrub changes read position |
+| Tutorial Copy | user project byte-identical after restore; mic released; artifacts deleted; reload recovery |
+| Keyboard | Shift+R emits `perf.record` through the command path; auto-repeat ignored; editable targets ignored; Escape preserves latches, recording and project |
+| Layout | Playwright screenshots at 375/390/420 px, tablet, desktop — no overlay covers a taught control |
+| Privacy | network log contains no user audio during a full Quick Start run |
+| Regression | full suite green, `tsgo --noEmit` clean, zero console errors |
 
-Mobile runs are labelled emulation; real-iPhone verification requires the physical checklist.
+Real-device iPhone/iPad checks are a separate manual checklist and are labelled as such.
 
-## 13. Implementation sequence
+---
 
-1. Resolve VERIFY items (targeted reads + tests); publish results before writing lessons.
-2. Rocker remap + arbitration suppression + regression tests.
-3. Keyboard: Shift+R via command path, Escape via cleanup path, safety rules.
-4. Registry metadata schema + coverage test + derived guide/atlas/hints/export.
-5. Tutorial event stream for continuous controls.
-6. Runtime (`LessonRuntime`, milestones, persistence) with unit tests.
-7. Overlay + highlight layer + responsive placement.
-8. Quick Start ten lessons, Playwright end-to-end.
-9. Tutorial project snapshot/restore, then modules E and F.
-10. Remaining modules A–D, G, H; `guideCorrections.json`; full acceptance matrix.
+## 12. Implementation sequence
+
+1. Fix the eight blockers in §1.3 with tests (undoPass, LoopWrap, DirectionChange, heavy gating, Shift+R, import/export, chop remap + arbitration, highlight layer).
+2. Widen registry metadata; coverage test; regenerate GUIDE, keyboard panel, mapping export.
+3. Tutorial event stream for continuous controls + telemetry tap.
+4. Analysis worker and region selection.
+5. Runtime, completion engine, diagnostics, persistence.
+6. Overlay, coach pill, highlight rendering, responsive placement.
+7. Quick Start ten lessons + Playwright end-to-end.
+8. Tutorial Copy snapshot/restore; Modules 8-10.
+9. Remaining modules, capstone, coverage dashboard, full acceptance matrix.
+
+---
+
+## 13. VERIFY items (reference-only lessons until proven)
+
+PRINT signal inclusion/exclusion; continuous wind reversal and source lifetime; exact dim/full-light hold duration; reverse-direction recording rejection once `DirectionChange` is emitted; audible Heads scrubbing at browser level; Bluetooth pairing hold timing; iOS delivery limits for large WAV exports. Each gets a targeted read plus an automated or Playwright test in step 1; anything unresolved ships as a read-only reference lesson with no completion gate and an `unverified` badge in the atlas.
