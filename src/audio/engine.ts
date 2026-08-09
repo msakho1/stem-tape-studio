@@ -1399,6 +1399,25 @@ export class AudioEngine {
   /** Node-engine head voices. Empty while heads are served by the worklet. */
   private headVoices: ({ node: AudioBufferSourceNode; gain: GainNode } | null)[] = [null, null, null, null];
   private headsBus: GainNode | null = null;
+  /** Analyser on the heads bus — head-path output, isolated from the transport. */
+  private headsTap: AnalyserNode | null = null;
+
+  /** RMS of the heads bus only. 0 when heads mode is not serving audio. */
+  headsRms(): number {
+    const a = this.headsTap;
+    if (!a) return 0;
+    const buf = new Float32Array(a.fftSize);
+    a.getFloatTimeDomainData(buf);
+    let sum = 0;
+    for (let i = 0; i < buf.length; i++) sum += buf[i]! * buf[i]!;
+    return Math.sqrt(sum / buf.length);
+  }
+
+  /** Absolute source-frame read position of each of the four heads. */
+  headReadFrames(): number[] {
+    return [0, 1, 2, 3].map((i) => this.headFrameNow(i));
+  }
+
   /** Mute mask of the non-source tracks, restored verbatim on heads exit. */
   private preHeadsMutes: boolean[] | null = null;
   /** PRINT commit hook, installed by the ingest layer (persist + adopt). */
@@ -1500,6 +1519,8 @@ export class AudioEngine {
         /* noop */
       }
       this.headsBus = null;
+      this.headsTap = null;
+
     }
   }
 
@@ -1569,7 +1590,14 @@ export class AudioEngine {
       const bus = this.ctx.createGain();
       bus.gain.value = 1;
       bus.connect(t!.input);
+      // Measurement tap: proves the HEAD path itself is sounding, not the
+      // transport underneath it.
+      const tap = this.ctx.createAnalyser();
+      tap.fftSize = 2048;
+      bus.connect(tap);
+      this.headsTap = tap;
       this.headsBus = bus;
+
       for (const s of t!.sources) {
         try {
           s.node.onended = null;
@@ -1835,6 +1863,45 @@ export class AudioEngine {
   /** Why the most recent shuttle attempt was refused, for the diagnostic record. */
   lastScrubRejection: string | null = null;
 
+  /**
+   * Every scrub grain node that is currently alive. Registered on creation and
+   * removed by the node's own `onended`, so `scrubPathCount()` is a measurement
+   * of the graph rather than an assertion about it.
+   */
+  readonly liveScrubPaths = new Set<AudioBufferSourceNode>();
+
+  /** Active scrub audio paths right now (0 once a release has settled). */
+  scrubPathCount(): number {
+    return this.liveScrubPaths.size;
+  }
+
+  /** Live AudioParam value of each stem fader — what is actually audible. */
+
+
+  trackGainValues(): number[] {
+    return this.tracks.map((t) => t.gain.gain.value);
+  }
+
+  /** Per-stem post-FX RMS — proves a stem's own path is sounding. */
+  trackRms(): number[] {
+    return this.tracks.map((t) => {
+      const a = t.analyser;
+      const buf = new Float32Array(a.fftSize);
+      a.getFloatTimeDomainData(buf);
+      let sum = 0;
+      for (let i = 0; i < buf.length; i++) sum += buf[i]! * buf[i]!;
+      return Math.sqrt(sum / buf.length);
+    });
+  }
+
+  /** Normal (non-scrub) playback paths per stem — 1 per loaded, playing stem. */
+
+  playbackPathCounts(): number[] {
+    return this.tracks.map((t) => t.sources.length);
+  }
+
+
+
   private scrubGrainAll(dtS: number) {
     const gs = this.globalScrub;
     const ctx = this.ctx;
@@ -1890,9 +1957,15 @@ export class AudioEngine {
       emitted++;
       const rec = { node, gain: g, at, endAt: at + dur, gen };
       (gs.live[i] ??= []).push(rec);
+      // Measured, not asserted: every sounding scrub path is registered here
+      // and only removed when the node actually ends, so a harness can read a
+      // true "active scrub path" count after release.
+      this.liveScrubPaths.add(node);
       node.onended = () => {
         const cur = this.globalScrub;
         if (cur) cur.live[i] = (cur.live[i] ?? []).filter((r) => r !== rec);
+        this.liveScrubPaths.delete(node);
+
         try {
           node.disconnect();
           g.disconnect();
