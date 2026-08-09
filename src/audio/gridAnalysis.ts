@@ -259,25 +259,34 @@ export function mergeEnvelopes(envelopes: Float32Array[]): Float32Array {
  */
 export function analyzeSongGrid(
   inputs: AnalysisInput[],
-  opts: { beatsPerBar?: number; hopSeconds?: number } = {},
+  opts: { beatsPerBar?: number; hopSeconds?: number; windowSeconds?: number } = {},
 ): SongGrid | null {
   const usable = inputs.filter((i) => i.channel.length > 0 && i.sampleRate > 0);
   if (usable.length === 0) return null;
   const hopSeconds = opts.hopSeconds ?? HOP_SECONDS;
+  const windowSeconds = opts.windowSeconds ?? WINDOW_SECONDS;
   const beatsPerBar = opts.beatsPerBar ?? 4;
   const sampleRate = usable[0]!.sampleRate;
 
-  const envelopes = usable.map((i) => normalizeEnvelope(onsetEnvelope(i.channel, i.sampleRate, hopSeconds)));
+  const envelopes = usable.map((i) =>
+    normalizeEnvelope(onsetEnvelope(i.channel, i.sampleRate, hopSeconds, windowSeconds)),
+  );
   const env = mergeEnvelopes(envelopes);
   const tempo = estimateTempo(env, hopSeconds);
   if (!tempo) return null;
 
   const beatSeconds = 60 / tempo.bpm;
   const beatHops = tempo.lagHops;
-  const phaseS = estimateBeatPhase(env, beatHops, hopSeconds);
-  const downbeatIndex = estimateDownbeat(env, beatHops, phaseS / hopSeconds, beatsPerBar);
+  // Latency-corrected, folded into the first beat period.
+  const phaseS = estimateBeatPhase(env, beatHops, hopSeconds, windowSeconds);
+  // The downbeat search indexes RAW envelope frames, so undo the correction.
+  const rawPhaseHops = (phaseS - onsetLatency(hopSeconds, windowSeconds)) / hopSeconds;
+  const downbeatIndex = estimateDownbeat(env, beatHops, rawPhaseHops, beatsPerBar);
   const firstBeatS = phaseS;
-  const firstDownbeatS = phaseS + downbeatIndex * beatSeconds;
+  const barSeconds = beatSeconds * beatsPerBar;
+  // Earliest downbeat at or after t = 0, never an arbitrary later bar line.
+  const firstDownbeatS = ((((phaseS + downbeatIndex * beatSeconds) % barSeconds) + barSeconds) % barSeconds);
+
 
   const analysisFrames = usable.reduce((m, i) => Math.max(m, i.channel.length), 0);
   const durationS = usable.reduce((m, i) => Math.max(m, i.channel.length / i.sampleRate), 0);
