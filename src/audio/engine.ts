@@ -1697,7 +1697,7 @@ export class AudioEngine {
     const sr = t.buffer.sampleRate;
     const cf = Math.max(1, this.heads.cycleFrames);
     const cs = this.heads.cycleStartFrame;
-    const rate = Math.min(MAX_SCRUB_RATE, Math.abs(deltaFrames) / Math.max(1e-4, dtS) / sr);
+    const rate = Math.min(HEAD_SCRUB_MAX_RATE, Math.abs(deltaFrames) / Math.max(1e-4, dtS) / sr);
     st.pos = cs + (((st.pos + deltaFrames - cs) % cf) + cf) % cf;
     if (rate < SCRUB_SILENCE_RATE) return;
     const now = ctx.currentTime;
