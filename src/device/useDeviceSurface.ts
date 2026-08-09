@@ -660,21 +660,55 @@ export function useDeviceSurface() {
   }, []);
 
 
-  const onControlPointerUp = useCallback(
-    (control: Control, e: React.PointerEvent) => {
-      engine.release(control, e.pointerId);
-      endDrag(e.pointerId);
+  /**
+   * Releasing either half of the touch shuttle: if the other rocker zone is
+   * still held the shuttle continues in that direction, otherwise it ends.
+   * Releasing FUNCTION ends the shuttle outright, exactly like the keyboard.
+   */
+  const endTouchScrub = useCallback((pointerId: number) => {
+    if (!scrubPointersRef.current.delete(pointerId)) return false;
+    const remaining = [...scrubPointersRef.current.values()][0];
+    dispatch({ type: "globalScrub", dir: remaining ?? null });
+    return true;
+  }, []);
+
+  const releaseControlPointer = useCallback(
+    (control: Control, e: React.PointerEvent, cancelled: boolean) => {
+      if (endTouchScrub(e.pointerId)) return;
+      if (control === "function") {
+        fnPointerRef.current = null;
+        if (scrubPointersRef.current.size) {
+          scrubPointersRef.current.clear();
+          dispatch({ type: "globalScrub", dir: null });
+        }
+        if (scrubUsedFnRef.current) {
+          // Already cancelled at shuttle start — nothing left to release.
+          scrubUsedFnRef.current = false;
+          cancelDrag(e.pointerId);
+          return;
+        }
+      }
+      if (cancelled) {
+        engine.cancel(control, e.pointerId);
+        cancelDrag(e.pointerId);
+      } else {
+        engine.release(control, e.pointerId);
+        endDrag(e.pointerId);
+      }
     },
-    [endDrag, engine],
+    [cancelDrag, endDrag, endTouchScrub, engine],
+  );
+
+  const onControlPointerUp = useCallback(
+    (control: Control, e: React.PointerEvent) => releaseControlPointer(control, e, false),
+    [releaseControlPointer],
   );
 
   const onControlPointerCancel = useCallback(
-    (control: Control, e: React.PointerEvent) => {
-      engine.cancel(control, e.pointerId);
-      cancelDrag(e.pointerId);
-    },
-    [cancelDrag, engine],
+    (control: Control, e: React.PointerEvent) => releaseControlPointer(control, e, true),
+    [releaseControlPointer],
   );
+
 
 
   // Read-only verification fixture: the ordered command stream and the last
