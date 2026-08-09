@@ -658,6 +658,8 @@ export function useDeviceSurface() {
       globalScrub: stateRef.current.globalScrub,
       playing: stateRef.current.playing,
       power: stateRef.current.power,
+      fxOverlay: stateRef.current.perf.fxOverlay,
+      headsMode: stateRef.current.headsMode,
     });
     return () => {
       delete w.__stemTapeSurface;
