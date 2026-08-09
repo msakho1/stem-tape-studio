@@ -1786,20 +1786,35 @@ export class AudioEngine {
     // ONE shared playhead: the timeline is re-anchored, every stem reads it.
     this.timeline.anchor(ctx.currentTime, gs.pos);
     this.timelineFrozenAt = ctx.currentTime;
+    for (const pt of gs.perTrack) pt.pos = gs.pos;
     if (gs.pos === before) return; // parked at an end — no grain, no click
     const now = ctx.currentTime;
     const dur = Math.min(0.12, Math.max(0.03, dtS * 1.6));
     const backwards = gs.dir < 0;
+    let emitted = 0;
     for (let i = 0; i < this.tracks.length; i++) {
       const t = this.tracks[i]!;
-      if (!t.buffer) continue;
-      if (backwards && !t.reversed) t.reversed = reverseBuffer(ctx, t.buffer);
-      const buffer = backwards ? t.reversed : t.buffer;
+      const pt = gs.perTrack[i];
+      if (!pt) continue;
+      if (pt.mode === "worklet") {
+        // The worklet kernel renders its own shuttle: it is already running at
+        // GLOBAL_SCRUB_RATE in `gs.dir`. Only re-align its read pointer so all
+        // four stems stay locked to the single shared playhead.
+        pt.grains++;
+        emitted++;
+        continue;
+      }
+      const src = t.buffer ?? this.scrubPcm(t);
+      if (!src) continue;
+      if (backwards && !t.reversed) t.reversed = reverseBuffer(ctx, src);
+      const buffer = backwards ? t.reversed : src;
       if (!buffer) continue;
       const at = Math.max(now, gs.lastGrainAt[i] ?? now);
       const offsetS = backwards ? buffer.duration - gs.pos : gs.pos;
       const g = ctx.createGain();
       g.connect(t.input);
+      const tap = this.scrubTap(i);
+      if (tap) g.connect(tap);
       const node = ctx.createBufferSource();
       node.buffer = buffer;
       node.playbackRate.value = GLOBAL_SCRUB_RATE;
@@ -1811,6 +1826,8 @@ export class AudioEngine {
       g.gain.linearRampToValueAtTime(0, at + dur);
       node.start(at, Math.min(Math.max(0, offsetS), Math.max(0, buffer.duration - 1e-3)), dur * GLOBAL_SCRUB_RATE);
       gs.lastGrainAt[i] = at + dur * 0.8;
+      pt.grains++;
+      emitted++;
       node.onended = () => {
         try {
           node.disconnect();
@@ -1820,7 +1837,22 @@ export class AudioEngine {
         }
       };
     }
-    gs.grains++;
+    if (emitted > 0) gs.grains++;
+    this.sampleScrubTaps();
+  }
+
+  /**
+   * PCM for a track whose node buffer was released after worklet handoff.
+   * Falls back to the reversed copy (re-reversed lazily) so a migrated track is
+   * never silently skipped by the shuttle.
+   */
+  private scrubPcm(t: TrackRuntime): AudioBuffer | null {
+    if (t.buffer) return t.buffer;
+    if (t.reversed && this.ctx) {
+      t.buffer = reverseBuffer(this.ctx, t.reversed);
+      return t.buffer;
+    }
+    return null;
   }
 
   private globalScrubTick() {
@@ -1832,18 +1864,45 @@ export class AudioEngine {
     if (dt > 0) this.scrubGrainAll(dt);
   }
 
-  beginGlobalScrub(dir: 1 | -1): { ok: boolean; detail: string } {
+  /** Point every worklet track at the shuttle rate/direction from `pos`. */
+  private worbletShuttle(dir: 1 | -1, pos: number, engage: boolean) {
     const ctx = this.ctx;
-    if (!ctx) return { ok: false, detail: "audio not unlocked" };
-    if (this.duration === 0) return { ok: false, detail: "no stems decoded" };
+    if (!ctx) return;
+    const sr = ctx.sampleRate;
+    this.fanout((_t, at) => ({ type: "setDirection", applyAtContextFrame: at, direction: dir }));
+    this.fanout((_t, at) => ({
+      type: "setRate",
+      applyAtContextFrame: at,
+      rate: engage ? GLOBAL_SCRUB_RATE : this.timeline.musicalRate(),
+      rampFrames: Math.round(0.008 * sr),
+    }));
+    if (engage) {
+      this.fanout((_t, at) => ({ type: "start", applyAtContextFrame: at, sourceFrame: Math.round(pos * sr) }));
+    }
+  }
+
+  beginGlobalScrub(dir: 1 | -1): { ok: boolean; detail: string } {
+    // Root cause 1: the shuttle was refused outright on a suspended/never-run
+    // context and the refusal never reached the surface. Resume first, then
+    // report a precise reason if it is still impossible.
+    const ctx = this.ctx;
+    if (!ctx) {
+      this.lastScrubRejection = "audio not unlocked — the shuttle needs the AudioContext created by a user gesture";
+      return { ok: false, detail: this.lastScrubRejection };
+    }
+    if (ctx.state !== "running") void ctx.resume();
+    if (this.duration === 0) {
+      this.lastScrubRejection = "no stems decoded — load or demo four stems before shuttling";
+      return { ok: false, detail: this.lastScrubRejection };
+    }
     if (this.globalScrub) return this.setGlobalScrubDirection(dir);
+    this.lastScrubRejection = null;
     const now = ctx.currentTime;
     const pos = this.position();
     const wasPlaying = this.requestedPlaying;
     const musicalRate = this.timeline.musicalRate();
     this.cancelWind();
     this.stopSources();
-    this.fanout((_t, at) => ({ type: "stop", applyAtContextFrame: at }));
     this.requestedPlaying = false;
     this.timeline.anchor(now, pos);
     this.timelineFrozenAt = now;
@@ -1858,18 +1917,32 @@ export class AudioEngine {
       lastGrainAt: this.tracks.map(() => now),
       grains: 0,
       startedAt: now,
+      perTrack: this.tracks.map((t) => ({
+        mode: t.engineMode === "worklet" && t.worklet ? ("worklet" as const) : ("node" as const),
+        startPos: pos,
+        pos,
+        grains: 0,
+        peak: 0,
+        rms: 0,
+      })),
     };
+    // Worklet tracks shuttle inside the kernel; node tracks shuttle as grains.
+    this.worbletShuttle(dir, pos, true);
     this.globalScrub.timer = setInterval(() => this.globalScrubTick(), GLOBAL_SCRUB_INTERVAL_MS);
+    const wk = this.globalScrub.perTrack.filter((p) => p.mode === "worklet").length;
     return {
       ok: true,
-      detail: `global shuttle ${dir > 0 ? "forward" : "backward"} at ${GLOBAL_SCRUB_RATE}× from ${pos.toFixed(3)}s — four stems on one playhead`,
+      detail: `global shuttle ${dir > 0 ? "forward" : "backward"} at ${GLOBAL_SCRUB_RATE}× from ${pos.toFixed(3)}s — four stems on one playhead (${wk} worklet / ${4 - wk} node)`,
     };
   }
 
   setGlobalScrubDirection(dir: 1 | -1): { ok: boolean; detail: string } {
     const gs = this.globalScrub;
     if (!gs) return this.beginGlobalScrub(dir);
-    gs.dir = dir;
+    if (gs.dir !== dir) {
+      gs.dir = dir;
+      this.worbletShuttle(dir, gs.pos, true);
+    }
     return { ok: true, detail: `shuttle direction → ${dir > 0 ? "forward" : "backward"} at ${gs.pos.toFixed(3)}s` };
   }
 
