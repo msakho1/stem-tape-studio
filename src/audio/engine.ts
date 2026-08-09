@@ -1580,13 +1580,11 @@ export class AudioEngine {
     if (!res.ok) return { ok: false, detail: res.detail };
     this.heads = res.state;
 
-    // Everything except the source is silenced for the duration; the saved mute
-    // states are restored verbatim on exit.
-    this.preHeadsMutes = this.tracks.map((tr) => tr.muted);
-    this.tracks.forEach((tr, i) => {
-      if (i !== source) tr.muted = true;
-      this.applyAudibility(i as TrackId);
-    });
+    // Heads mode LAYERS over the dry mix: no stem is muted on entry. Existing
+    // mute states are preserved verbatim (drums stay audible; a muted musical
+    // source keeps its normal copy silent while its heads still sound).
+    this.preHeadsMutes = null;
+    this.applyAudibilityAll();
 
     if (engine === "worklet") {
       this.pushHeads();
