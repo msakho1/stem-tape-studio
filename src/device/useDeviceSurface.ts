@@ -651,6 +651,8 @@ export function useDeviceSurface() {
     faderValuesRef,
     rawLog,
     gestureLog,
+    heldKeys,
+    globalScrub: state.globalScrub,
 
     handlers: {
       onControlPointerDown,
