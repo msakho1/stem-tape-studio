@@ -11,7 +11,7 @@ import type { FxFamily } from "./stemPerformance";
 
 export const STEM_TAPE_MAP_VERSION = "stem-tape-v1.0.0";
 
-export type MapLayer = "tape" | "stem" | "fx-overlay" | "system";
+export type MapLayer = "tape" | "stem" | "heads" | "fx-overlay" | "system";
 export type Provenance = "stock" | "v2.6" | "reinterpreted" | "extension";
 
 export interface StemTapeRow {
