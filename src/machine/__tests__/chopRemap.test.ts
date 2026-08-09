@@ -97,11 +97,12 @@ describe("P4 · PLAY + rocker = chop", () => {
 
   it("arbiter claims PLAY on the rocker deflection so the tap cannot fire", () => {
     const a = new ChordArbiter(() => ({ activeStem: 0, fxOverlay: false, selectedBank: null }));
-    a.handle({ control: "play", phase: "down", t: 0 });
-    a.handle({ control: "rocker-fwd", phase: "down", t: 60 });
+    a.handle({ id: 1, pointerId: 1, control: "play", phase: "down", t: 0 });
+    a.handle({ id: 2, pointerId: 2, control: "rocker-fwd", phase: "down", t: 60 });
     expect(a.isClaimed("play")).toBe(true);
-    a.handle({ control: "rocker-fwd", phase: "up", t: 120 });
-    a.handle({ control: "play", phase: "up", t: 200 });
+    a.handle({ id: 3, pointerId: 2, control: "rocker-fwd", phase: "up", t: 120 });
+    a.handle({ id: 4, pointerId: 1, control: "play", phase: "up", t: 200 });
+
     // The claim was recorded before dispatch — the log names the suppression.
     expect(a.log.some((e: { suppressed: Control[] }) => e.suppressed.includes("play"))).toBe(true);
   });
