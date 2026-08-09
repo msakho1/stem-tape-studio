@@ -28,6 +28,8 @@ import {
 import { controlBus, type ContinuousChannel } from "@/audio/controlBus";
 import { getAudioEngine } from "@/audio/engine";
 import { FaderSessionManager, type FaderIndex } from "@/input/faderSessions";
+import { installDiagnostics, publishSurface } from "@/lib/diagnostics";
+
 
 
 
