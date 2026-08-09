@@ -66,6 +66,7 @@ export type AudioCommandType =
   | "lane.reverse"
   | "lane.scrub.start"
   | "lane.scrub.end"
+  | "lane.scrub.park"
 
   | "rollback";
 

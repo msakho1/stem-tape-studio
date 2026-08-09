@@ -120,6 +120,16 @@ export function useAudioEngine(commands: AudioCommand[]) {
         else engine.previewHeadScrub(head, e.value, ts);
         return;
       }
+      if (e.channel === "laneScrub") {
+        // FUNCTION + fader N = audible positional scrub of lane N. Release
+        // parks the lane and stores the loop-capture candidate.
+        const ts = e.timestamp ?? performance.now();
+        if (e.phase === "start") engine.beginLaneFaderScrub(head, e.value, ts);
+        else if (e.phase === "cancel") engine.endLaneFaderScrub(head, e.value, true);
+        else if (e.committed || e.phase === "end") engine.endLaneFaderScrub(head, e.value);
+        else engine.previewLaneFaderScrub(head, e.value, ts);
+        return;
+      }
       if (e.channel === "headLevel") {
         if (e.phase !== "start") engine.applyHeadLevel(head, e.value);
         return;
