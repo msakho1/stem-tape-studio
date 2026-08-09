@@ -113,11 +113,12 @@ describe("Heads v2 · deferred tap recognition", () => {
   it("emits ×3 once and never dispatches an intermediate ×1 or ×2", () => {
     vi.useFakeTimers();
     const seen: Gesture[] = [];
-    const g = new GestureEngine((ev) => seen.push(ev));
+    const g = new GestureEngine();
+    g.onGesture((ev) => seen.push(ev));
     let t = 0;
     for (let i = 0; i < 3; i++) {
-      g.pointerDown("track-button-1", 1, (t += 40));
-      g.pointerUp("track-button-1", 1, (t += 40));
+      g.press("track-button-1", 1, (t += 40));
+      g.release("track-button-1", 1, (t += 40));
       vi.advanceTimersByTime(80);
     }
     vi.advanceTimersByTime(400);
@@ -130,9 +131,10 @@ describe("Heads v2 · deferred tap recognition", () => {
   it("still resolves a lone tap to ×1 after the window closes", () => {
     vi.useFakeTimers();
     const seen: Gesture[] = [];
-    const g = new GestureEngine((ev) => seen.push(ev));
-    g.pointerDown("track-button-2", 1, 0);
-    g.pointerUp("track-button-2", 1, 40);
+    const g = new GestureEngine();
+    g.onGesture((ev) => seen.push(ev));
+    g.press("track-button-2", 1, 0);
+    g.release("track-button-2", 1, 40);
     vi.advanceTimersByTime(400);
     expect(seen.filter((s) => s.type === "tap")).toMatchObject([{ count: 1, control: "track-button-2" }]);
     vi.useRealTimers();
