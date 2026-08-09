@@ -13,6 +13,7 @@ import { applyGesture, applyPerfIntent, initialSurfaceState, pressControl, relea
 import { ChordArbiter } from "@/machine/chordArbiter";
 import { STEM_TAPE_ROW_BY_ID } from "@/machine/stemTapeV1Map";
 import type { Gesture } from "@/input/gestures";
+import type { Control } from "@/device/geometry";
 
 const tap = (control: "rocker-fwd" | "rocker-rwd", count = 1): Gesture =>
   ({ control, level: "tap", count, t: 0, downMs: 40 }) as unknown as Gesture;
@@ -33,7 +34,7 @@ describe("P4 · PLAY + rocker = chop", () => {
     expect(chops.map((c) => c.payload["track"])).toEqual([0, 1, 2, 3]);
     expect(chops.every((c) => c.payload["div"] === 2)).toBe(true);
     // Ordered stream: sequence numbers strictly increase.
-    const seqs = chops.map((c) => c.seq);
+    const seqs = chops.map((c) => c.id);
     expect([...seqs].sort((a, b) => a - b)).toEqual(seqs);
   });
 
@@ -85,14 +86,14 @@ describe("P4 · PLAY + rocker = chop", () => {
   });
 
   it("arbiter claims PLAY on the rocker deflection so the tap cannot fire", () => {
-    const a = new ChordArbiter();
-    a.observe({ control: "play", phase: "down", t: 0 });
-    a.observe({ control: "rocker-fwd", phase: "down", t: 60 });
+    const a = new ChordArbiter(() => ({ activeStem: 0, fxOverlay: false, selectedBank: null }));
+    a.handle({ control: "play", phase: "down", t: 0 });
+    a.handle({ control: "rocker-fwd", phase: "down", t: 60 });
     expect(a.isClaimed("play")).toBe(true);
-    a.observe({ control: "rocker-fwd", phase: "up", t: 120 });
-    a.observe({ control: "play", phase: "up", t: 200 });
+    a.handle({ control: "rocker-fwd", phase: "up", t: 120 });
+    a.handle({ control: "play", phase: "up", t: 200 });
     // The claim was recorded before dispatch — the log names the suppression.
-    expect(a.recentLog().some((e) => e.suppressed.includes("play"))).toBe(true);
+    expect(a.log.some((e: { suppressed: Control[] }) => e.suppressed.includes("play"))).toBe(true);
   });
 
   it("registry row supersedes the v2.6 rocker.chop row", () => {
