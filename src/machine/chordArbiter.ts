@@ -90,6 +90,10 @@ function isTrack(c: Control): boolean {
 function isVolume(c: Control): c is "volume-minus" | "volume-plus" {
   return c === "volume-minus" || c === "volume-plus";
 }
+function isRocker(c: Control): c is "rocker-fwd" | "rocker-rwd" {
+  return c === "rocker-fwd" || c === "rocker-rwd";
+}
+
 
 export interface ArbiterView {
   activeStem: StemIndex;
