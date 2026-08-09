@@ -1639,11 +1639,12 @@ export class AudioEngine {
       const mask = this.preHeadsMutes;
       this.tracks.forEach((tr, i) => {
         tr.muted = mask[i] ?? false;
-        this.applyAudibility(i as TrackId);
       });
       this.preHeadsMutes = null;
     }
     this.heads = exitHeads(this.heads);
+    // Re-close the source gate now that heads no longer bypass its mute.
+    this.applyAudibilityAll();
     return { ok: true, detail: "heads off — original four tracks, faders and mutes restored, transport untouched" };
   }
 
