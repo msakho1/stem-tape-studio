@@ -3,9 +3,9 @@
  *
  * Musical signal order (binding correction) rather than physical button order:
  *
- *   source → TONE → RHYTHM → MOTION → SPACE → fader → solo → master
+ *   source → TONE → MOD → MOTION → SPACE → fader → solo → master
  *
- * so Beat Repeat / Gate / Pump feed Echo and Reverb, and Echo / Reverb /
+ * so Reel Flange / Formant Shift / Rhythmic Gate feed Echo and Reverb, and Echo / Reverb /
  * Shimmer tails stay natural downstream of them.
  *
  * Macro amounts are PER ALGORITHM, never shared per bank: Filter, Isolator and
@@ -19,17 +19,17 @@ import type { StemIndex } from "./stemPerformance";
 export type BankIndex = 0 | 1 | 2 | 3;
 export type AlgorithmIndex = 0 | 1 | 2;
 
-export type BankId = "tone" | "rhythm" | "motion" | "space";
+export type BankId = "tone" | "mod" | "motion" | "space";
 
 export type AlgorithmId =
   // TONE
   | "filter"
   | "isolator"
   | "dirt"
-  // RHYTHM
-  | "beatRepeat"
+  // MOD
+  | "reelFlange"
+  | "formantShift"
   | "gate"
-  | "pump"
   // MOTION
   | "echo"
   | "pitchEcho"
@@ -77,13 +77,13 @@ export const BANKS: [BankDef, BankDef, BankDef, BankDef] = [
     ],
   },
   {
-    id: "rhythm",
-    label: "RHYTHM",
+    id: "mod",
+    label: "MOD",
     buttonIndex: 3,
     algorithms: [
-      { id: "beatRepeat", label: "Beat Repeat", defaultMacro: 0.5, heavy: false, legacy: true },
+      { id: "reelFlange", label: "Reel Flange", defaultMacro: 0.45, heavy: false, legacy: false },
+      { id: "formantShift", label: "Formant Shift", defaultMacro: 0.5, heavy: false, legacy: false },
       { id: "gate", label: "Rhythmic Gate", defaultMacro: 0.5, heavy: false, legacy: false },
-      { id: "pump", label: "Pump", defaultMacro: 0.45, heavy: false, legacy: false },
     ],
   },
   {
@@ -242,7 +242,9 @@ export function serializeStemFx(s: StemFxState): SerializedStemFx {
 /** v3 family key → { bank, algorithm } in the twelve-FX model. */
 export const LEGACY_FAMILY_TO_BANK: Record<string, { bank: BankIndex; algorithm: AlgorithmIndex }> = {
   filter: { bank: 0, algorithm: 0 },
-  beatRepeat: { bank: 1, algorithm: 0 },
+  // Beat Repeat and Pump are RETIRED. Saved projects that latched Beat Repeat
+  // land on Rhythmic Gate, the surviving rhythmic algorithm of the MOD bank.
+  beatRepeat: { bank: 1, algorithm: 2 },
   echo: { bank: 2, algorithm: 0 },
   reverb: { bank: 3, algorithm: 0 },
 };
@@ -250,7 +252,7 @@ export const LEGACY_FAMILY_TO_BANK: Record<string, { bank: BankIndex; algorithm:
 /**
  * Old (v3) per-stem FX record → twelve-FX state.
  *
- * Filter / Tempo Echo / Reverb / Beat Repeat become the selected algorithm of
+ * Filter / Tempo Echo / Reverb become the selected algorithm of
  * their bank, latches are preserved, and the retired 1..4 `variation` maps onto
  * that algorithm's macro amount (variation N → (N-1)/3) so nothing the user set
  * is silently discarded. Every new algorithm gets its safe default macro.

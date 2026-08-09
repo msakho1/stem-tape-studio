@@ -3,12 +3,12 @@
  *
  * Signal graph (correction 2 and 3): the rack input is PERMANENT. Engine
  * migration (node ↔ worklet) crossfades the two tape sources into this stable
- * input, so nothing is ever re-parented and tails / Beat-Repeat / filter state
+ * input, so nothing is ever re-parented and tails / filter state
  * survive the migration.
  *
  *   tape source(s) ─ handoff envelope ─→ FxRackInput
  *
- *   FxRackInput → filter (dry/wet, true bypass) → beatRepeat ─┬→ directGate ──────────┐
+ *   FxRackInput → filter (dry/wet, true bypass) → passthrough ─┬→ directGate ─────────┐
  *                                                             ├→ echoInput  → echoRet ┤
  *                                                             └→ reverbInput→ revRet ─┤
  *                                                                                     ↓
@@ -26,8 +26,6 @@
 import { equalPower, measuredDryWet, sampleCurve, FILTER_FADE_S } from "../crossfade";
 import type { FxFamily } from "@/machine/stemPerformance";
 
-export const BEAT_REPEAT_PROCESSOR = "beat-repeat-processor";
-export const BEAT_REPEAT_URL = "/beat-repeat-processor.js";
 
 const GATE_TAU = 0.008;
 /** Delay-tap crossfade for echo division / rate changes — no Doppler glide. */
@@ -86,50 +84,15 @@ export const REVERB_VARIATIONS: ReverbVariation[] = [
 /** Hard ceiling so an Atmospheric Wash cannot become an oscillator. */
 export const REVERB_FEEDBACK_CEILING = 0.9;
 
-export interface RepeatVariation {
-  name: string;
-  /** Beats per slice, relative to a quarter note. */
-  ratio: number;
-}
-
-export const REPEAT_VARIATIONS: RepeatVariation[] = [
-  { name: "1/4", ratio: 1 },
-  { name: "1/8", ratio: 0.5 },
-  { name: "1/16", ratio: 0.25 },
-  { name: "1/32", ratio: 0.125 },
-];
-
 /** Slowest effective BPM the ring buffer is sized for (1/2 note at this BPM). */
 export const MIN_SUPPORTED_BPM = 40;
-
-export function repeatRingCapacityFrames(sampleRate: number): number {
-  return Math.ceil((60 / MIN_SUPPORTED_BPM) * 2 * sampleRate);
-}
 
 export interface FxRackSnapshot {
   filter: { mode: string; cutoff: number; q: number; layer: "tape" | "fx-momentary" | "fx-latched" };
   echo: { active: boolean; variation: string; delayS: number; feedback: number };
   reverb: { active: boolean; variation: string; feedback: number };
-  beatRepeat: { active: boolean; variation: string; sliceFrames: number; arming: boolean; rejected: string | null };
   inputOpen: boolean;
   workletLoaded: boolean;
-}
-
-let repeatModuleLoaded: WeakSet<BaseAudioContext> | null = null;
-
-export async function loadBeatRepeatModule(ctx: AudioContext): Promise<{ ok: boolean; detail: string }> {
-  repeatModuleLoaded ??= new WeakSet();
-  if (repeatModuleLoaded.has(ctx)) return { ok: true, detail: "beat-repeat module already registered" };
-  if (typeof ctx.audioWorklet === "undefined" || typeof AudioWorkletNode === "undefined") {
-    return { ok: false, detail: "AudioWorklet unavailable — Beat Repeat rejected, other FX unaffected" };
-  }
-  try {
-    await ctx.audioWorklet.addModule(BEAT_REPEAT_URL);
-    repeatModuleLoaded.add(ctx);
-    return { ok: true, detail: `registered "${BEAT_REPEAT_PROCESSOR}" from ${BEAT_REPEAT_URL}` };
-  } catch (err) {
-    return { ok: false, detail: err instanceof Error ? err.message : String(err) };
-  }
 }
 
 export class FxRack {
@@ -142,13 +105,13 @@ export class FxRack {
   private filterWet: GainNode;
   private postFilter: GainNode;
 
-  private repeatNode: AudioWorkletNode | null = null;
-  private repeatBypass: GainNode;
-  private repeatCapacity = 0;
 
   private directGate: GainNode;
   private echoInput: GainNode;
   private reverbInput: GainNode;
+
+  /** Permanent unity passthrough where Beat Repeat used to sit. */
+  private repeatBypass: GainNode;
 
   private echoSum: GainNode;
   private echoTaps: { delay: DelayNode; gain: GainNode }[] = [];
@@ -169,7 +132,6 @@ export class FxRack {
 
   private echoState = { active: false, variation: 1, delayS: 0.5 };
   private reverbState = { active: false, variation: 1 };
-  private repeatState = { active: false, variation: 1, sliceFrames: 0, arming: false, rejected: null as string | null };
   private open = true;
 
   constructor(
@@ -205,7 +167,7 @@ export class FxRack {
     this.filterDry.connect(this.postFilter);
     this.filterWet.connect(this.postFilter);
 
-    // beat repeat placeholder — a unity passthrough until the worklet exists
+    // permanent unity passthrough (Beat Repeat removed)
     this.postFilter.connect(this.repeatBypass);
 
     for (const node of [this.directGate, this.echoInput, this.reverbInput]) {
@@ -367,81 +329,12 @@ export class FxRack {
     this.reverbState = { active, variation: variationIndex + 1 };
   }
 
-  // --------------------------------------------------------- beat repeat
-
-  async ensureRepeatNode(): Promise<{ ok: boolean; detail: string }> {
-    if (this.repeatNode) return { ok: true, detail: "beat repeat node present" };
-    const load = await loadBeatRepeatModule(this.ctx);
-    if (!load.ok) {
-      this.repeatState.rejected = load.detail;
-      return load;
-    }
-    try {
-      this.repeatCapacity = repeatRingCapacityFrames(this.ctx.sampleRate);
-      const node = new AudioWorkletNode(this.ctx, BEAT_REPEAT_PROCESSOR, {
-        numberOfInputs: 1,
-        numberOfOutputs: 1,
-        outputChannelCount: [2],
-        processorOptions: { capacityFrames: this.repeatCapacity },
-      });
-      node.port.onmessage = (e: MessageEvent<{ arming?: boolean; detail?: string }>) => {
-        if (typeof e.data?.arming === "boolean") this.repeatState.arming = e.data.arming;
-      };
-      // Insert between postFilter and the gates without a bypass window.
-      this.postFilter.disconnect(this.repeatBypass);
-      this.postFilter.connect(node);
-      node.connect(this.repeatBypass);
-      this.repeatNode = node;
-      this.repeatState.rejected = null;
-      return { ok: true, detail: `beat repeat ring = ${this.repeatCapacity} frames (1/2 note @ ${MIN_SUPPORTED_BPM} BPM)` };
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      this.repeatState.rejected = detail;
-      return { ok: false, detail };
-    }
-  }
-
-  repeatSliceFrames(variationIndex: number, effectiveBpm: number): number {
-    const v = REPEAT_VARIATIONS[variationIndex] ?? REPEAT_VARIATIONS[0]!;
-    return Math.round((60 / Math.max(1, effectiveBpm)) * v.ratio * this.ctx.sampleRate);
-  }
-
-  async setBeatRepeat(
-    active: boolean,
-    variationIndex: number,
-    effectiveBpm: number,
-  ): Promise<{ ok: boolean; detail: string; arming: boolean }> {
-    if (!active) {
-      this.repeatState = { ...this.repeatState, active: false, arming: false };
-      this.repeatNode?.port.postMessage({ type: "deactivate", seq: 1 });
-      return { ok: true, detail: "beat repeat released", arming: false };
-    }
-    const ready = await this.ensureRepeatNode();
-    if (!ready.ok) return { ok: false, detail: ready.detail, arming: false };
-    const slice = this.repeatSliceFrames(variationIndex, effectiveBpm);
-    if (slice > this.repeatCapacity) {
-      const detail = `slice ${slice} frames exceeds the ${this.repeatCapacity}-frame ring — Beat Repeat rejected at this tempo/rate (other FX unaffected)`;
-      this.repeatState = { ...this.repeatState, active: false, rejected: detail };
-      return { ok: false, detail, arming: false };
-    }
-    this.repeatNode!.port.postMessage({ type: "setSlice", seq: 2, sliceFrames: slice });
-    this.repeatNode!.port.postMessage({ type: "activate", seq: 3 });
-    this.repeatState = { active: true, variation: variationIndex + 1, sliceFrames: slice, arming: true, rejected: null };
-    return { ok: true, detail: `repeating ${slice} frames (${REPEAT_VARIATIONS[variationIndex]?.name})`, arming: true };
-  }
-
-  clearRepeatBuffer() {
-    this.repeatNode?.port.postMessage({ type: "clear", seq: 4 });
-    this.repeatState = { ...this.repeatState, active: false, arming: false };
-  }
-
   /** Fade every DSP tail out — used on song switch / stem replacement. */
   flushTails() {
     this.ramp(this.echoFeedback.gain, 0, 0.02);
     this.ramp(this.echoReturn.gain, 0, 0.02);
     for (const line of this.reverbLines) this.ramp(line.fb.gain, 0, 0.03);
     this.ramp(this.reverbReturn.gain, 0, 0.03);
-    this.clearRepeatBuffer();
     this.echoState = { ...this.echoState, active: false };
     this.reverbState = { ...this.reverbState, active: false };
   }
@@ -465,26 +358,13 @@ export class FxRack {
         variation: REVERB_VARIATIONS[this.reverbState.variation - 1]?.name ?? "Tight Room",
         feedback: this.reverbLines[0]?.fb.gain.value ?? 0,
       },
-      beatRepeat: {
-        active: this.repeatState.active,
-        variation: REPEAT_VARIATIONS[this.repeatState.variation - 1]?.name ?? "1/4",
-        sliceFrames: this.repeatState.sliceFrames,
-        arming: this.repeatState.arming,
-        rejected: this.repeatState.rejected,
-      },
       inputOpen: this.open,
-      workletLoaded: this.repeatNode != null,
+      workletLoaded: false,
+
     };
   }
 
   dispose() {
-    try {
-      this.repeatNode?.port.postMessage({ type: "dispose", seq: 5 });
-      this.repeatNode?.disconnect();
-    } catch {
-      /* noop */
-    }
-    this.repeatNode = null;
     try {
       this.output.disconnect();
       this.input.disconnect();
@@ -498,5 +378,4 @@ export const FX_FAMILY_LABEL: Record<FxFamily, string> = {
   filter: "Filter",
   echo: "Echo",
   reverb: "Reverb",
-  beatRepeat: "Beat Repeat",
 };

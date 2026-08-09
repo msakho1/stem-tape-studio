@@ -8,6 +8,7 @@
  */
 
 import type { PreDecodeEstimate, ProbeResult, StemRole } from "./format";
+import type { SongGrid } from "./gridAnalysis";
 import { DERIVED_SCHEMA_VERSION, type StoredProject } from "./store";
 
 export interface DerivedCopy {
@@ -54,6 +55,8 @@ export interface SessionState {
   bpmSource: BpmSource;
   highMemoryMode: boolean;
   lastError: string | null;
+  /** Automatic analysed grid for this song, persisted in seconds. */
+  songGrid: SongGrid | null;
 }
 
 export type BpmSource = "manual" | "tempo-grid" | "provisional";
@@ -79,6 +82,7 @@ function emptySession(): SessionState {
     bpmSource: "provisional",
     highMemoryMode: false,
     lastError: null,
+    songGrid: null,
   };
 }
 
@@ -121,7 +125,11 @@ export function toStoredProject(s: SessionState, control: StoredProject["control
     updatedAt: Date.now(),
     blobBackend: backend,
     // BPM value AND source persist per song.
-    control: { ...control, grid: { bpm: s.bpm, source: s.bpmSource } },
+    control: {
+      ...control,
+      grid: { bpm: s.bpm, source: s.bpmSource },
+      songGrid: s.songGrid ?? control.songGrid ?? null,
+    },
     highMemoryMode: s.highMemoryMode,
     stems: Object.values(s.stems).map((stem) => ({
       role: stem.role,

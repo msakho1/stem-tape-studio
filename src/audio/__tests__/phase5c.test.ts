@@ -22,11 +22,9 @@ import type { BankIndex } from "@/machine/fx12";
 import {
   ECHO_FEEDBACK_MAX,
   ECHO_VARIATIONS,
-  REPEAT_VARIATIONS,
   REVERB_FEEDBACK_CEILING,
   REVERB_VARIATIONS,
   MIN_SUPPORTED_BPM,
-  repeatRingCapacityFrames,
 } from "@/audio/fx/rack";
 import { STEM_TAPE_V1_MAP, V26_ROWS_AS_REGISTRY, exportMapJson } from "@/machine/stemTapeV1Map";
 import { V26_MAP } from "@/machine/v26map";
@@ -225,15 +223,16 @@ describe("stem performance state", () => {
     ).toBe(true);
   });
 
-  it("a restored Beat Repeat latch re-arms instead of replaying stale memory", () => {
+  it("a retired v3 Beat Repeat latch migrates onto MOD / Rhythmic Gate", () => {
     const restored = deserializePerformance({
       version: 3,
       activeStem: 0,
       tracks: [{ soloed: false, linked: true, fx: { beatRepeat: { latched: true, variation: 2 } } }],
     });
-    expect(restored.tracks[0]!.fx.beatRepeat.arming).toBe(true);
-    // v3 beatRepeat maps onto the RHYTHM bank, algorithm 0.
+    // Beat Repeat is retired: the latch survives on the MOD bank, and the
+    // selected algorithm is Rhythmic Gate (index 2), not a missing processor.
     expect(restored.tracks[0]!.fx12.banks[1]!.latched).toBe(true);
+    expect(restored.tracks[0]!.fx12.banks[1]!.selectedAlgorithm).toBe(2);
   });
 
   it("clearLatches leaves the selected algorithm alone", () => {
@@ -267,22 +266,6 @@ describe("FX timing math (correction 11 thresholds)", () => {
     expect(echoDelay(0.5, base * 2)).toBeCloseTo(0.125, TOL);
   });
 
-  it("beat repeat slice length is exact to the frame for every division", () => {
-    const bpm = 128;
-    for (const v of REPEAT_VARIATIONS) {
-      const exact = (60 / bpm) * v.ratio * SR;
-      expect(Math.abs(Math.round(exact) - exact)).toBeLessThanOrEqual(0.5);
-    }
-  });
-
-  it("the ring buffer is sized from a 1/2 note at the slowest supported BPM", () => {
-    const cap = repeatRingCapacityFrames(SR);
-    expect(cap).toBe(Math.ceil((60 / MIN_SUPPORTED_BPM) * 2 * SR));
-    // Every division at every supported tempo fits inside it.
-    const slowest = REPEAT_VARIATIONS[0]!;
-    expect((60 / MIN_SUPPORTED_BPM) * slowest.ratio * SR).toBeLessThanOrEqual(cap);
-  });
-
   it("feedback constants are clamped below self-oscillation", () => {
     for (const v of ECHO_VARIATIONS) expect(v.feedback).toBeLessThanOrEqual(ECHO_FEEDBACK_MAX);
     for (const v of REVERB_VARIATIONS) expect(v.feedback).toBeLessThanOrEqual(REVERB_FEEDBACK_CEILING);
@@ -305,7 +288,8 @@ describe("mapping registry", () => {
     const extensions = STEM_TAPE_V1_MAP.filter((r) => r.provenance !== "v2.6");
     expect(extensions.length).toBeGreaterThan(0);
     for (const row of extensions) expect(Array.isArray(row.suppresses)).toBe(true);
-    expect(extensions.filter((r) => r.layer === "fx-overlay").length).toBe(13);
+    // 3 surviving legacy families × 3 rows + clearLatches = 10 (Beat Repeat retired).
+    expect(extensions.filter((r) => r.layer === "fx-overlay").length).toBe(10);
   });
 
   it("exports JSON for the Mapping Lab", () => {

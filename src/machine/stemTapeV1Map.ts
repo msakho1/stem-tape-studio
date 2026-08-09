@@ -265,7 +265,6 @@ export const FX_ROWS: StemTapeRow[] = [
   ...FAMILY_ROWS("filter", 1, "bipolar DJ filter"),
   ...FAMILY_ROWS("echo", 2, "tempo-synced echo"),
   ...FAMILY_ROWS("reverb", 3, "algorithmic reverb"),
-  ...FAMILY_ROWS("beatRepeat", 4, "beat repeat / stutter"),
   {
     id: "fx.clearLatches",
     layer: "fx-overlay",

@@ -161,6 +161,17 @@ export async function ingestSequential(
     opts.onResult?.(r);
     await yieldToBrowser();
   }
+  // Requirement 8: a grid must exist automatically whenever stems are loaded.
+  // Sources changed, so any stored scrub landing is stale.
+  engine.clearScrubCandidates("stems replaced");
+  const stems = session.get().stems;
+  const hashes: string[] = [];
+  for (const [role, track] of Object.entries(ROLE_TRACK) as [StemRole, TrackId][]) {
+    hashes[track] = stems[role]?.contentHash ?? "";
+  }
+  const grid = await engine.analyzeGrid(hashes);
+  // Persist the analysed grid with the song (seconds first).
+  session.set({ songGrid: grid, ...(grid ? { bpm: grid.bpm, bpmSource: "tempo-grid" as const } : {}) });
   return results;
 }
 

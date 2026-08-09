@@ -27,7 +27,7 @@ import {
   type StemFxState,
 } from "./fx12";
 
-export const FX_FAMILIES = ["filter", "echo", "reverb", "beatRepeat"] as const;
+export const FX_FAMILIES = ["filter", "echo", "reverb"] as const;
 export type FxFamily = (typeof FX_FAMILIES)[number];
 
 /**
@@ -50,7 +50,7 @@ export interface FxSlotState {
   variation: 1 | 2 | 3 | 4;
   /** Set when the engine refused the activation (e.g. no AudioWorklet). */
   rejected: string | null;
-  /** Beat Repeat only: buffer is filling, not yet repeating. */
+  /** Retained for schema compatibility; always false. */
   arming: boolean;
 }
 
@@ -86,7 +86,6 @@ export function initialStemTrack(): StemTrackState {
       filter: initialFxSlot(),
       echo: initialFxSlot(),
       reverb: initialFxSlot(),
-      beatRepeat: initialFxSlot(),
     },
     fx12: initialStemFx(),
   };
@@ -98,13 +97,18 @@ export function initialStemTrack(): StemTrackState {
  * 0 (the legacy processor) is selected; algorithms 1 and 2 are the new
  * processors and never activate the legacy family.
  */
-export const BANK_FAMILY: readonly FxFamily[] = ["filter", "beatRepeat", "echo", "reverb"];
+/**
+ * Bank 2 (MOD) has NO legacy processor: Reel Flange, Formant Shift and
+ * Rhythmic Gate are all bank-native, so bank 2 maps to no family.
+ */
+export const BANK_FAMILY: readonly (FxFamily | null)[] = ["filter", null, "echo", "reverb"];
 
 export function syncLegacySlots(t: StemTrackState): StemTrackState {
   const fx = { ...t.fx };
   BANKS.forEach((_def, i) => {
     const bank = t.fx12.banks[i as BankIndex]!;
-    const family = BANK_FAMILY[i]!;
+    const family = BANK_FAMILY[i];
+    if (!family) return;
     const legacySelected = bank.selectedAlgorithm === 0;
     const alg = bank.algorithms[bank.selectedAlgorithm]!;
     fx[family] = {

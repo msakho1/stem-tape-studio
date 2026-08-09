@@ -147,6 +147,16 @@ export function DiagnosticPanel({
             <span className="st-kv__k">bpm source</span>
             <span className="st-kv__v">{audio.baseBpm.toFixed(1)} ({audio.bpmSource})</span>
           </div>
+          <div className="st-kv" data-testid="grid-analysis">
+            <span className="st-kv__k">song grid</span>
+            <span className="st-kv__v">{audio.gridDetail}</span>
+          </div>
+          <div className="st-kv" data-testid="scrub-candidates">
+            <span className="st-kv__k">scrub landings</span>
+            <span className="st-kv__v">
+              {audio.scrubCandidates.map((c, i) => `${i + 1}:${c == null ? "—" : `${c.toFixed(3)}s`}`).join("  ")}
+            </span>
+          </div>
           <div className="st-kv">
             <span className="st-kv__k">engine source</span>
             <span className="st-kv__v">{audio.enginePreference} · worklet tracks {audio.workletTrackCount}</span>
@@ -176,7 +186,6 @@ export function DiagnosticPanel({
                   const rack = audio.fx[i];
                   const extra =
                     f === "echo" && rack ? ` ${rack.echo.delayS.toFixed(4)}s` :
-                    f === "beatRepeat" && rack ? ` ${rack.beatRepeat.sliceFrames}fr${rack.beatRepeat.arming ? " ARMING" : ""}` :
                     f === "reverb" && rack ? ` ${rack.reverb.variation}` :
                     f === "filter" && rack ? ` ${rack.filter.layer}` : "";
                   return (

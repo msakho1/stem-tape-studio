@@ -3,7 +3,7 @@
  *
  * Four SERIAL stages, always in musical signal order:
  *
- *     source → TONE → RHYTHM → MOTION → SPACE → fader
+ *     source → TONE → MOD → MOTION → SPACE → fader
  *
  * Every stage is a permanent dry/wet pair whose input and output are created
  * once and never re-parented, so switching algorithms can never click a track
@@ -169,18 +169,143 @@ function buildDirt(ctx: AudioContext): AlgorithmGraph {
 }
 
 // ---------------------------------------------------------------------------
-// RHYTHM
+// MOD  —  Reel Flange · Formant Shift · Rhythmic Gate
 // ---------------------------------------------------------------------------
 
-/** Rhythmic gate and pump share one tempo-locked LFO shape. */
-function buildLfoGate(ctx: AudioContext, kind: "gate" | "pump"): AlgorithmGraph {
+/**
+ * Reel Flange: a tape-style flanger. A short modulated delay (0.4–8 ms) is
+ * summed with the direct path through the stage's own dry/wet, and the
+ * feedback path is kept below unity so the resonance cannot run away. The
+ * sweep is FREE-RUNNING (0.05–0.6 Hz), not tempo-locked: a reel flange is a
+ * mechanical wow artefact, not a rhythmic effect.
+ */
+function buildReelFlange(ctx: AudioContext): AlgorithmGraph {
+  const input = ctx.createGain();
+  const out = ctx.createGain();
+  const delay = ctx.createDelay(0.05);
+  delay.delayTime.value = 0.003;
+  const fb = ctx.createGain();
+  fb.gain.value = 0.35;
+  // Inverted feedback gives the hollow through-zero character.
+  const invert = ctx.createGain();
+  invert.gain.value = -1;
+
+  const lfo = ctx.createOscillator();
+  lfo.type = "triangle";
+  lfo.frequency.value = 0.18;
+  const sweep = ctx.createGain();
+  sweep.gain.value = 0.0022;
+  const centre = ctx.createConstantSource();
+  centre.offset.value = 0.0032;
+  lfo.connect(sweep);
+  sweep.connect(delay.delayTime);
+  centre.connect(delay.delayTime);
+  delay.delayTime.value = 0;
+  lfo.start();
+  centre.start();
+
+  input.connect(delay);
+  input.connect(out);
+  delay.connect(out);
+  delay.connect(fb);
+  fb.connect(invert);
+  invert.connect(delay);
+
+  return {
+    input,
+    output: out,
+    setMacro: (v, when) => {
+      const t = Math.max(when, 0);
+      const m = clamp01(v);
+      // Macro = depth + rate together, the single performance control.
+      lfo.frequency.setValueAtTime(0.05 + 0.55 * m, t);
+      sweep.gain.setValueAtTime(0.0004 + 0.0036 * m, t);
+      centre.offset.setValueAtTime(0.0006 + 0.0038 * m, t);
+      fb.gain.setValueAtTime(Math.min(0.85, 0.2 + 0.65 * m), t);
+    },
+    dispose: () => {
+      try {
+        lfo.stop();
+        centre.stop();
+      } catch {
+        /* already stopped */
+      }
+      for (const n of [input, delay, fb, invert, sweep, out]) n.disconnect();
+    },
+  };
+}
+
+/**
+ * Formant Shift: moves the vocal-tract resonances WITHOUT changing pitch or
+ * timing. Three parallel peaking bands track a formant set that slides from
+ * roughly 0.7× (chest) to 1.6× (throat/child) as the macro sweeps; the source
+ * pitch, tape speed and phase are untouched, so it stays sample-locked to the
+ * transport. A gentle tilt keeps loudness roughly constant across the sweep.
+ */
+const FORMANTS = [620, 1180, 2600];
+
+function buildFormantShift(ctx: AudioContext): AlgorithmGraph {
+  const input = ctx.createGain();
+  const out = ctx.createGain();
+  // Notch the untreated formant region, then re-inject shifted peaks.
+  const bands = FORMANTS.map((f, i) => {
+    const peak = ctx.createBiquadFilter();
+    peak.type = "peaking";
+    peak.frequency.value = f;
+    peak.Q.value = 4 + i;
+    peak.gain.value = 0;
+    return peak;
+  });
+  const cut = ctx.createBiquadFilter();
+  cut.type = "peaking";
+  cut.frequency.value = 1100;
+  cut.Q.value = 0.8;
+  cut.gain.value = 0;
+
+  // Serial chain: each peaking band shapes the same signal in place.
+  let node: AudioNode = input;
+  node.connect(cut);
+  node = cut;
+  for (const b of bands) {
+    node.connect(b);
+    node = b;
+  }
+  node.connect(out);
+
+  return {
+    input,
+    output: out,
+    setMacro: (v, when) => {
+      const t = Math.max(when, 0);
+      const m = clamp01(v);
+      // 0 → 0.7× (down), 0.5 → 1.0× (neutral), 1 → 1.6× (up).
+      const ratio = m < 0.5 ? 0.7 + 0.6 * (m / 0.5) : 1 + 0.6 * ((m - 0.5) / 0.5);
+      const away = Math.abs(ratio - 1) / 0.6; // 0 at neutral, 1 at either end
+      bands.forEach((b, i) => {
+        b.frequency.setValueAtTime(Math.min(ctx.sampleRate / 2.2, FORMANTS[i]! * ratio), t);
+        b.gain.setValueAtTime(9 * away, t);
+      });
+      // Scoop the original formant region proportionally so the shifted peaks
+      // dominate instead of doubling the vowel.
+      cut.gain.setValueAtTime(-7 * away, t);
+      // Loudness compensation for the added peaks.
+      out.gain.setValueAtTime(1 - 0.22 * away, t);
+    },
+    dispose: () => {
+      for (const n of [input, cut, out, ...bands]) n.disconnect();
+    },
+  };
+}
+
+/** Rhythmic Gate: a tempo-locked square VCA chop. */
+function buildLfoGate(ctx: AudioContext, kind: "gate"): AlgorithmGraph {
   const input = ctx.createGain();
   const vca = ctx.createGain();
   vca.gain.value = 1;
   input.connect(vca);
 
   const lfo = ctx.createOscillator();
-  lfo.type = kind === "gate" ? "square" : "triangle";
+  lfo.type = "square";
   const depth = ctx.createGain();
   depth.gain.value = 0.5;
   const offset = ctx.createConstantSource();
@@ -201,11 +326,10 @@ function buildLfoGate(ctx: AudioContext, kind: "gate" | "pump"): AlgorithmGraph 
     const divisions = [1, 2, 4, 8];
     const div = divisions[Math.min(divisions.length - 1, Math.floor(macro * divisions.length))]!;
     lfo.frequency.setValueAtTime((bpm / 60) * div, t);
-    // Pump is a soft duck; gate is a hard chop. The pump depth is ~65 %:
-    // the VCA travels 0.35 → 1.0, which is unmistakably audible.
-    const d = kind === "gate" ? 0.5 : 0.325;
+    // A hard chop: the VCA travels 0 → 1.
+    const d = 0.5;
     depth.gain.setValueAtTime(d, t);
-    offset.offset.setValueAtTime(kind === "gate" ? 0.5 : 0.675, t);
+    offset.offset.setValueAtTime(0.5, t);
   };
   apply(ctx.currentTime);
 
@@ -469,10 +593,12 @@ export function buildAlgorithm(ctx: AudioContext, id: AlgorithmId): AlgorithmGra
       return buildIsolator(ctx);
     case "dirt":
       return buildDirt(ctx);
+    case "reelFlange":
+      return buildReelFlange(ctx);
+    case "formantShift":
+      return buildFormantShift(ctx);
     case "gate":
       return buildLfoGate(ctx, "gate");
-    case "pump":
-      return buildLfoGate(ctx, "pump");
     case "echo":
       return buildEcho(ctx, false);
     case "pitchEcho":
@@ -485,10 +611,6 @@ export function buildAlgorithm(ctx: AudioContext, id: AlgorithmId): AlgorithmGra
       return buildReverb(ctx, true);
     case "freeze":
       return buildFreeze(ctx);
-    case "beatRepeat":
-      // Beat Repeat is sample-accurate and stays on its dedicated worklet,
-      // owned by the legacy rack. The stage passes audio through untouched.
-      return null;
   }
 }
 
