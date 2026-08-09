@@ -157,21 +157,44 @@ State per lane: `sourceStem`, `startFrame`, `endFrame`, `lengthBars`, `origin: "
 - **No loop:** create a reversible performance playback layer for that lane starting at its current audible source position; the hidden forward song pointer keeps advancing; toggling off crossfades back to the hidden position. Other lanes never restart or reposition.
 - Worklet uses the negative read step (no extra PCM). Node fallback uses the existing gated reverse-copy path and its allocation goes through the operation-level memory gate in `src/audio/memory.ts`.
 
-## 8. Automatic grid (unchanged, approved)
+## 8. Automatic grid + portable persistence
 
 `src/audio/gridAnalysis.ts` + `src/workers/gridWorker.ts`, run after ingest/restore, before performance-ready. Reads already-decoded channel data in sequential bounded chunks (no second decode, no cloud, no AI terminology, no confidence score). Spectral-flux onset envelope → autocorrelation/comb tempo over 60–200 BPM with explicit half/double disambiguation → phase by pulse-train correlation → downbeats by 4-beat energy accumulation.
 
+The grid belongs to the **song timeline**, not to any individual stem's length. Time in seconds is the authority; frames are derived.
+
 ```ts
 interface SongGrid {
-  gridId: string; sampleRate: number; beatsPerBar: number; originFrame: number;
-  beats: Int32Array; bars: Int32Array;
-  segments: { startFrame: number; bpm: number }[];
-  normalized: Float64Array;   // sample-rate-portable
+  gridId: string;
+  beatsPerBar: number;
+  analysisSampleRate: number;      // rate the analysis ran at
+  analysisOriginFrame: number;     // origin in analysis frames
+  songDurationSeconds: number;     // song-timeline duration at analysis time
+  beatTimesSeconds: Float64Array;  // AUTHORITATIVE
+  barTimesSeconds: Float64Array;   // AUTHORITATIVE
+  beatFramesAtAnalysis: Int32Array; // original analysis frames (audit)
+  normalized: Float64Array;        // cross-check only
+  segments: { startSeconds: number; bpm: number; source: "auto" | "manual" }[];
   sourceHashes: string[];
 }
 ```
 
-Persisted additively on `StoredProject.control.grid`; restored through `normalized` (≤1 frame at 44.1↔48 kHz); recomputed when `sourceHashes` change. FN ×4 tap remains the optional manual correction, writing `source: "manual"` segments. PerformanceLoop and tempo FX (`fx/banks.ts:38`, chop, Echo, Pump, Beat Repeat) read the frame map.
+**Restore:** primary computation is `frame = Math.round(beatTimeSeconds * decodedContextSampleRate)`. The rate-scaled form (`beatFramesAtAnalysis * ctxRate / analysisSampleRate`) and `normalized * songDurationFrames` are computed as **validators only**. Disagreement beyond 2 frames logs a diagnostic and keeps the seconds-derived value; disagreement beyond 50 ms marks the grid stale and re-runs analysis. `normalized` is never used to reconstruct positions when seconds are present, so unequal stem lengths, encoder padding and small decode-duration drift cannot shift the grid.
+
+Persisted additively on `StoredProject.control.grid`; recomputed when `sourceHashes` change. FN ×4 tap remains the optional manual correction, writing `source: "manual"` segments.
+
+**Grid consumers:** Tempo Echo, Pitch Echo (when synchronized), Reel Flange modulation (when synchronized), Rhythmic Gate, performance loops, chop and other grid transitions. Formant Shift does not consume the grid.
+
+## 8b. FX registry correction — Pump and Beat Repeat removed
+
+Button 4's bank is final: **MOD → Reel Flange → Formant Shift → Rhythmic Gate**.
+
+Every reference is updated in one pass: FX registry and bank names (`src/audio/fx/banks.ts`), `fx.*` commands and acknowledgements, persistence schema + migration, diagnostics, LED/readout labels, mapping export, DSP tests, grid consumers.
+
+**Deleted:** Pump DSP and its tests; Beat Repeat processor (`public/beat-repeat-processor.js`) and its dedicated ring-buffer infrastructure. Shared LFO, delay-line and worklet utilities are **retained** wherever another retained effect still uses them; deletion is only permitted after a reference check shows zero remaining importers.
+
+**Saved-project migration:** Beat Repeat slot → Reel Flange; Pump slot → Formant Shift; Rhythmic Gate state preserved verbatim. Migration clears any momentary or latched activation on the two remapped slots, so a project can never load with a different effect unexpectedly engaged. Parameter values from the removed effects are dropped, not reinterpreted; the replacement loads at its documented defaults.
+
 
 ## 9. Removal dependency audit
 
