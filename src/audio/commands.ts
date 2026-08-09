@@ -17,6 +17,8 @@ export type AudioCommandType =
   | "transport.restart"
   | "transport.cue"
   | "transport.scrub"
+  | "transport.scrub.start"
+  | "transport.scrub.end"
   | "track.mute"
   | "track.unmute"
   | "track.gain"

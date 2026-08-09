@@ -34,6 +34,8 @@ export interface StemTapeRow {
   led: string;
   provenance: Provenance;
   family?: FxFamily;
+  /** Desktop keyboard bindings, "KeyF+KeyQ" for chords. Panel is derived from these. */
+  keys?: string[];
   /** Phase 6 tutorial metadata — drives the Guide without duplicating the map. */
   tutorial?: {
     plainLanguage: string;
@@ -65,6 +67,11 @@ export const STEM_ROWS: StemTapeRow[] = [
     rollback: "none",
     led: "active stem LED brightens",
     provenance: "extension",
+    tutorial: {
+      plainLanguage: "Hold PLAY and tap volume up to move to the next stem: Vocals, Drums, Bass, Instruments.",
+      highlight: ["play", "volume-plus"],
+      expected: "The newly selected stem's LED brightens.",
+    },
   },
   {
     id: "stem.select.prev",
@@ -75,6 +82,11 @@ export const STEM_ROWS: StemTapeRow[] = [
     rollback: "none",
     led: "active stem LED brightens",
     provenance: "extension",
+    tutorial: {
+      plainLanguage: "Hold PLAY and tap volume down to step back to the previous stem.",
+      highlight: ["play", "volume-minus"],
+      expected: "The newly selected stem's LED brightens.",
+    },
   },
   {
     id: "stem.solo",
@@ -123,17 +135,18 @@ export const TRANSPORT_OVERRIDE_ROWS: StemTapeRow[] = [
     id: "rocker.scrub",
     layer: "tape",
     controls: ["function", "rocker-fwd"],
-    command: "transport.scrub seconds=±0.5 (global four-stem shuttle on one shared playhead)",
-    suppresses: ["rocker.chop"],
+    command: "transport.scrub.start direction=±1 → transport.scrub.end (held audible four-stem shuttle, one shared playhead)",
+    suppresses: ["rocker.chop", "rate.set", "transport.scrub"],
     supersedes: ["rocker.chop"],
     originalBehaviour: "v2.6: FUNCTION + rocker halves/doubles the chop division. Chop now lives on the FUNCTION + rocker DOUBLE-tap.",
     rollback: "none",
-    led: "rocker LED flashes in the scrub direction",
+    led: "rocker LED flashes in the scrub direction while held",
     provenance: "reinterpreted",
+    keys: ["KeyF+KeyQ", "KeyF+KeyA"],
     tutorial: {
-      plainLanguage: "Hold FUNCTION and click a rocker to shuttle all four stems together.",
+      plainLanguage: "Hold FUNCTION and a rocker to shuttle all four stems together — you hear the tape move.",
       highlight: ["function", "rocker-fwd"],
-      expected: "All four stems move by half a second and stay locked to each other.",
+      expected: "Audible tape-style shuttle; all four stems stay locked to one playhead and playback resumes on release.",
     },
   },
 ];
@@ -149,6 +162,11 @@ export const SYSTEM_ROWS: StemTapeRow[] = [
     rollback: "none",
     led: "both FUNCTION LEDs alternate-pulse while open",
     provenance: "reinterpreted",
+    tutorial: {
+      plainLanguage: "Press both volume keys together to open or close the effects layer.",
+      highlight: ["volume-minus", "volume-plus"],
+      expected: "Both FUNCTION LEDs alternate-pulse while the effects layer is open.",
+    },
   },
   {
     id: "system.pairing",
@@ -184,6 +202,11 @@ const FAMILY_ROWS = (family: FxFamily, track: number, label: string): StemTapeRo
     led: `side LED ${track} breathing`,
     provenance: "extension",
     family,
+    tutorial: {
+      plainLanguage: `Hold key ${track} to apply ${label} to the active stem for as long as you hold it.`,
+      highlight: [`track-button-${track}`],
+      expected: `Side LED ${track} breathes while the effect sounds.`,
+    },
   },
   {
     id: `fx.${family}.variation`,
@@ -195,6 +218,11 @@ const FAMILY_ROWS = (family: FxFamily, track: number, label: string): StemTapeRo
     led: `side LEDs show the variation number, then time out`,
     provenance: "extension",
     family,
+    tutorial: {
+      plainLanguage: `Hold key ${track} and tap a volume key to step through the four ${label} variations.`,
+      highlight: [`track-button-${track}`, "volume-plus"],
+      expected: "The side LEDs briefly show the variation number.",
+    },
   },
   {
     id: `fx.${family}.latch`,
@@ -206,6 +234,11 @@ const FAMILY_ROWS = (family: FxFamily, track: number, label: string): StemTapeRo
     led: `side LED ${track} solid while latched`,
     provenance: "extension",
     family,
+    tutorial: {
+      plainLanguage: `Hold FUNCTION and press key ${track} to leave ${label} latched on until you toggle it off.`,
+      highlight: ["function", `track-button-${track}`],
+      expected: `Side LED ${track} stays solid while the effect is latched.`,
+    },
   },
 ];
 

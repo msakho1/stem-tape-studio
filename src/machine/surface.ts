@@ -140,6 +140,9 @@ export interface SurfaceState {
    */
   commands: AudioCommand[];
 
+  /** Held global four-stem shuttle: +1 forward, -1 backward, 0 idle. */
+  globalScrub: 0 | 1 | -1;
+
   /** Phase 5C stem-performance layer (serializable, no audio objects). */
   perf: StemPerformanceState;
 
@@ -247,6 +250,7 @@ export function initialSurfaceState(): SurfaceState {
     maxTakeSeconds: 480,
 
     commands: [],
+    globalScrub: 0,
 
     perf: initialStemPerformance(),
 
@@ -254,6 +258,32 @@ export function initialSurfaceState(): SurfaceState {
     coverage: {},
     note: "phase 4 — v2.6 simulation + ordered audio command stream",
   };
+}
+
+/**
+ * Hotfix — held global four-stem shuttle (FUNCTION + rocker, or F+Q / F+A).
+ * Emits ONE ordered start command on entry and ONE end command on release; the
+ * discrete `transport.scrub` step row is never dispatched while it is held.
+ */
+export function applyGlobalScrub(state: SurfaceState, dir: 1 | -1 | null, t = 0): SurfaceState {
+  if (dir === null) {
+    if (state.globalScrub === 0) return state;
+    return emit(
+      { ...state, globalScrub: 0, lastGesture: "global shuttle release" },
+      "transport.scrub.end",
+      {},
+      { rowId: "transport.scrub.global", t },
+    );
+  }
+  const busy = state.tracks.some((tr) => tr.content === "recording" || tr.content === "overdubbing");
+  if (busy) return { ...state, note: "global shuttle rejected — a take is recording" };
+  if (state.globalScrub === dir) return state;
+  return emit(
+    { ...state, globalScrub: dir, lastGesture: `global shuttle ${dir > 0 ? "forward" : "backward"}` },
+    "transport.scrub.start",
+    { direction: dir },
+    { rowId: "transport.scrub.global", t },
+  );
 }
 
 function fire(state: SurfaceState, rowId: string, detail: string, t: number): SurfaceState {

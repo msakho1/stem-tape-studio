@@ -1,6 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { DeviceSurface } from "@/device/DeviceSurface";
+import { KeyboardPanel } from "@/device/KeyboardPanel";
 import { SystemPage } from "@/device/SystemPage";
 import { KEY_HINTS, useDeviceSurface } from "@/device/useDeviceSurface";
 import { CONTROL_LABELS } from "@/device/geometry";
@@ -78,6 +79,8 @@ function LabPage() {
     gestureLog,
     handlers,
     arbiter,
+    heldKeys,
+    globalScrub,
   } = useDeviceSurface();
 
   const { engine, status, acks, unlock, unlockNote } = useAudioEngine(state.commands);
@@ -194,6 +197,14 @@ function LabPage() {
               lights={state.lights}
               {...handlers}
             />
+            <div className="hidden lg:block">
+              <KeyboardPanel
+                heldKeys={heldKeys}
+                fxOverlay={state.perf.fxOverlay}
+                headsMode={state.headsMode}
+                globalScrub={globalScrub}
+              />
+            </div>
           </section>
 
           {/* ---------- live readout ---------- */}

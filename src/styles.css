@@ -970,3 +970,66 @@
   .st-sys-input > *:nth-child(2n) { border-right: none; }
   .st-sys-input > *:nth-child(-n + 2) { border-bottom: 1px solid var(--bench-line); }
 }
+
+/* ---- desktop keyboard controls panel (hotfix) ---- */
+.st-kbd {
+  margin-top: 1rem;
+  border: 1px solid var(--bench-line);
+  background: var(--bench);
+  color: var(--ink);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+.st-kbd__head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--bench-line);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.st-kbd__title { flex: 1; }
+.st-kbd__context { opacity: 0.65; }
+.st-kbd__close {
+  border: 1px solid var(--bench-line);
+  line-height: 1;
+  padding: 0 0.35rem;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.st-kbd__scrub {
+  padding: 0.35rem 0.6rem;
+  border-bottom: 1px solid var(--bench-line);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.st-kbd__list { max-height: 15rem; overflow-y: auto; }
+.st-kbd__row {
+  display: grid;
+  grid-template-columns: 6.5rem 1fr;
+  gap: 0.5rem;
+  padding: 0.3rem 0.6rem;
+  border-bottom: 1px solid color-mix(in oklch, var(--bench-line) 55%, transparent);
+}
+.st-kbd__row[data-lit="1"] { background: color-mix(in oklch, var(--ink) 12%, transparent); }
+.st-kbd__keys {
+  border: 1px solid var(--bench-line);
+  padding: 0 0.3rem;
+  text-align: center;
+}
+.st-kbd__row[data-lit="1"] .st-kbd__keys { border-color: var(--ink); font-weight: 600; }
+.st-kbd__detail { opacity: 0.78; }
+.st-kbd__reopen {
+  margin-top: 1rem;
+  border: 1px solid var(--bench-line);
+  background: transparent;
+  color: var(--ink);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 0.3rem 0.6rem;
+  cursor: pointer;
+}

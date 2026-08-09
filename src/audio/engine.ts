@@ -85,6 +85,12 @@ export const RAMP_TAU = 0.008;
 /** How far ahead the seam scheduler commits work, seconds. */
 export const SEAM_LOOKAHEAD_S = 0.25;
 const SCHEDULER_INTERVAL_MS = 25;
+/** Held-shuttle transport speed, in source seconds per real second. */
+const GLOBAL_SCRUB_RATE = 3;
+/** Grain scheduler period for the shuttle (ms). */
+const GLOBAL_SCRUB_INTERVAL_MS = 45;
+/** Grain level; the shuttle is deliberately quieter than normal playback. */
+const GLOBAL_SCRUB_LEVEL = 0.85;
 
 export type TrackId = 0 | 1 | 2 | 3;
 
@@ -1668,6 +1674,166 @@ export class AudioEngine {
     };
   }
 
+  // ------------------------------------------------- global four-stem shuttle
+  /**
+   * Hotfix: FUNCTION + rocker (and F+Q / F+A on the keyboard) is a HELD tape
+   * shuttle, not a discrete jump. One shared playhead moves for all four stems
+   * and the movement is rendered as overlapping grains through each track's own
+   * input node, so faders, mutes, solo and FX all stay in the signal path.
+   */
+  private globalScrub: {
+    dir: 1 | -1;
+    pos: number;
+    startPos: number;
+    wasPlaying: boolean;
+    musicalRate: number;
+    timer: ReturnType<typeof setInterval> | null;
+    last: number;
+    lastGrainAt: number[];
+    grains: number;
+    startedAt: number;
+  } | null = null;
+
+  globalScrubState() {
+    const gs = this.globalScrub;
+    return {
+      active: gs != null,
+      direction: gs?.dir ?? 0,
+      position: gs?.pos ?? this.position(),
+      grains: gs?.grains ?? 0,
+      wasPlaying: gs?.wasPlaying ?? false,
+      musicalRate: gs?.musicalRate ?? this.timeline.musicalRate(),
+    };
+  }
+
+  private scrubGrainAll(dtS: number) {
+    const gs = this.globalScrub;
+    const ctx = this.ctx;
+    if (!gs || !ctx) return;
+    const before = gs.pos;
+    gs.pos = Math.min(this.duration, Math.max(0, gs.pos + gs.dir * GLOBAL_SCRUB_RATE * dtS));
+    // ONE shared playhead: the timeline is re-anchored, every stem reads it.
+    this.timeline.anchor(ctx.currentTime, gs.pos);
+    this.timelineFrozenAt = ctx.currentTime;
+    if (gs.pos === before) return; // parked at an end — no grain, no click
+    const now = ctx.currentTime;
+    const dur = Math.min(0.12, Math.max(0.03, dtS * 1.6));
+    const backwards = gs.dir < 0;
+    for (let i = 0; i < this.tracks.length; i++) {
+      const t = this.tracks[i]!;
+      if (!t.buffer) continue;
+      if (backwards && !t.reversed) t.reversed = reverseBuffer(ctx, t.buffer);
+      const buffer = backwards ? t.reversed : t.buffer;
+      if (!buffer) continue;
+      const at = Math.max(now, gs.lastGrainAt[i] ?? now);
+      const offsetS = backwards ? buffer.duration - gs.pos : gs.pos;
+      const g = ctx.createGain();
+      g.connect(t.input);
+      const node = ctx.createBufferSource();
+      node.buffer = buffer;
+      node.playbackRate.value = GLOBAL_SCRUB_RATE;
+      node.connect(g);
+      const fade = Math.min(0.006, dur / 3);
+      g.gain.setValueAtTime(0, at);
+      g.gain.linearRampToValueAtTime(GLOBAL_SCRUB_LEVEL, at + fade);
+      g.gain.setValueAtTime(GLOBAL_SCRUB_LEVEL, at + dur - fade);
+      g.gain.linearRampToValueAtTime(0, at + dur);
+      node.start(at, Math.min(Math.max(0, offsetS), Math.max(0, buffer.duration - 1e-3)), dur * GLOBAL_SCRUB_RATE);
+      gs.lastGrainAt[i] = at + dur * 0.8;
+      node.onended = () => {
+        try {
+          node.disconnect();
+          g.disconnect();
+        } catch {
+          /* noop */
+        }
+      };
+    }
+    gs.grains++;
+  }
+
+  private globalScrubTick() {
+    const gs = this.globalScrub;
+    if (!gs) return;
+    const nowMs = typeof performance !== "undefined" ? performance.now() : Date.now();
+    const dt = Math.min(0.2, Math.max(0, (nowMs - gs.last) / 1000));
+    gs.last = nowMs;
+    if (dt > 0) this.scrubGrainAll(dt);
+  }
+
+  beginGlobalScrub(dir: 1 | -1): { ok: boolean; detail: string } {
+    const ctx = this.ctx;
+    if (!ctx) return { ok: false, detail: "audio not unlocked" };
+    if (this.duration === 0) return { ok: false, detail: "no stems decoded" };
+    if (this.globalScrub) return this.setGlobalScrubDirection(dir);
+    const now = ctx.currentTime;
+    const pos = this.position();
+    const wasPlaying = this.requestedPlaying;
+    const musicalRate = this.timeline.musicalRate();
+    this.cancelWind();
+    this.stopSources();
+    this.fanout((_t, at) => ({ type: "stop", applyAtContextFrame: at }));
+    this.requestedPlaying = false;
+    this.timeline.anchor(now, pos);
+    this.timelineFrozenAt = now;
+    this.globalScrub = {
+      dir,
+      pos,
+      startPos: pos,
+      wasPlaying,
+      musicalRate,
+      timer: null,
+      last: typeof performance !== "undefined" ? performance.now() : Date.now(),
+      lastGrainAt: this.tracks.map(() => now),
+      grains: 0,
+      startedAt: now,
+    };
+    this.globalScrub.timer = setInterval(() => this.globalScrubTick(), GLOBAL_SCRUB_INTERVAL_MS);
+    return {
+      ok: true,
+      detail: `global shuttle ${dir > 0 ? "forward" : "backward"} at ${GLOBAL_SCRUB_RATE}× from ${pos.toFixed(3)}s — four stems on one playhead`,
+    };
+  }
+
+  setGlobalScrubDirection(dir: 1 | -1): { ok: boolean; detail: string } {
+    const gs = this.globalScrub;
+    if (!gs) return this.beginGlobalScrub(dir);
+    gs.dir = dir;
+    return { ok: true, detail: `shuttle direction → ${dir > 0 ? "forward" : "backward"} at ${gs.pos.toFixed(3)}s` };
+  }
+
+  endGlobalScrub(): { ok: boolean; detail: string } {
+    const gs = this.globalScrub;
+    const ctx = this.ctx;
+    if (!gs || !ctx) return { ok: false, detail: "no global scrub active" };
+    if (gs.timer) clearInterval(gs.timer);
+    this.globalScrub = null;
+    const now = ctx.currentTime;
+    this.timeline.anchor(now, gs.pos);
+    this.timelineFrozenAt = now;
+    const moved = gs.pos - gs.startPos;
+    if (gs.wasPlaying) {
+      this.requestedPlaying = true;
+      const { started, startAt } = this.startAll(gs.pos);
+      this.fanout((_t, at) => ({
+        type: "start",
+        applyAtContextFrame: at,
+        sourceFrame: Math.round(this.timeline.positionAt(at / ctx.sampleRate) * ctx.sampleRate),
+      }));
+      this.invalidateSeams();
+      this.timeline.endInertia(startAt, gs.musicalRate);
+      this.transportPhase = "playing";
+      return {
+        ok: true,
+        detail: `shuttle released → ${gs.pos.toFixed(3)}s (${moved >= 0 ? "+" : ""}${moved.toFixed(3)}s), ${started} stems resume at ${gs.musicalRate.toFixed(3)}×`,
+      };
+    }
+    return {
+      ok: true,
+      detail: `shuttle released → parked at ${gs.pos.toFixed(3)}s (${moved >= 0 ? "+" : ""}${moved.toFixed(3)}s, transport stopped)`,
+    };
+  }
+
   beginHeadScrub(head: number, pointerId: number, normalized: number, timestamp: number): { ok: boolean; detail: string } {
     if (!this.heads.active) return { ok: false, detail: "scrub ignored — heads mode is not active" };
     const cf = Math.max(1, this.heads.cycleFrames);
@@ -2140,6 +2306,15 @@ export class AudioEngine {
             "completed",
             `cued at frame 0 after a ${(CUE_FADE_S * 1000).toFixed(0)} ms transport fade — musical rate held at ${this.timeline.musicalRate().toFixed(3)}×`,
           );
+        }
+        case "transport.scrub.start": {
+          const dir: 1 | -1 = Number(p["direction"] ?? 1) < 0 ? -1 : 1;
+          const r = this.beginGlobalScrub(dir);
+          return this.ack(cmd, r.ok ? "accepted" : "rejected", r.detail);
+        }
+        case "transport.scrub.end": {
+          const r = this.endGlobalScrub();
+          return this.ack(cmd, r.ok ? "completed" : "rejected", r.detail);
         }
         case "transport.scrub": {
           if (!this.ctx) return this.ack(cmd, "rejected", "audio not unlocked");

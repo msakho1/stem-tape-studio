@@ -60,6 +60,8 @@ export function useAudioEngine(commands: AudioCommand[]) {
         position: d.position,
         effectiveBpm: d.effectiveBpm,
         windReversals: engine.windReversals,
+        globalScrub: engine.globalScrubState(),
+        stems: d.tracks.map((t) => ({ id: t.id, decoded: t.decoded, sourceLive: t.sourceLive, gain: t.gain })),
         masterRms: engine.masterRms(),
         fx: d.fx.map((f) => (f ? { active: (f as unknown as Record<string, unknown>)["active"] ?? null, summary: JSON.stringify(f).slice(0, 200) } : null)),
         lastFxRejection: d.lastFxRejection,
