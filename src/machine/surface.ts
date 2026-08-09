@@ -356,6 +356,18 @@ function fire(state: SurfaceState, rowId: string, detail: string, t: number): Su
 const clamp01 = (n: number) => (n < 0 ? 0 : n > 1 ? 1 : n);
 const trackIndexOf = (control: Control) => (Number(control.slice(-1)) - 1) as TrackIndex;
 
+/** Lanes whose Track button is currently held (plus `extra`, deduped, sorted). */
+function heldTrackLanes(state: SurfaceState, extra?: number): number[] {
+  const set = new Set<number>();
+  for (const c of state.pressed) if (c.startsWith("track-button")) set.add(trackIndexOf(c));
+  if (extra != null) set.add(extra);
+  return [...set].sort((a, b) => a - b);
+}
+
+/** Four-character audibility mask, "1" for every lane in `lanes`. */
+const maskOf = (lanes: number[]) => [0, 1, 2, 3].map((k) => (lanes.includes(k) ? "1" : "0")).join("");
+
+
 function setTrack(state: SurfaceState, i: number, patch: Partial<TrackSlice>): SurfaceState["tracks"] {
   const tracks = [...state.tracks] as SurfaceState["tracks"];
   const slice = tracks[i];
