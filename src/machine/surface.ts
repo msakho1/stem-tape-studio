@@ -561,6 +561,21 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
       if (c === "volume-plus" || c === "volume-minus") {
         const dir = c === "volume-plus" ? 1 : -1;
         if (fn) {
+          // Universal lane loop resize: FUNCTION + Track held + Volume ±.
+          // Halve / double the captured loop of every held lane, in bars, so
+          // the resize is grid-exact instead of a free-running time nudge.
+          const held = next.pressed.filter((x) => x.startsWith("track-button")).map(trackIndexOf);
+          if (held.length > 0) {
+            const notes: string[] = [];
+            for (const i of held) {
+              const slice = next.tracks[i]!;
+              const bars = Math.max(0.25, Math.min(8, dir > 0 ? slice.laneLoop.bars * 2 : slice.laneLoop.bars / 2));
+              next = { ...next, tracks: setTrack(next, i, { laneLoop: { ...slice.laneLoop, bars } }) };
+              next = emit(next, "loop.resize", { lane: i, bars }, { rowId: "loop.resize", t });
+              notes.push(`lane ${i + 1} → ${bars} bar`);
+            }
+            return fire(next, "loop.resize", notes.join(" · "), t);
+          }
           const chopWindowOffset = clamp01(next.chopWindowOffset + dir * 0.0625);
           next = { ...next, chopWindowOffset };
           return fire(next, "volume.chopWindow", `chop window → ${chopWindowOffset.toFixed(3)}`, t);
@@ -569,6 +584,7 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
         next = emit({ ...next, masterVolume }, "master.gain", { level: masterVolume }, { rowId: "volume.master", t });
         return fire(next, "volume.master", `master → ${masterVolume.toFixed(3)}`, t);
       }
+
 
       // Heads reverse is a Track double-tap (§3.3), never a fader double-tap.
 
