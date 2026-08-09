@@ -1399,6 +1399,25 @@ export class AudioEngine {
   /** Node-engine head voices. Empty while heads are served by the worklet. */
   private headVoices: ({ node: AudioBufferSourceNode; gain: GainNode } | null)[] = [null, null, null, null];
   private headsBus: GainNode | null = null;
+  /** Analyser on the heads bus — head-path output, isolated from the transport. */
+  private headsTap: AnalyserNode | null = null;
+
+  /** RMS of the heads bus only. 0 when heads mode is not serving audio. */
+  headsRms(): number {
+    const a = this.headsTap;
+    if (!a) return 0;
+    const buf = new Float32Array(a.fftSize);
+    a.getFloatTimeDomainData(buf);
+    let sum = 0;
+    for (let i = 0; i < buf.length; i++) sum += buf[i]! * buf[i]!;
+    return Math.sqrt(sum / buf.length);
+  }
+
+  /** Absolute source-frame read position of each of the four heads. */
+  headReadFrames(): number[] {
+    return [0, 1, 2, 3].map((i) => this.headFrameNow(i));
+  }
+
   /** Mute mask of the non-source tracks, restored verbatim on heads exit. */
   private preHeadsMutes: boolean[] | null = null;
   /** PRINT commit hook, installed by the ingest layer (persist + adopt). */
