@@ -54,10 +54,21 @@ export type AudioCommandType =
   | "heads.source"
   | "heads.level"
   | "heads.mute"
-  | "heads.reverse"
   | "heads.scrub"
-  
+  // ---- Universal lane layer (corrective production task) -------------------
+  // These are LANE commands: one implementation serves Tape, Heads and the FX
+  // overlay. `heads.reverse` has been deleted; `lane.reverse` replaces it.
+  /** Momentary audition (bare Track hold). payload.mask = "0110" or "" to end. */
+  | "lane.audition"
+  | "loop.capture"
+  | "loop.release"
+  | "loop.resize"
+  | "lane.reverse"
+  | "lane.scrub.start"
+  | "lane.scrub.end"
+
   | "rollback";
+
 
 
 
