@@ -138,7 +138,7 @@ export const TRANSPORT_OVERRIDE_ROWS: StemTapeRow[] = [
     command: "transport.scrub.start direction=±1 → transport.scrub.end (held audible four-stem shuttle, one shared playhead)",
     suppresses: ["rocker.chop", "rate.set", "transport.scrub"],
     supersedes: ["rocker.chop"],
-    originalBehaviour: "v2.6: FUNCTION + rocker halves/doubles the chop division. Chop now lives on the FUNCTION + rocker DOUBLE-tap.",
+    originalBehaviour: "v2.6: FUNCTION + rocker halves/doubles the chop division. Chop now lives on PLAY + rocker.",
     rollback: "none",
     led: "rocker LED flashes in the scrub direction while held",
     provenance: "reinterpreted",
@@ -149,7 +149,26 @@ export const TRANSPORT_OVERRIDE_ROWS: StemTapeRow[] = [
       expected: "Audible tape-style shuttle; all four stems stay locked to one playhead and playback resumes on release.",
     },
   },
+  {
+    id: "rocker.chop.play",
+    layer: "tape",
+    controls: ["play", "rocker-fwd"],
+    command: "loop.chop half / double (PLAY held + rocker deflection; PLAY is claimed before dispatch)",
+    suppresses: ["transport.play", "transport.stop", "transport.cue", "rate.set"],
+    supersedes: ["rocker.chop"],
+    originalBehaviour: "v2.6: FUNCTION + rocker halved/doubled the chop. Stem Tape moves chop to PLAY + rocker so FUNCTION + rocker can shuttle.",
+    rollback: "none",
+    led: "chop division shown on the four track LEDs while PLAY is held",
+    provenance: "extension",
+    keys: ["Space+KeyQ", "Space+KeyA"],
+    tutorial: {
+      plainLanguage: "Hold PLAY and flick a rocker to halve or double the chop; flick twice to reset, hold to glide.",
+      highlight: ["play", "rocker-fwd"],
+      expected: "The loop subdivides or lengthens and the transport never starts or stops.",
+    },
+  },
 ];
+
 
 export const SYSTEM_ROWS: StemTapeRow[] = [
   {

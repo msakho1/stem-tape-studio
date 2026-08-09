@@ -90,6 +90,10 @@ function isTrack(c: Control): boolean {
 function isVolume(c: Control): c is "volume-minus" | "volume-plus" {
   return c === "volume-minus" || c === "volume-plus";
 }
+function isRocker(c: Control): c is "rocker-fwd" | "rocker-rwd" {
+  return c === "rocker-fwd" || c === "rocker-rwd";
+}
+
 
 export interface ArbiterView {
   activeStem: StemIndex;
@@ -238,6 +242,22 @@ export class ChordArbiter {
         this.startMacroHold(control, control === "volume-plus" ? 1 : -1, activeStem, selectedBank);
         return;
       }
+    }
+
+    // Play + Rocker = the chop family (Stem Tape extension, supersedes the v2.6
+    // `rocker.chop` row). The deflection claims PLAY the instant it arrives, so
+    // the pending Play tap transaction is cancelled BEFORE dispatch and no
+    // transport.play / transport.stop / transport.cue can leak out.
+    if (isRocker(control) && this.down.has("play")) {
+      this.claim("play");
+      this.log.unshift({
+        t,
+        controls: ["play", control],
+        intent: "none",
+        suppressed: ["play"],
+        detail: "PLAY claimed by rocker deflection — chop family, transport suppressed",
+      });
+      if (this.log.length > 60) this.log.length = 60;
     }
 
     // Play-first chords are resolved on RELEASE (they need a duration), but the
