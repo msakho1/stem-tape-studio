@@ -3439,10 +3439,10 @@ export class AudioEngine {
         case "lane.reverse": {
           const i = Number(p["lane"]);
           if (this.heads.active) {
-            this.heads = toggleHeadReverse(this.heads, i);
-            this.pushHeads();
-            this.restartHeadVoice(i);
-            return this.ack(cmd, "completed", `lane ${i + 1} (head) → ${this.heads.heads[i]!.reverse ? "reverse" : "forward"} — pointer negated, no reversed PCM`);
+            // Heads v2: the lane IS an independent head, so the flip happens on
+            // that head's own clock and the tape lane is left untouched.
+            const r = this.headLanes.toggleReverse(i);
+            return this.ack(cmd, r.ok ? "completed" : "rejected", r.detail);
           }
           return this.execute({ ...cmd, type: "tape.reverse", payload: { track: i, on: Boolean(p["reverse"]) } });
         }

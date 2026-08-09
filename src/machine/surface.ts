@@ -469,11 +469,12 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
           // command survives into heads entry/exit.
           const tracks = [...next.tracks] as SurfaceState["tracks"];
           for (let i = 0; i < 4; i++)
-            tracks[i] = { ...tracks[i]!, headPos: i * 0.25, headReverse: false, headMuted: false, headLevel: 0.8 };
+            tracks[i] = { ...tracks[i]!, headPos: 0, headReverse: false, headMuted: false, headLevel: 0.8, headLatched: false, headLoop: { active: false, bars: 1 } };
           next = { ...next, headsMode: on, tracks, headsSource: on ? next.headsSource : null };
           next = emit(next, on ? "heads.enter" : "heads.exit", {}, { rowId: "play.heads", t });
           next = fire(next, "play.heads", `heads mode ${on ? "on" : "off"}`, t);
-          if (on) next = fire(next, "heads.replay", "heads 1·2·3·4 read the source at 0 · 0.25 · 0.50 · 0.75 of the audible cycle", t);
+          if (on)
+            next = fire(next, "heads.lane.play", "heads 1·2·3·4 are four independent lane heads — hold a Track to play one, triple-tap to latch it", t);
           return next;
         }
 
@@ -581,12 +582,9 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
             return fire(next, "heads.latch", `head ${i + 1} independent playback ${latched ? "latched" : "released"} — transport untouched`, t);
           }
           if (g.count === 2) {
-            if (fn) {
-              const reverse = !slice.headReverse;
-              next = { ...next, tracks: setTrack(next, i, { headReverse: reverse }) };
-              next = emit(next, "heads.reverse", { head: i, reverse }, { rowId: "heads.reverse", t });
-              return fire(next, "heads.reverse", `head ${i + 1} → ${reverse ? "reverse" : "forward"}`, t);
-            }
+            // FUNCTION + double-tap is handled by the UNIVERSAL lane layer
+            // above (lane.reverse); in heads mode the engine routes it to the
+            // head. A bare double-tap captures this head's loop.
             const active = !slice.headLoop.active;
             next = {
               ...next,
