@@ -86,7 +86,7 @@ export const RAMP_TAU = 0.008;
 export const SEAM_LOOKAHEAD_S = 0.25;
 const SCHEDULER_INTERVAL_MS = 25;
 /** Held-shuttle transport speed, in source seconds per real second. */
-const GLOBAL_SCRUB_RATE = 3;
+const GLOBAL_SCRUB_RATE = 1.6;
 /** Grain scheduler period for the shuttle (ms). */
 const GLOBAL_SCRUB_INTERVAL_MS = 45;
 /** Grain level; the shuttle is deliberately quieter than normal playback. */
