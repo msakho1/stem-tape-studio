@@ -221,7 +221,7 @@ loop.release { lane, releaseAtFrame }
 grid.installed | grid.replaced | grid.correct
 ```
 
-Schema additions: `control.grid` → `SongGrid`; `control.heads.laneSources`. Removed: PRINT state fields where no legacy record references them. Rejections ack with a reason and mutate nothing.
+Schema additions: `control.grid` → `SongGrid` (seconds-authoritative); `control.heads.lanes[laneId] = { sourceStem, offsetPercent, reverse }`; `heads.lane.setSource { lane, sourceStem }` command (releases loop, clears candidate, crossfades that lane only). FX slot migration as in §8b. Removed: PRINT state fields where no legacy record references them. Rejections ack with a reason and mutate nothing.
 
 ## 11. Diagnostics and LEDs
 
