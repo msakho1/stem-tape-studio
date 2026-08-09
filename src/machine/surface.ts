@@ -231,6 +231,17 @@ function track(stem: TrackSlice["stem"], volume: number): TrackSlice {
 
 
 
+/**
+ * Momentary hold dispatch. In Heads Mode the four Tracks are the four heads,
+ * so a hold PLAYS exactly the held group on the heads' own clock; everywhere
+ * else it is the tape-lane momentary audition. One mask, two destinations —
+ * the two layers can never disagree about who is held.
+ */
+function emitHold(state: SurfaceState, mask: string, t: number, rowId: string): SurfaceState {
+  const heads = state.headsMode && !state.perf.fxOverlay;
+  return emit(state, heads ? "heads.play.hold" : "lane.audition", { mask }, { rowId: heads ? "heads.play" : rowId, t });
+}
+
 export function initialSurfaceState(): SurfaceState {
   return {
     power: "on",
@@ -688,6 +699,18 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
           // Halve / double the captured loop of every held lane, in bars, so
           // the resize is grid-exact instead of a free-running time nudge.
           const held = next.pressed.filter((x) => x.startsWith("track-button")).map(trackIndexOf);
+          if (held.length > 0 && next.headsMode && !next.perf.fxOverlay) {
+            // FUNCTION + Track held + Volume ± resizes THAT head's loop.
+            const notes: string[] = [];
+            for (const i of held) {
+              const slice = next.tracks[i]!;
+              const bars = Math.max(0.25, Math.min(8, dir > 0 ? slice.headLoop.bars * 2 : slice.headLoop.bars / 2));
+              next = { ...next, tracks: setTrack(next, i, { headLoop: { ...slice.headLoop, bars } }) };
+              next = emit(next, "heads.loop.resize", { head: i, bars, direction: dir }, { rowId: "heads.loop", t });
+              notes.push(`head ${i + 1} → ${bars} bar`);
+            }
+            return fire(next, "heads.loop", notes.join(" · "), t);
+          }
           if (held.length > 0) {
             const notes: string[] = [];
             for (const i of held) {
@@ -753,7 +776,7 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
         const lanes = heldTrackLanes(next, i);
         const mask = maskOf(lanes);
         next = { ...next, activeTrack: i, auditionChord: lanes.length > 1 ? lanes : [] };
-        next = emit(next, "lane.audition", { mask }, { rowId: "lane.audition", t });
+        next = emitHold(next, mask, t, "lane.audition");
         return fire(
           next,
           "lane.audition",
@@ -790,7 +813,7 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
         const lanes = heldTrackLanes(next);
         const mask = lanes.length ? maskOf(lanes) : "";
         next = { ...next, auditionChord: lanes.length > 1 ? lanes : next.auditionChord };
-        next = emit(next, "lane.audition", { mask }, { rowId: "lane.audition", t });
+        next = emitHold(next, mask, t, "lane.audition");
         return fire(
           next,
           "lane.audition",
@@ -827,7 +850,7 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
       if (lanes.length >= 2 && lanes.length === g.controls.length && !fn && !next.pressed.includes("play")) {
         const mask = maskOf(lanes);
         next = { ...next, auditionChord: lanes, activeTrack: lanes[0] as TrackIndex };
-        next = emit(next, "lane.audition", { mask }, { rowId: "lane.audition", t });
+        next = emitHold(next, mask, t, "lane.audition");
         return fire(next, "lane.audition", `chord audition — mask ${mask}`, t);
       }
       return next;
@@ -842,7 +865,7 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
       if (set.every((c) => c.startsWith("track-button")) && set.length >= 2) {
         const lanes = heldTrackLanes(next);
         const mask = lanes.length ? maskOf(lanes) : "";
-        next = emit(next, "lane.audition", { mask }, { rowId: "lane.audition", t });
+        next = emitHold(next, mask, t, "lane.audition");
         return fire(next, "lane.audition", mask ? `chord narrowed — mask ${mask}` : "chord released — prior mix restored", t);
       }
       return next;
@@ -1176,13 +1199,13 @@ export function deriveLeds(state: SurfaceState): LedFrame {
     } else if (state.headsMode) {
       // Heads language (§5): full-bright chase over loaded content, faint chase
       // for an empty (printable) head, dark-but-distinguishable when muted.
-      const isSource = state.headsSource === i;
       const loaded = track.content !== "empty";
       const dir = track.headReverse ? "reversed chase" : "chase";
-      if (isSource) frame[id] = { pattern: "solid", reason: `heads source — track ${i + 1} feeds all four heads`, priority: LED_PRIORITY.heads + 1 };
+      if (track.headLatched)
+        frame[id] = { pattern: "solid", reason: `head ${i + 1} latched — playing independently of the transport`, priority: LED_PRIORITY.heads + 1 };
       else if (track.headMuted) frame[id] = { pattern: "faint", reason: `head ${i + 1} muted (still a head, not an empty slot)`, priority: LED_PRIORITY.heads - 2 };
       else if (loaded) frame[id] = { pattern: "chase", reason: `head ${i + 1} ${dir} over loaded content`, priority: LED_PRIORITY.heads };
-      else frame[id] = { pattern: "faint", reason: `head ${i + 1} hollow — empty track, available as a PRINT target`, priority: LED_PRIORITY.heads - 1 };
+      else frame[id] = { pattern: "faint", reason: `head ${i + 1} hollow — lane ${i + 1} is empty`, priority: LED_PRIORITY.heads - 1 };
     } else if (track.content === "empty") {
       frame[id] = { pattern: "dark", reason: "dark = empty (v2.6)", priority: 0 };
     } else if (track.content === "muted") {
