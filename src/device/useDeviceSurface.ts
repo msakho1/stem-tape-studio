@@ -138,6 +138,8 @@ export function useDeviceSurface() {
   const [heldKeys, setHeldKeys] = useState<string[]>([]);
   const heldKeysRef = useRef<Set<string>>(new Set());
   const scrubKeysRef = useRef<Set<string>>(new Set());
+  /** FUNCTION acted as the shuttle modifier: its release must NOT fire a tap. */
+  const scrubUsedFnRef = useRef(false);
   const syncHeld = useCallback(() => setHeldKeys([...heldKeysRef.current]), []);
 
   const [rawLog, setRawLog] = useState<RawInputEvent[]>([]);
@@ -273,6 +275,7 @@ export function useDeviceSurface() {
       // can fire underneath the shuttle.
       if ((e.code === "KeyQ" || e.code === "KeyA") && heldKeysRef.current.has("KeyF")) {
         scrubKeysRef.current.add(e.code);
+        scrubUsedFnRef.current = true;
         dispatch({ type: "globalScrub", dir: e.code === "KeyQ" ? 1 : -1 });
         return;
       }
@@ -289,7 +292,16 @@ export function useDeviceSurface() {
         else dispatch({ type: "globalScrub", dir: null });
         return;
       }
-      if (e.code === "KeyF") endScrub();
+      if (e.code === "KeyF") {
+        endScrub();
+        if (scrubUsedFnRef.current) {
+          // The modifier is consumed by the shuttle: cancel it so no FUNCTION
+          // tap row (which would stop the tape) fires on release.
+          scrubUsedFnRef.current = false;
+          engine.cancel(control, "keyboard");
+          return;
+        }
+      }
       engine.release(control, "keyboard");
     };
     window.addEventListener("keydown", down);
