@@ -1689,6 +1689,8 @@ export class AudioEngine {
     dir: 1 | -1;
     pos: number;
     startPos: number;
+    /** Context time at which `pos` was last integrated — the integral anchor. */
+    posCtxTime: number;
     wasPlaying: boolean;
     musicalRate: number;
     timer: ReturnType<typeof setInterval> | null;
@@ -1696,6 +1698,10 @@ export class AudioEngine {
     lastGrainAt: number[];
     grains: number;
     startedAt: number;
+    /** Scheduler generation. Bumped on release; stale grains are never emitted. */
+    gen: number;
+    /** Every grain currently scheduled or sounding, per track. */
+    live: { node: AudioBufferSourceNode; gain: GainNode; at: number; endAt: number; gen: number }[][];
     /** Per-track evidence — the shuttle is proven per stem, never by master RMS. */
     perTrack: {
       mode: "node" | "worklet";
@@ -1706,6 +1712,26 @@ export class AudioEngine {
       rms: number;
     }[];
   } | null = null;
+
+  /** Release handoff evidence — one record per stem, per release. */
+  lastScrubHandoff: {
+    keyupContextFrame: number;
+    handoffContextFrame: number;
+    fadeMs: number;
+    stems: {
+      id: number;
+      mode: "node" | "worklet";
+      landingFrame: number;
+      restartFrame: number;
+      landingErrorFrames: number;
+      queuedGrainsBefore: number;
+      queuedGrainsAfter: number;
+      activeScrubSources: number;
+      activeNormalSources: number;
+      livePlaybackPaths: number;
+    }[];
+  } | null = null;
+
 
   /**
    * Per-track scrub-path analysers. The shuttle grains are tapped BEFORE the
