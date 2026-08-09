@@ -253,8 +253,6 @@ export function applyGlobalScrub(state: SurfaceState, dir: 1 | -1 | null, t = 0)
       { rowId: "transport.scrub.global", t },
     );
   }
-  const busy = state.tracks.some((tr) => tr.content === "recording" || tr.content === "overdubbing");
-  if (busy) return { ...state, note: "global shuttle rejected — a take is recording" };
   if (state.globalScrub === dir) return state;
   return emit(
     { ...state, globalScrub: dir, lastGesture: `global shuttle ${dir > 0 ? "forward" : "backward"}` },

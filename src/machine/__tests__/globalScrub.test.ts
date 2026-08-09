@@ -38,14 +38,12 @@ describe("global shuttle command stream", () => {
     expect(s.commands.map((c) => c.type)).not.toContain("transport.scrub");
   });
 
-  it("is rejected while a take is recording", () => {
+  it("is not blocked by track content (live-input recording removed)", () => {
     const base = initialSurfaceState();
     const tracks = [...base.tracks] as typeof base.tracks;
-    tracks[1] = { ...tracks[1], content: "recording" };
+    tracks[1] = { ...tracks[1], content: "loaded" };
     const s = applyGlobalScrub({ ...base, tracks }, 1);
-    expect(s.globalScrub).toBe(0);
-    expect(s.commands).toHaveLength(0);
-    expect(s.note).toMatch(/rejected/);
+    expect(s.globalScrub).toBe(1);
   });
 
   it("emits one end whichever key is released first (F first or Q/A first)", () => {
