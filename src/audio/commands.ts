@@ -49,11 +49,20 @@ export type AudioCommandType =
   | "grid.tap"
   | "grid.quantise"
   // Heads mode is a first-class Stem Tape v1 feature, not a reserved gesture.
+  // ---- Heads Mode v2: four INDEPENDENT lane heads --------------------------
+  // Head N reads lane N and plays on its own clock. `heads.source` and
+  // `heads.print` no longer exist: there is nothing to assign and nothing to
+  // bake. Every command below addresses ONE head by lane index.
   | "heads.enter"
   | "heads.exit"
-  | "heads.source"
   | "heads.level"
   | "heads.mute"
+  /** payload.mask = "0110" of Tracks held right now; "" ends the momentary hold. */
+  | "heads.play.hold"
+  | "heads.latch"
+  | "heads.loop.capture"
+  | "heads.loop.resize"
+  | "heads.reverse"
   | "heads.scrub"
   // ---- Universal lane layer (corrective production task) -------------------
   // These are LANE commands: one implementation serves Tape, Heads and the FX

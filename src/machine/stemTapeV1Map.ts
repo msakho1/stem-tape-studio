@@ -11,7 +11,7 @@ import type { FxFamily } from "./stemPerformance";
 
 export const STEM_TAPE_MAP_VERSION = "stem-tape-v1.0.0";
 
-export type MapLayer = "tape" | "stem" | "fx-overlay" | "system";
+export type MapLayer = "tape" | "stem" | "heads" | "fx-overlay" | "system";
 export type Provenance = "stock" | "v2.6" | "reinterpreted" | "extension";
 
 export interface StemTapeRow {
@@ -169,6 +169,101 @@ export const TRANSPORT_OVERRIDE_ROWS: StemTapeRow[] = [
   },
 ];
 
+
+
+/**
+ * Heads Mode v2. The four heads stop being phase offsets of one source track:
+ * head N is lane N, on its own clock, audible while the main transport is
+ * paused. That kills the stock "hold a track to assign the source" row.
+ */
+export const HEADS_V2_ROWS: StemTapeRow[] = [
+  {
+    id: "heads.lane.play",
+    layer: "heads",
+    controls: ["track-button-n"],
+    command: "heads.play.hold mask=<held> (hold plays exactly the held heads; release restores the previous mix)",
+    suppresses: ["heads.source", "lane.audition"],
+    supersedes: ["heads.source"],
+    originalBehaviour: "v2.6: holding a loaded track made it the single source feeding all four heads.",
+    rollback: "none",
+    led: "held heads solid, the rest faint",
+    provenance: "reinterpreted",
+    tutorial: {
+      plainLanguage: "In Heads Mode hold a Track to hear just that head, even with the transport stopped.",
+      highlight: ["track-button-1"],
+      expected: "Only the held heads sound; the song playhead does not move.",
+    },
+  },
+  {
+    id: "heads.lane.mute",
+    layer: "heads",
+    controls: ["track-button-n"],
+    command: "heads.mute toggle (single tap, emitted only after the ×2/×3 window closes)",
+    suppresses: ["track.mute"],
+    rollback: "none",
+    led: "muted head faint",
+    provenance: "extension",
+  },
+  {
+    id: "heads.lane.latch",
+    layer: "heads",
+    controls: ["track-button-n"],
+    command: "heads.latch toggle (triple-tap — independent playback that survives the release)",
+    suppresses: ["heads.replay"],
+    supersedes: ["heads.replay"],
+    originalBehaviour: "v2.6: heads on = three tracks replay the source a quarter apart.",
+    rollback: "none",
+    led: "latched head solid",
+    provenance: "reinterpreted",
+  },
+  {
+    id: "heads.lane.loop",
+    layer: "heads",
+    controls: ["track-button-n"],
+    command: "heads.loop.capture (double-tap captures one bar from the parked position · tap releases it)",
+    suppresses: ["track.loop"],
+    rollback: "none",
+    led: "looping head chases",
+    provenance: "extension",
+  },
+  {
+    id: "heads.lane.scrub",
+    layer: "heads",
+    controls: ["function", "fader-n"],
+    command: "heads.scrub.start/preview/end on head N (audible positional scrub; release parks the loop start)",
+    suppresses: ["fader.headScrub", "lane.scrub"],
+    supersedes: ["heads.scrub"],
+    originalBehaviour: "v2.6: FUNCTION + faders scrubbed the shared heads; double-tap reversed them.",
+    rollback: "none",
+    led: "scrubbed head solid while held",
+    provenance: "reinterpreted",
+    tutorial: {
+      plainLanguage: "Hold FUNCTION and move a fader to scrub that head, then double-tap its Track to grab a loop there.",
+      highlight: ["function", "fader-1"],
+      expected: "You hear that head travel; the parked position becomes the next loop start.",
+    },
+  },
+  {
+    id: "heads.lane.reverse",
+    layer: "heads",
+    controls: ["function", "track-button-n"],
+    command: "heads.reverse toggle (FUNCTION + double-tap, per head)",
+    suppresses: ["lane.reverse"],
+    rollback: "none",
+    led: "reversed head chases backwards",
+    provenance: "extension",
+  },
+  {
+    id: "heads.lane.resize",
+    layer: "heads",
+    controls: ["function", "track-button-n", "volume-up"],
+    command: "heads.loop.resize half / double the held head's loop (0.25–8 bars)",
+    suppresses: ["volume.master"],
+    rollback: "none",
+    led: "resized head flashes its new length",
+    provenance: "extension",
+  },
+];
 
 export const SYSTEM_ROWS: StemTapeRow[] = [
   {
@@ -332,6 +427,7 @@ export const STEM_TAPE_V1_MAP: StemTapeRow[] = [
   ...V26_ROWS_AS_REGISTRY,
   ...STEM_ROWS,
   ...TRANSPORT_OVERRIDE_ROWS,
+  ...HEADS_V2_ROWS,
   ...SYSTEM_ROWS,
   ...FX_ROWS,
   ...RECORDING_ROWS,

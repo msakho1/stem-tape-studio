@@ -75,6 +75,7 @@ import {
   type SourceCandidate,
   headReadPosition,
 } from "./heads";
+import { HeadLanes } from "./headLanes";
 import {
   HEAD_SCRUB_MAX_RATE,
   SCRUB_SILENCE_RATE,
@@ -1440,19 +1441,38 @@ export class AudioEngine {
   private headsTap: AnalyserNode | null = null;
 
   /** RMS of the heads bus only. 0 when heads mode is not serving audio. */
+  /**
+   * Heads Mode v2: FOUR INDEPENDENT LANE HEADS. Head N reads lane N on its own
+   * clock, so heads sound while the main transport is paused and the song
+   * playhead never moves because a head moved.
+   */
+  readonly headLanes = new HeadLanes({
+    ctx: () => this.ctx,
+    destination: () => this.master,
+    buffer: (i) => this.tracks[i]?.buffer ?? null,
+    reversed: (i) => {
+      const t = this.tracks[i];
+      if (!t?.buffer || !this.ctx) return null;
+      if (!t.reversed) t.reversed = reverseBuffer(this.ctx, t.buffer);
+      return t.reversed;
+    },
+    barSeconds: () => this.barSeconds(),
+    songPosition: () => this.position(),
+  });
+
   headsRms(): number {
-    const a = this.headsTap;
-    if (!a) return 0;
-    const buf = new Float32Array(a.fftSize);
-    a.getFloatTimeDomainData(buf);
-    let sum = 0;
-    for (let i = 0; i < buf.length; i++) sum += buf[i]! * buf[i]!;
-    return Math.sqrt(sum / buf.length);
+    return this.headLanes.rms();
+  }
+
+  /** Independent read position (seconds) of each of the four lane heads. */
+  headPositions(): number[] {
+    return [0, 1, 2, 3].map((i) => this.headLanes.position(i));
   }
 
   /** Absolute source-frame read position of each of the four heads. */
   headReadFrames(): number[] {
-    return [0, 1, 2, 3].map((i) => this.headFrameNow(i));
+    const sr = this.ctx?.sampleRate ?? 48000;
+    return [0, 1, 2, 3].map((i) => this.headLanes.position(i) * sr);
   }
 
   /** Mute mask of the non-source tracks, restored verbatim on heads exit. */
@@ -1593,87 +1613,22 @@ export class AudioEngine {
   enterHeadsMode(): { ok: boolean; detail: string } {
     if (!this.ctx) return { ok: false, detail: "audio not unlocked" };
     if (this.heads.active) return { ok: true, detail: "heads already active" };
-    const source = chooseSource(this.headCandidates());
-    const cyc = source != null ? this.cycleOf(source as TrackId) : null;
-    const t = source != null ? this.tracks[source] : null;
-    const engine: "worklet" | "node" = t?.engineMode === "worklet" && t.worklet ? "worklet" : "node";
-    const res = enterHeads(this.heads, {
-      source,
-      cycleFrames: cyc?.frames ?? 0,
-      cycleStartFrame: cyc?.startFrame ?? 0,
-      engine,
-      fallback: engine === "node" ? "served by the node engine — four AudioBufferSourceNode voices over one shared PCM" : null,
-      frame: Math.round(this.ctx.currentTime * this.ctx.sampleRate),
-    });
-    if (!res.ok) return { ok: false, detail: res.detail };
-    this.heads = res.state;
-
-    // Heads mode LAYERS over the dry mix: no stem is muted on entry. Existing
-    // mute states are preserved verbatim (drums stay audible; a muted musical
-    // source keeps its normal copy silent while its heads still sound).
+    const r = this.headLanes.enter();
+    if (!r.ok) return r;
+    // The reducer-visible flag only; geometry belongs to HeadLanes now. There
+    // is no heads SOURCE any more: head N is lane N by construction.
+    this.heads = { ...emptyHeads(), active: true, engine: null, enteredAtFrame: Math.round(this.ctx.currentTime * this.ctx.sampleRate) };
     this.preHeadsMutes = null;
     this.applyAudibilityAll();
-
-    if (engine === "worklet") {
-      this.pushHeads();
-    } else {
-      const at = this.ctx.currentTime + LOOKAHEAD_S;
-      const bus = this.ctx.createGain();
-      bus.gain.value = 1;
-      bus.connect(t!.input);
-      // Measurement tap: proves the HEAD path itself is sounding, not the
-      // transport underneath it.
-      const tap = this.ctx.createAnalyser();
-      tap.fftSize = 2048;
-      bus.connect(tap);
-      this.headsTap = tap;
-      this.headsBus = bus;
-
-      for (const s of t!.sources) {
-        try {
-          s.node.onended = null;
-          s.node.stop(at);
-        } catch {
-          /* noop */
-        }
-      }
-      t!.sources = [];
-      t!.committedSeamAt = null;
-      for (let i = 0; i < 4; i++) this.spawnHeadVoice(t!, i, at, false);
-    }
-    return { ok: true, detail: `${res.detail}${this.heads.fallback ? ` · ${this.heads.fallback}` : ""}` };
+    return r;
   }
 
   exitHeadsMode(): { ok: boolean; detail: string } {
-    // Any open scrub must be closed before the heads layer disappears.
-    this.cancelAllScrubs();
     if (!this.heads.active) return { ok: true, detail: "heads already off" };
-    const src = this.heads.source;
-    const engine = this.heads.engine;
-    const t = src != null ? this.tracks[src] : null;
-    if (engine === "worklet" && t?.worklet) {
-      // The underlying pointer never moved, so exit is phase-correct by design.
-      void t.worklet.setHeads(null, 0, 1);
-    } else {
-      this.teardownHeadVoices();
-      if (t && this.ctx && this.requestedPlaying) {
-        const pos = this.position();
-        const bounds = t.loop.enabled ? this.loopBounds(t) : null;
-        this.spawn(t, this.ctx.currentTime + 0.01, bounds ? Math.max(pos, bounds.start) : pos, true);
-        t.committedSeamAt = null;
-      }
-    }
-    if (this.preHeadsMutes) {
-      const mask = this.preHeadsMutes;
-      this.tracks.forEach((tr, i) => {
-        tr.muted = mask[i] ?? false;
-      });
-      this.preHeadsMutes = null;
-    }
+    const r = this.headLanes.exit();
     this.heads = exitHeads(this.heads);
-    // Re-close the source gate now that heads no longer bypass its mute.
     this.applyAudibilityAll();
-    return { ok: true, detail: "heads off — original four tracks, faders and mutes restored, transport untouched" };
+    return r;
   }
 
   // ------------------------------------------------- audible head scrubbing
@@ -2169,6 +2124,8 @@ export class AudioEngine {
     live: { node: AudioBufferSourceNode; gain: GainNode; at: number; gen: number }[];
   } | null)[] = [null, null, null, null];
 
+  /** Live normalized read position of a head shuttle, per head. */
+  private headLaneScrubNorm: ((() => number) | null)[] = [null, null, null, null];
   private headLaneTimer: (ReturnType<typeof setInterval> | null)[] = [null, null, null, null];
 
   /** Cycle length of the heads engine in seconds (0 when there is no cycle). */
@@ -2275,21 +2232,21 @@ export class AudioEngine {
     // Heads mode: the head lane scrubs at its own 1.5× ceiling inside the
     // heads engine; the tape lanes are untouched.
     if (this.heads.active) {
-      // In Heads mode the lane IS a head: shuttling moves that head's offset
-      // inside the cycle at the same 1.5× ceiling, and the head voice restarts
-      // so the movement is audible on the head itself, not on the tape mix.
-      const cycleS = this.headCycleSeconds();
-      if (cycleS <= 0) return { ok: false, detail: "heads have no cycle yet" };
-      const step = (LANE_SCRUB_RATE * (GLOBAL_SCRUB_INTERVAL_MS / 1000)) / cycleS;
+      // Heads v2: the lane IS an independent head, so the shuttle drives that
+      // head's OWN normalized read position through the heads engine at the
+      // same 1.5x ceiling. The tape lanes and the song playhead never move.
+      const dur = this.headLanes.duration(lane);
+      if (dur <= 0) return { ok: false, detail: `head ${lane + 1} has no source` };
+      this.headLanes.beginScrub(lane);
+      let norm = this.headLanes.position(lane) / dur;
+      const step = (LANE_SCRUB_RATE * (GLOBAL_SCRUB_INTERVAL_MS / 1000)) / dur;
       const timer = setInterval(() => {
-        const cur = this.heads.heads[lane];
-        if (!cur) return;
-        this.heads = scrubHead(this.heads, lane, cur.offset + dir * step);
-        this.pushHeads();
-        this.restartHeadVoice(lane);
+        norm = Math.min(1, Math.max(0, norm + dir * step));
+        this.headLanes.previewScrub(lane, norm);
       }, GLOBAL_SCRUB_INTERVAL_MS);
       this.headLaneTimer[lane] = timer;
-      return { ok: true, detail: `head ${lane + 1} shuttle ${dir > 0 ? "forward" : "backward"} at ${LANE_SCRUB_RATE}× of its cycle` };
+      this.headLaneScrubNorm[lane] = () => norm;
+      return { ok: true, detail: `head ${lane + 1} shuttle ${dir > 0 ? "forward" : "backward"} at ${LANE_SCRUB_RATE}x of its own source` };
     }
     const existing = this.laneScrub[lane];
     if (existing) {
@@ -2325,9 +2282,9 @@ export class AudioEngine {
       const timer = this.headLaneTimer[lane];
       if (timer) clearInterval(timer);
       this.headLaneTimer[lane] = null;
-      const off = this.heads.heads[lane]?.offset ?? 0;
-      this.restartHeadVoice(lane);
-      return { ok: true, detail: `head ${lane + 1} landed at offset ${off.toFixed(4)} of its cycle` };
+      const norm = this.headLaneScrubNorm[lane]?.() ?? 0;
+      this.headLaneScrubNorm[lane] = null;
+      return this.headLanes.endScrub(lane, norm);
     }
     const ls = this.laneScrub[lane];
     const ctx = this.ctx;
@@ -3445,23 +3402,35 @@ export class AudioEngine {
           const r = this.exitHeadsMode();
           return this.ack(cmd, r.ok ? "completed" : "rejected", r.detail);
         }
-        case "heads.source": {
-          const r = this.setHeadsSource(Number(p["track"]) as TrackId);
-          return this.ack(cmd, r.ok ? "completed" : "rejected", r.detail);
-        }
         case "heads.level": {
           if (!this.heads.active) return this.ack(cmd, "rejected", "heads mode is not active");
           const i = Number(p["head"]);
-          this.heads = setHeadLevel(this.heads, i, Number(p["level"]));
-          this.pushHeads();
-          return this.ack(cmd, "completed", `head ${i + 1} level → ${this.heads.heads[i]!.level.toFixed(3)}`);
+          this.headLanes.setLevel(i, Number(p["level"]));
+          return this.ack(cmd, "completed", `head ${i + 1} level → ${Number(p["level"]).toFixed(3)}`);
         }
         case "heads.mute": {
-          if (!this.heads.active) return this.ack(cmd, "rejected", "heads mode is not active");
-          const i = Number(p["head"]);
-          this.heads = toggleHeadMute(this.heads, i);
-          this.pushHeads();
-          return this.ack(cmd, "completed", `head ${i + 1} ${this.heads.heads[i]!.muted ? "muted" : "unmuted"} — still a head, geometry unchanged`);
+          const r = this.headLanes.toggleMute(Number(p["head"]));
+          return this.ack(cmd, r.ok ? "completed" : "rejected", r.detail);
+        }
+        case "heads.play.hold": {
+          const r = this.headLanes.setHeld(String(p["mask"] ?? ""));
+          return this.ack(cmd, r.ok ? "completed" : "rejected", r.detail);
+        }
+        case "heads.latch": {
+          const r = this.headLanes.toggleLatch(Number(p["head"]));
+          return this.ack(cmd, r.ok ? "completed" : "rejected", r.detail);
+        }
+        case "heads.loop.capture": {
+          const r = this.headLanes.captureLoop(Number(p["head"]), Math.max(0.25, Number(p["bars"] ?? 1)));
+          return this.ack(cmd, r.ok ? "completed" : "rejected", r.detail);
+        }
+        case "heads.loop.resize": {
+          const r = this.headLanes.resizeLoop(Number(p["head"]), Number(p["direction"]) < 0 ? -1 : 1);
+          return this.ack(cmd, r.ok ? "completed" : "rejected", r.detail);
+        }
+        case "heads.reverse": {
+          const r = this.headLanes.toggleReverse(Number(p["head"]));
+          return this.ack(cmd, r.ok ? "completed" : "rejected", r.detail);
         }
         // ---- universal lane layer ------------------------------------------
         // ONE implementation for Tape, Heads and the FX overlay. In heads mode
@@ -3470,10 +3439,10 @@ export class AudioEngine {
         case "lane.reverse": {
           const i = Number(p["lane"]);
           if (this.heads.active) {
-            this.heads = toggleHeadReverse(this.heads, i);
-            this.pushHeads();
-            this.restartHeadVoice(i);
-            return this.ack(cmd, "completed", `lane ${i + 1} (head) → ${this.heads.heads[i]!.reverse ? "reverse" : "forward"} — pointer negated, no reversed PCM`);
+            // Heads v2: the lane IS an independent head, so the flip happens on
+            // that head's own clock and the tape lane is left untouched.
+            const r = this.headLanes.toggleReverse(i);
+            return this.ack(cmd, r.ok ? "completed" : "rejected", r.detail);
           }
           return this.execute({ ...cmd, type: "tape.reverse", payload: { track: i, on: Boolean(p["reverse"]) } });
         }
@@ -3548,19 +3517,8 @@ export class AudioEngine {
         }
 
         case "heads.scrub": {
-          if (!this.heads.active) return this.ack(cmd, "rejected", "heads mode is not active");
-          const i = Number(p["head"]);
-          const pos = Number(p["position"]);
-          const already = Math.abs((this.heads.heads[i]?.offset ?? -1) - ((pos % 1) + 1) % 1) < 1e-9;
-          this.heads = scrubHead(this.heads, i, pos);
-          if (already) {
-            // The audible gesture already landed this head; re-seaming the
-            // voice here would add a second, inaudible-but-real restart.
-            return this.ack(cmd, "completed", `head ${i + 1} landing confirmed at ${(this.heads.heads[i]!.offset * 100).toFixed(1)}% (audible scrub already applied)`);
-          }
-          this.pushHeads();
-          this.restartHeadVoice(i);
-          return this.ack(cmd, "completed", `head ${i + 1} scrubbed to ${(this.heads.heads[i]!.offset * 100).toFixed(1)}% of the cycle`);
+          const r = this.headLanes.endScrub(Number(p["head"]), Number(p["position"]));
+          return this.ack(cmd, r.ok ? "completed" : "rejected", r.detail);
         }
 
         default:
