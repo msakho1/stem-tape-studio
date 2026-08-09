@@ -868,6 +868,10 @@ export class AudioEngine {
     for (const t of this.tracks) {
       if (this.heads.active && this.heads.engine === "node" && this.heads.source === this.tracks.indexOf(t)) continue;
       if (!t.buffer || !t.loop.enabled) continue;
+      // A reversed lane wraps itself inside the mirrored loop window (see
+      // `spawn`), so the forward seam scheduler must not also cut it.
+      if (t.loop.reverse) continue;
+
 
       if (t.committedSeamAt != null && t.committedSeamAt > now) continue;
       const bounds = this.loopBounds(t);
