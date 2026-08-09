@@ -301,6 +301,28 @@ export class GestureEngine {
     }
 
 
+    // ---- deferred Track arbitration -------------------------------------
+    if (isDeferredControl(control)) {
+      const claim = this.pending.get(control);
+      if (claim && claim.count >= 2) {
+        // Second valid release confirms the double-tap. Exactly one gesture is
+        // emitted for the whole sequence: no ×1 was ever dispatched.
+        clearTimeout(claim.timer);
+        this.pending.delete(control);
+        this.decisionLatencyMs.push(t - claim.firstReleaseAt);
+        this.emit({ type: "tap", control, count: 2, t });
+        return;
+      }
+      const timer = setTimeout(() => {
+        this.pending.delete(control);
+        const at = performance.now();
+        this.decisionLatencyMs.push(at - t);
+        if (this.decisionLatencyMs.length > 50) this.decisionLatencyMs.shift();
+        this.emit({ type: "tap", control, count: 1, t: at });
+      }, this.timings.trackDecisionMs);
+      this.pending.set(control, { count: 1, timer, firstReleaseAt: t });
+      return;
+    }
 
     // Optimistic tap: fire now, revise upward if more taps arrive.
     const prev = this.taps.get(control);
@@ -319,6 +341,7 @@ export class GestureEngine {
     this.clearTimers(rec);
     this.presses.delete(control);
     this.clearTaps(control);
+    this.dropPending(control);
     if (this.chordActive?.includes(control)) this.registerChordRelease(control, t);
     this.emitRaw({ id: ++this.seq, control, phase: "cancel", pointerId, t });
     this.emit({ type: "cancel", control, t });
@@ -329,6 +352,15 @@ export class GestureEngine {
     for (const control of [...this.presses.keys()]) {
       this.cancel(control, this.presses.get(control)!.pointerId, t);
     }
+    for (const control of [...this.pending.keys()]) this.dropPending(control);
+  }
+
+  /** Discard a pending Track decision without emitting anything. */
+  private dropPending(control: Control) {
+    const claim = this.pending.get(control);
+    if (!claim) return;
+    clearTimeout(claim.timer);
+    this.pending.delete(control);
   }
 
   private clearTimers(rec: PressRecord) {
@@ -343,6 +375,7 @@ export class GestureEngine {
     if (prev?.timer) clearTimeout(prev.timer);
     this.taps.delete(control);
   }
+
 
   private evaluateChordStart(t: number) {
     if (this.chordActive) return;
