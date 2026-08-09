@@ -3279,17 +3279,23 @@ export class AudioEngine {
           if (on && !allowed(judge(projected, this.budget, this.highMemoryMode))) {
             return this.ack(cmd, "rejected", describeVerdict(projected, this.budget, this.highMemoryMode));
           }
+          // The song clock is NEVER touched by a lane flip: reverse-on reads
+          // backwards from the current song position, reverse-off rejoins the
+          // song position the hidden timeline has reached meanwhile. With a
+          // loop armed, only that loop reverses (mirrored loop window).
           const pos = this.position();
           t.loop = { ...t.loop, reverse: on };
           if (!on) t.reversed = null;
-          const mirrored = Math.max(0, t.buffer.duration - pos);
-          const relocated = this.relocate(t, on ? mirrored : Math.max(0, t.buffer.duration - pos));
-          this.invalidateSeams();
+          const relocated = this.respawnLane(t, pos);
+          const bounds = t.loop.enabled ? this.loopBounds(t) : null;
           return this.ack(
             cmd,
             "completed",
-            `track ${id + 1} reverse ${on ? "on" : "off"}${relocated ? " · dual-source crossfade" : ""}`,
+            `track ${id + 1} reverse ${on ? "on" : "off"} at song ${pos.toFixed(3)}s` +
+              `${bounds ? ` · loop only [${bounds.start.toFixed(3)}, ${bounds.end.toFixed(3)}]` : " · song timeline keeps running"}` +
+              `${relocated ? " · dual-source crossfade" : ""}`,
           );
+
         }
         case "filter.set": {
           const id = Number(p["track"]) as TrackId;
