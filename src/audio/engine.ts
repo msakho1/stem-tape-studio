@@ -1890,9 +1890,15 @@ export class AudioEngine {
       emitted++;
       const rec = { node, gain: g, at, endAt: at + dur, gen };
       (gs.live[i] ??= []).push(rec);
+      // Measured, not asserted: every sounding scrub path is registered here
+      // and only removed when the node actually ends, so a harness can read a
+      // true "active scrub path" count after release.
+      this.liveScrubPaths.add(node);
       node.onended = () => {
         const cur = this.globalScrub;
         if (cur) cur.live[i] = (cur.live[i] ?? []).filter((r) => r !== rec);
+        this.liveScrubPaths.delete(node);
+
         try {
           node.disconnect();
           g.disconnect();
