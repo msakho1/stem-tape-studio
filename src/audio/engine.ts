@@ -1519,6 +1519,8 @@ export class AudioEngine {
         /* noop */
       }
       this.headsBus = null;
+      this.headsTap = null;
+
     }
   }
 
