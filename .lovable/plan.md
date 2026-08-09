@@ -63,7 +63,7 @@ Bare Track = FX-bank select; Track hold = momentary FX; Track + Vol −/+ = algo
 | `fader.window` (FN+1/2/3 window start/end/shift) | **Advanced Loop panel** (new UI in the Tape page) driving the existing `window` engine commands unchanged |
 | `fader.windowReverse` (start past end) | Advanced Loop panel derives it from start/end exactly as `surface.ts:848` does today |
 | `fader.filter` (FN+4) | Retired — Filter remains in the TONE FX bank |
-| `heads.source` / `heads.print` Track hold | **Heads panel**: per-lane source assignment among Vocals / Drums / Bass / Instruments, persisted per song (`StoredProject.control.heads.laneSources`) |
+| `heads.source` / `heads.print` Track hold | **Heads panel**: per-lane source assignment among Vocals / Drums / Bass / Instruments, persisted per song as `StoredProject.control.heads.lanes[laneId] = { sourceStem, offsetPercent, reverse }` |
 | `heads.reverse` (Heads-only) | Replaced by universal `lane.reverse` |
 | `track.delete` (Track double-tap) | Removed from the surface entirely |
 | all `rec.*` Track gestures | Removed |
