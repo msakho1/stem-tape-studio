@@ -45,7 +45,7 @@ import { BankRack, type BankStageSnapshot } from "./fx/banks";
 import type { AlgorithmIndex, BankIndex } from "@/machine/fx12";
 import { algorithmDef } from "@/machine/fx12";
 import { FX_FAMILIES, type FxFamily } from "@/machine/stemPerformance";
-import { RecordingController } from "./input/recorder";
+
 import { TapeTimelineBus, type TapeTimelineEvent } from "./timelineEvents";
 import { PerformanceRecorder } from "./export/performanceRecorder";
 import { emptyGrid, tapGrid, type GridState } from "./grid";
@@ -288,63 +288,8 @@ export class AudioEngine {
   grid: GridState = emptyGrid(48000);
   lastGridTapFrame: number | null = null;
   quantisePunch = false;
-  /** Phase 6 — created lazily, only after the context exists. */
-  private recorder: RecordingController | null = null;
-  /** §2.2 — track held for recording before input exists; armed once granted. */
-  pendingInputTrack: TrackId | null = null;
-
-  /** Called by the input UI after permission lands: honours the pending hold. */
-  resolvePendingInput(): { ok: boolean; detail: string } {
-    const id = this.pendingInputTrack;
-    if (id == null) return { ok: false, detail: "no pending input request" };
-    const rec = this.recording();
-    if (!rec?.model.inputEnabled) return { ok: false, detail: "input still not enabled" };
-    rec.arm(id);
-    this.pendingInputTrack = null;
-    return { ok: true, detail: `pending hold honoured — track ${id + 1} armed: ${rec.model.lastAck}` };
-  }
 
   private perfRecorder: PerformanceRecorder | null = null;
-
-  /** Phase 6 capture/overdub runtime. Null until the context is unlocked. */
-  recording(): RecordingController | null {
-    if (!this.ctx) return null;
-    if (!this.recorder) {
-      const engine = this;
-      this.recorder = new RecordingController({
-        ctx: this.ctx,
-        inputNodeFor: (i) => engine.tracks[i]?.input ?? null,
-        faderNodeFor: (i) => engine.tracks[i]?.gain ?? null,
-        tapeFrameFor: (i) => {
-          const sr = engine.ctx?.sampleRate ?? 48000;
-          void i;
-          return Math.round(engine.position() * sr);
-        },
-        loopFramesFor: (i) => {
-          const t = engine.tracks[i];
-          if (!t?.buffer) return null;
-          const b = resolveLoop(t.loop, t.buffer.duration);
-          const sr = engine.ctx!.sampleRate;
-          return { start: Math.round(b.start * sr), end: Math.round(b.end * sr) };
-        },
-        trackContent: (i) => (engine.tracks[i]?.buffer ? "loaded" : engine.tracks[i]?.trash ? "trashed" : "empty"),
-        currentRate: () => engine.timeline.currentRate(engine.ctx?.currentTime ?? 0),
-      });
-      // SOS follows the timeline through ONE subscription. No engine branch has
-      // to remember to call followRate() ever again.
-      const rec = this.recorder;
-      this.timelineBus.subscribe((ev: TapeTimelineEvent) => {
-        if (ev.type === "RateChange") {
-          for (let i = 0; i < engine.tracks.length; i++) rec.followRate(i, ev.rate, ev.rampFrames);
-        } else if (ev.type === "DirectionChange") {
-          // Reverse stays REJECTED for recorded layers until reverse recording
-          // is approved — the take mixer keeps its forward rate.
-          engine.lastError = "reverse is not applied to recorded take layers (reverse recording unapproved)";
-        }
-      });
-    }
-    return this.recorder;
-  }
 
   /** Master-bus performance recorder — records exactly what is heard. */
   performance(): PerformanceRecorder | null {
@@ -936,8 +881,6 @@ export class AudioEngine {
     // both read the source PCM and a handoff would move it under them.
     if (this.heads.active)
       return { ok: false, detail: `refused — heads mode is active (source track ${(this.heads.source ?? 0) + 1}); exit heads before switching engines` };
-    if (this.heads.print && (this.heads.print.phase === "rendering" || this.heads.print.phase === "finalising"))
-      return { ok: false, detail: "refused — a PRINT render is in flight" };
 
 
     t.migrationStatus = "checking";
@@ -1425,10 +1368,6 @@ export class AudioEngine {
 
   /** Mute mask of the non-source tracks, restored verbatim on heads exit. */
   private preHeadsMutes: boolean[] | null = null;
-  /** PRINT commit hook, installed by the ingest layer (persist + adopt). */
-  commitPrint:
-    | ((target: TrackId, buffer: AudioBuffer, detail: string) => Promise<{ ok: boolean; detail: string }>)
-    | null = null;
 
   private headCandidates(): SourceCandidate[] {
     return this.tracks.map((t, i) => ({
@@ -2335,67 +2274,6 @@ export class AudioEngine {
     return { ok: true, detail: `heads source → track ${id + 1} · cycle ${cyc.frames} frames · ${headsSummary(this.heads)}` };
   }
 
-  /** Source PCM for one whole audible cycle, from whichever engine owns it. */
-  private async readCyclePcm(): Promise<{ ok: boolean; channels: Float32Array[]; detail: string }> {
-    const src = this.heads.source;
-    if (src == null) return { ok: false, channels: [], detail: "no heads source" };
-    const t = this.tracks[src]!;
-    const start = this.heads.cycleStartFrame;
-    const frames = this.heads.cycleFrames;
-    if (t.buffer) {
-      const chans: Float32Array[] = [];
-      for (let c = 0; c < t.buffer.numberOfChannels; c++) {
-        const arr = new Float32Array(frames);
-        const src32 = t.buffer.getChannelData(c);
-        for (let i = 0; i < frames; i++) arr[i] = start + i < src32.length ? src32[start + i]! : 0;
-        chans.push(arr);
-      }
-      return { ok: true, channels: chans, detail: `read ${frames} frames from the node buffer` };
-    }
-    if (t.worklet) return t.worklet.readRange(start, frames);
-    return { ok: false, channels: [], detail: `track ${src + 1} holds no readable PCM` };
-  }
-
-  /**
-   * PRINT (§4): bake exactly one audible cycle of the four-head performance
-   * into an EMPTY track. Positions, directions, levels and mutes are baked;
-   * rate, FX and master are not, so the printed loop is never resampled twice.
-   */
-  async printHeads(target: TrackId): Promise<{ ok: boolean; detail: string }> {
-    if (!this.ctx) return { ok: false, detail: "audio not unlocked" };
-    if (!this.heads.active || this.heads.source == null) return { ok: false, detail: "PRINT requires heads mode to be active" };
-    if (target === this.heads.source) return { ok: false, detail: "PRINT target cannot be the heads source" };
-    const tt = this.tracks[target];
-    if (!tt) return { ok: false, detail: `no track ${target}` };
-    if (tt.buffer || tt.engineMode === "worklet")
-      return { ok: false, detail: `track ${target + 1} is not empty — PRINT only ever writes into an empty track` };
-
-    const frames = this.heads.cycleFrames;
-    this.heads = { ...this.heads, print: { target, phase: "rendering", detail: "reading one cycle", cycleFrames: frames } };
-    const read = await this.readCyclePcm();
-    if (!read.ok || read.channels.length === 0) {
-      this.heads = { ...this.heads, print: { target, phase: "failed", detail: read.detail, cycleFrames: frames } };
-      return { ok: false, detail: `PRINT failed — ${read.detail}. Target left empty, heads still audible.` };
-    }
-    const rendered = renderHeadsCycle(read.channels, 0, frames, this.heads.heads);
-    const peak = peakOf(rendered);
-    const srcIdx = this.heads.source ?? 0;
-    const sr = this.tracks[srcIdx]?.buffer?.sampleRate ?? this.ctx.sampleRate;
-    const buffer = this.ctx.createBuffer(rendered.length, frames, sr);
-    for (let c = 0; c < rendered.length; c++) buffer.copyToChannel(new Float32Array(rendered[c]!), c);
-
-    this.heads = { ...this.heads, print: { target, phase: "finalising", detail: "committing", cycleFrames: frames } };
-    const detail = `PRINT ${frames} frames (${(frames / sr).toFixed(3)}s) @ ${sr} Hz · ${rendered.length}ch · peak ${peak.toFixed(3)} · ${headsSummary(this.heads)}`;
-    if (!this.commitPrint) {
-      // No persistence layer installed: adopt in memory rather than lose the bake.
-      const adopted = this.adoptBuffer(target, buffer, { name: `print ${target + 1}`, provenance: "user-private", decodeMs: 0, reused: true });
-      this.heads = { ...this.heads, print: { target, phase: adopted.ok ? "done" : "failed", detail: adopted.detail, cycleFrames: frames } };
-      return { ok: adopted.ok, detail: `${detail} · ${adopted.detail} · not persisted (no storage layer installed)` };
-    }
-    const commit = await this.commitPrint(target, buffer, detail);
-    this.heads = { ...this.heads, print: { target, phase: commit.ok ? "done" : "failed", detail: commit.detail, cycleFrames: frames } };
-    return { ok: commit.ok, detail: commit.ok ? `${detail} · ${commit.detail}` : `PRINT failed — ${commit.detail}. Target left empty, heads still audible.` };
-  }
 
 
   // --------------------------------------------------------------- commands
@@ -3080,49 +2958,7 @@ export class AudioEngine {
 
         }
 
-        // ---- Phase 6: recording, grid, heads/PRINT -------------------------
-        case "rec.requestInput": {
-          const id = Number(p["track"]) as TrackId;
-          const rec = this.recording();
-          if (!rec) return this.ack(cmd, "rejected", "audio not unlocked");
-          if (rec.model.inputEnabled) {
-            rec.arm(id);
-            this.pendingInputTrack = null;
-            return this.ack(cmd, "completed", rec.model.lastAck);
-          }
-          // §2.2: the hold is remembered, not lost. The UI opens the grant
-          // drawer; the track arms itself the moment permission lands.
-          this.pendingInputTrack = id;
-          return this.ack(cmd, "accepted", `track ${id + 1} is waiting for input — allow the microphone and it arms itself, nothing else changed`);
-        }
-        case "rec.cancelInput": {
-          const had = this.pendingInputTrack;
-          this.pendingInputTrack = null;
-          return this.ack(cmd, "completed", had == null ? "no pending input request" : `pending input request for track ${had + 1} cancelled — track untouched`);
-        }
-        case "rec.recover": {
-          const rec = this.recording();
-          if (!rec) return this.ack(cmd, "rejected", "audio not unlocked");
-          const recoverable = rec.takes.filter((t) => t.state === "ready" && t.durable);
-          if (recoverable.length === 0)
-            return this.ack(cmd, "rejected", "nothing recoverable — interrupted takes stay interrupted rather than being played back short");
-          void Promise.all(recoverable.map((t) => rec.activateTake(t)));
-          return this.ack(cmd, "accepted", `re-activating ${recoverable.length} durable take(s)`);
-        }
-
-        case "rec.arm":
-        case "rec.tap":
-        case "rec.undoPass": {
-          const id = Number(p["track"]) as TrackId;
-          const rec = this.recording();
-          if (!rec) return this.ack(cmd, "rejected", "audio not unlocked");
-          if (!rec.model.inputEnabled)
-            return this.ack(cmd, "rejected", "input is not enabled — open the input drawer and allow the microphone first");
-          if (cmd.type === "rec.arm") rec.arm(id);
-          else if (cmd.type === "rec.tap") rec.tap(id);
-          else rec.doubleTap(id);
-          return this.ack(cmd, "completed", rec.model.lastAck);
-        }
+        // ---- Phase 6: grid and export -------------------------------------
         case "grid.tap": {
           const frame = this.ctx ? Math.round(this.ctx.currentTime * this.ctx.sampleRate) : 0;
           const sr = this.ctx?.sampleRate ?? 48000;
@@ -3196,14 +3032,6 @@ export class AudioEngine {
           return this.ack(cmd, "completed", `head ${i + 1} scrubbed to ${(this.heads.heads[i]!.offset * 100).toFixed(1)}% of the cycle`);
         }
 
-        case "heads.print": {
-          const target = Number(p["track"]) as TrackId;
-          if (!this.heads.active) return this.ack(cmd, "rejected", "PRINT requires heads mode to be active");
-          void this.printHeads(target).then((r) =>
-            this.ack({ id: cmd.id, type: cmd.type }, r.ok ? "completed" : "failed", r.detail),
-          );
-          return this.ack(cmd, "accepted", `PRINT accepted — rendering one heads cycle into track ${target + 1}`);
-        }
         default:
           return this.ack(cmd, "rejected", "unknown command type");
       }
