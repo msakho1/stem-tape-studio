@@ -252,7 +252,8 @@ LED arbitration gains distinct tiers for momentary audition, persistent solo, lo
 
 **Measured latencies reported:** bare Track tap, FN+Track single, FN+double-tap Track, FN+Track+Volume resize — with the final chosen `trackTapWindowMs` and `holdMs`.
 
-## 14. Genuine unresolved decisions
+Added to §13: per-lane head source reassignment leaves the other three lanes' pointers and levels bit-identical; FX-overlay Track tap selects a bank while an active loop keeps sounding through it and is still releasable after the overlay closes; second-press-that-becomes-a-hold never emits `loop.capture`; grid restore at 44.1 ↔ 48 kHz agrees within 2 frames across all three representations; migrated Beat Repeat/Pump projects load as Reel Flange/Formant Shift with zero active momentary or latch state and Rhythmic Gate untouched.
 
-1. **Heads lane count vs stem count.** Heads runs four phase-offset heads over *one* source (`src/audio/heads.ts`). "FN + Fader scrubs that lane's source" is unambiguous in Tape (lane = stem) but in Heads all four lanes may share one source. Should Heads lanes 1–4 scrub/reverse/loop the *four heads independently over the shared source*, or should the Heads panel's per-lane source assignment make each lane a genuinely separate stem first? The panel spec implies the latter — confirm.
-2. **FX overlay bare-Track vs looping lane.** In the FX overlay a bare Track tap selects an FX bank. If that physical lane has an active performance loop, does the tap still select the bank (loop released only from Tape/Heads), or does loop release take precedence there too?
+## 14. Unresolved decisions
+
+None. Both previously open questions are resolved by this revision: Heads is four independent lanes keyed by `laneId` with per-lane `sourceStem` (§1), and an FX-overlay bare Track tap selects the bank and never releases a loop (§1).
