@@ -177,8 +177,32 @@ export function estimateTempo(
   return { bpm: 60 / (refined * hopSeconds), lagHops: refined, strength: y1 };
 }
 
-/** Comb search: the phase offset (in seconds) whose beat slots carry most onset energy. */
-export function estimateBeatPhase(env: Float32Array, beatHops: number, hopSeconds = HOP_SECONDS): number {
+/**
+ * Analysis latency of the flux frames.
+ *
+ * Frame `i` measures energy over [i·hop, i·hop + win). Compared with frame
+ * `i-1`, the ONLY new audio in it is its last hop, [i·hop + win − hop,
+ * i·hop + win). So a transient at time `T` first raises the flux at the frame
+ * whose start is `T − (win − hop)`: reading the frame start as the onset time
+ * reports every beat (win − hop) = 30 ms EARLY. Every phase result therefore
+ * adds this constant back.
+ */
+export function onsetLatency(hopSeconds = HOP_SECONDS, windowSeconds = WINDOW_SECONDS): number {
+  return Math.max(0, windowSeconds - hopSeconds);
+}
+
+/**
+ * Comb search: the phase offset (in seconds) whose beat slots carry most onset
+ * energy, corrected for the window latency above and folded into the first
+ * beat period so the result is the EARLIEST beat of the song, not an arbitrary
+ * later one.
+ */
+export function estimateBeatPhase(
+  env: Float32Array,
+  beatHops: number,
+  hopSeconds = HOP_SECONDS,
+  windowSeconds = WINDOW_SECONDS,
+): number {
   if (env.length === 0 || beatHops <= 0) return 0;
   const steps = Math.max(1, Math.round(beatHops));
   let bestOffset = 0;
@@ -194,8 +218,12 @@ export function estimateBeatPhase(env: Float32Array, beatHops: number, hopSecond
       bestOffset = off;
     }
   }
-  return bestOffset * hopSeconds;
+  const beatSeconds = beatHops * hopSeconds;
+  const corrected = bestOffset * hopSeconds + onsetLatency(hopSeconds, windowSeconds);
+  // Fold to the earliest beat at or after t = 0.
+  return ((corrected % beatSeconds) + beatSeconds) % beatSeconds;
 }
+
 
 /** Which beat of the bar carries the most energy — that beat is the downbeat. */
 export function estimateDownbeat(
