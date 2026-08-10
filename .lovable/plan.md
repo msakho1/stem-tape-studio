@@ -32,32 +32,28 @@ Only after that trace names the missing event do I change code. The unlock must 
 awaited before `input.click()` — that would consume or delay the trusted activation. Unlock
 is attached as a passive listener on the same gesture and resolved in parallel.
 
-## Step 2 — "load all": confirm intent before touching it
+## Step 2 — "load all" = one picker, with a confirmed mapping before ingest
 
-Evidence from the code as it stands:
+Today the markup already declares a multi-file picker:
 
 ```tsx
 <input ref={allInput} type="file" multiple ... onChange={(e) => void onPickAll(e.target.files)} />
 <button onClick={() => allInput.current?.click()}> ↑ load all </button>
 ```
 
-and separately, on each saved project row:
+and `onPickAll` assigns roles blindly by array index
+(`role: STEM_ROLE_LIST[i]`), which is exactly how drums silently land in vocals.
 
-```tsx
-<button className="st-link" onClick={() => void restore(p)}>…</button>
-```
+Repair (option a), with a mandatory confirmation stage:
 
-So today "load all" is a **multi-file picker**, and restoring a stored project is a different
-control. Before repairing it I need you to confirm which behaviour you meant:
+1. One picker, up to four files.
+2. A mapping panel appears: each chosen filename beside a role selector
+   (vocals / drums / bass / instruments), pre-filled by a filename heuristic but
+   fully editable, duplicates blocked, unassigned files blocked.
+3. Nothing is decoded until the user confirms the mapping. Confirm runs the same
+   sequential ingest path, then grid analysis, then a cell refresh.
+4. Cancel discards without touching the engine.
 
-- (a) it should open one picker and fill all four cells from the chosen files — repair the
-  picker path, or
-- (b) it should load the four stems already stored in the current project — then it is the
-  wrong wiring, and it becomes a restore-into-cells action.
-
-I will implement the one you name, not silently redefine it. If you do not specify, I will
-repair (a), because that is what the markup declares, and add an explicit, separately
-labelled restore action for (b).
 
 ## Step 3 — Audio always on
 
@@ -73,17 +69,53 @@ acknowledgement, the heads-bus RMS, the head positions, and the readout sentence
 
 1. Enter and exit Heads (Function + triple-tap Play, both directions)
 2. Function + Fader N — audible positional scrub of lane N, with grain output measured
-3. Function + double-tap Track N — lane reverse (loop-only when a loop exists)
+3. Function + double-tap Track N — reverses that lane **unconditionally**. A performance loop is
+   not a prerequisite: with a loop, the loop plays backwards; without one, the lane plays
+   backwards while its hidden song timeline keeps moving forward and rejoins on un-reverse.
+   Any code path that gates reverse on loop presence is removed.
 4. Track hold — momentary audition, **including while the transport is paused**
 5. Two, three and four simultaneous Track holds — group audition, exact mix restored on release
 6. Track double-tap — one-bar loop capture at the parked scrub position; single tap releases it
 7. Track triple-tap — latched independent playback while the transport is paused
 8. FX processing while in Heads — an FX press affects the heads bus, verified by RMS/spectrum change
-9. Exit restoration — stem mute/solo/level/reverse state identical, bit-for-bit, to pre-entry
+9. Exit restoration — see the explicit rule below
+
+### Explicit Heads exit rule (confirmed: temporary Heads performance)
+
+Heads is a strictly non-destructive performance layer. On exit, the song lane is restored to
+**exactly** its pre-entry state and nothing done inside Heads leaks out:
+
+| Property | On Heads exit |
+| --- | --- |
+| mute / solo | restored verbatim |
+| fader level | restored verbatim |
+| playback position | restored — the song clock never moved because a head moved |
+| lane reverse applied in Heads | discarded, lane returns to its pre-entry direction |
+| loop captured in Heads | discarded, lane returns to its pre-entry loop (or none) |
+| FX applied in Heads | discarded with the heads bus |
+
+Implementation: a single snapshot taken at `heads.enter` is the authority for the restore, and
+Heads-layer reverse/loop are written to head state only, never to the song lane. This is
+asserted by a test that diffs the full lane state before entry and after exit.
 
 Any of these that fails gets a real fix. I am not pre-committing to "no DSP changes": if the
 end-to-end pass shows the fault is in `headLanes`/`engine` audio wiring rather than in
 arbitration, that code is changed too. What I will avoid is speculative DSP churn.
+
+## Step 4b — Strict tap-arbitration tests
+
+Deferred arbitration must be proven, not assumed. New tests at the gesture-engine level and at
+the reducer level:
+
+- A double-tap emits `×2` only — no transient `×1` action is ever dispatched, on Track buttons
+  in the tape layer and in Heads.
+- A triple-tap emits `×3` only — its first two taps never create a one-bar loop.
+- `×1`, `×2`, `×3` are mutually exclusive: for any tap burst exactly one action is emitted.
+- `pointercancel` (and pointer-capture loss) mid-burst leaves **no** pending action, no timer
+  and no emitted command.
+- The same four assertions run against real pointer events on the rendered SP-1, not only the
+  synthetic gesture engine.
+
 
 ## Step 5 — Feedback comes from the accepted acknowledgement
 
