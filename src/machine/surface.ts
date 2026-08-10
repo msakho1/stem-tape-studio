@@ -86,6 +86,15 @@ export interface SurfaceState {
   power: "off" | "on";
   playing: boolean;
   functionHeld: boolean;
+  /**
+   * FUNCTION is a STICKY qualifier as well as a held one. A finger (or mouse)
+   * that cannot hold FUNCTION and tap another control at the same time taps
+   * FUNCTION first: it stays armed until this timestamp, or until the next
+   * gesture consumes it. Deferred multi-tap recognition also lands here — the
+   * ×3 PLAY tap resolves ~200 ms after the last release, long after FUNCTION
+   * may have been lifted, so heads entry would otherwise be unreachable.
+   */
+  fnStickyUntil: number | null;
   pressed: Control[];
   tracks: [TrackSlice, TrackSlice, TrackSlice, TrackSlice];
   activeTrack: TrackIndex;
