@@ -40,7 +40,7 @@ function barPosition(position: number, bpm: number, grid: SongGrid | null) {
   const rel = position - origin;
   // Anything before the first detected downbeat is still musical bar 1.
   const bar = Math.max(0, Math.floor(rel / barSeconds));
-  const inBar = rel - bar * barSeconds;
+  const inBar = Math.max(0, rel - bar * barSeconds);
   const beat = Math.floor(inBar / beatSeconds);
   const sixteenth = Math.floor(((inBar - beat * beatSeconds) / beatSeconds) * 4);
   return {
