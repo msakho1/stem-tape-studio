@@ -1048,8 +1048,9 @@
 }
 .st-deck__head {
   display: flex;
-  align-items: flex-start;
-  gap: 1rem;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem 1rem;
 }
 .st-deck__id p {
   font-size: 10px;
@@ -1061,7 +1062,8 @@
 .st-deck__clock {
   flex: 1;
   text-align: center;
-  font-size: clamp(22px, 6vw, 40px);
+  white-space: nowrap;
+  font-size: clamp(20px, 3.2vw, 34px);
   letter-spacing: 0.08em;
   font-variant-numeric: tabular-nums;
   color: var(--ink);
