@@ -428,7 +428,34 @@ function loadSong(state: SurfaceState, song: number): SurfaceState {
 /** FN + rocker scrub step, seconds of song time per tap. */
 export const SCRUB_STEP_S = 0.5;
 
+/**
+ * How long a released FUNCTION stays armed. Long enough to cover the deferred
+ * multi-tap window (200 ms) plus a whole triple-tap performed afterwards.
+ */
+export const FN_STICKY_MS = 2500;
+
+/** FUNCTION is qualifying right now — held, or armed and not yet expired. */
+export function fnActive(state: SurfaceState, t: number = performance.now()): boolean {
+  if (state.functionHeld) return true;
+  return state.fnStickyUntil != null && t <= state.fnStickyUntil;
+}
+
+/**
+ * Public entry point. Wraps the reducer so the sticky FUNCTION window expires
+ * on time and is consumed by exactly one non-FUNCTION gesture: a stale arm must
+ * never silently re-qualify a later, unrelated control.
+ */
 export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
+  const armed = !state.functionHeld && state.fnStickyUntil != null;
+  const expired = armed && g.t > state.fnStickyUntil!;
+  const base = expired ? { ...state, fnStickyUntil: null } : state;
+  const out = applyGestureInner(base, g);
+  if (!armed || expired || out.functionHeld) return out;
+  // Any gesture on another control spends the arm, whether or not it used it.
+  return g.control === "function" ? out : { ...out, fnStickyUntil: null };
+}
+
+function applyGestureInner(state: SurfaceState, g: Gesture): SurfaceState {
   let next: SurfaceState = { ...state };
   const fn = fnActive(state, g.t);
   const t = g.t;
