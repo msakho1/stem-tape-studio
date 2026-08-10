@@ -3,7 +3,12 @@ import { Waveform } from "@/components/tape/Waveform";
 import { LaneStrip } from "@/components/tape/LaneStrip";
 import type { SongGrid } from "@/audio/gridAnalysis";
 
-export const LANE_COLORS = ["var(--lane-1)", "var(--lane-2)", "var(--lane-3)", "var(--lane-4)"] as const;
+export const LANE_COLORS = [
+  "var(--lane-1)",
+  "var(--lane-2)",
+  "var(--lane-3)",
+  "var(--lane-4)",
+] as const;
 export const LANE_TAGS = ["VOX", "DRM", "BAS", "INS"] as const;
 
 interface Props {
@@ -39,7 +44,7 @@ function barPosition(position: number, bpm: number, grid: SongGrid | null) {
   const sixteenth = Math.floor(((inBar - beat * beatSeconds) / beatSeconds) * 4);
   return {
     barSeconds,
-    label: `${bar + 1}.${((beat % beatsPerBar) + beatsPerBar) % beatsPerBar + 1}.${Math.max(0, sixteenth) + 1}`,
+    label: `${bar + 1}.${(((beat % beatsPerBar) + beatsPerBar) % beatsPerBar) + 1}.${Math.max(0, sixteenth) + 1}`,
     bar: bar + 1,
   };
 }
@@ -55,7 +60,10 @@ function Reel({ cx, cy }: { cx: number; cy: number }) {
       <circle r="4" fill="currentColor" />
       {[0, 72, 144, 216, 288].map((a) => (
         <g key={a} transform={`rotate(${a})`}>
-          <path d="M -13 -18 L -30 -62 A 66 66 0 0 1 30 -62 L 13 -18 A 40 40 0 0 0 -13 -18 Z" fill="var(--bench)" />
+          <path
+            d="M -13 -18 L -30 -62 A 66 66 0 0 1 30 -62 L 13 -18 A 40 40 0 0 0 -13 -18 Z"
+            fill="var(--bench)"
+          />
           <path
             d="M -13 -18 L -30 -62 A 66 66 0 0 1 30 -62 L 13 -18 A 40 40 0 0 0 -13 -18 Z"
             fill="none"
@@ -143,7 +151,12 @@ export function TapeDeck({
       </div>
 
       <div className="st-deck__panel">
-        <svg viewBox="0 0 720 260" className="st-deck__svg" role="img" aria-label={`Tape transport, bar ${bar}`}>
+        <svg
+          viewBox="0 0 720 260"
+          className="st-deck__svg"
+          role="img"
+          aria-label={`Tape transport, bar ${bar}`}
+        >
           <g className="text-[var(--ink)]">
             <g transform="translate(170 118)">
               <g className="st-reel" style={reelStyle}>
@@ -167,11 +180,29 @@ export function TapeDeck({
             <circle cx="300" cy="226" r="11" fill="none" stroke="currentColor" strokeWidth="3" />
             <circle cx="420" cy="226" r="11" fill="none" stroke="currentColor" strokeWidth="3" />
             <circle cx="474" cy="226" r="11" fill="none" stroke="currentColor" strokeWidth="3" />
-            <rect x="330" y="206" width="60" height="40" rx="4" fill="none" stroke="currentColor" strokeWidth="2.5" />
+            <rect
+              x="330"
+              y="206"
+              width="60"
+              height="40"
+              rx="4"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.5"
+            />
             <path d="M346 220h28M350 226h20M354 232h12" stroke="currentColor" strokeWidth="2" />
 
             {/* level meter */}
-            <rect x="300" y="18" width="120" height="62" rx="3" fill="none" stroke="currentColor" strokeWidth="2" />
+            <rect
+              x="300"
+              y="18"
+              width="120"
+              height="62"
+              rx="3"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+            />
             {[0, 1, 2, 3, 4, 5, 6, 7, 8].map((i) => (
               <path
                 key={i}
@@ -190,7 +221,14 @@ export function TapeDeck({
                 style={{ transform: `rotate(${needle}deg)` }}
               />
             </g>
-            <text x="360" y="76" textAnchor="middle" fontSize="9" fill="currentColor" opacity="0.65">
+            <text
+              x="360"
+              y="76"
+              textAnchor="middle"
+              fontSize="9"
+              fill="currentColor"
+              opacity="0.65"
+            >
               -12 · 0 · +12
             </text>
           </g>
@@ -210,7 +248,13 @@ export function TapeDeck({
       </div>
 
       <div className="st-deck__timeline">
-        <Waveform buffer={buffers[activeIndex] ?? null} progress={progress} slices={slices} loop={loop} height={70} />
+        <Waveform
+          buffer={buffers[activeIndex] ?? null}
+          progress={progress}
+          slices={slices}
+          loop={loop}
+          height={70}
+        />
         <div className="st-deck__ruler">
           {ticks.map((t) => (
             <span key={t.bar} style={{ left: `${t.x * 100}%` }}>

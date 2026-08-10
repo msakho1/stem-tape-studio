@@ -105,7 +105,10 @@ function LabPage() {
   const buffer = mounted ? engine.getBuffer(active as 0 | 1 | 2 | 3) : null;
   const progress = status.duration > 0 ? status.position / status.duration : 0;
   const loopWindow = useMemo(
-    () => (state.window.end > state.window.start ? { start: state.window.start, end: state.window.end } : null),
+    () =>
+      state.window.end > state.window.start
+        ? { start: state.window.start, end: state.window.end }
+        : null,
     [state.window.start, state.window.end],
   );
 
@@ -121,7 +124,8 @@ function LabPage() {
 
   /** Every decoded lane, for the deck's four coloured timeline rows. */
   const laneBuffers = useMemo(
-    () => (mounted ? ([0, 1, 2, 3] as const).map((i) => engine.getBuffer(i)) : [null, null, null, null]),
+    () =>
+      mounted ? ([0, 1, 2, 3] as const).map((i) => engine.getBuffer(i)) : [null, null, null, null],
     // Buffer identity changes with decode generation, which the status carries.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [mounted, engine, status.tracks.map((t) => `${t.decoded}:${t.generation}`).join(",")],
@@ -129,7 +133,8 @@ function LabPage() {
 
   /** "What just happened" prefers the FX algorithm when FX was the last action. */
   const firedTop = state.fired[0];
-  const isFxAction = !!firedTop && firedTop.rowId.startsWith("fx.") && firedTop.rowId !== "fx.overlay.toggle";
+  const isFxAction =
+    !!firedTop && firedTop.rowId.startsWith("fx.") && firedTop.rowId !== "fx.overlay.toggle";
   const lastFxDetail = isFxAction ? firedTop!.detail : null;
   const lastFxLabel = useMemo(() => {
     if (!isFxAction) return null;
@@ -143,7 +148,6 @@ function LabPage() {
     return null;
   }, [isFxAction, state.commands]);
 
-
   return (
     <div className="min-h-screen pb-16 lg:pb-0">
       {/* ---------- top bar ---------- */}
@@ -153,9 +157,21 @@ function LabPage() {
         </p>
         <div className="flex flex-wrap items-center gap-x-8 gap-y-3 px-4 pb-4 pt-2 md:px-8">
           <div className="flex items-center gap-3">
-            <svg width="34" height="34" viewBox="0 0 34 34" aria-hidden className="text-[var(--ink)]">
+            <svg
+              width="34"
+              height="34"
+              viewBox="0 0 34 34"
+              aria-hidden
+              className="text-[var(--ink)]"
+            >
               <path d="M17 5 L30 28 H4 Z" fill="none" stroke="currentColor" strokeWidth="1.2" />
-              <path d="M17 13 L23 24 H11 Z" fill="none" stroke="currentColor" strokeWidth="1" opacity="0.6" />
+              <path
+                d="M17 13 L23 24 H11 Z"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1"
+                opacity="0.6"
+              />
             </svg>
             <div>
               <h1 className="font-mono text-xl tracking-tight text-[var(--ink)]">Stem Tape</h1>
@@ -167,7 +183,13 @@ function LabPage() {
 
           <nav className="order-3 hidden gap-6 lg:order-none lg:flex" aria-label="Sections">
             {TABS.map((t) => (
-              <button key={t.id} type="button" className="st-tab" data-on={tab === t.id} onClick={() => setTab(t.id)}>
+              <button
+                key={t.id}
+                type="button"
+                className="st-tab"
+                data-on={tab === t.id}
+                onClick={() => setTab(t.id)}
+              >
                 {t.label}
               </button>
             ))}
@@ -196,8 +218,8 @@ function LabPage() {
           <section className="border-b border-[var(--bench-line)] px-4 py-5 md:px-8 lg:border-b-0 lg:border-r">
             <div className="mb-4 flex items-start justify-between gap-4">
               <p className="max-w-sm font-mono text-[12px] leading-relaxed text-[var(--ink-dim)]">
-                The SP-1 is the interface. Drag its faders, press its buttons, and combine gestures — audio responds
-                in real time.
+                The SP-1 is the interface. Drag its faders, press its buttons, and combine gestures
+                — audio responds in real time.
               </p>
               <div className="flex shrink-0 flex-col gap-2">
                 <button
@@ -207,9 +229,16 @@ function LabPage() {
                   data-testid="unlock-audio"
                   onClick={() => void unlock()}
                 >
-                  {mounted && status.contextState === "running" ? `audio live · ${status.sampleRate ?? "?"} Hz` : "enable audio"}
+                  {mounted && status.contextState === "running"
+                    ? `audio live · ${status.sampleRate ?? "?"} Hz`
+                    : "enable audio"}
                 </button>
-                <button type="button" className="st-toggle" data-on={showHitZones} onClick={() => setShowHitZones((v) => !v)}>
+                <button
+                  type="button"
+                  className="st-toggle"
+                  data-on={showHitZones}
+                  onClick={() => setShowHitZones((v) => !v)}
+                >
                   {showHitZones ? "hide controls" : "show controls"}
                 </button>
               </div>
@@ -236,13 +265,19 @@ function LabPage() {
 
           {/* ---------- live readout ---------- */}
           <section className="border-b border-[var(--bench-line)] px-4 py-5 md:px-8 lg:border-b-0 lg:border-r lg:px-5">
-            <p className="font-mono text-[10px] uppercase tracking-[0.24em] text-[var(--signal)]">live</p>
-            <h2 className="mt-1 font-mono text-xl tracking-tight text-[var(--ink)]" data-testid="live-track">
+            <p className="font-mono text-[10px] uppercase tracking-[0.24em] text-[var(--signal)]">
+              live
+            </p>
+            <h2
+              className="mt-1 font-mono text-xl tracking-tight text-[var(--ink)]"
+              data-testid="live-track"
+            >
               track <span className="text-[var(--signal)]">{active + 1}</span> ·{" "}
               <span className="uppercase">{activeRole}</span>
             </h2>
             <p className="mt-1 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--ink-dim)]">
-              loop 1/{state.chopDiv} · filter {state.filter.mode === "off" ? "bypass" : state.filter.mode} ·{" "}
+              loop 1/{state.chopDiv} · filter{" "}
+              {state.filter.mode === "off" ? "bypass" : state.filter.mode} ·{" "}
               {state.window.reverse ? "reverse" : "forward"}
             </p>
 
@@ -258,7 +293,9 @@ function LabPage() {
                       <span className="st-track__v">
                         {muted ? "muted" : `${Math.round((state.tracks[i]?.volume ?? 0) * 100)}%`}
                       </span>
-                      <span className="st-track__tag">{t?.decoded ? (i === active ? "loop" : "") : "empty"}</span>
+                      <span className="st-track__tag">
+                        {t?.decoded ? (i === active ? "loop" : "") : "empty"}
+                      </span>
                     </div>
                   </li>
                 );
@@ -285,16 +322,23 @@ function LabPage() {
                 what just happened?
               </p>
               {lastFxLabel && (
-                <p className="mt-1 font-mono text-[12px] uppercase tracking-[0.14em] text-[var(--signal)]" data-testid="what-happened-fx">
+                <p
+                  className="mt-1 font-mono text-[12px] uppercase tracking-[0.14em] text-[var(--signal)]"
+                  data-testid="what-happened-fx"
+                >
                   fx · {lastFxLabel}
                 </p>
               )}
-              <p className="mt-1 font-mono text-[12px] text-[var(--ink)]" data-testid="what-happened">
+              <p
+                className="mt-1 font-mono text-[12px] text-[var(--ink)]"
+                data-testid="what-happened"
+              >
                 {lastFxDetail ?? lastGesture}
               </p>
               {activeStem && (
                 <p className="mt-1 font-mono text-[10px] text-[var(--ink-faint)]">
-                  {activeStem.filename} · {formatBytes(activeTrackStatus?.decodedBytes ?? 0)} decoded
+                  {activeStem.filename} · {formatBytes(activeTrackStatus?.decodedBytes ?? 0)}{" "}
+                  decoded
                 </p>
               )}
             </div>
@@ -302,15 +346,26 @@ function LabPage() {
 
           {/* ---------- project rail ---------- */}
           <aside className="px-4 py-5 md:px-8 lg:px-5">
-            <p className="font-mono text-[10px] uppercase tracking-[0.24em] text-[var(--ink-faint)]">project</p>
+            <p className="font-mono text-[10px] uppercase tracking-[0.24em] text-[var(--ink-faint)]">
+              project
+            </p>
             <p className="mt-1 font-mono text-[13px] uppercase text-[var(--ink)]">{sess.name}</p>
             <p className="mt-1 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--ink-dim)]">
-              {sess.saved ? "saved locally" : loaded.length ? "unsaved — local only" : "no stems loaded"}
+              {sess.saved
+                ? "saved locally"
+                : loaded.length
+                  ? "unsaved — local only"
+                  : "no stems loaded"}
             </p>
             <ul className="mt-4 grid gap-2 border-t border-[var(--bench-line)] pt-3">
               {TRACK_ROLES.map((role) => (
-                <li key={role} className="flex items-baseline justify-between gap-3 font-mono text-[11px]">
-                  <span className="truncate text-[var(--ink)]">{sess.stems[role]?.filename ?? `${role} —`}</span>
+                <li
+                  key={role}
+                  className="flex items-baseline justify-between gap-3 font-mono text-[11px]"
+                >
+                  <span className="truncate text-[var(--ink)]">
+                    {sess.stems[role]?.filename ?? `${role} —`}
+                  </span>
                   <button type="button" className="st-link" onClick={() => setTab("projects")}>
                     {sess.stems[role] ? "replace" : "load"}
                   </button>
@@ -321,7 +376,8 @@ function LabPage() {
               manage project
             </button>
             <p className="mt-6 font-mono text-[10px] leading-relaxed text-[var(--ink-faint)]">
-              No network request in this app ever contains your audio. Everything decodes and stays on this device.
+              No network request in this app ever contains your audio. Everything decodes and stays
+              on this device.
             </p>
           </aside>
         </div>
@@ -340,13 +396,14 @@ function LabPage() {
             <div className="flex flex-wrap gap-x-4 gap-y-1 font-mono text-[11px] text-[var(--ink-dim)]">
               {KEY_HINTS.map(([key, ctrl]) => (
                 <span key={ctrl}>
-                  <span className="text-[var(--ink)]">{key.toLowerCase()}</span> → {CONTROL_LABELS[ctrl]}
+                  <span className="text-[var(--ink)]">{key.toLowerCase()}</span> →{" "}
+                  {CONTROL_LABELS[ctrl]}
                 </span>
               ))}
             </div>
             <p className="mt-3 font-mono text-[11px] leading-relaxed text-[var(--ink-faint)]">
-              Hold two controls to emit a chord. Taps fire optimistically and revise upward (×1 → ×2 → ×3) so a single
-              tap is never delayed by the multi-tap window.
+              Hold two controls to emit a chord. Taps fire optimistically and revise upward (×1 → ×2
+              → ×3) so a single tap is never delayed by the multi-tap window.
             </p>
           </section>
           <section className="st-section">
@@ -385,23 +442,39 @@ function LabPage() {
         </div>
       )}
 
-
       {/* ---------- transport bar ---------- */}
       <div className="hidden border-t border-[var(--bench-line)] px-8 py-3 lg:flex lg:items-center lg:gap-6">
         <span className="font-mono text-[12px] tabular-nums text-[var(--ink)]">
           {clock(status.position)} / {clock(status.duration)}
         </span>
         <div className="min-w-0 flex-1">
-          <Waveform buffer={buffer} progress={progress} slices={state.chopDiv} loop={loopWindow} height={40} />
+          <Waveform
+            buffer={buffer}
+            progress={progress}
+            slices={state.chopDiv}
+            loop={loopWindow}
+            height={40}
+          />
         </div>
         <span className="font-mono text-[12px] text-[var(--ink-dim)]">{sess.bpm} BPM</span>
-        <span className="font-mono text-[12px] tabular-nums text-[var(--ink)]">{status.rate.toFixed(2)}×</span>
+        <span className="font-mono text-[12px] tabular-nums text-[var(--ink)]">
+          {status.rate.toFixed(2)}×
+        </span>
       </div>
 
       {/* ---------- mobile tab bar ---------- */}
-      <nav className="fixed inset-x-0 bottom-0 z-20 grid grid-cols-4 border-t border-[var(--bench-line)] bg-[var(--bench)] lg:hidden" aria-label="Sections">
+      <nav
+        className="fixed inset-x-0 bottom-0 z-20 grid grid-cols-4 border-t border-[var(--bench-line)] bg-[var(--bench)] lg:hidden"
+        aria-label="Sections"
+      >
         {TABS.map((t) => (
-          <button key={t.id} type="button" className="st-tab st-tab--bar" data-on={tab === t.id} onClick={() => setTab(t.id)}>
+          <button
+            key={t.id}
+            type="button"
+            className="st-tab st-tab--bar"
+            data-on={tab === t.id}
+            onClick={() => setTab(t.id)}
+          >
             {t.label}
           </button>
         ))}
