@@ -1,66 +1,121 @@
-# Stem Tape — Diagnostic Findings and Repair Plan
+# Stem Tape — Corrective Diagnostic and Repair Plan (v2)
 
-## What the live diagnostic actually showed
+Your critique is accepted. The previous plan tested a locked, empty engine through the
+diagnostics bridge, which proves nothing about gesture recognition, tap arbitration or
+routing from the rendered SP-1. Everything below is driven from the rendered surface with
+real decoded stems, and no conclusion is reported without a command + acknowledgement pair
+and audible evidence.
 
-I ran the app in a real browser and drove it through the diagnostics bridge (`window.__stemTape`).
+## Step 0 — Establish the two preconditions separately
 
-Loading the demo, then issuing the exact commands the SP-1 gestures emit:
+The earlier probe conflated two failures. They are now separate, independently reported gates:
 
-```json
-{ "type": "heads.enter",   "status": "rejected", "detail": "audio not unlocked" }
-{ "type": "heads.play.hold","status": "rejected", "detail": "heads mode is not active" }
-{ "type": "tape.reverse",  "status": "rejected", "detail": "audio not unlocked — enable audio, then repeat the gesture" }
+- **P-A: decoded audio.** Four stems ingested and reported decoded by the engine, with byte
+  counts and a detected grid.
+- **P-B: running context.** `ctx.state === "running"`, reached through a real trusted pointer
+  event on the surface, never through a script call.
+
+No Heads or reverse verdict is issued until both are green and printed.
+
+## Step 1 — Trace the real file-input events (no speculation)
+
+Instrument nothing; observe. Record, in order, for one stem cell:
+`pointerdown` on "select" → `click` dispatched to the hidden `input[type=file]` → `change`
+event with `files.length` → ingest result → refresh. Repeat for:
+
+1. first selection into an empty cell
+2. selecting the **same file again** (the classic no-`change` case: input value not reset)
+3. replacing an already-loaded cell
+4. WebKit, which fires the picker differently
+
+Only after that trace names the missing event do I change code. The unlock must **not** be
+awaited before `input.click()` — that would consume or delay the trusted activation. Unlock
+is attached as a passive listener on the same gesture and resolved in parallel.
+
+## Step 2 — "load all": confirm intent before touching it
+
+Evidence from the code as it stands:
+
+```tsx
+<input ref={allInput} type="file" multiple ... onChange={(e) => void onPickAll(e.target.files)} />
+<button onClick={() => allInput.current?.click()}> ↑ load all </button>
 ```
 
-Engine state at that moment: `ctx: null`, `tracks: []`.
+and separately, on each saved project row:
 
-**Root cause of "Heads mode does not work" and "Function + double-tap reverse does not work":** they are not broken features. Every audio command is gated behind an unlocked `AudioContext`, and the context is only created by the explicit "enable audio" button (or an ingest). If a user has not pressed that box — or the demo/stem load did not complete — the whole command stream is rejected silently to the ear. `lane.reverse` correctly re-dispatches to `tape.reverse`; it never gets to run.
+```tsx
+<button className="st-link" onClick={() => void restore(p)}>…</button>
+```
 
-This is the same root cause as "I have to click a file 2 or 3 times to load it": ingest calls `engine.unlock()` itself, so the first pick spends its click creating the context and, if that resolve races the picker, the pick appears to do nothing.
+So today "load all" is a **multi-file picker**, and restoring a stored project is a different
+control. Before repairing it I need you to confirm which behaviour you meant:
 
-## The fix, in order
+- (a) it should open one picker and fill all four cells from the chosen files — repair the
+  picker path, or
+- (b) it should load the four stems already stored in the current project — then it is the
+  wrong wiring, and it becomes a restore-into-cells action.
 
-### 1. Audio is always on (removes three bugs at once)
-- Delete the "enable audio" toggle from the tape page.
-- Create and resume the `AudioContext` on the first pointer/key event anywhere in the app (a single global unlock listener installed at mount), and again on every ingest, transport press and mode entry.
-- Any command that currently rejects with "audio not unlocked" instead awaits the unlock and then runs. Heads mode, FN + double-tap reverse, and per-lane scrub all start working without any further change to their logic.
-- Show the running sample rate as passive text in the status rail instead of a button.
+I will implement the one you name, not silently redefine it. If you do not specify, I will
+repair (a), because that is what the markup declares, and add an explicit, separately
+labelled restore action for (b).
 
-### 2. Stem loading
-- One click loads one stem: reset the file input value after each pick, unlock before opening the picker, and keep the busy state per-cell so a second click is never needed.
-- Fix "load all": ensure the picker is `multiple`, assign the picked files to roles in order, run the shared sequential ingest, then run grid analysis and refresh the cells (the per-cell path already does this; the all-path skips the analysis and refresh ordering).
-- Verify by loading four files in one action and confirming four decoded cells.
+## Step 3 — Audio always on
 
-### 3. Tempo display
-- The tempo tile shows nothing (an em dash) until a stem is decoded and analysis has produced a real grid. No provisional 120.
+Delete the "enable audio" toggle. The context is created and resumed from the first trusted
+interaction anywhere in the app, and any command arriving at a cold context awaits that unlock
+instead of returning `rejected: audio not unlocked`. Sample rate becomes passive status text.
 
-### 4. Session naming
-- The session name becomes an editable field in the project header; renaming persists with the project and replaces "untitled session" everywhere it is displayed.
+## Step 4 — Comprehensive Heads audit, on the rendered surface
 
-### 5. Memory
-- High memory is the default and the only mode. Remove the memory-mode selector and the local-storage drawer that only reports "off".
+Entry is **Function + triple-tap Play**, performed as pointer events on the SVG. Each item
+below is a separate pass that records: the gesture, the emitted command, the engine
+acknowledgement, the heads-bus RMS, the head positions, and the readout sentence.
 
-### 6. "What just happened" readout
-- The readout currently prints the raw intent (`arbitrated → fx.momentary.end`). Replace it with a human sentence resolved from the command that was emitted: the FX name and bank for FX presses ("MOTION · Reel Flange — momentary, released"), the head and its action in Heads Mode ("Head 2 latched — playing independently at 4.21 s"), the lane and value for faders, and so on. One label table, used by both the tape page and the guide.
+1. Enter and exit Heads (Function + triple-tap Play, both directions)
+2. Function + Fader N — audible positional scrub of lane N, with grain output measured
+3. Function + double-tap Track N — lane reverse (loop-only when a loop exists)
+4. Track hold — momentary audition, **including while the transport is paused**
+5. Two, three and four simultaneous Track holds — group audition, exact mix restored on release
+6. Track double-tap — one-bar loop capture at the parked scrub position; single tap releases it
+7. Track triple-tap — latched independent playback while the transport is paused
+8. FX processing while in Heads — an FX press affects the heads bus, verified by RMS/spectrum change
+9. Exit restoration — stem mute/solo/level/reverse state identical, bit-for-bit, to pre-entry
 
-### 7. Controls and Guide
-- "Show controls" becomes two independent things: a hit-zone overlay toggle (geometry only), and a control reference made of accordions — "how to scrub", "how to reverse a stem", "how to capture a loop", "heads mode", "FX banks", each drawer opening to show the button/gesture diagram plus a short looping animation of that gesture on the SP-1 illustration.
-- The Guide tab is enriched with the same accordion content plus a short "first five minutes" walkthrough.
+Any of these that fails gets a real fix. I am not pre-committing to "no DSP changes": if the
+end-to-end pass shows the fault is in `headLanes`/`engine` audio wiring rather than in
+arbitration, that code is changed too. What I will avoid is speculative DSP churn.
 
-### 8. Header and footer copy
-- Under "A four-track tape looper for the browser": "created by Mounir Sakho", linking to the Instagram profile.
-- Remove the "No network request in this app ever contains your audio…" sentence.
-- Remove the report download from the System page.
-- Add a "support this project" button at the right of the unofficial/independent line, with a cupped-hand-and-floating-coin icon. Not wired to a payment provider yet — it opens a placeholder panel.
+## Step 5 — Feedback comes from the accepted acknowledgement
 
-## Technical notes
+The "what just happened" line is built from the **engine acknowledgement**, not from current UI
+selection. The ack is extended to carry the resolved target: stem/lane, FX algorithm name, bank,
+and action, so the sentence is a rendering of what actually executed
+("MOTION · Reel Flange — momentary on stem 2, released"), never a re-read of state that may
+have moved on. Same table feeds Heads events ("Head 3 latched — playing independently at 4.21 s").
 
-- Global unlock: an `AudioEngine.ensureUnlocked()` awaited inside the command executor rather than a boolean check, so no gesture is ever lost to a cold context.
-- The FX/heads labelling table lives next to the command definitions so the readout can never drift from the emitted command.
-- No changes to grid analysis, the tape kernel, or the scrub handoff math.
+## Step 6 — Remove the memory-mode concept entirely
 
-## Verification
+Not "high memory by default". Delete the mode itself: the setting, the selector, the local
+storage drawer, the persisted preference and every branch that reads it. One normal automatic
+configuration remains.
 
-- Browser proof: cold load, immediately press Play + Track (heads), then FN + double-tap Track 1, and show non-rejected acks and heads RMS above zero with no "enable audio" click anywhere.
-- Single-click load of one stem and a four-file "load all", with decoded byte counts and a detected BPM.
-- Full unit suite must stay green.
+## Step 7 — Remaining interface work
+
+- Controls split into (i) a pure hit-zone overlay toggle and (ii) an accordion control
+  reference — "how to scrub", "how to reverse a stem", "capture a loop", "heads mode",
+  "FX banks" — each drawer showing the gesture diagram plus a short animated example on the
+  SP-1. Guide tab gets the same content plus a short first-session walkthrough.
+- Header: "created by Mounir Sakho", linked to the Instagram profile.
+- Remove the "No network request…" sentence and the System-page report download.
+- "support this project" button beside the unofficial/independent line, cupped hand with a
+  floating coin, opening a placeholder panel (not wired to a provider yet).
+- Tempo shows nothing until a stem is decoded and analysed.
+- Session name is editable and persists.
+
+## Acceptance test (the only thing that counts as "works")
+
+Load real stems once. Then, in **Chromium and WebKit**: perform each gesture on the rendered
+SP-1 with pointer events, and for each one record the expected command, the engine
+acknowledgement, the pointer/position movement, measured audible output, and the UI
+explanation string. A feature is reported as working only when all five agree, in both engines.
+Unit suite must also stay green.
