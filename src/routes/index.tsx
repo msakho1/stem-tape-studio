@@ -238,19 +238,32 @@ function LabPage() {
               })}
             </ul>
 
-            <div className="mt-4 border border-[var(--bench-line)] bg-[var(--bench-raised)] p-2">
-              <Waveform buffer={buffer} progress={progress} slices={state.chopDiv} loop={loopWindow} height={78} />
+            <div className="mt-4">
+              <TapeDeck
+                buffers={laneBuffers}
+                activeIndex={active}
+                position={status.position}
+                duration={status.duration}
+                bpm={sess.bpm}
+                grid={sess.songGrid}
+                rate={status.rate}
+                playing={status.actuallyPlaying}
+                slices={state.chopDiv}
+                loop={loopWindow}
+              />
             </div>
-            <p className="mt-2 font-mono text-[11px] tabular-nums text-[var(--ink-dim)]">
-              {clock(status.position)} / {clock(status.duration)}
-            </p>
 
             <div className="mt-5 border-t border-[var(--bench-line)] pt-3">
               <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--ink-faint)]">
                 what just happened?
               </p>
+              {lastFxLabel && (
+                <p className="mt-1 font-mono text-[12px] uppercase tracking-[0.14em] text-[var(--signal)]" data-testid="what-happened-fx">
+                  fx · {lastFxLabel}
+                </p>
+              )}
               <p className="mt-1 font-mono text-[12px] text-[var(--ink)]" data-testid="what-happened">
-                {lastGesture}
+                {lastFxDetail ?? lastGesture}
               </p>
               {activeStem && (
                 <p className="mt-1 font-mono text-[10px] text-[var(--ink-faint)]">
