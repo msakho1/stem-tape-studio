@@ -94,7 +94,7 @@ export interface SurfaceState {
    * ×3 PLAY tap resolves ~200 ms after the last release, long after FUNCTION
    * may have been lifted, so heads entry would otherwise be unreachable.
    */
-  fnSticky: { from: number; until: number } | null;
+  fnSticky: { from: number; until: number; spentBy?: Control } | null;
   pressed: Control[];
   tracks: [TrackSlice, TrackSlice, TrackSlice, TrackSlice];
   activeTrack: TrackIndex;
@@ -451,14 +451,16 @@ export function fnActive(state: SurfaceState, t: number = performance.now()): bo
  * never silently re-qualify a later, unrelated control.
  */
 export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
-  const armed = !state.functionHeld && state.fnSticky != null;
-  const expired = armed && g.t > state.fnSticky!.until;
-  const base = expired ? { ...state, fnSticky: null } : state;
-  const out = applyGestureInner(base, g);
-  if (!armed || expired || out.functionHeld) return out;
-  // Any gesture on another control spends the arm, whether or not it used it.
   const control = "control" in g ? g.control : null;
-  return control === "function" ? out : { ...out, fnSticky: null };
+  const s = state.fnSticky;
+  // The arm dies when it expires, or as soon as a control OTHER than the one
+  // that first used it arrives — a multi-tap chain on one control (×1 → ×2 →
+  // ×3, each delivered separately) must keep reading as FUNCTION + that control.
+  const dead = s != null && !state.functionHeld && (g.t > s.until || (s.spentBy != null && s.spentBy !== control));
+  const base = dead ? { ...state, fnSticky: null } : state;
+  const out = applyGestureInner(base, g);
+  if (out.functionHeld || out.fnSticky == null || control == null || control === "function") return out;
+  return out.fnSticky.spentBy === control ? out : { ...out, fnSticky: { ...out.fnSticky, spentBy: control } };
 }
 
 function applyGestureInner(state: SurfaceState, g: Gesture): SurfaceState {
