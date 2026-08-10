@@ -94,7 +94,7 @@ export interface SurfaceState {
    * ×3 PLAY tap resolves ~200 ms after the last release, long after FUNCTION
    * may have been lifted, so heads entry would otherwise be unreachable.
    */
-  fnStickyUntil: number | null;
+  fnSticky: { from: number; until: number } | null;
   pressed: Control[];
   tracks: [TrackSlice, TrackSlice, TrackSlice, TrackSlice];
   activeTrack: TrackIndex;
@@ -256,7 +256,7 @@ export function initialSurfaceState(): SurfaceState {
     power: "on",
     playing: false,
     functionHeld: false,
-    fnStickyUntil: null,
+    fnSticky: null,
     pressed: [],
     tracks: [track("vocals", 0.78), track("drums", 0.72), track("bass", 0.65), track("instruments", 0.7)],
     activeTrack: 0,
@@ -432,12 +432,17 @@ export const SCRUB_STEP_S = 0.5;
  * How long a released FUNCTION stays armed. Long enough to cover the deferred
  * multi-tap window (200 ms) plus a whole triple-tap performed afterwards.
  */
-export const FN_STICKY_MS = 2500;
+export const FN_STICKY_MS = 1500;
 
-/** FUNCTION is qualifying right now — held, or armed and not yet expired. */
+/**
+ * FUNCTION is qualifying right now — held, or armed and not yet expired.
+ * The window is bounded at BOTH ends and compared against the gesture's own
+ * timestamp, so an arm can only qualify gestures that happened after it.
+ */
 export function fnActive(state: SurfaceState, t: number = performance.now()): boolean {
   if (state.functionHeld) return true;
-  return state.fnStickyUntil != null && t <= state.fnStickyUntil;
+  const s = state.fnSticky;
+  return s != null && t >= s.from && t <= s.until;
 }
 
 /**
@@ -446,14 +451,14 @@ export function fnActive(state: SurfaceState, t: number = performance.now()): bo
  * never silently re-qualify a later, unrelated control.
  */
 export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
-  const armed = !state.functionHeld && state.fnStickyUntil != null;
-  const expired = armed && g.t > state.fnStickyUntil!;
-  const base = expired ? { ...state, fnStickyUntil: null } : state;
+  const armed = !state.functionHeld && state.fnSticky != null;
+  const expired = armed && g.t > state.fnSticky!.until;
+  const base = expired ? { ...state, fnSticky: null } : state;
   const out = applyGestureInner(base, g);
   if (!armed || expired || out.functionHeld) return out;
   // Any gesture on another control spends the arm, whether or not it used it.
   const control = "control" in g ? g.control : null;
-  return control === "function" ? out : { ...out, fnStickyUntil: null };
+  return control === "function" ? out : { ...out, fnSticky: null };
 }
 
 function applyGestureInner(state: SurfaceState, g: Gesture): SurfaceState {
@@ -921,7 +926,7 @@ export function pressControl(state: SurfaceState, control: Control): SurfaceStat
     ...state,
     pressed,
     functionHeld: control === "function" ? true : state.functionHeld,
-    fnStickyUntil: control === "function" ? null : state.fnStickyUntil,
+    fnSticky: control === "function" ? null : state.fnSticky,
     fnModifierUsed:
       control !== "function" && state.functionHeld ? true : state.fnModifierUsed,
 
@@ -947,7 +952,8 @@ export function releaseControl(state: SurfaceState, control: Control): SurfaceSt
   const shouldToggle = state.fnHoldReached && !state.fnModifierUsed;
   // Releasing FUNCTION arms the sticky window so the next gesture — including
   // a multi-tap that only resolves after the release — still reads as FN + X.
-  next = { ...next, functionHeld: false, fnHoldReached: false, fnModifierUsed: false, fnStickyUntil: performance.now() + FN_STICKY_MS };
+  const from = performance.now();
+  next = { ...next, functionHeld: false, fnHoldReached: false, fnModifierUsed: false, fnSticky: { from, until: from + FN_STICKY_MS } };
   if (!shouldToggle) return next;
   const power = state.power === "on" ? "off" : "on";
   next = { ...next, power, playing: power === "off" ? false : next.playing };

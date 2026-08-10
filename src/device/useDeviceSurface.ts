@@ -492,7 +492,7 @@ export function useDeviceSurface() {
         timestamp: performance.now(),
       });
     }
-  }, [state.functionHeld, state.fnStickyUntil, state.headsMode]);
+  }, [state.functionHeld, state.fnSticky, state.headsMode]);
 
   const onControlPointerDown = useCallback(
     (control: Control, e: React.PointerEvent) => {
