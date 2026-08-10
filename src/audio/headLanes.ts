@@ -190,7 +190,12 @@ export class HeadLanes {
       const dur = this.duration(i);
       const dir = l.reverse ? -1 : 1;
       const raw = l.anchorPos + (ctx.currentTime - l.anchorCtx) * dir;
-      if (raw >= dur || raw <= 0) {
+      // Only the direction of travel can run off an edge. A forward head that
+      // starts at 0 sits at raw < 0 for the 10 ms pre-roll before its anchor,
+      // which used to be misread as "reached the end" and killed the voice.
+      const off = dir > 0 ? raw >= dur : raw <= 0;
+      if (off) {
+
         l.posS = Math.min(Math.max(0, raw), dur);
         l.ended = true;
         this.stopLane(i, "source end");
