@@ -1082,9 +1082,7 @@
 .st-deck__svg { display: block; width: 100%; height: auto; }
 
 @keyframes st-reel-spin { to { transform: rotate(360deg); } }
-.st-reel { transform-origin: center; }
-.st-reel > g { animation: st-reel-spin 2.4s linear infinite; transform-origin: 0 0; transform-box: view-box; }
-.st-reel[style*="paused"] > g { animation-play-state: paused; }
+.st-reel { animation: st-reel-spin 2.4s linear infinite; transform-origin: 0 0; }
 
 .st-deck__needle { transform-origin: 0 0; transition: transform 90ms linear; }
 

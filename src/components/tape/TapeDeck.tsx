@@ -145,11 +145,15 @@ export function TapeDeck({
       <div className="st-deck__panel">
         <svg viewBox="0 0 720 260" className="st-deck__svg" role="img" aria-label={`Tape transport, bar ${bar}`}>
           <g className="text-[var(--ink)]">
-            <g className="st-reel" style={reelStyle} transform="translate(170 118)">
-              <Reel cx={0} cy={0} />
+            <g transform="translate(170 118)">
+              <g className="st-reel" style={reelStyle}>
+                <Reel cx={0} cy={0} />
+              </g>
             </g>
-            <g className="st-reel" style={reelStyle} transform="translate(550 118)">
-              <Reel cx={0} cy={0} />
+            <g transform="translate(550 118)">
+              <g className="st-reel" style={reelStyle}>
+                <Reel cx={0} cy={0} />
+              </g>
             </g>
 
             {/* tape path */}
