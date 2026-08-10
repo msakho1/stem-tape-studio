@@ -30,7 +30,14 @@ function peaks(buffer: AudioBuffer, bins: number): number[] {
   return out;
 }
 
-export function Waveform({ buffer, progress, slices = 0, loop = null, height = 84, className }: Props) {
+export function Waveform({
+  buffer,
+  progress,
+  slices = 0,
+  loop = null,
+  height = 84,
+  className,
+}: Props) {
   const ref = useRef<HTMLCanvasElement | null>(null);
   const env = useMemo(() => (buffer ? peaks(buffer, 320) : null), [buffer]);
 

@@ -145,6 +145,10 @@
   --ink-faint: oklch(0.55 0 0);
   --signal: oklch(0.66 0.19 22);
   --lamp: oklch(0.95 0.06 92);
+  --lane-1: oklch(0.64 0.18 25);
+  --lane-2: oklch(0.6 0.16 255);
+  --lane-3: oklch(0.62 0.15 150);
+  --lane-4: oklch(0.76 0.14 85);
   --mono: ui-monospace, "SFMono-Regular", "JetBrains Mono", Menlo, monospace;
 }
 
@@ -1033,3 +1037,84 @@
   padding: 0.3rem 0.6rem;
   cursor: pointer;
 }
+
+/* ---------- transport deck (tape page) ---------- */
+
+.st-deck {
+  border: 1px solid var(--bench-line);
+  background: var(--bench-raised);
+  padding: 0.85rem;
+  font-family: var(--mono);
+}
+.st-deck__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem 1rem;
+}
+.st-deck__id p {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: var(--ink-dim);
+  line-height: 1.5;
+}
+.st-deck__clock {
+  flex: 1 1 100%;
+  order: 3;
+  text-align: center;
+  white-space: nowrap;
+  font-size: clamp(20px, 3.2vw, 34px);
+  letter-spacing: 0.08em;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+  line-height: 1;
+}
+.st-deck__bar {
+  margin-left: auto;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  color: var(--ink-dim);
+  white-space: nowrap;
+}
+.st-deck__panel {
+  margin-top: 0.6rem;
+  border: 1px solid var(--bench-line);
+  padding: 0.4rem;
+}
+.st-deck__svg { display: block; width: 100%; height: auto; }
+
+@keyframes st-reel-spin { to { transform: rotate(360deg); } }
+.st-reel { animation: st-reel-spin 2.4s linear infinite; transform-origin: 0 0; }
+
+.st-deck__needle { transform-origin: 0 0; transition: transform 90ms linear; }
+
+.st-deck__timeline {
+  margin-top: 0.6rem;
+  border: 1px solid var(--bench-line);
+  padding: 0.5rem;
+}
+.st-deck__ruler {
+  position: relative;
+  height: 14px;
+  margin-top: 0.25rem;
+  font-size: 9px;
+  color: var(--ink-faint);
+}
+.st-deck__ruler span { position: absolute; top: 0; transform: translateX(-50%); }
+
+.st-deck__legend {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  margin-top: 0.6rem;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--ink-dim);
+}
+.st-deck__legend span { display: inline-flex; align-items: center; gap: 0.35rem; }
+.st-deck__legend span[data-on="true"] { color: var(--ink); }
+.st-deck__legend i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.st-deck__state[data-on="true"] { color: var(--signal); }
