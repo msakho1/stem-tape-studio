@@ -452,7 +452,8 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
   const out = applyGestureInner(base, g);
   if (!armed || expired || out.functionHeld) return out;
   // Any gesture on another control spends the arm, whether or not it used it.
-  return g.control === "function" ? out : { ...out, fnStickyUntil: null };
+  const control = "control" in g ? g.control : null;
+  return control === "function" ? out : { ...out, fnStickyUntil: null };
 }
 
 function applyGestureInner(state: SurfaceState, g: Gesture): SurfaceState {
