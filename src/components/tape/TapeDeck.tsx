@@ -38,7 +38,8 @@ function barPosition(position: number, bpm: number, grid: SongGrid | null) {
   const barSeconds = grid?.barSeconds ?? beatSeconds * beatsPerBar;
   const origin = grid?.firstDownbeatS ?? 0;
   const rel = position - origin;
-  const bar = Math.floor(rel / barSeconds);
+  // Anything before the first detected downbeat is still musical bar 1.
+  const bar = Math.max(0, Math.floor(rel / barSeconds));
   const inBar = rel - bar * barSeconds;
   const beat = Math.floor(inBar / beatSeconds);
   const sixteenth = Math.floor(((inBar - beat * beatSeconds) / beatSeconds) * 4);
