@@ -17,7 +17,7 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
-import { applyGesture, initialSurfaceState, pressControl, releaseControl, type SurfaceState } from "@/machine/surface";
+import { FN_STICKY_MS, applyGesture, initialSurfaceState, pressControl, releaseControl, type SurfaceState } from "@/machine/surface";
 import { GestureEngine, type Gesture } from "@/input/gestures";
 
 let clock = 0;
@@ -138,5 +138,31 @@ describe("Heads v2 · deferred tap recognition", () => {
     vi.advanceTimersByTime(400);
     expect(seen.filter((s) => s.type === "tap")).toMatchObject([{ count: 1, control: "track-button-2" }]);
     vi.useRealTimers();
+  });
+});
+
+describe("Heads v2 · single-pointer entry (sticky FUNCTION)", () => {
+  it("enters heads from a released FUNCTION plus a separately delivered x1 -> x3 play chain", () => {
+    const t0 = performance.now();
+    let s = pressControl(initialSurfaceState(), "function");
+    s = releaseControl(s, "function");
+    expect(s.functionHeld).toBe(false);
+    expect(s.fnSticky).not.toBeNull();
+    for (const count of [1, 2, 3]) {
+      s = applyGesture(s, { type: "tap", control: "play", count, t: t0 + 100 * count } as Gesture);
+    }
+    expect(s.headsMode).toBe(true);
+    expect(s.playing).toBe(false);
+    expect(types(s)).toContain("heads.enter");
+  });
+
+  it("does not let a stale arm qualify a later, unrelated control", () => {
+    let s = pressControl(initialSurfaceState(), "function");
+    s = releaseControl(s, "function");
+    const expired = s.fnSticky!.until + 1;
+    s = applyGesture(s, { type: "tap", control: "track-button-2", count: 2, t: expired } as Gesture);
+    expect(s.fnSticky).toBeNull();
+    expect(types(s)).not.toContain("lane.reverse");
+    expect(FN_STICKY_MS).toBe(1500);
   });
 });
