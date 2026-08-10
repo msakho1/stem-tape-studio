@@ -1060,7 +1060,8 @@
   line-height: 1.5;
 }
 .st-deck__clock {
-  flex: 1;
+  flex: 1 1 100%;
+  order: 3;
   text-align: center;
   white-space: nowrap;
   font-size: clamp(20px, 3.2vw, 34px);
@@ -1070,6 +1071,7 @@
   line-height: 1;
 }
 .st-deck__bar {
+  margin-left: auto;
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.16em;
