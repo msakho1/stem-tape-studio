@@ -7,6 +7,8 @@ import { KEY_HINTS, useDeviceSurface } from "@/device/useDeviceSurface";
 import { CONTROL_LABELS } from "@/device/geometry";
 import { ProjectDrawer } from "@/audio/ProjectDrawer";
 import { Waveform } from "@/components/tape/Waveform";
+import { TapeDeck } from "@/components/tape/TapeDeck";
+import { algorithmDef, type AlgorithmIndex, type BankIndex } from "@/machine/fx12";
 import { useAudioEngine } from "@/audio/useAudioEngine";
 import { formatBytes } from "@/audio/format";
 import { loadDemoProject } from "@/audio/loadDemo";
