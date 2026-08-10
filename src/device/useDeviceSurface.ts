@@ -130,7 +130,7 @@ export function useDeviceSurface() {
 
   /** Which fader layer is live (FN = chop window, HEADS = scrub, else volume). */
   const layerRef = useRef<{ fn: boolean; heads: boolean }>({ fn: false, heads: false });
-  layerRef.current = { fn: state.functionHeld, heads: state.headsMode };
+  layerRef.current = { fn: fnActive(state), heads: state.headsMode };
 
   /**
    * Application-ready gate. Nothing reaches the gesture engine until the client
@@ -491,7 +491,7 @@ export function useDeviceSurface() {
         timestamp: performance.now(),
       });
     }
-  }, [state.functionHeld, state.headsMode]);
+  }, [state.functionHeld, state.fnStickyUntil, state.headsMode]);
 
   const onControlPointerDown = useCallback(
     (control: Control, e: React.PointerEvent) => {
@@ -512,7 +512,7 @@ export function useDeviceSurface() {
       // fire underneath it, and FUNCTION is consumed exactly as on keyboard.
       if (
         (control === "rocker-fwd" || control === "rocker-rwd") &&
-        (fnPointerRef.current != null || stateRef.current.functionHeld)
+        (fnPointerRef.current != null || fnActive(stateRef.current))
       ) {
         const dir = control === "rocker-fwd" ? 1 : -1;
         // Mobile Safari only permits AudioContext creation/resume in the direct
