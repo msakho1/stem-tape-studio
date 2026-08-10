@@ -86,15 +86,6 @@ export interface SurfaceState {
   power: "off" | "on";
   playing: boolean;
   functionHeld: boolean;
-  /**
-   * FUNCTION is a STICKY qualifier as well as a held one. A finger (or mouse)
-   * that cannot hold FUNCTION and tap another control at the same time taps
-   * FUNCTION first: it stays armed until this timestamp, or until the next
-   * gesture consumes it. Deferred multi-tap recognition also lands here — the
-   * ×3 PLAY tap resolves ~200 ms after the last release, long after FUNCTION
-   * may have been lifted, so heads entry would otherwise be unreachable.
-   */
-  fnSticky: { from: number; until: number; spentBy?: Control } | null;
   pressed: Control[];
   tracks: [TrackSlice, TrackSlice, TrackSlice, TrackSlice];
   activeTrack: TrackIndex;
@@ -256,7 +247,6 @@ export function initialSurfaceState(): SurfaceState {
     power: "on",
     playing: false,
     functionHeld: false,
-    fnSticky: null,
     pressed: [],
     tracks: [track("vocals", 0.78), track("drums", 0.72), track("bass", 0.65), track("instruments", 0.7)],
     activeTrack: 0,
@@ -428,44 +418,9 @@ function loadSong(state: SurfaceState, song: number): SurfaceState {
 /** FN + rocker scrub step, seconds of song time per tap. */
 export const SCRUB_STEP_S = 0.5;
 
-/**
- * How long a released FUNCTION stays armed. Long enough to cover the deferred
- * multi-tap window (200 ms) plus a whole triple-tap performed afterwards.
- */
-export const FN_STICKY_MS = 1500;
-
-/**
- * FUNCTION is qualifying right now — held, or armed and not yet expired.
- * The window is bounded at BOTH ends and compared against the gesture's own
- * timestamp, so an arm can only qualify gestures that happened after it.
- */
-export function fnActive(state: SurfaceState, t: number = performance.now()): boolean {
-  if (state.functionHeld) return true;
-  const s = state.fnSticky;
-  return s != null && t >= s.from && t <= s.until;
-}
-
-/**
- * Public entry point. Wraps the reducer so the sticky FUNCTION window expires
- * on time and is consumed by exactly one non-FUNCTION gesture: a stale arm must
- * never silently re-qualify a later, unrelated control.
- */
 export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
-  const control = "control" in g ? g.control : null;
-  const s = state.fnSticky;
-  // The arm dies when it expires, or as soon as a control OTHER than the one
-  // that first used it arrives — a multi-tap chain on one control (×1 → ×2 →
-  // ×3, each delivered separately) must keep reading as FUNCTION + that control.
-  const dead = s != null && !state.functionHeld && (g.t > s.until || (s.spentBy != null && s.spentBy !== control));
-  const base = dead ? { ...state, fnSticky: null } : state;
-  const out = applyGestureInner(base, g);
-  if (out.functionHeld || out.fnSticky == null || control == null || control === "function") return out;
-  return out.fnSticky.spentBy === control ? out : { ...out, fnSticky: { ...out.fnSticky, spentBy: control } };
-}
-
-function applyGestureInner(state: SurfaceState, g: Gesture): SurfaceState {
   let next: SurfaceState = { ...state };
-  const fn = fnActive(state, g.t);
+  const fn = state.functionHeld;
   const t = g.t;
 
   // Power is a v2.6 row: FUNCTION hold. It uses its OWN configurable threshold
@@ -928,7 +883,6 @@ export function pressControl(state: SurfaceState, control: Control): SurfaceStat
     ...state,
     pressed,
     functionHeld: control === "function" ? true : state.functionHeld,
-    fnSticky: control === "function" ? null : state.fnSticky,
     fnModifierUsed:
       control !== "function" && state.functionHeld ? true : state.fnModifierUsed,
 
@@ -952,10 +906,7 @@ export function releaseControl(state: SurfaceState, control: Control): SurfaceSt
   if (control !== "function") return next;
 
   const shouldToggle = state.fnHoldReached && !state.fnModifierUsed;
-  // Releasing FUNCTION arms the sticky window so the next gesture — including
-  // a multi-tap that only resolves after the release — still reads as FN + X.
-  const from = performance.now();
-  next = { ...next, functionHeld: false, fnHoldReached: false, fnModifierUsed: false, fnSticky: { from, until: from + FN_STICKY_MS } };
+  next = { ...next, functionHeld: false, fnHoldReached: false, fnModifierUsed: false };
   if (!shouldToggle) return next;
   const power = state.power === "on" ? "off" : "on";
   next = { ...next, power, playing: power === "off" ? false : next.playing };
@@ -1001,7 +952,7 @@ export function applyFader(
   const t = performance.now();
   // Heads claims the fader layer before the v2.6 FN window/filter rows (§3.3).
   if ((claimed === "headScrub" || claimed === "headLevel" || (!claimed && state.headsMode)) && !state.perf.fxOverlay) {
-    if (claimed === "headScrub" || (!claimed && fnActive(state))) {
+    if (claimed === "headScrub" || (!claimed && state.functionHeld)) {
       // Landing position of an audible scrub gesture (audio already travelled).
       const next = emit(
         { ...state, tracks: setTrack(state, index, { headPos: value }) },
@@ -1032,7 +983,7 @@ export function applyFader(
       t,
     );
   }
-  if (claimed === "window" || (!claimed && fnActive(state))) {
+  if (claimed === "window" || (!claimed && state.functionHeld)) {
 
     if (index === 3) {
       const mode = value > 0.58 ? "hp" : value < 0.42 ? "lp" : "off";
@@ -1303,8 +1254,6 @@ export function deriveLeds(state: SurfaceState): LedFrame {
     ? { pattern: "pulse", reason: "FX overlay open — FUNCTION LEDs alternate-pulse", priority: LED_PRIORITY.momentaryFx }
     : state.functionHeld
       ? { pattern: "solid", reason: "function held", priority: 60 }
-      : fnActive(state)
-        ? { pattern: "blink", reason: "function armed — next control reads as FUNCTION + it", priority: 58 }
       : state.headsMode
         ? { pattern: "breathe", reason: "heads mode on", priority: 45 }
         : { pattern: "dark", reason: "function idle", priority: 0 };

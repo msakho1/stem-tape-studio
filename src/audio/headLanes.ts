@@ -122,25 +122,18 @@ export class HeadLanes {
     this.bus = bus;
     this.tap = tap;
     const at = Math.max(0, this.host.songPosition());
-    this.lanes = [0, 1, 2, 3].map((i) => {
+    this.lanes = [0, 1, 2, 3].map(() => {
       const l = freshLane();
       l.posS = at;
-      // Entry is AUDIBLE: every decoded lane latches immediately at its stored
-      // level so the four heads sound the moment the mode is armed. Parking
-      // silently was the old model and gave the musician no feedback at all.
-      l.latched = this.host.buffer(i) != null;
       return l;
     });
     this.active = true;
-    this.reconcile("heads entry");
-    const live = this.lanes.map((l, i) => (l.moving ? i + 1 : 0)).filter(Boolean);
-    this.note("heads.enter", -1, `four independent heads latched at ${at.toFixed(3)}s — playing ${live.join("+") || "none"}, transport untouched`);
+    this.note("heads.enter", -1, `four independent heads parked at ${at.toFixed(3)}s — transport untouched`);
     return {
       ok: true,
-      detail: `heads on — head N reads lane N from ${at.toFixed(3)}s, playing ${live.join("+") || "none"} at their set levels`,
+      detail: `heads on — head N reads lane N, parked at ${at.toFixed(3)}s, nothing playing until a Track is held or latched`,
     };
   }
-
 
   exit(): { ok: boolean; detail: string } {
     if (!this.active) return { ok: true, detail: "heads already off" };
@@ -190,12 +183,7 @@ export class HeadLanes {
       const dur = this.duration(i);
       const dir = l.reverse ? -1 : 1;
       const raw = l.anchorPos + (ctx.currentTime - l.anchorCtx) * dir;
-      // Only the direction of travel can run off an edge. A forward head that
-      // starts at 0 sits at raw < 0 for the 10 ms pre-roll before its anchor,
-      // which used to be misread as "reached the end" and killed the voice.
-      const off = dir > 0 ? raw >= dur : raw <= 0;
-      if (off) {
-
+      if (raw >= dur || raw <= 0) {
         l.posS = Math.min(Math.max(0, raw), dur);
         l.ended = true;
         this.stopLane(i, "source end");
