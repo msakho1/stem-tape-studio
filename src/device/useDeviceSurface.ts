@@ -18,6 +18,7 @@ import {
   applyGlobalScrub,
   applyPerfIntent,
   deriveLeds,
+  fnActive,
   initialSurfaceState,
   observedRows,
 
