@@ -122,18 +122,25 @@ export class HeadLanes {
     this.bus = bus;
     this.tap = tap;
     const at = Math.max(0, this.host.songPosition());
-    this.lanes = [0, 1, 2, 3].map(() => {
+    this.lanes = [0, 1, 2, 3].map((i) => {
       const l = freshLane();
       l.posS = at;
+      // Entry is AUDIBLE: every decoded lane latches immediately at its stored
+      // level so the four heads sound the moment the mode is armed. Parking
+      // silently was the old model and gave the musician no feedback at all.
+      l.latched = this.host.buffer(i) != null;
       return l;
     });
     this.active = true;
-    this.note("heads.enter", -1, `four independent heads parked at ${at.toFixed(3)}s — transport untouched`);
+    this.reconcile("heads entry");
+    const live = this.lanes.map((l, i) => (l.moving ? i + 1 : 0)).filter(Boolean);
+    this.note("heads.enter", -1, `four independent heads latched at ${at.toFixed(3)}s — playing ${live.join("+") || "none"}, transport untouched`);
     return {
       ok: true,
-      detail: `heads on — head N reads lane N, parked at ${at.toFixed(3)}s, nothing playing until a Track is held or latched`,
+      detail: `heads on — head N reads lane N from ${at.toFixed(3)}s, playing ${live.join("+") || "none"} at their set levels`,
     };
   }
+
 
   exit(): { ok: boolean; detail: string } {
     if (!this.active) return { ok: true, detail: "heads already off" };
