@@ -117,6 +117,31 @@ function LabPage() {
   const lastGesture = gestureLog[0]?.text ?? "Nothing yet — press a control on the SP-1.";
   const loaded = TRACK_ROLES.filter((r) => sess.stems[r] && !sess.stems[r]!.trashed);
 
+  /** Every decoded lane, for the deck's four coloured timeline rows. */
+  const laneBuffers = useMemo(
+    () => (mounted ? ([0, 1, 2, 3] as const).map((i) => engine.getBuffer(i)) : [null, null, null, null]),
+    // Buffer identity changes with decode generation, which the status carries.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [mounted, engine, status.tracks.map((t) => `${t.decoded}:${t.generation}`).join(",")],
+  );
+
+  /** "What just happened" prefers the FX algorithm when FX was the last action. */
+  const firedTop = state.fired[0];
+  const isFxAction = !!firedTop && firedTop.rowId.startsWith("fx.") && firedTop.rowId !== "fx.overlay.toggle";
+  const lastFxDetail = isFxAction ? firedTop!.detail : null;
+  const lastFxLabel = useMemo(() => {
+    if (!isFxAction) return null;
+    for (let i = state.commands.length - 1; i >= 0; i--) {
+      const c = state.commands[i]!;
+      if (!c.type.startsWith("fx.")) continue;
+      const p = c.payload as { bank?: number; algorithm?: number } | undefined;
+      if (typeof p?.bank !== "number") continue;
+      return algorithmDef(p.bank as BankIndex, (p.algorithm ?? 0) as AlgorithmIndex).label;
+    }
+    return null;
+  }, [isFxAction, state.commands]);
+
+
   return (
     <div className="min-h-screen pb-16 lg:pb-0">
       {/* ---------- top bar ---------- */}
