@@ -256,6 +256,7 @@ export function initialSurfaceState(): SurfaceState {
     power: "on",
     playing: false,
     functionHeld: false,
+    fnStickyUntil: null,
     pressed: [],
     tracks: [track("vocals", 0.78), track("drums", 0.72), track("bass", 0.65), track("instruments", 0.7)],
     activeTrack: 0,
@@ -429,7 +430,7 @@ export const SCRUB_STEP_S = 0.5;
 
 export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
   let next: SurfaceState = { ...state };
-  const fn = state.functionHeld;
+  const fn = fnActive(state, g.t);
   const t = g.t;
 
   // Power is a v2.6 row: FUNCTION hold. It uses its OWN configurable threshold
@@ -892,6 +893,7 @@ export function pressControl(state: SurfaceState, control: Control): SurfaceStat
     ...state,
     pressed,
     functionHeld: control === "function" ? true : state.functionHeld,
+    fnStickyUntil: control === "function" ? null : state.fnStickyUntil,
     fnModifierUsed:
       control !== "function" && state.functionHeld ? true : state.fnModifierUsed,
 
@@ -915,7 +917,9 @@ export function releaseControl(state: SurfaceState, control: Control): SurfaceSt
   if (control !== "function") return next;
 
   const shouldToggle = state.fnHoldReached && !state.fnModifierUsed;
-  next = { ...next, functionHeld: false, fnHoldReached: false, fnModifierUsed: false };
+  // Releasing FUNCTION arms the sticky window so the next gesture — including
+  // a multi-tap that only resolves after the release — still reads as FN + X.
+  next = { ...next, functionHeld: false, fnHoldReached: false, fnModifierUsed: false, fnStickyUntil: performance.now() + FN_STICKY_MS };
   if (!shouldToggle) return next;
   const power = state.power === "on" ? "off" : "on";
   next = { ...next, power, playing: power === "off" ? false : next.playing };
@@ -961,7 +965,7 @@ export function applyFader(
   const t = performance.now();
   // Heads claims the fader layer before the v2.6 FN window/filter rows (§3.3).
   if ((claimed === "headScrub" || claimed === "headLevel" || (!claimed && state.headsMode)) && !state.perf.fxOverlay) {
-    if (claimed === "headScrub" || (!claimed && state.functionHeld)) {
+    if (claimed === "headScrub" || (!claimed && fnActive(state))) {
       // Landing position of an audible scrub gesture (audio already travelled).
       const next = emit(
         { ...state, tracks: setTrack(state, index, { headPos: value }) },
@@ -992,7 +996,7 @@ export function applyFader(
       t,
     );
   }
-  if (claimed === "window" || (!claimed && state.functionHeld)) {
+  if (claimed === "window" || (!claimed && fnActive(state))) {
 
     if (index === 3) {
       const mode = value > 0.58 ? "hp" : value < 0.42 ? "lp" : "off";
@@ -1263,6 +1267,8 @@ export function deriveLeds(state: SurfaceState): LedFrame {
     ? { pattern: "pulse", reason: "FX overlay open — FUNCTION LEDs alternate-pulse", priority: LED_PRIORITY.momentaryFx }
     : state.functionHeld
       ? { pattern: "solid", reason: "function held", priority: 60 }
+      : fnActive(state)
+        ? { pattern: "blink", reason: "function armed — next control reads as FUNCTION + it", priority: 58 }
       : state.headsMode
         ? { pattern: "breathe", reason: "heads mode on", priority: 45 }
         : { pattern: "dark", reason: "function idle", priority: 0 };
