@@ -32,32 +32,28 @@ Only after that trace names the missing event do I change code. The unlock must 
 awaited before `input.click()` — that would consume or delay the trusted activation. Unlock
 is attached as a passive listener on the same gesture and resolved in parallel.
 
-## Step 2 — "load all": confirm intent before touching it
+## Step 2 — "load all" = one picker, with a confirmed mapping before ingest
 
-Evidence from the code as it stands:
+Today the markup already declares a multi-file picker:
 
 ```tsx
 <input ref={allInput} type="file" multiple ... onChange={(e) => void onPickAll(e.target.files)} />
 <button onClick={() => allInput.current?.click()}> ↑ load all </button>
 ```
 
-and separately, on each saved project row:
+and `onPickAll` assigns roles blindly by array index
+(`role: STEM_ROLE_LIST[i]`), which is exactly how drums silently land in vocals.
 
-```tsx
-<button className="st-link" onClick={() => void restore(p)}>…</button>
-```
+Repair (option a), with a mandatory confirmation stage:
 
-So today "load all" is a **multi-file picker**, and restoring a stored project is a different
-control. Before repairing it I need you to confirm which behaviour you meant:
+1. One picker, up to four files.
+2. A mapping panel appears: each chosen filename beside a role selector
+   (vocals / drums / bass / instruments), pre-filled by a filename heuristic but
+   fully editable, duplicates blocked, unassigned files blocked.
+3. Nothing is decoded until the user confirms the mapping. Confirm runs the same
+   sequential ingest path, then grid analysis, then a cell refresh.
+4. Cancel discards without touching the engine.
 
-- (a) it should open one picker and fill all four cells from the chosen files — repair the
-  picker path, or
-- (b) it should load the four stems already stored in the current project — then it is the
-  wrong wiring, and it becomes a restore-into-cells action.
-
-I will implement the one you name, not silently redefine it. If you do not specify, I will
-repair (a), because that is what the markup declares, and add an explicit, separately
-labelled restore action for (b).
 
 ## Step 3 — Audio always on
 
