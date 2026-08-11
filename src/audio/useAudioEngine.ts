@@ -21,6 +21,8 @@ export function useAudioEngine(commands: AudioCommand[]) {
    */
   const commandTail = useRef<Promise<void>>(Promise.resolve());
   const [acks, setAcks] = useState<Ack[]>([]);
+  /** >0 while a heads.enter / heads.exit is still queued or executing. */
+  const [headsInFlight, setHeadsInFlight] = useState(0);
   const [status, setStatus] = useState<EngineStatus>(() => engine.status());
   const [unlockNote, setUnlockNote] = useState<string>("audio locked — press PLAY or enable audio");
 
