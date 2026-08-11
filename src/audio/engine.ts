@@ -257,6 +257,8 @@ export interface EngineStatus {
   /** Heads v2 truth: the four independent lane heads, straight from HeadLanes. */
   headLanes: HeadLaneSnapshot[];
   headsSummary: string;
+  /** The ONE stem the four heads read while Heads is active. */
+  headsSource: { index: number; name: string } | null;
   /** Live scrub evidence: open gestures, kernel telemetry, emitted events. */
   scrub: {
     open: ({ head: number; pointerId: number; previews: number; lastVelocity: number } | null)[];
@@ -1356,8 +1358,9 @@ export class AudioEngine {
     // The FX rack stays OPEN whenever the stem is audible OR a head is riding
     // this lane, so Heads is processed by that lane's FX. The stem's own copy
     // is silenced at the gate instead.
-    const headHere = this.heads.active;
-    t.fxRack?.setInputOpen(stemAudible || headHere);
+    // Heads no longer ride the per-stem chains — they have their own bus into
+    // the master — so the lane FX gate follows the stem alone.
+    t.fxRack?.setInputOpen(stemAudible);
     this.setGain(t.stemGate.gain, stemAudible ? 1 : 0);
     this.setGain(t.soloGain.gain, audibleBySolo ? 1 : 0);
   }
@@ -1500,17 +1503,21 @@ export class AudioEngine {
 
   /** RMS of the heads bus only. 0 when heads mode is not serving audio. */
   /**
-   * Heads Mode v2: FOUR INDEPENDENT LANE HEADS. Head N reads lane N on its own
-   * clock, so heads sound while the main transport is paused and the song
-   * playhead never moves because a head moved.
+   * Heads Mode: FOUR INDEPENDENT READERS over ONE selected stem buffer, each
+   * parked at a different moment of the song. The decoded buffer is shared by
+   * reference — never duplicated, never mutated — and the four voices mix into
+   * a dedicated heads bus that lands in the master chain.
    */
   readonly headLanes = new HeadLanes({
     ctx: () => this.ctx,
     destination: () => this.master,
-    laneDestination: (i) => this.tracks[i]?.input ?? null,
-    buffer: (i) => this.tracks[i]?.buffer ?? null,
-    reversed: (i) => {
-      const t = this.tracks[i];
+    sourceBuffer: () => {
+      const s = this.headLanes.source;
+      return s == null ? null : (this.tracks[s]?.buffer ?? null);
+    },
+    reversedSource: () => {
+      const s = this.headLanes.source;
+      const t = s == null ? null : this.tracks[s];
       if (!t?.buffer || !this.ctx) return null;
       if (!t.reversed) t.reversed = reverseBuffer(this.ctx, t.buffer);
       return t.reversed;
@@ -1518,6 +1525,13 @@ export class AudioEngine {
     barSeconds: () => this.barSeconds(),
     songPosition: () => this.position(),
   });
+
+  /**
+   * Most recently targeted track — the Heads source when Heads is entered.
+   * Updated by any track-scoped command while Heads is NOT active.
+   */
+  lastTargetedTrack = 0;
+
 
   headsRms(): number {
     return this.headLanes.rms();
@@ -1684,14 +1698,15 @@ export class AudioEngine {
   enterHeadsMode(): { ok: boolean; detail: string } {
     if (!this.ctx) return { ok: false, detail: "audio not unlocked" };
     if (this.heads.active) return { ok: true, detail: "heads already active" };
-    // Captured BEFORE anything about the heads is written: which stems the
-    // musician can actually hear right now. Those become moving heads.
-    const anySolo = this.tracks.some((t) => t.soloed);
-    const entries = this.tracks.map((t) => ({
-      audible: this.requestedPlaying && t.buffer != null && !t.muted && (!anySolo || t.soloed),
-    }));
-    const r = this.headLanes.enter(entries);
+    // ONE source stem for all four heads: the most recently targeted track if
+    // it is decoded, otherwise the first decoded stem.
+    const preferred = this.tracks[this.lastTargetedTrack]?.buffer ? this.lastTargetedTrack : null;
+    const source = preferred ?? this.tracks.findIndex((t) => t.buffer != null);
+    if (source < 0) return { ok: false, detail: "heads rejected — no decoded lane to read" };
+    const sourceName = (this.tracks[source]?.name ?? `stem ${source + 1}`).replace(/\.[a-z0-9]+$/i, "");
+    const r = this.headLanes.enter({ source, sourceName, playing: this.requestedPlaying });
     if (!r.ok) return r;
+
 
     this.headsEntrySnapshot = this.tracks.map((t) => ({
       muted: t.muted,
@@ -2949,6 +2964,11 @@ export class AudioEngine {
 
   execute(cmd: AudioCommand): Ack {
     const p = cmd.payload;
+    // Remember the most recently targeted stem — it becomes the Heads source.
+    if (!this.heads.active) {
+      const targeted = (p as Record<string, unknown> | undefined)?.["track"];
+      if (typeof targeted === "number" && targeted >= 0 && targeted < 4) this.lastTargetedTrack = targeted;
+    }
     if (!this.ctx && (cmd.type.startsWith("track.") || cmd.type.startsWith("loop.") || cmd.type.startsWith("tape."))) {
       return this.ack(cmd, "rejected", "audio not unlocked — enable audio, then repeat the gesture");
     }
@@ -3717,6 +3737,10 @@ export class AudioEngine {
       heads: this.heads,
       headLanes: this.headLanes.snapshot(),
       headsSummary: headsSummary(this.heads),
+      headsSource:
+        this.headLanes.active && this.headLanes.source != null
+          ? { index: this.headLanes.source, name: this.headLanes.sourceName ?? `stem ${this.headLanes.source + 1}` }
+          : null,
       scrub: {
         open: this.scrubTrackers.map((t, i) =>
           t ? { head: i, pointerId: t.pointerId, previews: t.previewCount, lastVelocity: t.lastVelocity } : null,

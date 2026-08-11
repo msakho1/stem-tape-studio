@@ -89,6 +89,8 @@ export function useAudioEngine(commands: AudioCommand[]) {
         transportPosition: d.position,
         transportPlaying: d.actuallyPlaying,
         headsRms: engine.headsRms(),
+        source: engine.headLanes.source,
+        sourceName: engine.headLanes.sourceName,
         heads: engine.headLanes.snapshot(),
         summary: engine.headLanes.summary(),
         log: engine.headLanes.log.slice(-40),
@@ -176,6 +178,8 @@ export function useAudioEngine(commands: AudioCommand[]) {
         return;
       }
       if (e.channel !== "fader") return;
+      // Touching a stem fader targets that stem — it becomes the Heads source.
+      engine.lastTargetedTrack = head;
       // In heads mode the faders are the head layer: level/scrub arrive on
       // their own channels, so the continuous bus must not move the track fader.
       if (engine.heads.active) return;

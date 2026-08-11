@@ -16,12 +16,13 @@
  */
 
 /**
- * Per-lane entry descriptor captured by the engine BEFORE any heads state is
- * touched: was this stem audible at the instant Heads was entered?
+ * Entry descriptor: which stem the four heads read, and its display name.
  */
-export interface HeadEntryLane {
-  audible: boolean;
+export interface HeadsEntry {
+  source: number;
+  sourceName: string;
 }
+
 
 export interface HeadLaneSnapshot {
   lane: number;
@@ -60,18 +61,17 @@ interface LaneRuntime {
 
 export interface HeadLaneHost {
   ctx(): AudioContext | null;
-  /** Where the heads bus lands. Deliberately NOT the per-track chain: heads
-   *  must survive stem mutes and the transport being stopped. */
+  /** Where the heads bus lands — the master chain, never a per-stem chain. */
   destination(): AudioNode | null;
-  /** Per-lane landing node: lane N's head rides stem N's FX chain, entering
-   *  AFTER the stem's mute gate so a muted stem still passes its head. */
-  laneDestination(lane: number): AudioNode | null;
-  buffer(lane: number): AudioBuffer | null;
-  reversed(lane: number): AudioBuffer | null;
+  /** The ONE decoded buffer all four heads read. Never duplicated. */
+  sourceBuffer(): AudioBuffer | null;
+  /** Lazily built reverse copy of that same source. */
+  reversedSource(): AudioBuffer | null;
   barSeconds(): number;
-  /** Song position used as the default parking spot on entry. */
+  /** Song position used to centre the initial head distribution. */
   songPosition(): number;
 }
+
 
 const FADE_S = 0.008;
 const GRAIN_S = 0.07;
@@ -98,12 +98,40 @@ function freshLane(): LaneRuntime {
   };
 }
 
+/**
+ * Deterministic initial spread of four read positions across ONE source.
+ *
+ * The heads must never collapse onto a single position — that is the whole
+ * musical point of Heads mode. The spread is centred on the current transport
+ * position where the buffer allows it, and redistributed inward otherwise.
+ */
+export function distributeHeads(duration: number, current: number): number[] {
+  const dur = Math.max(0, duration);
+  if (!(dur > 0.05)) return [0, 0, 0, 0];
+  const fallback = [0.2, 0.4, 0.6, 0.8].map((f) => f * dur);
+  if (dur < 8) return fallback;
+  const spacing = Math.min(Math.max(dur * 0.1, 8), 30);
+  const at = Math.min(Math.max(0, current), dur);
+  const raw = [at - 2 * spacing, at - spacing, at, at + spacing];
+  // Slide the whole comb into bounds before clamping, so the spacing survives.
+  const span = 3 * spacing;
+  if (span <= dur) {
+    let shift = 0;
+    if (raw[0]! < 0) shift = -raw[0]!;
+    else if (raw[3]! > dur) shift = dur - raw[3]!;
+    const out = raw.map((x) => x + shift);
+    return out.map((x) => Math.min(Math.max(0, x), dur));
+  }
+  return fallback;
+}
+
 export class HeadLanes {
   active = false;
+  /** Index of the ONE stem all four heads read. */
+  source: number | null = null;
+  sourceName: string | null = null;
   private lanes: LaneRuntime[] = [0, 1, 2, 3].map(freshLane);
   private bus: GainNode | null = null;
-  /** One gain per lane, landing in that lane's own FX chain. */
-  private laneBuses: (GainNode | null)[] = [null, null, null, null];
   private tap: AnalyserNode | null = null;
   private scrubbing: (boolean | null)[] = [null, null, null, null];
   /** Ordered evidence trail; the browser proof reads it verbatim. */
@@ -118,7 +146,11 @@ export class HeadLanes {
 
   // ------------------------------------------------------------- lifecycle
 
-  enter(entries?: HeadEntryLane[]): { ok: boolean; detail: string } {
+  /**
+   * Enter Heads: FOUR independent readers over the SAME decoded buffer, each
+   * parked at a different moment of that one stem.
+   */
+  enter(entry: HeadsEntry & { playing?: boolean }): { ok: boolean; detail: string } {
     const ctx = this.host.ctx();
     this.note("heads.enter.requested", -1, `entry requested — ctx ${ctx ? ctx.state : "absent"}`);
     if (!ctx) {
@@ -126,16 +158,23 @@ export class HeadLanes {
       return { ok: false, detail: "audio not unlocked" };
     }
     if (this.active) return { ok: true, detail: "heads already active" };
-    const loaded = [0, 1, 2, 3].filter((i) => this.host.buffer(i) != null);
-    if (loaded.length === 0) {
+    this.source = entry.source;
+    this.sourceName = entry.sourceName;
+    const buf = this.host.sourceBuffer();
+    if (!buf) {
+      this.source = null;
+      this.sourceName = null;
       this.note("heads.enter.rejected", -1, "no decoded lane to read");
       return { ok: false, detail: "heads rejected — no decoded lane to read" };
     }
     const dest0 = this.host.destination();
     if (!dest0) {
+      this.source = null;
+      this.sourceName = null;
       this.note("heads.enter.rejected", -1, "no output bus");
       return { ok: false, detail: "heads rejected — no output bus" };
     }
+    // ONE dedicated heads bus into the master chain. All four readers land here.
     const bus = ctx.createGain();
     bus.gain.value = 1;
     bus.connect(dest0);
@@ -144,45 +183,26 @@ export class HeadLanes {
     bus.connect(tap);
     this.bus = bus;
     this.tap = tap;
-    this.laneBuses = [0, 1, 2, 3].map((i) => {
-      const g = ctx.createGain();
-      g.gain.value = 1;
-      const dest = this.host.laneDestination(i) ?? dest0;
-      g.connect(dest);
-      // Measurement tap only — the audible path is the lane FX chain.
-      g.connect(tap);
-      return g;
-    });
-    // POSITION FIRST. Every lane is parked exactly where the song is before any
-    // moving/latch/anchor state is written, so no stale anchor can recompute an
-    // entry position (the reverse-continuity bug).
-    const at = Math.max(0, this.host.songPosition());
-    this.lanes = [0, 1, 2, 3].map(() => {
+    // POSITION FIRST: four DISTINCT read positions inside the one source,
+    // written before any moving/latch/anchor state exists.
+    const spread = distributeHeads(buf.duration, Math.max(0, this.host.songPosition()));
+    this.lanes = [0, 1, 2, 3].map((i) => {
       const l = freshLane();
-      l.posS = at;
+      l.posS = spread[i]!;
+      // While the tape is rolling all four heads sound at once — that layering
+      // of four moments of the same stem IS heads mode. Paused: parked, silent.
+      l.latched = entry.playing === true;
       return l;
     });
     this.active = true;
-    // Musical continuity: a stem that was audible at the instant of entry keeps
-    // sounding as its own head from `at`. Muted/inactive stems (and everything,
-    // when the transport is paused) stay parked at the same position.
-    const carried: number[] = [];
-    for (let i = 0; i < 4; i++) {
-      if (entries?.[i]?.audible && this.host.buffer(i) != null) {
-        this.lanes[i]!.latched = true;
-        carried.push(i + 1);
-      }
-    }
-    if (carried.length > 0) this.reconcile("entry continuation");
-    const detail =
-      carried.length > 0
-        ? `heads on — heads ${carried.join("+")} carried the playing stems from ${at.toFixed(3)}s, the rest parked there`
-        : `heads on — head N reads lane N, parked at ${at.toFixed(3)}s`;
+    if (entry.playing) this.reconcile("entry — four heads over one source");
+    const detail = `heads on — 4 heads reading ${entry.sourceName} at ${spread.map((s) => s.toFixed(2) + "s").join(" / ")}`;
     this.note("heads.enter.accepted", -1, detail);
     for (let i = 0; i < 4; i++) {
       const l = this.lanes[i]!;
       this.note("head.state", i, `pos ${l.posS.toFixed(3)}s moving ${l.moving} latched ${l.latched} muted ${l.muted} reverse ${l.reverse}`);
     }
+
     return { ok: true, detail };
   }
 
@@ -190,14 +210,6 @@ export class HeadLanes {
   exit(): { ok: boolean; detail: string } {
     if (!this.active) return { ok: true, detail: "heads already off" };
     for (let i = 0; i < 4; i++) this.stopLane(i, "exit");
-    for (const g of this.laneBuses) {
-      try {
-        g?.disconnect();
-      } catch {
-        /* noop */
-      }
-    }
-    this.laneBuses = [null, null, null, null];
     if (this.bus) {
       try {
         this.bus.disconnect();
@@ -209,16 +221,20 @@ export class HeadLanes {
     this.bus = null;
     this.tap = null;
     this.active = false;
+    this.source = null;
+    this.sourceName = null;
     this.lanes = [0, 1, 2, 3].map(freshLane);
-    this.note("heads.exit", -1, "heads off — stem mixer restored, transport untouched");
-    return { ok: true, detail: "heads off — four lanes released, transport untouched" };
+    this.note("heads.exit", -1, "heads off — heads bus disconnected, stem mapping restored");
+    return { ok: true, detail: "heads off — four readers stopped, transport untouched" };
   }
 
   // ------------------------------------------------------------- positions
 
-  duration(i: number): number {
-    return this.host.buffer(i)?.duration ?? 0;
+  /** Duration of the ONE source buffer every head reads. */
+  duration(_i?: number): number {
+    return this.host.sourceBuffer()?.duration ?? 0;
   }
+
 
   position(i: number): number {
     const l = this.lanes[i];
@@ -275,9 +291,9 @@ export class HeadLanes {
   private startLane(i: number, why: string) {
     const ctx = this.host.ctx();
     const l = this.lanes[i]!;
-    const laneBus = this.laneBuses[i] ?? this.bus;
+    const laneBus = this.bus;
     if (!ctx || !laneBus || l.moving) return;
-    const buf = this.host.buffer(i);
+    const buf = this.host.sourceBuffer();
     if (!buf) return;
     if (l.ended && !l.loop && l.posS >= buf.duration - 1e-3) l.posS = 0;
     l.ended = false;
@@ -287,7 +303,7 @@ export class HeadLanes {
     const node = ctx.createBufferSource();
     const dur = buf.duration;
     const rev = l.reverse;
-    const src = rev ? this.host.reversed(i) ?? buf : buf;
+    const src = rev ? this.host.reversedSource() ?? buf : buf;
     node.buffer = src;
     let offset = rev ? dur - l.posS : l.posS;
     if (l.loop) {
@@ -502,8 +518,8 @@ export class HeadLanes {
 
   private grain(i: number, atS: number) {
     const ctx = this.host.ctx();
-    const buf = this.host.buffer(i);
-    const laneBus = this.laneBuses[i] ?? this.bus;
+    const buf = this.host.sourceBuffer();
+    const laneBus = this.bus;
     if (!ctx || !buf || !laneBus) return;
     const l = this.lanes[i]!;
     const g = ctx.createGain();
