@@ -15,6 +15,14 @@
  *  - A head with no loop stops at the end of its source rather than wrapping.
  */
 
+/**
+ * Per-lane entry descriptor captured by the engine BEFORE any heads state is
+ * touched: was this stem audible at the instant Heads was entered?
+ */
+export interface HeadEntryLane {
+  audible: boolean;
+}
+
 export interface HeadLaneSnapshot {
   lane: number;
   /** Audible + moving right now. */
