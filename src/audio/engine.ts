@@ -257,6 +257,8 @@ export interface EngineStatus {
   /** Heads v2 truth: the four independent lane heads, straight from HeadLanes. */
   headLanes: HeadLaneSnapshot[];
   headsSummary: string;
+  /** The ONE stem the four heads read while Heads is active. */
+  headsSource: { index: number; name: string } | null;
   /** Live scrub evidence: open gestures, kernel telemetry, emitted events. */
   scrub: {
     open: ({ head: number; pointerId: number; previews: number; lastVelocity: number } | null)[];
@@ -1356,8 +1358,9 @@ export class AudioEngine {
     // The FX rack stays OPEN whenever the stem is audible OR a head is riding
     // this lane, so Heads is processed by that lane's FX. The stem's own copy
     // is silenced at the gate instead.
-    const headHere = this.heads.active;
-    t.fxRack?.setInputOpen(stemAudible || headHere);
+    // Heads no longer ride the per-stem chains — they have their own bus into
+    // the master — so the lane FX gate follows the stem alone.
+    t.fxRack?.setInputOpen(stemAudible);
     this.setGain(t.stemGate.gain, stemAudible ? 1 : 0);
     this.setGain(t.soloGain.gain, audibleBySolo ? 1 : 0);
   }
@@ -2961,6 +2964,11 @@ export class AudioEngine {
 
   execute(cmd: AudioCommand): Ack {
     const p = cmd.payload;
+    // Remember the most recently targeted stem — it becomes the Heads source.
+    if (!this.heads.active) {
+      const targeted = (p as Record<string, unknown> | undefined)?.["track"];
+      if (typeof targeted === "number" && targeted >= 0 && targeted < 4) this.lastTargetedTrack = targeted;
+    }
     if (!this.ctx && (cmd.type.startsWith("track.") || cmd.type.startsWith("loop.") || cmd.type.startsWith("tape."))) {
       return this.ack(cmd, "rejected", "audio not unlocked — enable audio, then repeat the gesture");
     }
@@ -3729,6 +3737,10 @@ export class AudioEngine {
       heads: this.heads,
       headLanes: this.headLanes.snapshot(),
       headsSummary: headsSummary(this.heads),
+      headsSource:
+        this.headLanes.active && this.headLanes.source != null
+          ? { index: this.headLanes.source, name: this.headLanes.sourceName ?? `stem ${this.headLanes.source + 1}` }
+          : null,
       scrub: {
         open: this.scrubTrackers.map((t, i) =>
           t ? { head: i, pointerId: t.pointerId, previews: t.previewCount, lastVelocity: t.lastVelocity } : null,
