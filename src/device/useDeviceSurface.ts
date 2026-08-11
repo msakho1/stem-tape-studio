@@ -756,8 +756,17 @@ export function useDeviceSurface() {
   const leds = useMemo(() => deriveLeds(state), [state]);
   const observed = useMemo(() => observedRows(state, leds), [state, leds]);
 
+  /**
+   * The engine's verdict on heads entry/exit. Called from the ack subscription;
+   * it is the only path that may change `headsMode`.
+   */
+  const applyEngineHeads = useCallback((patch: { active?: boolean; source?: number | null }) => {
+    dispatch({ type: "headsFeedback", patch });
+  }, []);
+
   return {
     state,
+    applyEngineHeads,
     leds,
     observed,
     engine,
