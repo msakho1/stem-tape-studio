@@ -16,6 +16,7 @@ import {
   applyFader,
   applyGesture,
   applyGlobalScrub,
+  applyHeadsFeedback,
   applyPerfIntent,
   deriveLeds,
   initialSurfaceState,
