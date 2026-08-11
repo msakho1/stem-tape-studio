@@ -386,7 +386,7 @@ function LabPage() {
         <div className="min-w-0 flex-1">
           <Waveform buffer={buffer} progress={progress} slices={state.chopDiv} loop={loopWindow} height={40} />
         </div>
-        <span className="font-mono text-[12px] text-[var(--ink-dim)]">{sess.bpm} BPM</span>
+        <span className="font-mono text-[12px] text-[var(--ink-dim)]">{sess.songGrid ? `${sess.songGrid.bpm.toFixed(2)} BPM` : "— BPM"}</span>
         <span className="font-mono text-[12px] tabular-nums text-[var(--ink)]">{status.rate.toFixed(2)}×</span>
       </div>
 
