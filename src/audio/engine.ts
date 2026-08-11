@@ -136,6 +136,8 @@ export interface TrackRuntime {
   /** Deleted buffers go here, recoverable until the project is compacted. */
   trash: AudioBuffer | null;
   input: GainNode;
+  /** Mute/solo gate for the ordinary stem copy (head voices bypass it). */
+  stemGate: GainNode;
   /** Post-filter unity tap feeding the permanent FX rack input. */
   preFx: GainNode;
   /** Phase 5C per-stem FX rack. Its input node is never re-parented. */
@@ -473,6 +475,12 @@ export class AudioEngine {
 
     this.tracks = [0, 1, 2, 3].map((i) => {
       const input = ctx.createGain();
+      // Stem gate: mute/solo close THIS node, not the FX rack input, so a head
+      // voice injected at `input` still rides the lane's FX chain while the
+      // ordinary stem copy is silenced.
+      const stemGate = ctx.createGain();
+      stemGate.gain.value = 1;
+      stemGate.connect(input);
       const dry = ctx.createGain();
       const wet = ctx.createGain();
       const filter = ctx.createBiquadFilter();
@@ -514,6 +522,7 @@ export class AudioEngine {
         reversed: null,
         trash: null,
         input,
+        stemGate,
         preFx,
         fxRack,
         bankRack,
@@ -724,7 +733,7 @@ export class AudioEngine {
     if (!buf) return null;
     const readOffset = t.loop.reverse ? buf.duration - offset : offset;
     const fade = ctx.createGain();
-    fade.connect(t.input);
+    fade.connect(t.stemGate);
     const node = ctx.createBufferSource();
     node.buffer = buf;
     node.playbackRate.value = this.timeline.currentRate(ctx.currentTime);
@@ -1034,7 +1043,7 @@ export class AudioEngine {
       return { ok: false, detail: t.fallbackReason };
     }
 
-    const wt = new WorkletTrack(id, this.ctx, t.input, (w, detail) => this.handleProcessorError(w, detail));
+    const wt = new WorkletTrack(id, this.ctx, t.stemGate, (w, detail) => this.handleProcessorError(w, detail));
     wt.onTelemetry = (_w, ack) => {
       if (ack.detail !== "scrub" || !ack.scrubHeads) return;
       this.scrubTelemetry = { contextFrame: ack.contextFrame ?? 0, rms: ack.rms ?? 0, heads: ack.scrubHeads };
@@ -1341,9 +1350,13 @@ export class AudioEngine {
     // track's own chain, so the source gate stays open while heads are active
     // even if the user has muted that stem in the dry mixer (which only
     // silences the normal copy — the head voices replace it).
-    const headsSource = this.heads.active && this.heads.source === id;
-    const open = audibleBySolo && (headsSource || !t.muted || t.soloed || (auditing && this.audition[id] === true));
-    t.fxRack?.setInputOpen(open);
+    const stemAudible = audibleBySolo && (!t.muted || t.soloed || (auditing && this.audition[id] === true));
+    // The FX rack stays OPEN whenever the stem is audible OR a head is riding
+    // this lane, so Heads is processed by that lane's FX. The stem's own copy
+    // is silenced at the gate instead.
+    const headHere = this.heads.active;
+    t.fxRack?.setInputOpen(stemAudible || headHere);
+    this.setGain(t.stemGate.gain, stemAudible ? 1 : 0);
     this.setGain(t.soloGain.gain, audibleBySolo ? 1 : 0);
   }
 
@@ -1492,6 +1505,7 @@ export class AudioEngine {
   readonly headLanes = new HeadLanes({
     ctx: () => this.ctx,
     destination: () => this.master,
+    laneDestination: (i) => this.tracks[i]?.input ?? null,
     buffer: (i) => this.tracks[i]?.buffer ?? null,
     reversed: (i) => {
       const t = this.tracks[i];
@@ -2013,7 +2027,7 @@ export class AudioEngine {
       const at = Math.max(now, gs.lastGrainAt[i] ?? now);
       const offsetS = backwards ? buffer.duration - gs.pos : gs.pos;
       const g = ctx.createGain();
-      g.connect(t.input);
+      g.connect(t.stemGate);
       const tap = this.scrubTap(i);
       if (tap) g.connect(tap);
       const node = ctx.createBufferSource();
@@ -2277,7 +2291,7 @@ export class AudioEngine {
     const at = Math.max(now, ls.lastGrainAt);
     const offsetS = backwards ? buffer.duration - ls.pos : ls.pos;
     const g = ctx.createGain();
-    g.connect(t.input);
+    g.connect(t.stemGate);
     const tap = this.scrubTap(lane);
     if (tap) g.connect(tap);
     const node = ctx.createBufferSource();
@@ -2487,7 +2501,7 @@ export class AudioEngine {
     const at = Math.max(now, s.lastGrainAt);
     const offsetS = backwards ? buffer.duration - target : target;
     const g = ctx.createGain();
-    g.connect(t.input);
+    g.connect(t.stemGate);
     const tap = this.scrubTap(lane);
     if (tap) g.connect(tap);
     const node = ctx.createBufferSource();
