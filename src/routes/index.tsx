@@ -117,7 +117,12 @@ function LabPage() {
     setDemoBusy(false);
   }, [engine, unlock]);
 
-  const lastGesture = gestureLog[0]?.text ?? "Nothing yet — press a control on the SP-1.";
+  // "What just happened?" narrates the SEMANTIC command the surface emitted —
+  // the actual effect, lane or head — not the internal gesture identifier.
+  const lastCommand = state.commands[state.commands.length - 1];
+  const lastGesture = lastCommand
+    ? narrateCommand(lastCommand, state)
+    : (gestureLog[0]?.text ?? "Nothing yet — press a control on the SP-1.");
   const loaded = TRACK_ROLES.filter((r) => sess.stems[r] && !sess.stems[r]!.trashed);
 
   return (
