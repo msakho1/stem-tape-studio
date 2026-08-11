@@ -76,6 +76,7 @@ type Action =
   | { type: "gesture"; gesture: Gesture }
   | { type: "perf"; intent: PerfIntent }
   | { type: "globalScrub"; dir: 1 | -1 | null }
+  | { type: "headsFeedback"; patch: { active?: boolean; source?: number | null } }
   | { type: "faderCommit"; index: number; value: number; claimed?: ContinuousChannel };
 
 
@@ -95,6 +96,9 @@ function reducer(state: SurfaceState, action: Action): SurfaceState {
       return applyGesture({ ...state, lastGesture: describeGesture(action.gesture) }, action.gesture);
     case "globalScrub":
       return applyGlobalScrub(state, action.dir, performance.now());
+    case "headsFeedback":
+      // Engine truth. The reducer never sets headsMode itself.
+      return applyHeadsFeedback(state, action.patch);
     case "faderCommit":
       return applyFader(state, action.index, action.value, action.claimed);
   }
