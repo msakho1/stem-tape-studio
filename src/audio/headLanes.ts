@@ -55,6 +55,9 @@ export interface HeadLaneHost {
   /** Where the heads bus lands. Deliberately NOT the per-track chain: heads
    *  must survive stem mutes and the transport being stopped. */
   destination(): AudioNode | null;
+  /** Per-lane landing node: lane N's head rides stem N's FX chain, entering
+   *  AFTER the stem's mute gate so a muted stem still passes its head. */
+  laneDestination(lane: number): AudioNode | null;
   buffer(lane: number): AudioBuffer | null;
   reversed(lane: number): AudioBuffer | null;
   barSeconds(): number;
@@ -91,6 +94,8 @@ export class HeadLanes {
   active = false;
   private lanes: LaneRuntime[] = [0, 1, 2, 3].map(freshLane);
   private bus: GainNode | null = null;
+  /** One gain per lane, landing in that lane's own FX chain. */
+  private laneBuses: (GainNode | null)[] = [null, null, null, null];
   private tap: AnalyserNode | null = null;
   private scrubbing: (boolean | null)[] = [null, null, null, null];
   /** Ordered evidence trail; the browser proof reads it verbatim. */
@@ -111,16 +116,25 @@ export class HeadLanes {
     if (this.active) return { ok: true, detail: "heads already active" };
     const loaded = [0, 1, 2, 3].filter((i) => this.host.buffer(i) != null);
     if (loaded.length === 0) return { ok: false, detail: "heads rejected — no decoded lane to read" };
-    const dest = this.host.destination();
-    if (!dest) return { ok: false, detail: "heads rejected — no output bus" };
+    const dest0 = this.host.destination();
+    if (!dest0) return { ok: false, detail: "heads rejected — no output bus" };
     const bus = ctx.createGain();
     bus.gain.value = 1;
-    bus.connect(dest);
+    bus.connect(dest0);
     const tap = ctx.createAnalyser();
     tap.fftSize = 2048;
     bus.connect(tap);
     this.bus = bus;
     this.tap = tap;
+    this.laneBuses = [0, 1, 2, 3].map((i) => {
+      const g = ctx.createGain();
+      g.gain.value = 1;
+      const dest = this.host.laneDestination(i) ?? dest0;
+      g.connect(dest);
+      // Measurement tap only — the audible path is the lane FX chain.
+      g.connect(tap);
+      return g;
+    });
     const at = Math.max(0, this.host.songPosition());
     this.lanes = [0, 1, 2, 3].map(() => {
       const l = freshLane();
@@ -138,6 +152,14 @@ export class HeadLanes {
   exit(): { ok: boolean; detail: string } {
     if (!this.active) return { ok: true, detail: "heads already off" };
     for (let i = 0; i < 4; i++) this.stopLane(i, "exit");
+    for (const g of this.laneBuses) {
+      try {
+        g?.disconnect();
+      } catch {
+        /* noop */
+      }
+    }
+    this.laneBuses = [null, null, null, null];
     if (this.bus) {
       try {
         this.bus.disconnect();
@@ -167,8 +189,11 @@ export class HeadLanes {
     if (!l.moving || !ctx) return l.posS;
     const dir = l.reverse ? -1 : 1;
     const raw = l.anchorPos + (ctx.currentTime - l.anchorCtx) * dir;
-    if (l.loop) return l.loop.startS + mod(raw - l.loop.startS, Math.max(1e-4, l.loop.lengthS));
     const dur = this.duration(i);
+    if (l.loop) {
+      const looped = l.loop.startS + mod(raw - l.loop.startS, Math.max(1e-4, l.loop.lengthS));
+      return Math.min(Math.max(0, looped), Math.max(0, dur));
+    }
     return Math.min(Math.max(0, raw), Math.max(0, dur));
   }
 
@@ -212,14 +237,15 @@ export class HeadLanes {
   private startLane(i: number, why: string) {
     const ctx = this.host.ctx();
     const l = this.lanes[i]!;
-    if (!ctx || !this.bus || l.moving) return;
+    const laneBus = this.laneBuses[i] ?? this.bus;
+    if (!ctx || !laneBus || l.moving) return;
     const buf = this.host.buffer(i);
     if (!buf) return;
     if (l.ended && !l.loop && l.posS >= buf.duration - 1e-3) l.posS = 0;
     l.ended = false;
     const at = ctx.currentTime + 0.01;
     const gain = ctx.createGain();
-    gain.connect(this.bus);
+    gain.connect(laneBus);
     const node = ctx.createBufferSource();
     const dur = buf.duration;
     const rev = l.reverse;
@@ -346,11 +372,16 @@ export class HeadLanes {
       }
       return { ok: true, detail: `head ${i + 1} loop released` };
     }
-    const lengthS = Math.max(0.05, bars * this.host.barSeconds());
-    const start = l.scrubCandidate != null ? l.scrubCandidate : this.position(i);
+    const dur = this.duration(i);
+    const lengthS = Math.min(Math.max(0.05, bars * this.host.barSeconds()), Math.max(0.05, dur));
+    const raw = l.scrubCandidate != null ? l.scrubCandidate : this.position(i);
+    // A loop must live INSIDE the source. Parking at the very end (a scrub
+    // landing at duration) previously produced a loop window past the end,
+    // which read silence and reported positions beyond the buffer.
+    const start = Math.min(Math.max(0, raw), Math.max(0, dur - lengthS));
     l.scrubCandidate = null;
     l.posS = start;
-    l.loop = { startS: Math.max(0, start), lengthS, bars };
+    l.loop = { startS: start, lengthS, bars };
     if (l.moving) this.stopLane(i, "loop capture reseat");
     if (!l.latched && !l.held) l.latched = true; // a captured loop repeats
     this.reconcile("loop capture");
@@ -377,14 +408,22 @@ export class HeadLanes {
   toggleReverse(i: number): { ok: boolean; detail: string } {
     if (!this.active) return { ok: false, detail: "heads mode is not active" };
     const l = this.lanes[i]!;
-    l.posS = this.position(i);
+    // Freeze the CURRENT (still forward) read position BEFORE flipping, and
+    // re-assert it after stopLane. stopLane recomputes posS from the anchor,
+    // and with the direction already flipped that recomputation ran backwards
+    // from the old anchor and clamped the head to 0.
+    const at = this.position(i);
     l.reverse = !l.reverse;
     if (l.moving) {
       this.stopLane(i, "reverse");
+      l.posS = at;
       this.reconcile("reverse");
+    } else {
+      l.posS = at;
     }
-    return { ok: true, detail: `head ${i + 1} → ${l.reverse ? "REVERSE" : "forward"} at ${l.posS.toFixed(3)}s` };
+    return { ok: true, detail: `head ${i + 1} → ${l.reverse ? "REVERSE" : "forward"} at ${at.toFixed(3)}s` };
   }
+
 
   // --------------------------------------------------------------- scrub
 
@@ -426,10 +465,11 @@ export class HeadLanes {
   private grain(i: number, atS: number) {
     const ctx = this.host.ctx();
     const buf = this.host.buffer(i);
-    if (!ctx || !buf || !this.bus) return;
+    const laneBus = this.laneBuses[i] ?? this.bus;
+    if (!ctx || !buf || !laneBus) return;
     const l = this.lanes[i]!;
     const g = ctx.createGain();
-    g.connect(this.bus);
+    g.connect(laneBus);
     const n = ctx.createBufferSource();
     n.buffer = buf;
     n.connect(g);

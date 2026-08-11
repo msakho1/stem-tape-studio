@@ -15,7 +15,10 @@ export interface RawInputEvent {
 export type HoldLevel = "hold" | "power" | "long";
 
 export type Gesture =
-  | { type: "tap"; control: Control; count: number; t: number }
+  | { type: "tap"; control: Control; count: number; t: number; /** FUNCTION was held when this tap sequence began. Deferred taps commit
+   *  up to trackDecisionMs after release, long after FUNCTION may have been
+   *  let go, so the qualifier is latched at press time, not at commit. */
+      qualified?: boolean }
   | { type: "holdStart"; control: Control; level: HoldLevel; duration: number; t: number }
   | { type: "holdEnd"; control: Control; level: HoldLevel; duration: number; t: number }
   | { type: "tapThenHold"; control: Control; t: number }
@@ -100,6 +103,8 @@ interface PressRecord {
   powerHoldTimer: ReturnType<typeof setTimeout> | null;
   longHoldTimer: ReturnType<typeof setTimeout> | null;
   moved: boolean;
+  /** FUNCTION held at press time. */
+  qualified: boolean;
 }
 
 interface TapRecord {
@@ -143,7 +148,10 @@ export class GestureEngine {
   private presses = new Map<Control, PressRecord>();
   private taps = new Map<Control, TapRecord>();
   /** Deferred Track decisions awaiting a timeout or a second press. */
-  private pending = new Map<Control, { count: number; timer: ReturnType<typeof setTimeout>; firstReleaseAt: number }>();
+  private pending = new Map<
+    Control,
+    { count: number; timer: ReturnType<typeof setTimeout>; firstReleaseAt: number; qualified: boolean }
+  >();
   private gestureListeners = new Set<GestureListener>();
   private rawListeners = new Set<RawListener>();
   private chordActive: Control[] | null = null;
@@ -197,6 +205,7 @@ export class GestureEngine {
       powerHoldTimer: null,
       longHoldTimer: null,
       moved: false,
+      qualified: control !== "function" && this.presses.has("function"),
     };
 
     if (!isContinuousControl(control)) {
@@ -215,7 +224,11 @@ export class GestureEngine {
         clearTimeout(claim.timer);
         // count now tracks 1 → 2 → 3; the emit is still deferred to the
         // release that closes the sequence.
-        this.pending.set(control, { ...claim, count: Math.min(3, claim.count + 1) });
+        this.pending.set(control, {
+          ...claim,
+          count: Math.min(3, claim.count + 1),
+          qualified: claim.qualified || rec.qualified,
+        });
       }
 
       rec.holdTimer = setTimeout(() => {
@@ -308,6 +321,7 @@ export class GestureEngine {
       const claim = this.pending.get(control);
       const count = claim ? claim.count : 1;
       const firstReleaseAt = claim ? claim.firstReleaseAt : t;
+      const qualified = (claim?.qualified ?? false) || rec.qualified;
       if (claim) clearTimeout(claim.timer);
       if (count >= 3) {
         // The third valid release confirms independent latched playback. One
@@ -315,7 +329,7 @@ export class GestureEngine {
         this.pending.delete(control);
         this.decisionLatencyMs.push(t - firstReleaseAt);
         if (this.decisionLatencyMs.length > 50) this.decisionLatencyMs.shift();
-        this.emit({ type: "tap", control, count: 3, t });
+        this.emit({ type: "tap", control, count: 3, t, qualified });
         return;
       }
       // ×1 waits to see whether a ×2 arrives; ×2 waits again for a ×3. Nothing
@@ -325,9 +339,9 @@ export class GestureEngine {
         const at = performance.now();
         this.decisionLatencyMs.push(at - firstReleaseAt);
         if (this.decisionLatencyMs.length > 50) this.decisionLatencyMs.shift();
-        this.emit({ type: "tap", control, count, t: at });
+        this.emit({ type: "tap", control, count, t: at, qualified });
       }, this.timings.trackDecisionMs);
-      this.pending.set(control, { count, timer, firstReleaseAt });
+      this.pending.set(control, { count, timer, firstReleaseAt, qualified });
       return;
     }
 
@@ -338,7 +352,7 @@ export class GestureEngine {
     if (prev?.timer) clearTimeout(prev.timer);
     const timer = setTimeout(() => this.taps.delete(control), this.timings.multiTapGapMs);
     this.taps.set(control, { count, lastReleaseAt: t, timer });
-    this.emit({ type: "tap", control, count, t });
+    this.emit({ type: "tap", control, count, t, qualified: rec.qualified });
   }
 
   /** Pointer cancellation / lost capture. Never leaves a stuck control. */

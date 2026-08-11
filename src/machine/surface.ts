@@ -420,7 +420,11 @@ export const SCRUB_STEP_S = 0.5;
 
 export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
   let next: SurfaceState = { ...state };
-  const fn = state.functionHeld;
+  // FUNCTION qualification is sampled at PRESS time for taps: deferred Track
+  // arbitration commits up to trackDecisionMs after the release, by which time
+  // the user has usually let FUNCTION go. Without this, FN + double-tap
+  // (lane reverse) degraded into a bare double-tap (loop capture).
+  const fn = state.functionHeld || (g.type === "tap" && g.qualified === true);
   const t = g.t;
 
   // Power is a v2.6 row: FUNCTION hold. It uses its OWN configurable threshold
