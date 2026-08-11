@@ -28,6 +28,10 @@ class TapeProcessor extends AudioWorkletProcessor {
     /** @type {Float32Array[]} */
     this.channels = [];
     this.sourceFrames = 0;
+    /** Short equal-power fade-in after a bar-synced loop release. */
+    this.releaseFade = null;
+    /** Set by applyCommand so mid-block loop geometry is re-read immediately. */
+    this.geometryDirty = false;
     this.sourceSampleRate = sampleRate;
     /** Resampling ratio when the PCM rate differs from the context rate. */
     this.rateScale = 1;
@@ -333,6 +337,7 @@ class TapeProcessor extends AudioWorkletProcessor {
   }
 
   applyCommand(m) {
+    this.geometryDirty = true;
     switch (m.type) {
       case "start":
         if (Number.isFinite(m.sourceFrame)) this.readPosition = m.sourceFrame;
@@ -391,6 +396,18 @@ class TapeProcessor extends AudioWorkletProcessor {
         this.recomputeLoop();
         if (this.readPosition < this.loopStart || this.readPosition >= this.loopEnd) this.readPosition = this.loopStart;
         break;
+      case "releaseLoop": {
+        // Defect 2 parity: the loop window is dropped and the read pointer is
+        // planted on the EXACT source frame the host derived from the hidden
+        // song timeline — never the captured loop start.
+        this.loopEnabled = false;
+        this.windowStart = 0;
+        this.windowEnd = this.sourceFrames || this.windowEnd;
+        this.recomputeLoop();
+        this.readPosition = Number(m.targetSourceFrame) || 0;
+        this.releaseFade = { frames: Math.max(1, m.fadeFrames | 0), left: Math.max(1, m.fadeFrames | 0) };
+        break;
+      }
       case "setLoopMode":
         this.loopMode = m.mode === "variable" ? "variable" : "fixed";
         break;
@@ -458,14 +475,23 @@ class TapeProcessor extends AudioWorkletProcessor {
       return true;
     }
 
-    const xf = this.crossfadeFrames;
-    const loopLen = this.loopEnd - this.loopStart;
-    const looping = this.loopEnabled && loopLen > 2;
+    let xf = this.crossfadeFrames;
+    let loopLen = this.loopEnd - this.loopStart;
+    let looping = this.loopEnabled && loopLen > 2;
+    this.geometryDirty = false;
 
     for (let i = 0; i < blockFrames; i++) {
       // Sub-block precision: a command scheduled mid-quantum applies exactly.
       while (this.scheduledCommands.length > 0 && this.scheduledCommands[0].frame <= currentFrame + i) {
         this.applyCommand(this.scheduledCommands.shift().msg);
+      }
+      if (this.geometryDirty) {
+        // A release (or window change) that lands mid-quantum must take effect
+        // on THIS frame, not on the next block.
+        xf = this.crossfadeFrames;
+        loopLen = this.loopEnd - this.loopStart;
+        looping = this.loopEnabled && loopLen > 2;
+        this.geometryDirty = false;
       }
 
       if (this.inertia) {
@@ -532,6 +558,14 @@ class TapeProcessor extends AudioWorkletProcessor {
         }
       }
 
+      let relG = 1;
+      if (this.releaseFade) {
+        const rf = this.releaseFade;
+        relG = Math.sin(((rf.frames - rf.left) / rf.frames) * TWO_OVER_PI);
+        rf.left--;
+        if (rf.left <= 0) this.releaseFade = null;
+      }
+
       for (let c = 0; c < outChannels; c++) {
         const src = this.channels[srcChannels === 1 ? 0 : Math.min(c, srcChannels - 1)];
         let v;
@@ -568,7 +602,7 @@ class TapeProcessor extends AudioWorkletProcessor {
           v = this.sampleAt(src, this.readPosition) * a;
           if (b > 0) v += this.sampleAt(src, tailPos) * b;
         }
-        out[c][i] = v;
+        out[c][i] = v * relG;
         if (c === 0) {
           this.rmsAcc += v * v;
           this.rmsFrames++;

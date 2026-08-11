@@ -284,10 +284,25 @@ export interface EngineStatus {
 
 type Listener = (ack: Ack) => void;
 
+/** RMS of whatever an analyser tap currently sees. */
+function tapRms(a: AnalyserNode | null): number {
+  if (!a) return 0;
+  const buf = new Float32Array(a.fftSize);
+  a.getFloatTimeDomainData(buf);
+  let sum = 0;
+  for (let i = 0; i < buf.length; i++) sum += buf[i]! * buf[i]!;
+  return Math.sqrt(sum / buf.length);
+}
+
 export class AudioEngine {
   ctx: AudioContext | null = null;
   private master: GainNode | null = null;
   private masterAnalyser: AnalyserNode | null = null;
+  /** Gate for the ENTIRE normal four-stem mix (dry + every FX return). */
+  private normalBus: GainNode | null = null;
+  /** Measurement tap AFTER the normal bus gain. */
+  private normalTap: AnalyserNode | null = null;
+
   private tracks: TrackRuntime[] = [];
   private timeline = new TapeTimeline(1);
   /** Correction 6 — the one authoritative timeline event stream. */
@@ -477,6 +492,28 @@ export class AudioEngine {
     this.transportGain.connect(this.masterAnalyser);
     this.masterAnalyser.connect(ctx.destination);
 
+    // ---- explicit two-bus handoff ------------------------------------
+    //   NORMAL STEM BUS → normalBusGain → normalTap ─┐
+    //                                                ├→ master
+    //   HEADS BUS       → headsBusGain  → headsTap  ─┘
+    // Nothing else may connect to `master`. The taps sit AFTER the bus
+    // gains, so a measurement proves what each bus contributes to master,
+    // not what its stems produce upstream of the gate.
+    this.normalBus = ctx.createGain();
+    this.normalBus.gain.value = 1;
+    this.normalTap = ctx.createAnalyser();
+    this.normalTap.fftSize = 1024;
+    this.normalBus.connect(this.normalTap);
+    this.normalTap.connect(this.master);
+
+    this.headsBus = ctx.createGain();
+    this.headsBus.gain.value = 0;
+    this.headsTap = ctx.createAnalyser();
+    this.headsTap.fftSize = 1024;
+    this.headsBus.connect(this.headsTap);
+    this.headsTap.connect(this.master);
+
+
     this.tracks = [0, 1, 2, 3].map((i) => {
       const input = ctx.createGain();
       // Stem gate: mute/solo close THIS node, not the FX rack input, so a head
@@ -518,7 +555,11 @@ export class AudioEngine {
 
       gain.connect(soloGain);
       soloGain.connect(analyser);
-      analyser.connect(this.master!);
+      // Every normal path — dry AND every FX return — is already summed into
+      // `gain → soloGain → analyser` upstream, so this ONE edge is the whole
+      // normal contribution to the master. It lands on the normal bus.
+      analyser.connect(this.normalBus!);
+
       gain.gain.value = [0.78, 0.72, 0.65, 0.7][i] ?? 0.7;
 
       return {
@@ -881,8 +922,9 @@ export class AudioEngine {
       const rate = Math.abs(this.timeline.currentRate(now)) || 1;
       for (const v of this.headVoices) if (v) v.node.playbackRate.setTargetAtTime(rate, now, RAMP_TAU);
     }
-    for (const t of this.tracks) {
-      if (this.heads.active && this.heads.engine === "node" && this.heads.source === this.tracks.indexOf(t)) continue;
+    for (let li = 0; li < this.tracks.length; li++) {
+      const t = this.tracks[li]!;
+      if (this.heads.active && this.heads.engine === "node" && this.heads.source === li) continue;
       if (!t.buffer || !t.loop.enabled) continue;
       // A reversed lane wraps itself inside the mirrored loop window (see
       // `spawn`), so the forward seam scheduler must not also cut it.
@@ -892,21 +934,43 @@ export class AudioEngine {
       if (t.committedSeamAt != null && t.committedSeamAt > now) continue;
       const bounds = this.loopBounds(t);
       if (!bounds || bounds.length <= SEAM_FADE_S * 2) continue;
-      const seamAt = this.timeline.timeAtPosition(now, bounds.end);
+      // A scheduled release has ALREADY queued its replacement source at the
+      // bar boundary, and that replacement is the newest entry in `sources`.
+      // The wrap scheduler must ignore it entirely: the audible voice is the
+      // newest source from before the release (gen <= oldGen). Wrapping off the
+      // raw tail would fade out the replacement and respawn the lane from the
+      // loop start, which is exactly how a released loop used to rejoin the
+      // song several seconds behind the hidden timeline.
+      const pendingRel = this.pendingRelease[li];
+      const pool = pendingRel ? t.sources.filter((s) => s.gen !== pendingRel.newGen) : t.sources;
+      const live = pool[pool.length - 1];
+      if (!live) continue;
+      // The lane's seam is derived from ITS OWN read pointer, expressed in the
+      // shared integrated-rate timeline:
+      //   seamPosition = position(live.startAt) + (loopEnd - live.startPos)
+      // The shared timeline is NEVER re-anchored by a wrap, so the hidden song
+      // clock keeps advancing underneath a looping lane. That hidden value is
+      // what the lane rejoins on release.
+      const seamPos = this.timeline.positionAt(live.startAt) + (bounds.end - live.startPos);
+      const seamAt = this.timeline.timeAtPosition(now, seamPos);
       if (seamAt == null) continue;
       const fadeStart = seamAt - SEAM_FADE_S;
       if (fadeStart > now + SEAM_LOOKAHEAD_S) continue;
       const at = Math.max(fadeStart, now + 0.005);
-      const outgoing = t.sources[t.sources.length - 1];
-      if (outgoing) this.fadeOutAndStop(t, outgoing, at);
-      this.spawn(t, at, bounds.start, true);
+      // Never wrap a lane past a scheduled loop release — the release spawn
+      // owns everything at and after its bar boundary.
+      if (pendingRel && at >= pendingRel.at - 1e-6) continue;
+      this.fadeOutAndStop(t, live, at);
+      const wrapped = this.spawn(t, at, bounds.start, true);
+      // A wrap spawned UNDER a pending release must die at the boundary too —
+      // the replacement owns everything from that bar onwards.
+      if (wrapped && pendingRel) this.fadeOutAndStop(t, wrapped, pendingRel.at);
       t.committedSeamAt = seamAt;
       t.seamCount++;
-      // The wrap moves the playhead; re-anchor at the seam instant so the
-      // derived position keeps agreeing with what is audible.
-      this.timeline.anchor(at, bounds.start);
     }
+    this.settlePendingReleases(now);
   }
+
 
   /** Any rate or loop-shape change invalidates every pending seam. */
   private invalidateSeams() {
@@ -920,7 +984,7 @@ export class AudioEngine {
    * Dual-source crossfade to a new read position — used by loop-mode
    * transitions, chop jumps and reverse flips (anti-click matrix).
    */
-  private relocate(t: TrackRuntime, toPosition: number): boolean {
+  private relocateShared(t: TrackRuntime, toPosition: number): boolean {
     const ctx = this.ctx;
     if (!ctx || !this.requestedPlaying) return false;
     const at = ctx.currentTime + 0.01;
@@ -929,9 +993,137 @@ export class AudioEngine {
     const ok = this.spawn(t, at, toPosition, true) != null;
     if (ok) {
       t.committedSeamAt = null;
+      // Only a TRANSPORT relocation (seek/scrub landing) may move the shared
+      // clock. Loop work must never come through here.
       this.timeline.anchor(at, toPosition);
     }
     return ok;
+  }
+
+  /**
+   * Per-lane relocation: identical crossfade, but the shared hidden timeline is
+   * left strictly alone. Loop capture, chop and loop-mode transitions use this,
+   * which is what lets a released loop rejoin the song where it actually got to.
+   */
+  private relocateLane(t: TrackRuntime, toPosition: number): boolean {
+    const ctx = this.ctx;
+    if (!ctx || !this.requestedPlaying) return false;
+    const at = ctx.currentTime + 0.01;
+    const outgoing = t.sources[t.sources.length - 1];
+    if (outgoing) this.fadeOutAndStop(t, outgoing, at);
+    const ok = this.spawn(t, at, toPosition, true) != null;
+    if (ok) t.committedSeamAt = null;
+    return ok;
+  }
+
+  /**
+   * Defect 2 — bar-synchronised loop release.
+   *
+   * A release is scheduled for the next shared bar boundary of the analysed
+   * grid. At that instant the lane must resume from the HIDDEN song position —
+   * the value the shared integrated-rate timeline has reached — NOT from the
+   * bar the loop was captured on, and NOT from the loop window.
+   */
+  private pendingRelease: ({ at: number; pos: number; oldGen: number; newGen: number } | null)[] = [
+    null,
+    null,
+    null,
+    null,
+  ];
+
+  /** Frames the lane will actually start reading at, per scheduled release. */
+  lastReleasePlan: { lane: number; boundaryPos: number; sourceFrame: number; at: number }[] = [];
+
+  private scheduleLoopRelease(id: TrackId, t: TrackRuntime): { ok: boolean; detail: string } {
+    const ctx = this.ctx;
+    if (!ctx) return { ok: false, detail: "audio not unlocked" };
+    if (!t.loop.enabled) return { ok: true, detail: `lane ${id + 1} had no loop to release` };
+
+    // Stopped or silent lane: nothing is audible, so drop the window and let
+    // the next start read the hidden timeline normally.
+    if (!this.requestedPlaying || t.sources.length === 0) {
+      t.loop = { ...t.loop, enabled: false };
+      this.invalidateSeams();
+      return { ok: true, detail: `lane ${id + 1} loop released while stopped — next start reads the song position` };
+    }
+
+    const grid = this.songGrid;
+    const now = ctx.currentTime;
+    const hiddenNow = this.timeline.positionAt(now);
+    const boundaryPos = grid ? nextBarAfter(grid, hiddenNow) : hiddenNow + 0.02;
+    const at = this.timeline.timeAtPosition(now, boundaryPos);
+    if (at == null) {
+      return {
+        ok: false,
+        detail: `lane ${id + 1} release deferred — the rate curve is still settling, so the bar boundary is not yet solvable`,
+      };
+    }
+
+    const sr = ctx.sampleRate;
+    const sourceFrame = Math.round(boundaryPos * sr);
+    const outgoing = [...t.sources];
+    const oldGen = t.generation;
+    // The replacement source must be a STRAIGHT source: spawn reads
+    // t.loop.enabled for its mirrored-window wrap, so the window is closed for
+    // the spawn call and re-opened for the old source's remaining seams.
+    const savedEnabled = t.loop.enabled;
+    t.loop = { ...t.loop, enabled: false };
+    const live = this.spawn(t, at, boundaryPos, true);
+    t.loop = { ...t.loop, enabled: savedEnabled };
+    if (!live) {
+      t.loop = { ...t.loop, enabled: false };
+      return { ok: false, detail: `lane ${id + 1} release failed — no decoded buffer` };
+    }
+    for (const s of outgoing) this.fadeOutAndStop(t, s, at);
+    this.pendingRelease[id] = { at, pos: boundaryPos, oldGen, newGen: live.gen };
+    this.lastReleasePlan = [
+      ...this.lastReleasePlan.filter((r) => r.lane !== id).slice(-3),
+      { lane: id, boundaryPos, sourceFrame, at },
+    ];
+
+    if (t.engineMode === "worklet" && t.worklet) {
+      // Worklet parity: the processor gets the SAME landing expressed as an
+      // absolute source frame plus the shared context frame to apply it on.
+      void t.worklet.post({
+        type: "releaseLoop",
+        targetSourceFrame: sourceFrame,
+        fadeFrames: Math.round(SEAM_FADE_S * sr),
+        applyAtContextFrame: Math.round(at * sr),
+      });
+    }
+
+    return {
+      ok: true,
+      detail:
+        `lane ${id + 1} loop release scheduled for the next bar at ${boundaryPos.toFixed(3)}s ` +
+        `(source frame ${sourceFrame}, ctx ${at.toFixed(3)}s) — rejoining the hidden song timeline`,
+    };
+  }
+
+  /** Finalise any release whose crossfade has completed. */
+  private settlePendingReleases(now: number) {
+    for (let i = 0; i < this.pendingRelease.length; i++) {
+      const p = this.pendingRelease[i];
+      if (!p || now < p.at + SEAM_FADE_S) continue;
+      const t = this.tracks[i]!;
+      t.loop = { ...t.loop, enabled: false };
+      t.committedSeamAt = null;
+      t.seamGeneration++;
+      // Any straggler from before the boundary is gone by construction, but
+      // sweep by generation so a mis-timed wrap can never survive the release.
+      for (const s of [...t.sources]) {
+        // Only the release replacement survives the boundary — every other
+        // voice (including a wrap spawned while the release was pending) is
+        // reading the loop window, not the hidden song timeline.
+        if (s.gen === p.newGen) continue;
+        try {
+          s.node.stop();
+        } catch {
+          /* already stopped */
+        }
+      }
+      this.pendingRelease[i] = null;
+    }
   }
 
   // ------------------------------------------------------------------ gains
@@ -1510,7 +1702,7 @@ export class AudioEngine {
    */
   readonly headLanes = new HeadLanes({
     ctx: () => this.ctx,
-    destination: () => this.master,
+    destination: () => this.headsBus,
     sourceBuffer: () => {
       const s = this.headLanes.source;
       return s == null ? null : (this.tracks[s]?.buffer ?? null);
@@ -1536,6 +1728,86 @@ export class AudioEngine {
   headsRms(): number {
     return this.headLanes.rms();
   }
+
+  /**
+   * The ONE gate that decides whether the normal four-stem mix reaches the
+   * master. Heads and the stem mix are UNCORRELATED sources, so the handoff is
+   * equal-power (sin/cos), not complementary-linear.
+   */
+  private crossfadeBuses(toHeads: boolean, seconds = 0.04) {
+    const ctx = this.ctx;
+    const n = this.normalBus;
+    const h = this.headsBus;
+    if (!ctx || !n || !h) return;
+    const at = ctx.currentTime;
+    const N = 64;
+    const up = new Float32Array(N);
+    const down = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+      const x = (i / (N - 1)) * (Math.PI / 2);
+      up[i] = Math.sin(x);
+      down[i] = Math.cos(x);
+    }
+    const apply = (p: AudioParam, curve: Float32Array) => {
+      try {
+        p.cancelScheduledValues(at);
+        p.setValueAtTime(p.value, at);
+        p.setValueCurveAtTime(curve, at, seconds);
+      } catch {
+        p.value = curve[curve.length - 1]!;
+      }
+    };
+    apply(n.gain, toHeads ? down : up);
+    apply(h.gain, toHeads ? up : down);
+    this.busGate = { normal: toHeads ? 0 : 1, heads: toHeads ? 1 : 0 };
+    // Hard-pin the endpoint so float curve tails can never leave a residual
+    // open gate: after the fade the closed bus is EXACTLY 0.
+    setTimeout(() => {
+      if (this.ctx !== ctx) return;
+      const closing = toHeads ? n.gain : h.gain;
+      const opening = toHeads ? h.gain : n.gain;
+      try {
+        closing.cancelScheduledValues(ctx.currentTime);
+        closing.setValueAtTime(0, ctx.currentTime);
+        opening.cancelScheduledValues(ctx.currentTime);
+        opening.setValueAtTime(1, ctx.currentTime);
+      } catch {
+        /* noop */
+      }
+    }, Math.ceil(seconds * 1000) + 20);
+  }
+
+  /** Post-gate RMS of the normal four-stem bus (what it gives the master). */
+  normalBusRms(): number {
+    return tapRms(this.normalTap);
+  }
+
+  /** Post-gate RMS of the heads bus. */
+  headsBusRms(): number {
+    return tapRms(this.headsTap);
+  }
+
+  /**
+   * Gate values — proof of which bus is open.
+   *
+   * `normal`/`heads` are the SCHEDULED gate the engine committed to. The live
+   * AudioParam readings are reported separately because Chrome stops updating
+   * `AudioParam.value` on a node with no live inputs (an idle heads bus keeps
+   * reporting its last rendered value even though its automation ran), which
+   * makes the raw param a misleading isolation witness on its own.
+   */
+  busGains(): { normal: number; heads: number; liveNormal: number; liveHeads: number } {
+    return {
+      normal: this.busGate.normal,
+      heads: this.busGate.heads,
+      liveNormal: this.normalBus?.gain.value ?? 0,
+      liveHeads: this.headsBus?.gain.value ?? 0,
+    };
+  }
+
+  /** The gate the engine last committed to, independent of param rendering. */
+  private busGate = { normal: 1, heads: 0 };
+
 
   /** Independent read position (seconds) of each of the four lane heads. */
   headPositions(): number[] {
@@ -1638,17 +1910,11 @@ export class AudioEngine {
   private teardownHeadVoices() {
     const at = this.ctx?.currentTime ?? 0;
     for (let i = 0; i < 4; i++) this.killHeadVoice(i, at, false);
-    if (this.headsBus) {
-      try {
-        this.headsBus.disconnect();
-      } catch {
-        /* noop */
-      }
-      this.headsBus = null;
-      this.headsTap = null;
-
-    }
+    // The heads bus itself is PERMANENT (built in buildGraph) — only voices
+    // die. Nulling the bus here is what previously left orphaned voices with
+    // no gate to close, so the bus gain stays as the single audible authority.
   }
+
 
   /** Push the current head table to whichever engine is serving heads. */
   private pushHeads() {
@@ -1719,6 +1985,10 @@ export class AudioEngine {
     this.heads = { ...emptyHeads(), active: true, engine: null, enteredAtFrame: Math.round(this.ctx.currentTime * this.ctx.sampleRate) };
     this.preHeadsMutes = null;
     this.applyAudibilityAll();
+    // Defect 1: the normal four-stem bus is GATED SHUT for the whole of heads
+    // mode. Its sources keep running (the hidden song timeline must not stop),
+    // they simply contribute nothing to the master.
+    this.crossfadeBuses(true);
     return r;
   }
 
@@ -1753,6 +2023,9 @@ export class AudioEngine {
     // Stems rejoin the hidden timeline where it now is, through the normal
     // click-free audibility ramp.
     this.applyAudibilityAll();
+    // Re-open the normal bus; heads voices are already stopped and their bus
+    // closes on the same equal-power curve.
+    this.crossfadeBuses(false);
     return r;
   }
 
@@ -3308,7 +3581,7 @@ export class AudioEngine {
           const bounds = this.loopBounds(t);
           // Loop-mode transitions are NOT click-free by themselves: entering or
           // leaving the window relocates the read pointer.
-          const relocated = bounds && enabled ? this.relocate(t, bounds.start) : false;
+          const relocated = bounds && enabled ? this.relocateLane(t, bounds.start) : false;
           return this.ack(
             cmd,
             "completed",
@@ -3334,7 +3607,7 @@ export class AudioEngine {
             });
           }
           const bounds = this.loopBounds(t);
-          const relocated = bounds ? this.relocate(t, bounds.start) : false;
+          const relocated = bounds ? this.relocateLane(t, bounds.start) : false;
           return this.ack(
             cmd,
             "completed",
@@ -3612,7 +3885,8 @@ export class AudioEngine {
           if (!t) return this.ack(cmd, "rejected", `no lane ${i}`);
           const bars = Math.max(0.25, Number(p["bars"] ?? 1));
           if (cmd.type === "loop.release") {
-            return this.execute({ ...cmd, type: "loop.set", payload: { track: i, enabled: false } });
+            const r = this.scheduleLoopRelease(i, t);
+            return this.ack(cmd, r.ok ? "completed" : "rejected", r.detail);
           }
           // Length and start both come from the ANALYSED song grid: bars are
           // real bars of the detected tempo, and a capture begins on the bar
