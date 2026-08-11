@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { DEMO_NOTICE, buildDemoProject } from "@/audio/demo";
+import { DEMO_NOTICE, DEMO_TITLE, buildDemoProject } from "@/audio/demo";
 import { ROLE_LABEL, STEM_ROLE_LIST, formatBytes, type StemRole } from "@/audio/format";
 import { analyzeGridForSession, ingestSequential, ingestStem, ROLE_TRACK } from "@/audio/ingest";
 import { describeGrid } from "@/audio/gridAnalysis";
@@ -112,14 +112,16 @@ export function ProjectDrawer({ engine, status, control }: Props) {
   }, [engine, pending, refresh, detectGrid]);
 
   const loadDemo = useCallback(async () => {
-    setBusy("generating demo stems…");
+    setBusy("downloading demo stems…");
     session.reset();
     engine.resetDecodeCounters();
     const controller = new AbortController();
     abort.current = controller;
+    const stems = await buildDemoProject(controller.signal);
+    setBusy("decoding demo stems…");
     await ingestSequential(
       engine,
-      buildDemoProject().map((stem) => ({
+      stems.map((stem) => ({
         role: stem.role,
         file: new File([stem.blob], stem.filename, { type: "audio/wav" }),
         provenance: "bundled-demo" as const,
@@ -129,11 +131,12 @@ export function ProjectDrawer({ engine, status, control }: Props) {
         onResult: (r) => note(r.ok, `${ROLE_LABEL[r.role]} — ${r.detail}`),
       },
     );
-    session.set({ name: "demo session", source: "demo" });
+    session.set({ name: DEMO_TITLE, source: "demo" });
+    await detectGrid();
     abort.current = null;
     setBusy(null);
     void refresh();
-  }, [engine, refresh]);
+  }, [engine, refresh, detectGrid]);
 
   const save = useCallback(async () => {
     setBusy("saving project…");
