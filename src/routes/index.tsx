@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { DeviceSurface } from "@/device/DeviceSurface";
+import { InteractiveSP1 } from "@/device/InteractiveSP1";
 import { KeyboardPanel } from "@/device/KeyboardPanel";
 import { SystemPage } from "@/device/SystemPage";
 import { ControlsGuide, LESSONS } from "@/device/ControlsGuide";
@@ -82,6 +82,7 @@ function LabPage() {
     rawLog,
     gestureLog,
     handlers,
+    photo,
     arbiter,
     heldKeys,
     globalScrub,
@@ -197,15 +198,11 @@ function LabPage() {
                 {mounted && status.contextState === "running" ? `audio live · ${status.sampleRate ?? "?"} Hz` : "audio ready"}
               </p>
             </div>
-            <DeviceSurface
+            <InteractiveSP1
               svgRef={svgRef}
-              capRefs={capRefs}
               faderValues={state.tracks.map((t) => t.volume)}
-              pressed={state.pressed}
-              leds={leds}
-              showHitZones={showHitZones}
-              lights={state.lights}
-              {...handlers}
+              buttonActive={state.tracks.map((t) => t.content === "muted")}
+              photo={photo}
             />
             <div className="hidden lg:block">
               <KeyboardPanel
