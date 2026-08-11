@@ -27,5 +27,5 @@ export async function loadDemoProject(
       onResult: (r) => opts.onResult?.(r.ok, `${ROLE_LABEL[r.role]} — ${r.detail}`),
     },
   );
-  session.set({ name: "demo session", source: "demo" });
+  session.set({ name: DEMO_TITLE, source: "demo" });
 }
