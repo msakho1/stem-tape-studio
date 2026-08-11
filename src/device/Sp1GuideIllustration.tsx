@@ -140,6 +140,6 @@ export const Sp1GuideIllustration = memo(function Sp1GuideIllustration({
       data-active-controls={activeList}
       dangerouslySetInnerHTML={{ __html: MARKUP }}
     />
-
   );
-}
+});
+
