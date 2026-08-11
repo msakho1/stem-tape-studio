@@ -413,9 +413,8 @@ export class AudioEngine {
     return this.budget;
   }
 
-  setHighMemoryMode(on: boolean) {
-    this.highMemoryMode = on;
-  }
+  /** No-op: memory mode was removed; the ceiling is always the high one. */
+  setHighMemoryMode(_on?: boolean) {}
 
   onAck(fn: Listener) {
     this.listeners.add(fn);
