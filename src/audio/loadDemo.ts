@@ -14,9 +14,10 @@ export async function loadDemoProject(
 ): Promise<void> {
   session.reset();
   engine.resetDecodeCounters();
+  const stems = await buildDemoProject(opts.signal);
   await ingestSequential(
     engine,
-    buildDemoProject().map((stem) => ({
+    stems.map((stem) => ({
       role: stem.role,
       file: new File([stem.blob], stem.filename, { type: "audio/wav" }),
       provenance: "bundled-demo" as const,
