@@ -121,9 +121,12 @@ function LabPage() {
     <div className="min-h-screen pb-16 lg:pb-0">
       {/* ---------- top bar ---------- */}
       <header className="border-b border-[var(--bench-line)]">
-        <p className="px-4 pt-3 font-mono text-[9px] uppercase tracking-[0.24em] text-[var(--ink-faint)] md:px-8 md:text-[10px]">
-          unofficial · independent r&amp;d · not affiliated with teenage engineering
-        </p>
+        <div className="flex items-start justify-between gap-4 px-4 pt-3 md:px-8">
+          <p className="font-mono text-[9px] uppercase tracking-[0.24em] text-[var(--ink-faint)] md:text-[10px]">
+            unofficial · independent r&amp;d · not affiliated with teenage engineering
+          </p>
+          <SupportButton />
+        </div>
         <div className="flex flex-wrap items-center gap-x-8 gap-y-3 px-4 pb-4 pt-2 md:px-8">
           <div className="flex items-center gap-3">
             <svg width="34" height="34" viewBox="0 0 34 34" aria-hidden className="text-[var(--ink)]">
@@ -133,7 +136,16 @@ function LabPage() {
             <div>
               <h1 className="font-mono text-xl tracking-tight text-[var(--ink)]">Stem Tape</h1>
               <p className="font-mono text-[11px] text-[var(--ink-dim)]">
-                A four-track tape looper for the browser
+                A four-track tape looper for the browser · created by{" "}
+                <a
+                  href="https://www.instagram.com/mounirsakho?igsh=MXI3NDM0ZXBoMGR2ZQ%3D%3D&utm_source=qr"
+                  target="_blank"
+                  rel="noreferrer noopener"
+                  className="st-link"
+                  data-testid="creator-link"
+                >
+                  Mounir Sakho
+                </a>
               </p>
             </div>
           </div>
@@ -172,20 +184,9 @@ function LabPage() {
                 The SP-1 is the interface. Drag its faders, press its buttons, and combine gestures — audio responds
                 in real time.
               </p>
-              <div className="flex shrink-0 flex-col gap-2">
-                <button
-                  type="button"
-                  className="st-toggle"
-                  data-on={mounted && status.contextState === "running"}
-                  data-testid="unlock-audio"
-                  onClick={() => void unlock()}
-                >
-                  {mounted && status.contextState === "running" ? `audio live · ${status.sampleRate ?? "?"} Hz` : "enable audio"}
-                </button>
-                <button type="button" className="st-toggle" data-on={showHitZones} onClick={() => setShowHitZones((v) => !v)}>
-                  {showHitZones ? "hide controls" : "show controls"}
-                </button>
-              </div>
+              <p className="shrink-0 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--ink-faint)]">
+                {mounted && status.contextState === "running" ? `audio live · ${status.sampleRate ?? "?"} Hz` : "audio ready"}
+              </p>
             </div>
             <DeviceSurface
               svgRef={svgRef}
