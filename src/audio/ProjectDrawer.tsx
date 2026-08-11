@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DEMO_NOTICE, DEMO_TITLE, buildDemoProject } from "@/audio/demo";
-import { ROLE_LABEL, STEM_ROLE_LIST, formatBytes, type StemRole } from "@/audio/format";
+import { ROLE_LABEL, STEM_ROLE_LIST, formatBytes, inferRole, type StemRole } from "@/audio/format";
 import { analyzeGridForSession, ingestSequential, ingestStem, ROLE_TRACK } from "@/audio/ingest";
 import { describeGrid } from "@/audio/gridAnalysis";
 import { formatMiB } from "@/audio/memory";
@@ -17,10 +17,48 @@ interface Props {
 }
 
 /** A file waiting for the musician to confirm which stem cell it lands in. */
-interface PendingFile {
+export interface PendingFile {
   file: File;
   role: StemRole | "skip";
 }
+
+/**
+ * Bulk pick → one distinct role per file. Filename inference first, then the
+ * remaining roles in canonical order, so four files always propose four cells.
+ */
+export function proposeMapping(files: File[]): PendingFile[] {
+  const rows: PendingFile[] = files.slice(0, STEM_ROLE_LIST.length).map((file) => ({ file, role: "skip" }));
+  const taken = new Set<StemRole>();
+  for (const row of rows) {
+    const guess = inferRole(row.file.name);
+    if (guess && !taken.has(guess)) {
+      row.role = guess;
+      taken.add(guess);
+    }
+  }
+  for (const row of rows) {
+    if (row.role !== "skip") continue;
+    const free = STEM_ROLE_LIST.find((r) => !taken.has(r));
+    if (!free) break;
+    row.role = free;
+    taken.add(free);
+  }
+  return rows;
+}
+
+/**
+ * Reassigning a role SWAPS with the row that already holds it. The old
+ * behaviour forced that row to "skip", which silently dropped the fourth file.
+ */
+export function reassignRole(rows: PendingFile[], index: number, role: StemRole | "skip"): PendingFile[] {
+  const previous = rows[index]?.role ?? "skip";
+  return rows.map((row, j) => {
+    if (j === index) return { ...row, role };
+    if (role !== "skip" && row.role === role) return { ...row, role: previous };
+    return row;
+  });
+}
+
 
 /**
  * Project page — the only place audio enters or leaves the prototype.
@@ -81,10 +119,8 @@ export function ProjectDrawer({ engine, status, control }: Props) {
   /** Stage 1 of "load all": propose a mapping, do not ingest yet. */
   const stageAll = useCallback((files: FileList | null) => {
     if (!files || files.length === 0) return;
-    const picked = Array.from(files).slice(0, STEM_ROLE_LIST.length);
-    setPending(
-      picked.map((file, i) => ({ file, role: (STEM_ROLE_LIST[i] as StemRole | undefined) ?? "skip" })),
-    );
+    setPending(proposeMapping(Array.from(files)));
+
   }, []);
 
   /** Stage 2: the mapping was visibly confirmed — now decode. */
@@ -373,17 +409,11 @@ export function ProjectDrawer({ engine, status, control }: Props) {
                   className="border border-[var(--bench-line)] bg-transparent px-2 py-1 font-mono text-[10px] text-[var(--ink)]"
                   onChange={(e) => {
                     const role = e.target.value as StemRole | "skip";
-                    setPending((prev) =>
-                      (prev ?? []).map((row, j) =>
-                        j === i
-                          ? { ...row, role }
-                          : // a role can only be used once
-                            row.role === role && role !== "skip"
-                            ? { ...row, role: "skip" }
-                            : row,
-                      ),
-                    );
+                    // Swap, never drop: a role collision must not silently
+                    // turn another selected file into "skip".
+                    setPending((prev) => reassignRole(prev ?? [], i, role));
                   }}
+
                 >
                   {STEM_ROLE_LIST.map((role) => (
                     <option key={role} value={role}>
