@@ -6,6 +6,8 @@ import type { FaderIndex } from "@/input/faderSessions";
 
 /** Asset markup, scripts stripped. Nothing else in the SVG is modified. */
 const MARKUP = stripSvgScripts(markup);
+/** Stable object identity: a fresh one makes React re-set innerHTML and destroy the live SVG. */
+const HTML = { __html: MARKUP } as const;
 
 export interface InteractiveSP1Props {
   svgRef: React.RefObject<SVGSVGElement | null>;
@@ -31,7 +33,11 @@ type WithApi = SVGSVGElement & { stemTape?: Sp1PhotoApi };
  * ratio, and bridges its interaction events to the existing Stem Tape control
  * layer. It draws nothing of its own and overlays no controls.
  */
-export const InteractiveSP1 = memo(function InteractiveSP1({
+const arraysEqual = (a: readonly unknown[], b: readonly unknown[]) =>
+  a.length === b.length && a.every((v, i) => v === b[i]);
+
+export const InteractiveSP1 = memo(
+  function InteractiveSP1({
   svgRef,
   faderValues,
   buttonActive,
@@ -84,13 +90,11 @@ export const InteractiveSP1 = memo(function InteractiveSP1({
         photoRef.current.press(next, id);
       },
     });
-    (window as unknown as Record<string, unknown>)["__sp1boot"] = "setup" + String((((window as unknown as Record<string, number>)["__sp1n"] ?? 0) + 1)) ;
     // Seed the photographed caps from the authoritative state.
     const api = (svg as WithApi).stemTape;
     for (let i = 0; i < 4; i++) api?.setFader((i + 1) as StemChannel, faderValues[i] ?? 1);
 
     return () => {
-      (window as unknown as Record<string, unknown>)["__sp1boot"] = String((window as unknown as Record<string, unknown>)["__sp1boot"]) + "|cleanup";
       dispose();
       if (svgRef.current === svg) svgRef.current = null;
     };
@@ -124,7 +128,13 @@ export const InteractiveSP1 = memo(function InteractiveSP1({
       ref={hostRef}
       className="st-sp1-photo"
       data-testid="interactive-sp1"
-      dangerouslySetInnerHTML={{ __html: MARKUP }}
-    />
-  );
-});
+      dangerouslySetInnerHTML={HTML}
+      />
+    );
+  },
+  // Handlers are read through a ref, so only real surface state forces a render.
+  (prev, next) =>
+    prev.svgRef === next.svgRef &&
+    arraysEqual(prev.faderValues, next.faderValues) &&
+    arraysEqual(prev.buttonActive, next.buttonActive),
+);
