@@ -53,18 +53,18 @@ export function MiniSurface({
 
   return (
     <svg viewBox="40 40 640 700" className="h-40 w-full" role="img" aria-label="SP-1 control diagram">
-      <rect x="52" y="52" width="616" height="676" rx="26" fill="none" stroke={line} strokeWidth="3" />
+      <rect x="52" y="52" width="616" height="676" rx="26" fill="none" stroke={line} strokeWidth="8" />
       {/* faders */}
       {FADER_X.map((x, i) => (
         <g key={i}>
-          <rect x={x - 4} y={FADER_SLOT_Y} width="8" height={FADER_SLOT_H} rx="4" fill="none" stroke={line} strokeWidth="2" />
+          <rect x={x - 4} y={FADER_SLOT_Y} width="8" height={FADER_SLOT_H} rx="4" fill="none" stroke={line} strokeWidth="6" />
           <circle
             cx={x}
             cy={FADER_SLOT_Y + FADER_SLOT_H * 0.45}
             r="13"
             fill={on(`fader-${i + 1}` as Control) ? "var(--signal)" : "none"}
             stroke={line}
-            strokeWidth="2"
+            strokeWidth="6"
           >
             {motion === "fader" && on(`fader-${i + 1}` as Control) && (
               <animate
@@ -86,7 +86,7 @@ export function MiniSurface({
           r="17"
           fill={isHeld(`track-button-${i + 1}` as Control) ? "var(--signal)" : "none"}
           stroke={line}
-          strokeWidth="2"
+          strokeWidth="6"
         />
       ))}
       {/* volume buttons */}
@@ -94,7 +94,7 @@ export function MiniSurface({
         { c: "volume-minus" as Control, x: 176.4 },
         { c: "volume-plus" as Control, x: 276 },
       ].map((b) => (
-        <circle key={b.c} cx={b.x} cy={78.5} r="15" fill={isHeld(b.c) ? "var(--signal)" : "none"} stroke={line} strokeWidth="2" />
+        <circle key={b.c} cx={b.x} cy={78.5} r="15" fill={isHeld(b.c) ? "var(--signal)" : "none"} stroke={line} strokeWidth="6" />
       ))}
       {/* rocker */}
       <g>
@@ -106,7 +106,7 @@ export function MiniSurface({
           rx="22"
           fill={on("rocker-fwd") || on("rocker-rwd") ? "var(--signal)" : "none"}
           stroke={line}
-          strokeWidth="2"
+          strokeWidth="6"
         >
           {motion === "rocker" && (
             <animateTransform
@@ -120,7 +120,7 @@ export function MiniSurface({
         </rect>
       </g>
       {/* play + function rails */}
-      <rect x={612} y={180} width="50" height="114" rx="24" fill={isHeld("play") ? "var(--signal)" : "none"} stroke={line} strokeWidth="2" />
+      <rect x={612} y={180} width="50" height="114" rx="24" fill={isHeld("play") ? "var(--signal)" : "none"} stroke={line} strokeWidth="6" />
       <rect
         x={612}
         y={646}
