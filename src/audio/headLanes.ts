@@ -98,12 +98,40 @@ function freshLane(): LaneRuntime {
   };
 }
 
+/**
+ * Deterministic initial spread of four read positions across ONE source.
+ *
+ * The heads must never collapse onto a single position — that is the whole
+ * musical point of Heads mode. The spread is centred on the current transport
+ * position where the buffer allows it, and redistributed inward otherwise.
+ */
+export function distributeHeads(duration: number, current: number): number[] {
+  const dur = Math.max(0, duration);
+  if (!(dur > 0.05)) return [0, 0, 0, 0];
+  const fallback = [0.2, 0.4, 0.6, 0.8].map((f) => f * dur);
+  if (dur < 8) return fallback;
+  const spacing = Math.min(Math.max(dur * 0.1, 8), 30);
+  const at = Math.min(Math.max(0, current), dur);
+  const raw = [at - 2 * spacing, at - spacing, at, at + spacing];
+  // Slide the whole comb into bounds before clamping, so the spacing survives.
+  const span = 3 * spacing;
+  if (span <= dur) {
+    let shift = 0;
+    if (raw[0]! < 0) shift = -raw[0]!;
+    else if (raw[3]! > dur) shift = dur - raw[3]!;
+    const out = raw.map((x) => x + shift);
+    return out.map((x) => Math.min(Math.max(0, x), dur));
+  }
+  return fallback;
+}
+
 export class HeadLanes {
   active = false;
+  /** Index of the ONE stem all four heads read. */
+  source: number | null = null;
+  sourceName: string | null = null;
   private lanes: LaneRuntime[] = [0, 1, 2, 3].map(freshLane);
   private bus: GainNode | null = null;
-  /** One gain per lane, landing in that lane's own FX chain. */
-  private laneBuses: (GainNode | null)[] = [null, null, null, null];
   private tap: AnalyserNode | null = null;
   private scrubbing: (boolean | null)[] = [null, null, null, null];
   /** Ordered evidence trail; the browser proof reads it verbatim. */
@@ -118,7 +146,11 @@ export class HeadLanes {
 
   // ------------------------------------------------------------- lifecycle
 
-  enter(entries?: HeadEntryLane[]): { ok: boolean; detail: string } {
+  /**
+   * Enter Heads: FOUR independent readers over the SAME decoded buffer, each
+   * parked at a different moment of that one stem.
+   */
+  enter(entry: HeadsEntry & { playing?: boolean }): { ok: boolean; detail: string } {
     const ctx = this.host.ctx();
     this.note("heads.enter.requested", -1, `entry requested — ctx ${ctx ? ctx.state : "absent"}`);
     if (!ctx) {
@@ -126,16 +158,23 @@ export class HeadLanes {
       return { ok: false, detail: "audio not unlocked" };
     }
     if (this.active) return { ok: true, detail: "heads already active" };
-    const loaded = [0, 1, 2, 3].filter((i) => this.host.buffer(i) != null);
-    if (loaded.length === 0) {
+    this.source = entry.source;
+    this.sourceName = entry.sourceName;
+    const buf = this.host.sourceBuffer();
+    if (!buf) {
+      this.source = null;
+      this.sourceName = null;
       this.note("heads.enter.rejected", -1, "no decoded lane to read");
       return { ok: false, detail: "heads rejected — no decoded lane to read" };
     }
     const dest0 = this.host.destination();
     if (!dest0) {
+      this.source = null;
+      this.sourceName = null;
       this.note("heads.enter.rejected", -1, "no output bus");
       return { ok: false, detail: "heads rejected — no output bus" };
     }
+    // ONE dedicated heads bus into the master chain. All four readers land here.
     const bus = ctx.createGain();
     bus.gain.value = 1;
     bus.connect(dest0);
@@ -144,45 +183,26 @@ export class HeadLanes {
     bus.connect(tap);
     this.bus = bus;
     this.tap = tap;
-    this.laneBuses = [0, 1, 2, 3].map((i) => {
-      const g = ctx.createGain();
-      g.gain.value = 1;
-      const dest = this.host.laneDestination(i) ?? dest0;
-      g.connect(dest);
-      // Measurement tap only — the audible path is the lane FX chain.
-      g.connect(tap);
-      return g;
-    });
-    // POSITION FIRST. Every lane is parked exactly where the song is before any
-    // moving/latch/anchor state is written, so no stale anchor can recompute an
-    // entry position (the reverse-continuity bug).
-    const at = Math.max(0, this.host.songPosition());
-    this.lanes = [0, 1, 2, 3].map(() => {
+    // POSITION FIRST: four DISTINCT read positions inside the one source,
+    // written before any moving/latch/anchor state exists.
+    const spread = distributeHeads(buf.duration, Math.max(0, this.host.songPosition()));
+    this.lanes = [0, 1, 2, 3].map((i) => {
       const l = freshLane();
-      l.posS = at;
+      l.posS = spread[i]!;
+      // While the tape is rolling all four heads sound at once — that layering
+      // of four moments of the same stem IS heads mode. Paused: parked, silent.
+      l.latched = entry.playing === true;
       return l;
     });
     this.active = true;
-    // Musical continuity: a stem that was audible at the instant of entry keeps
-    // sounding as its own head from `at`. Muted/inactive stems (and everything,
-    // when the transport is paused) stay parked at the same position.
-    const carried: number[] = [];
-    for (let i = 0; i < 4; i++) {
-      if (entries?.[i]?.audible && this.host.buffer(i) != null) {
-        this.lanes[i]!.latched = true;
-        carried.push(i + 1);
-      }
-    }
-    if (carried.length > 0) this.reconcile("entry continuation");
-    const detail =
-      carried.length > 0
-        ? `heads on — heads ${carried.join("+")} carried the playing stems from ${at.toFixed(3)}s, the rest parked there`
-        : `heads on — head N reads lane N, parked at ${at.toFixed(3)}s`;
+    if (entry.playing) this.reconcile("entry — four heads over one source");
+    const detail = `heads on — 4 heads reading ${entry.sourceName} at ${spread.map((s) => s.toFixed(2) + "s").join(" / ")}`;
     this.note("heads.enter.accepted", -1, detail);
     for (let i = 0; i < 4; i++) {
       const l = this.lanes[i]!;
       this.note("head.state", i, `pos ${l.posS.toFixed(3)}s moving ${l.moving} latched ${l.latched} muted ${l.muted} reverse ${l.reverse}`);
     }
+
     return { ok: true, detail };
   }
 
