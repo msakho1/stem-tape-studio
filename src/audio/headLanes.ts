@@ -61,18 +61,17 @@ interface LaneRuntime {
 
 export interface HeadLaneHost {
   ctx(): AudioContext | null;
-  /** Where the heads bus lands. Deliberately NOT the per-track chain: heads
-   *  must survive stem mutes and the transport being stopped. */
+  /** Where the heads bus lands — the master chain, never a per-stem chain. */
   destination(): AudioNode | null;
-  /** Per-lane landing node: lane N's head rides stem N's FX chain, entering
-   *  AFTER the stem's mute gate so a muted stem still passes its head. */
-  laneDestination(lane: number): AudioNode | null;
-  buffer(lane: number): AudioBuffer | null;
-  reversed(lane: number): AudioBuffer | null;
+  /** The ONE decoded buffer all four heads read. Never duplicated. */
+  sourceBuffer(): AudioBuffer | null;
+  /** Lazily built reverse copy of that same source. */
+  reversedSource(): AudioBuffer | null;
   barSeconds(): number;
-  /** Song position used as the default parking spot on entry. */
+  /** Song position used to centre the initial head distribution. */
   songPosition(): number;
 }
+
 
 const FADE_S = 0.008;
 const GRAIN_S = 0.07;
