@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DEMO_NOTICE, DEMO_TITLE, buildDemoProject } from "@/audio/demo";
-import { ROLE_LABEL, STEM_ROLE_LIST, formatBytes, type StemRole } from "@/audio/format";
+import { ROLE_LABEL, STEM_ROLE_LIST, formatBytes, inferRole, type StemRole } from "@/audio/format";
 import { analyzeGridForSession, ingestSequential, ingestStem, ROLE_TRACK } from "@/audio/ingest";
 import { describeGrid } from "@/audio/gridAnalysis";
 import { formatMiB } from "@/audio/memory";
