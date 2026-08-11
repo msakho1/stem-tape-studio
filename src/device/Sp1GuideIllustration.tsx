@@ -71,12 +71,23 @@ export function Sp1GuideIllustration({
   const host = useRef<HTMLDivElement>(null);
   const [frameIndex, setFrameIndex] = useState(0);
 
-  const heldIds = useMemo(() => held.map(assetControlId), [held]);
-  const targetIds = useMemo(
-    () => highlight.map(assetControlId).filter((id) => !heldIds.includes(id)),
-    [highlight, heldIds],
+  // Keyed on content, not array identity: callers pass fresh literals every
+  // render, and an identity-based memo would restart the timeline forever.
+  const heldKey = held.map(assetControlId).sort().join(",");
+  const targetKey = highlight
+    .map(assetControlId)
+    .filter((id) => !heldKey.split(",").includes(id))
+    .join(",");
+  const frames = useMemo(
+    () =>
+      buildFrames(
+        targetKey ? targetKey.split(",") : [],
+        heldKey ? heldKey.split(",") : [],
+        motion,
+      ),
+    [targetKey, heldKey, motion],
   );
-  const frames = useMemo(() => buildFrames(targetIds, heldIds, motion), [targetIds, heldIds, motion]);
+
 
   useEffect(() => {
     setFrameIndex(0);
