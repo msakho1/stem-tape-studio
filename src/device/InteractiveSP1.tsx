@@ -47,7 +47,6 @@ export const InteractiveSP1 = memo(function InteractiveSP1({
   useEffect(() => {
     const host = hostRef.current;
     const svg = host?.querySelector("svg") as SVGSVGElement | null;
-    (window as unknown as Record<string, unknown>)["__sp1boot"] = svg ? "found" : "missing";
     if (!svg) return;
     svgRef.current = svg;
     svg.style.width = "100%";
@@ -56,9 +55,7 @@ export const InteractiveSP1 = memo(function InteractiveSP1({
     svg.style.touchAction = "none";
     svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
 
-    let dispose = () => {};
-    try {
-    dispose = bootstrapSp1Photo(svg, {
+    const dispose = bootstrapSp1Photo(svg, {
       onFaderStart: (ch, v, id) => {
         localRef.current[ch - 1] = v;
         photoRef.current.faderStart((ch - 1) as FaderIndex, v, id);
@@ -87,11 +84,6 @@ export const InteractiveSP1 = memo(function InteractiveSP1({
         photoRef.current.press(next, id);
       },
     });
-    } catch (err) {
-      (window as unknown as Record<string, unknown>)["__sp1err"] = String(err) + String((err as Error)?.stack);
-    }
-
-    (window as unknown as Record<string, unknown>)["__sp1boot"] = "api:" + typeof (svg as WithApi).stemTape;
     // Seed the photographed caps from the authoritative state.
     const api = (svg as WithApi).stemTape;
     for (let i = 0; i < 4; i++) api?.setFader((i + 1) as StemChannel, faderValues[i] ?? 1);
