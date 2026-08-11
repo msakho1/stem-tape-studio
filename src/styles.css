@@ -1090,3 +1090,47 @@
 }
 
 
+
+/*
+ * Physical gesture motion. A fader that "moves" must actually travel, and a
+ * rocker must deflect: while a continuous gesture is active, the highlighted
+ * group is translated along the axis the finger would push it.
+ */
+@keyframes sp1-fader-travel {
+  0%, 100% { transform: translateY(0); }
+  25% { transform: translateY(-14px); }
+  75% { transform: translateY(14px); }
+}
+@keyframes sp1-rocker-travel {
+  0%, 100% { transform: translateY(0); }
+  25% { transform: translateY(-9px); }
+  75% { transform: translateY(9px); }
+}
+/* Two upward clicks, then two downward clicks — a push, not a sweep. */
+@keyframes sp1-rocker-click {
+  0%, 10% { transform: translateY(0); }
+  15%, 20% { transform: translateY(-9px); }
+  25%, 30% { transform: translateY(0); }
+  35%, 40% { transform: translateY(-9px); }
+  45%, 55% { transform: translateY(0); }
+  60%, 65% { transform: translateY(9px); }
+  70%, 75% { transform: translateY(0); }
+  80%, 85% { transform: translateY(9px); }
+  90%, 100% { transform: translateY(0); }
+}
+.sp1-illustration [data-control] {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.sp1-illustration[data-gesture="fader"][data-active-controls~="fader-1"] [data-control="fader-1"],
+.sp1-illustration[data-gesture="fader"][data-active-controls~="fader-2"] [data-control="fader-2"],
+.sp1-illustration[data-gesture="fader"][data-active-controls~="fader-3"] [data-control="fader-3"],
+.sp1-illustration[data-gesture="fader"][data-active-controls~="fader-4"] [data-control="fader-4"] {
+  animation: sp1-fader-travel 1600ms ease-in-out infinite;
+}
+.sp1-illustration[data-gesture="rocker"][data-active-controls~="rocker"] [data-control="rocker"] {
+  animation: sp1-rocker-travel 1600ms ease-in-out infinite;
+}
+.sp1-illustration[data-gesture="rocker-click"][data-active-controls~="rocker"] [data-control="rocker"] {
+  animation: sp1-rocker-click 2200ms ease-out infinite;
+}

@@ -88,7 +88,7 @@ export const LESSONS: Lesson[] = [
     gesture: "FUNCTION + Track + VOL −/+",
     body: "Hold FUNCTION and the Track button, then press VOL − or VOL + to halve or double that lane's loop length.",
     highlight: ["function", "track-button-1", "volume-minus", "volume-plus"],
-    motion: "press",
+    motion: "sequence",
     held: ["function", "track-button-1"],
   },
   {
@@ -97,7 +97,7 @@ export const LESSONS: Lesson[] = [
     gesture: "Rocker",
     body: "Push the rocker without FUNCTION for varispeed: the tape drags or runs fast, pitch and all. Double-tap it to snap back to 1.00×.",
     highlight: ["rocker-fwd", "rocker-rwd"],
-    motion: "rocker",
+    motion: "rocker-click",
   },
   {
     id: "fx",
