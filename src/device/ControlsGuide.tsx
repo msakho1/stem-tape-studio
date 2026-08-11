@@ -52,7 +52,7 @@ export function MiniSurface({
   const line = "var(--ink)";
 
   return (
-    <svg viewBox="40 40 640 700" className="h-40 w-full" role="img" aria-label="SP-1 control diagram">
+    <svg viewBox="40 40 640 700" className="h-56 w-full" role="img" aria-label="SP-1 control diagram">
       <rect x="52" y="52" width="616" height="676" rx="26" fill="none" stroke={line} strokeWidth="8" />
       {/* faders */}
       {FADER_X.map((x, i) => (
@@ -320,7 +320,7 @@ export function ControlsGuide({
                   </span>
                 </button>
                 {isOpen && (
-                  <div className="grid gap-2 border-t border-[var(--bench-line)] px-3 py-3 md:grid-cols-[1fr_180px]">
+                  <div className="grid gap-2 border-t border-[var(--bench-line)] px-3 py-3 md:grid-cols-[1fr_240px]">
                     <p className="font-mono text-[11px] leading-relaxed text-[var(--ink-dim)]">{l.body}</p>
                     <MiniSurface highlight={l.highlight} motion={l.motion} held={l.held ?? []} />
                   </div>
