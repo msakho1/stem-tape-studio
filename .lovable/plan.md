@@ -80,29 +80,34 @@ acknowledgement, the heads-bus RMS, the head positions, and the readout sentence
 8. FX processing while in Heads — an FX press affects the heads bus, verified by RMS/spectrum change
 9. Exit restoration — see the explicit rule below
 
-### Explicit Heads exit rule (confirmed: temporary Heads performance)
+### Explicit Heads exit rule (temporary Heads performance, live song timeline)
 
-Heads is a strictly non-destructive performance layer. On exit, the song lane is restored to
-**exactly** its pre-entry state and nothing done inside Heads leaks out:
+Heads is a non-destructive performance layer, but the song does not freeze behind it. The
+hidden song timeline keeps running whenever transport is playing, so exiting after 30 s in
+Heads must not rewind the song by 30 s.
 
-| Property | On Heads exit |
-| --- | --- |
-| mute / solo | restored verbatim |
-| fader level | restored verbatim |
-| playback position | restored — the song clock never moved because a head moved |
-| lane reverse applied in Heads | discarded, lane returns to its pre-entry direction |
-| loop captured in Heads | discarded, lane returns to its pre-entry loop (or none) |
-| FX applied in Heads | discarded with the heads bus |
+- Head scrubbing, reversing and looping never move the hidden song timeline.
+- While transport plays, the hidden song timeline keeps advancing normally through the same
+  integrated rate curve as always.
+- On Heads exit, the normal stems rejoin at the hidden timeline's **current** position with a
+  click-free equal-power crossfade.
+- If transport stayed paused for the whole Heads session, the stems return to the original
+  parked position.
+- Mutes, solos and fader levels restore from the entry snapshot.
+- Heads-only loops, reverses and FX are discarded and never written to song-lane state.
+- After the handoff, exactly one playback path exists per stem — no orphaned head voice and no
+  duplicated source node.
 
-Implementation: a single snapshot taken at `heads.enter` is the authority for the restore, and
-Heads-layer reverse/loop are written to head state only, never to the song lane. This is
-asserted by a test that diffs the full lane state before entry and after exit.
+Exit test: playback position is compared against the **expected hidden-timeline position**
+(entry position + integrated transport advance), within the existing frame tolerance — never
+bit-for-bit against the entry frame. Mute/solo/level/direction/loop are compared verbatim
+against the entry snapshot, and the live voice count per stem is asserted to be exactly one.
 
 Any of these that fails gets a real fix. I am not pre-committing to "no DSP changes": if the
 end-to-end pass shows the fault is in `headLanes`/`engine` audio wiring rather than in
 arbitration, that code is changed too. What I will avoid is speculative DSP churn.
 
-## Step 4b — Strict tap-arbitration tests
+## Step 4b — Strict tap arbitration, with measured latency
 
 Deferred arbitration must be proven, not assumed. New tests at the gesture-engine level and at
 the reducer level:
@@ -113,8 +118,23 @@ the reducer level:
 - `×1`, `×2`, `×3` are mutually exclusive: for any tap burst exactly one action is emitted.
 - `pointercancel` (and pointer-capture loss) mid-burst leaves **no** pending action, no timer
   and no emitted command.
-- The same four assertions run against real pointer events on the rendered SP-1, not only the
+- The same assertions run against real pointer events on the rendered SP-1, not only the
   synthetic gesture engine.
+
+**Measured feel.** Record the actual latency from final `pointerup` to the emitted command for
+×1, ×2 and ×3, on the rendered surface, and report the numbers. Mutual exclusivity needs a
+deferral window, but Track controls must not feel sluggish: if the ×1 path is waiting the full
+multi-tap window unnecessarily, the window is tightened or the resolution is made adaptive
+(close early once the burst can no longer grow) and the improved numbers are reported.
+
+## Step 4c — Audio recovery after backgrounding
+
+"First interaction" covers cold start only. Also tested: tab hidden/restored, OS-level
+interruption and an explicitly suspended `AudioContext`. On return the context resumes
+automatically — on `visibilitychange` and on the next interaction — and playback continues
+without exposing any Enable Audio control. Verified by suspending the context mid-playback and
+confirming state returns to `running` with audible output and a correct playhead.
+
 
 
 ## Step 5 — Feedback comes from the accepted acknowledgement
