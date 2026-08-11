@@ -57,7 +57,7 @@ export function MiniSurface({
       {/* faders */}
       {FADER_X.map((x, i) => (
         <g key={i}>
-          <rect x={x - 4} y={FADER_SLOT_Y} width="8" height={FADER_SLOT_H} rx="4" fill="none" stroke={line} strokeWidth="6" />
+          <rect x={x - 4} y={FADER_SLOT_Y} width="8" height={FADER_SLOT_H} rx="4" fill="none" stroke={line} strokeWidth="4" />
           <circle
             cx={x}
             cy={FADER_SLOT_Y + FADER_SLOT_H * 0.45}
@@ -129,7 +129,7 @@ export function MiniSurface({
         rx="24"
         fill={isHeld("function") ? "var(--signal)" : "none"}
         stroke={line}
-        strokeWidth="2"
+        strokeWidth="6"
       />
       {/* gesture callout: filled red flash whose blink count = the tap count */}
       {zones.map((z, i) => {
@@ -145,7 +145,7 @@ export function MiniSurface({
             fill="var(--signal)"
             fillOpacity="0.85"
             stroke="var(--signal)"
-            strokeWidth="2"
+            strokeWidth="4"
             opacity={sustained ? 0.85 : 0}
           >
             {!sustained && (
