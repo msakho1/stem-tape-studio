@@ -1703,6 +1703,7 @@ export class AudioEngine {
         if (t.loop.reverse !== s.loop.reverse) {
           this.execute({
             id: `heads-exit-reverse-${i}`,
+            t: Date.now(),
             type: "tape.reverse",
             payload: { track: i, on: s.loop.reverse },
           } as AudioCommand);
