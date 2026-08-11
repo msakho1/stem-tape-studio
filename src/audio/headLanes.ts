@@ -291,9 +291,9 @@ export class HeadLanes {
   private startLane(i: number, why: string) {
     const ctx = this.host.ctx();
     const l = this.lanes[i]!;
-    const laneBus = this.laneBuses[i] ?? this.bus;
+    const laneBus = this.bus;
     if (!ctx || !laneBus || l.moving) return;
-    const buf = this.host.buffer(i);
+    const buf = this.host.sourceBuffer();
     if (!buf) return;
     if (l.ended && !l.loop && l.posS >= buf.duration - 1e-3) l.posS = 0;
     l.ended = false;
@@ -303,7 +303,7 @@ export class HeadLanes {
     const node = ctx.createBufferSource();
     const dur = buf.duration;
     const rev = l.reverse;
-    const src = rev ? this.host.reversed(i) ?? buf : buf;
+    const src = rev ? this.host.reversedSource() ?? buf : buf;
     node.buffer = src;
     let offset = rev ? dur - l.posS : l.posS;
     if (l.loop) {
@@ -518,8 +518,8 @@ export class HeadLanes {
 
   private grain(i: number, atS: number) {
     const ctx = this.host.ctx();
-    const buf = this.host.buffer(i);
-    const laneBus = this.laneBuses[i] ?? this.bus;
+    const buf = this.host.sourceBuffer();
+    const laneBus = this.bus;
     if (!ctx || !buf || !laneBus) return;
     const l = this.lanes[i]!;
     const g = ctx.createGain();
