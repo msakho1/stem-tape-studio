@@ -9,51 +9,77 @@ import { FADER_X, FADER_SLOT_Y, FADER_SLOT_H, HIT_ZONES, type Control } from "@/
  */
 export type MiniMotion = "press" | "fader" | "rocker" | "double" | "triple" | "hold";
 
+/**
+ * Gesture cadence for the red callout, expressed on a fixed 3 s cycle so the
+ * blink COUNT reads as the tap count: one flash = single tap, two = double
+ * tap, three = triple tap, sustained = hold.
+ */
+const CYCLE = "3s";
+function pulse(motion: MiniMotion): { values: string; keyTimes: string } {
+  // one flash occupies 0.18 s (on 0.09 s, off 0.09 s) inside the 3 s cycle
+  const flash = (n: number) => {
+    const v: string[] = ["0"];
+    const k: number[] = [0];
+    for (let i = 0; i < n; i++) {
+      const t = 0.02 + i * 0.09;
+      v.push("1", "1", "0");
+      k.push(t, t + 0.03, t + 0.05);
+    }
+    v.push("0");
+    k.push(1);
+    return { values: v.join(";"), keyTimes: k.map((x) => x.toFixed(3)).join(";") };
+  };
+  if (motion === "double") return flash(2);
+  if (motion === "triple") return flash(3);
+  if (motion === "hold") return { values: "0;1;1;0;0", keyTimes: "0;0.030;0.560;0.600;1" };
+  return flash(1);
+}
+
 export function MiniSurface({
   highlight,
   motion = "press",
+  held = [],
 }: {
   highlight: Control[];
   motion?: MiniMotion;
+  /** Controls shown as continuously engaged (e.g. FUNCTION during a chord). */
+  held?: Control[];
 }) {
   const on = (c: Control) => highlight.includes(c);
+  const isHeld = (c: Control) => held.includes(c);
   const zones = HIT_ZONES.filter((z) => on(z.control));
-  const faderHi = highlight.filter((c) => c.startsWith("fader-"));
-  const dur = motion === "triple" ? "1.2s" : motion === "double" ? "0.9s" : motion === "hold" ? "2s" : "1.4s";
+  const { values, keyTimes } = pulse(motion);
+  const line = "var(--ink)";
 
   return (
-    <svg viewBox="40 40 640 700" className="h-40 w-full" role="img" aria-label="SP-1 control diagram">
-      <rect x="52" y="52" width="616" height="676" rx="26" fill="none" stroke="var(--bench-line)" strokeWidth="2" />
-      {/* faders */}
+    <svg viewBox="26 26 668 768" className="h-56 w-full" role="img" aria-label="SP-1 control diagram">
+      <rect x="52" y="52" width="616" height="676" rx="26" fill="none" stroke={line} strokeWidth="8" />
+      {/* faders — slot plus the SP-1's tall cap */}
       {FADER_X.map((x, i) => (
         <g key={i}>
+          <rect x={x - 5} y={FADER_SLOT_Y} width="10" height={FADER_SLOT_H} rx="5" fill="none" stroke={line} strokeWidth="4" />
           <rect
-            x={x - 4}
-            y={FADER_SLOT_Y}
-            width="8"
-            height={FADER_SLOT_H}
-            rx="4"
-            fill="none"
-            stroke="var(--bench-line)"
-          />
-          <circle
-            cx={x}
-            cy={FADER_SLOT_Y + FADER_SLOT_H * 0.45}
-            r="13"
-            fill={on(`fader-${i + 1}` as Control) ? "var(--signal)" : "var(--bench-raised)"}
-            stroke="var(--bench-line)"
+            x={x - 11}
+            y={FADER_SLOT_Y + FADER_SLOT_H * 0.45 - 28}
+            width="22"
+            height="56"
+            rx="11"
+            fill={on(`fader-${i + 1}` as Control) ? "var(--signal)" : "var(--ink)"}
+            stroke={line}
+            strokeWidth="4"
           >
             {motion === "fader" && on(`fader-${i + 1}` as Control) && (
               <animate
-                attributeName="cy"
-                values={`${FADER_SLOT_Y + 16};${FADER_SLOT_Y + FADER_SLOT_H - 16};${FADER_SLOT_Y + 16}`}
+                attributeName="y"
+                values={`${FADER_SLOT_Y + 4};${FADER_SLOT_Y + FADER_SLOT_H - 60};${FADER_SLOT_Y + 4}`}
                 dur="2.4s"
                 repeatCount="indefinite"
               />
             )}
-          </circle>
+          </rect>
         </g>
       ))}
+
       {/* track buttons */}
       {FADER_X.map((x, i) => (
         <circle
@@ -61,8 +87,9 @@ export function MiniSurface({
           cx={x}
           cy={634.5}
           r="17"
-          fill={on(`track-button-${i + 1}` as Control) ? "var(--signal)" : "none"}
-          stroke="var(--bench-line)"
+          fill={isHeld(`track-button-${i + 1}` as Control) ? "var(--signal)" : "none"}
+          stroke={line}
+          strokeWidth="6"
         />
       ))}
       {/* volume buttons */}
@@ -70,14 +97,7 @@ export function MiniSurface({
         { c: "volume-minus" as Control, x: 176.4 },
         { c: "volume-plus" as Control, x: 276 },
       ].map((b) => (
-        <circle
-          key={b.c}
-          cx={b.x}
-          cy={78.5}
-          r="15"
-          fill={on(b.c) ? "var(--signal)" : "none"}
-          stroke="var(--bench-line)"
-        />
+        <circle key={b.c} cx={b.x} cy={78.5} r="15" fill={isHeld(b.c) ? "var(--signal)" : "none"} stroke={line} strokeWidth="6" />
       ))}
       {/* rocker */}
       <g>
@@ -88,7 +108,8 @@ export function MiniSurface({
           height="130"
           rx="22"
           fill={on("rocker-fwd") || on("rocker-rwd") ? "var(--signal)" : "none"}
-          stroke="var(--bench-line)"
+          stroke={line}
+          strokeWidth="6"
         >
           {motion === "rocker" && (
             <animateTransform
@@ -102,51 +123,51 @@ export function MiniSurface({
         </rect>
       </g>
       {/* play + function rails */}
-      <rect
-        x={612}
-        y={180}
-        width="50"
-        height="114"
-        rx="24"
-        fill={on("play") ? "var(--signal)" : "none"}
-        stroke="var(--bench-line)"
-      />
+      <rect x={612} y={180} width="50" height="114" rx="24" fill={isHeld("play") ? "var(--signal)" : "none"} stroke={line} strokeWidth="6" />
       <rect
         x={612}
         y={646}
         width="50"
         height="114"
         rx="24"
-        fill={on("function") ? "var(--signal)" : "none"}
-        stroke="var(--bench-line)"
+        fill={isHeld("function") ? "var(--signal)" : "none"}
+        stroke={line}
+        strokeWidth="6"
       />
-      {/* pulse over every highlighted zone */}
-      {zones.map((z, i) => (
-        <rect
-          key={`z${i}`}
-          x={z.x}
-          y={z.y}
-          width={z.width}
-          height={z.height}
-          rx="10"
-          fill="none"
-          stroke="var(--signal)"
-          strokeWidth="2"
-        >
-          {motion !== "fader" && (
-            <animate
-              attributeName="opacity"
-              values={motion === "hold" ? "1;0.35;1" : "1;0.05;1"}
-              dur={dur}
-              repeatCount="indefinite"
-            />
-          )}
-        </rect>
-      ))}
-      {faderHi.length === 0 && null}
+      {/* gesture callout: filled red flash whose blink count = the tap count */}
+      {zones.map((z, i) => {
+        const sustained = isHeld(z.control) || motion === "fader" || motion === "rocker";
+        return (
+          <rect
+            key={`z${i}`}
+            x={z.x}
+            y={z.y}
+            width={z.width}
+            height={z.height}
+            rx="10"
+            fill="var(--signal)"
+            fillOpacity="0.85"
+            stroke="var(--signal)"
+            strokeWidth="4"
+            opacity={sustained ? 0.85 : 0}
+          >
+            {!sustained && (
+              <animate
+                attributeName="opacity"
+                values={values}
+                keyTimes={keyTimes}
+                dur={CYCLE}
+                calcMode="linear"
+                repeatCount="indefinite"
+              />
+            )}
+          </rect>
+        );
+      })}
     </svg>
   );
 }
+
 
 interface Lesson {
   id: string;
@@ -155,6 +176,8 @@ interface Lesson {
   body: string;
   highlight: Control[];
   motion: MiniMotion;
+  /** Controls held down for the whole gesture (drawn solid, never blinking). */
+  held?: Control[];
 }
 
 /** The essential moves, in the order a performer learns them. */
@@ -198,6 +221,7 @@ export const LESSONS: Lesson[] = [
     body: "Hold FUNCTION and move a fader: that stem scrubs audibly under your finger. Release at the sound you want — the stem parks there. Then double-tap its Track button to capture a bar from that point.",
     highlight: ["function", "fader-1"],
     motion: "fader",
+    held: ["function"],
   },
   {
     id: "scrub-all",
@@ -206,6 +230,7 @@ export const LESSONS: Lesson[] = [
     body: "Hold FUNCTION and push the rocker to shuttle all four stems together, forwards or backwards. Release and playback lands cleanly at the new position.",
     highlight: ["function", "rocker-fwd", "rocker-rwd"],
     motion: "rocker",
+    held: ["function"],
   },
   {
     id: "reverse",
@@ -214,6 +239,7 @@ export const LESSONS: Lesson[] = [
     body: "Hold FUNCTION and double-tap a Track button to play that stem backwards — with or without a loop. Its hidden song position keeps moving, so turning reverse off rejoins the song where it now is.",
     highlight: ["function", "track-button-4"],
     motion: "double",
+    held: ["function"],
   },
   {
     id: "resize",
@@ -222,6 +248,7 @@ export const LESSONS: Lesson[] = [
     body: "Hold FUNCTION and the Track button, then press VOL − or VOL + to halve or double that lane's loop length.",
     highlight: ["function", "track-button-1", "volume-minus", "volume-plus"],
     motion: "press",
+    held: ["function", "track-button-1"],
   },
   {
     id: "varispeed",
@@ -246,6 +273,7 @@ export const LESSONS: Lesson[] = [
     body: "Hold FUNCTION and triple-tap PLAY. Each stem gets its own tape head that plays on its own clock — even while the transport is paused. Tap to mute, hold to audition, triple-tap to latch a head playing, FUNCTION + fader to scrub it. Leaving Heads discards head-only loops and reverses and rejoins the song where it now is.",
     highlight: ["function", "play"],
     motion: "triple",
+    held: ["function"],
   },
 ];
 
@@ -295,9 +323,9 @@ export function ControlsGuide({
                   </span>
                 </button>
                 {isOpen && (
-                  <div className="grid gap-2 border-t border-[var(--bench-line)] px-3 py-3 md:grid-cols-[1fr_180px]">
+                  <div className="grid gap-2 border-t border-[var(--bench-line)] px-3 py-3 md:grid-cols-[1fr_240px]">
                     <p className="font-mono text-[11px] leading-relaxed text-[var(--ink-dim)]">{l.body}</p>
-                    <MiniSurface highlight={l.highlight} motion={l.motion} />
+                    <MiniSurface highlight={l.highlight} motion={l.motion} held={l.held ?? []} />
                   </div>
                 )}
               </div>
