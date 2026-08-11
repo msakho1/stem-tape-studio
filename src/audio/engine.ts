@@ -254,6 +254,8 @@ export interface EngineStatus {
   lastError: string | null;
   /** Phase 6 heads/PRINT truth, straight from the engine. */
   heads: HeadsState;
+  /** Heads v2 truth: the four independent lane heads, straight from HeadLanes. */
+  headLanes: HeadLaneSnapshot[];
   headsSummary: string;
   /** Live scrub evidence: open gestures, kernel telemetry, emitted events. */
   scrub: {
