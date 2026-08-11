@@ -853,6 +853,8 @@ export class AudioEngine {
   }
 
   private stopSources() {
+    // Cancellation: a teardown is allowed to delete a protected target.
+    this.pendingRelease = [null, null, null, null];
     for (const t of this.tracks) {
       for (const s of t.sources) {
         try {
