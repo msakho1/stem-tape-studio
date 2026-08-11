@@ -1035,11 +1035,14 @@
 }
 
 /* Authoritative SP-1 illustration (src/assets/stem-tape-sp1-outline.svg) */
+.sp1-illustration {
+  max-width: 280px;
+  margin-inline: auto;
+}
 .sp1-illustration > svg {
   display: block;
   width: 100%;
   height: auto;
-  max-height: 320px;
   object-fit: contain;
   background: transparent;
   border: 0;
