@@ -409,17 +409,11 @@ export function ProjectDrawer({ engine, status, control }: Props) {
                   className="border border-[var(--bench-line)] bg-transparent px-2 py-1 font-mono text-[10px] text-[var(--ink)]"
                   onChange={(e) => {
                     const role = e.target.value as StemRole | "skip";
-                    setPending((prev) =>
-                      (prev ?? []).map((row, j) =>
-                        j === i
-                          ? { ...row, role }
-                          : // a role can only be used once
-                            row.role === role && role !== "skip"
-                            ? { ...row, role: "skip" }
-                            : row,
-                      ),
-                    );
+                    // Swap, never drop: a role collision must not silently
+                    // turn another selected file into "skip".
+                    setPending((prev) => reassignRole(prev ?? [], i, role));
                   }}
+
                 >
                   {STEM_ROLE_LIST.map((role) => (
                     <option key={role} value={role}>
