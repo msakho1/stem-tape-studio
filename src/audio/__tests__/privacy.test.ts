@@ -81,23 +81,38 @@ function pcm(sr = 22050, seconds = 3): Float32Array {
 describe("privacy: no user audio ever leaves the device", () => {
   it("grid analysis of decoded PCM opens no network transport", () => {
     const grid = analyzeSongGrid([{ channel: pcm(), sampleRate: 22050 }]);
-    expect(grid.bpm).toBeGreaterThan(0);
+    expect(grid?.bpm ?? 0).toBeGreaterThan(0);
     expect(calls).toEqual([]);
   });
 
   it("session persistence serialises no audio and opens no network transport", () => {
-    const session: SessionState = {
-      id: "p1",
+    const session = {
+      projectId: "p1",
       name: "audit session",
-      createdAt: 1,
-      updatedAt: 2,
+      saved: false,
+      savedAt: null,
+      source: "upload",
       bpm: 120,
+      bpmSource: "provisional",
+      lastError: null,
       songGrid: null,
-      stems: [
-        { id: "s1", lane: 0, name: "drums.wav", bytes: 1024, durationS: 3, sampleRate: 22050, channels: 1 },
-      ],
+      stems: {
+        one: {
+          role: "one",
+          filename: "drums.wav",
+          blob: new Blob([new Uint8Array(64)], { type: "audio/wav" }),
+          blobKey: "k1",
+          contentHash: "h1",
+          provenance: "upload",
+          trashed: false,
+          probe: { duration: 3, channels: 1, decodedSampleRate: 48000, sniff: { container: "wav", sampleRate: 48000 } },
+        },
+      },
     } as unknown as SessionState;
-    const stored = JSON.stringify(toStoredProject(session));
+    const control = { grid: { bpm: 120, source: "provisional" }, songGrid: null } as unknown as Parameters<
+      typeof toStoredProject
+    >[1];
+    const stored = JSON.stringify(toStoredProject(session, control, "indexeddb"));
     expect(stored).not.toMatch(/data:audio|base64|Float32|ArrayBuffer/i);
     expect(calls).toEqual([]);
   });
