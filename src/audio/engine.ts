@@ -942,7 +942,7 @@ export class AudioEngine {
       // loop start, which is exactly how a released loop used to rejoin the
       // song several seconds behind the hidden timeline.
       const pendingRel = this.pendingRelease[li];
-      const pool = pendingRel ? t.sources.filter((s) => s.gen <= pendingRel.oldGen) : t.sources;
+      const pool = pendingRel ? t.sources.filter((s) => s.gen !== pendingRel.newGen) : t.sources;
       const live = pool[pool.length - 1];
       if (!live) continue;
       // The lane's seam is derived from ITS OWN read pointer, expressed in the
@@ -964,10 +964,7 @@ export class AudioEngine {
       const wrapped = this.spawn(t, at, bounds.start, true);
       // A wrap spawned UNDER a pending release must die at the boundary too —
       // the replacement owns everything from that bar onwards.
-      if (wrapped && pendingRel) {
-        this.fadeOutAndStop(t, wrapped, pendingRel.at);
-        this.pendingRelease[li] = { ...pendingRel, oldGen: wrapped.gen };
-      }
+      if (wrapped && pendingRel) this.fadeOutAndStop(t, wrapped, pendingRel.at);
       t.committedSeamAt = seamAt;
       t.seamCount++;
     }
@@ -1115,7 +1112,10 @@ export class AudioEngine {
       // Any straggler from before the boundary is gone by construction, but
       // sweep by generation so a mis-timed wrap can never survive the release.
       for (const s of [...t.sources]) {
-        if (s.gen > p.oldGen) continue;
+        // Only the release replacement survives the boundary — every other
+        // voice (including a wrap spawned while the release was pending) is
+        // reading the loop window, not the hidden song timeline.
+        if (s.gen === p.newGen) continue;
         try {
           s.node.stop();
         } catch {
