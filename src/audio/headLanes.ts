@@ -16,12 +16,13 @@
  */
 
 /**
- * Per-lane entry descriptor captured by the engine BEFORE any heads state is
- * touched: was this stem audible at the instant Heads was entered?
+ * Entry descriptor: which stem the four heads read, and its display name.
  */
-export interface HeadEntryLane {
-  audible: boolean;
+export interface HeadsEntry {
+  source: number;
+  sourceName: string;
 }
+
 
 export interface HeadLaneSnapshot {
   lane: number;
