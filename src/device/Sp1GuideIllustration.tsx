@@ -75,7 +75,7 @@ function buildFrames(
 }
 
 
-export function Sp1GuideIllustration({
+export const Sp1GuideIllustration = memo(function Sp1GuideIllustration({
   highlight = [],
   motion = "press",
   held = [],
@@ -86,7 +86,6 @@ export function Sp1GuideIllustration({
   held?: Control[];
   className?: string;
 }) {
-  const host = useRef<HTMLDivElement>(null);
   const [frameIndex, setFrameIndex] = useState(0);
 
   // Keyed on content, not array identity: callers pass fresh literals every
@@ -124,25 +123,23 @@ export function Sp1GuideIllustration({
     };
   }, [frames, cycle]);
 
-  useEffect(() => {
-    const root = host.current?.querySelector("svg");
-    if (!root) return;
-    const active = new Set(frames[frameIndex]?.active ?? []);
-    root.querySelectorAll<SVGGElement>("[data-control]").forEach((g) => {
-      const id = g.getAttribute("data-control") ?? "";
-      if (active.has(id)) g.setAttribute("data-active", "true");
-      else g.removeAttribute("data-active");
-    });
-  }, [frameIndex, frames]);
-
+  /**
+   * Activation is expressed as a React-owned attribute on the host, never as a
+   * post-render write into the injected SVG. The page re-renders this tree
+   * several times a second while the engine runs; imperative `data-active`
+   * attributes were being wiped by the very next render, which is what turned
+   * every gesture into a sub-frame flash.
+   */
+  const activeList = (frames[frameIndex]?.active ?? []).join(" ");
 
   return (
     <div
-      ref={host}
       className={`sp1-illustration w-full ${className ?? ""}`}
       role="img"
       aria-label="SP-1 control illustration"
+      data-active-controls={activeList}
       dangerouslySetInnerHTML={{ __html: MARKUP }}
     />
+
   );
 }
