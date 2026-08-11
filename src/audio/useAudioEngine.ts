@@ -84,6 +84,8 @@ export function useAudioEngine(commands: AudioCommand[]) {
       const d = engine.status();
       return {
         active: engine.headLanes.active,
+        engineHeadsActive: engine.heads.active,
+        contextState: d.contextState,
         transportPosition: d.position,
         transportPlaying: d.actuallyPlaying,
         headsRms: engine.headsRms(),
