@@ -3,12 +3,15 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { DeviceSurface } from "@/device/DeviceSurface";
 import { KeyboardPanel } from "@/device/KeyboardPanel";
 import { SystemPage } from "@/device/SystemPage";
+import { ControlsGuide, LESSONS, MiniSurface } from "@/device/ControlsGuide";
+import { SupportButton } from "@/components/SupportButton";
 import { KEY_HINTS, useDeviceSurface } from "@/device/useDeviceSurface";
 import { CONTROL_LABELS } from "@/device/geometry";
 import { ProjectDrawer } from "@/audio/ProjectDrawer";
 import { Waveform } from "@/components/tape/Waveform";
 import { useAudioEngine } from "@/audio/useAudioEngine";
 import { formatBytes } from "@/audio/format";
+import { narrateCommand } from "@/device/narrate";
 import { loadDemoProject } from "@/audio/loadDemo";
 import { session, type SessionState } from "@/audio/session";
 
