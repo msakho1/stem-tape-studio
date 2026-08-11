@@ -3715,6 +3715,7 @@ export class AudioEngine {
       memoryStatement: describeVerdict(this.decodedTotalBytes, this.budget, this.highMemoryMode),
       lastError: this.lastError,
       heads: this.heads,
+      headLanes: this.headLanes.snapshot(),
       headsSummary: headsSummary(this.heads),
       scrub: {
         open: this.scrubTrackers.map((t, i) =>
