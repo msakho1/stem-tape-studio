@@ -110,9 +110,13 @@ export class HeadLanes {
 
   // ------------------------------------------------------------- lifecycle
 
-  enter(): { ok: boolean; detail: string } {
+  enter(entries?: HeadEntryLane[]): { ok: boolean; detail: string } {
     const ctx = this.host.ctx();
-    if (!ctx) return { ok: false, detail: "audio not unlocked" };
+    this.note("heads.enter.requested", -1, `entry requested — ctx ${ctx ? ctx.state : "absent"}`);
+    if (!ctx) {
+      this.note("heads.enter.rejected", -1, "audio not unlocked");
+      return { ok: false, detail: "audio not unlocked" };
+    }
     if (this.active) return { ok: true, detail: "heads already active" };
     const loaded = [0, 1, 2, 3].filter((i) => this.host.buffer(i) != null);
     if (loaded.length === 0) return { ok: false, detail: "heads rejected — no decoded lane to read" };
