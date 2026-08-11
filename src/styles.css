@@ -1048,6 +1048,45 @@
   border: 0;
   box-shadow: none;
 }
+/*
+ * Gesture activation is driven by data-active-controls on the host element,
+ * not by attributes written into the injected SVG: the surrounding page
+ * re-renders while audio runs and would wipe any imperative attribute within
+ * ~100 ms, which read as a strobe rather than a tap.
+ */
 .sp1-illustration [data-control] .highlight {
-  transition: opacity 120ms linear;
+  transition: opacity 180ms ease-out;
 }
+.sp1-illustration[data-active-controls~="play"] [data-control="play"] .highlight,
+.sp1-illustration[data-active-controls~="function"] [data-control="function"] .highlight,
+.sp1-illustration[data-active-controls~="rocker"] [data-control="rocker"] .highlight,
+.sp1-illustration[data-active-controls~="volume-minus"] [data-control="volume-minus"] .highlight,
+.sp1-illustration[data-active-controls~="volume-plus"] [data-control="volume-plus"] .highlight,
+.sp1-illustration[data-active-controls~="fader-1"] [data-control="fader-1"] .highlight,
+.sp1-illustration[data-active-controls~="fader-2"] [data-control="fader-2"] .highlight,
+.sp1-illustration[data-active-controls~="fader-3"] [data-control="fader-3"] .highlight,
+.sp1-illustration[data-active-controls~="fader-4"] [data-control="fader-4"] .highlight,
+.sp1-illustration[data-active-controls~="track-1"] [data-control="track-1"] .highlight,
+.sp1-illustration[data-active-controls~="track-2"] [data-control="track-2"] .highlight,
+.sp1-illustration[data-active-controls~="track-3"] [data-control="track-3"] .highlight,
+.sp1-illustration[data-active-controls~="track-4"] [data-control="track-4"] .highlight {
+  opacity: 1;
+}
+.sp1-illustration[data-active-controls~="play"] [data-control="play"] .control-shape,
+.sp1-illustration[data-active-controls~="function"] [data-control="function"] .control-shape,
+.sp1-illustration[data-active-controls~="rocker"] [data-control="rocker"] .control-shape,
+.sp1-illustration[data-active-controls~="volume-minus"] [data-control="volume-minus"] .control-shape,
+.sp1-illustration[data-active-controls~="volume-plus"] [data-control="volume-plus"] .control-shape,
+.sp1-illustration[data-active-controls~="fader-1"] [data-control="fader-1"] .control-shape,
+.sp1-illustration[data-active-controls~="fader-2"] [data-control="fader-2"] .control-shape,
+.sp1-illustration[data-active-controls~="fader-3"] [data-control="fader-3"] .control-shape,
+.sp1-illustration[data-active-controls~="fader-4"] [data-control="fader-4"] .control-shape,
+.sp1-illustration[data-active-controls~="track-1"] [data-control="track-1"] .control-shape,
+.sp1-illustration[data-active-controls~="track-2"] [data-control="track-2"] .control-shape,
+.sp1-illustration[data-active-controls~="track-3"] [data-control="track-3"] .control-shape,
+.sp1-illustration[data-active-controls~="track-4"] [data-control="track-4"] .control-shape {
+  stroke: #ef7479;
+  stroke-width: 2;
+}
+
+

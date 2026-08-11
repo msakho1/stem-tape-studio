@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import type { Control } from "@/device/geometry";
 import svgMarkup from "@/assets/stem-tape-sp1-outline.svg?raw";
 
@@ -21,43 +21,61 @@ export function assetControlId(c: Control): string {
 const MARKUP = svgMarkup.replace(/<\?xml[^>]*\?>/, "");
 
 interface Frame {
-  /** milliseconds from the start of the 3 s cycle */
+  /** milliseconds from the start of the cycle */
   at: number;
   active: string[];
 }
 
-const CYCLE_MS = 3000;
+/**
+ * Gesture cadence, in milliseconds. A tap must read as a deliberate press and
+ * release, not a strobe: the control stays lit long enough to be seen (ON),
+ * clears fully between taps (GAP), and the whole gesture is followed by a rest
+ * so the eye can count the taps before the cycle repeats.
+ */
+const LEAD_MS = 700; // qualifier (FUNCTION etc.) engages first
+const ON_MS = 520; // a tap is visibly held
+const GAP_MS = 380; // release between taps in a multi-tap
+const SUSTAIN_MS = 2600; // fader travel / rocker deflection / hold
+const REST_MS = 1500; // dark rest before the gesture repeats
 
 /**
  * Build the gesture timeline: qualifiers (held controls, e.g. FUNCTION) engage
  * first and stay lit, then the target control pulses once / twice / three
  * times, or stays lit for continuous motions (fader travel, rocker deflection)
- * and holds.
+ * and holds. Returns the frames plus the total cycle length so slower gestures
+ * are not clipped by a fixed period.
  */
-function buildFrames(target: string[], held: string[], motion: MiniMotion): Frame[] {
+function buildFrames(
+  target: string[],
+  held: string[],
+  motion: MiniMotion,
+): { frames: Frame[]; cycle: number } {
   const base = held;
   const all = [...held, ...target.filter((t) => !held.includes(t))];
   const frames: Frame[] = [{ at: 0, active: [] }];
-  const lead = held.length > 0 ? 500 : 0;
-  if (lead) frames.push({ at: 220, active: base });
+  const lead = held.length > 0 ? LEAD_MS : 0;
+  if (lead) frames.push({ at: 200, active: base });
+
+  const start = lead + 200;
 
   if (motion === "fader" || motion === "rocker" || motion === "hold") {
-    frames.push({ at: lead + 220, active: all });
-    frames.push({ at: 2500, active: base });
-    return frames;
+    frames.push({ at: start, active: all });
+    frames.push({ at: start + SUSTAIN_MS, active: base });
+    return { frames, cycle: start + SUSTAIN_MS + REST_MS };
   }
 
   const count = motion === "double" ? 2 : motion === "triple" ? 3 : 1;
-  let t = lead + 220;
+  let t = start;
   for (let i = 0; i < count; i++) {
     frames.push({ at: t, active: all });
-    frames.push({ at: t + 220, active: base });
-    t += 400;
+    frames.push({ at: t + ON_MS, active: base });
+    t += ON_MS + GAP_MS;
   }
-  return frames;
+  return { frames, cycle: t + REST_MS };
 }
 
-export function Sp1GuideIllustration({
+
+export const Sp1GuideIllustration = memo(function Sp1GuideIllustration({
   highlight = [],
   motion = "press",
   held = [],
@@ -68,7 +86,6 @@ export function Sp1GuideIllustration({
   held?: Control[];
   className?: string;
 }) {
-  const host = useRef<HTMLDivElement>(null);
   const [frameIndex, setFrameIndex] = useState(0);
 
   // Keyed on content, not array identity: callers pass fresh literals every
@@ -78,7 +95,7 @@ export function Sp1GuideIllustration({
     .map(assetControlId)
     .filter((id) => !heldKey.split(",").includes(id))
     .join(",");
-  const frames = useMemo(
+  const { frames, cycle } = useMemo(
     () =>
       buildFrames(
         targetKey ? targetKey.split(",") : [],
@@ -87,7 +104,6 @@ export function Sp1GuideIllustration({
       ),
     [targetKey, heldKey, motion],
   );
-
 
   useEffect(() => {
     setFrameIndex(0);
@@ -98,33 +114,32 @@ export function Sp1GuideIllustration({
       frames.forEach((f, i) => {
         timers.push(window.setTimeout(() => !stopped && setFrameIndex(i), f.at));
       });
-      timers.push(window.setTimeout(run, CYCLE_MS));
+      timers.push(window.setTimeout(run, cycle));
     };
     run();
     return () => {
       stopped = true;
       timers.forEach(clearTimeout);
     };
-  }, [frames]);
+  }, [frames, cycle]);
 
-  useEffect(() => {
-    const root = host.current?.querySelector("svg");
-    if (!root) return;
-    const active = new Set(frames[frameIndex]?.active ?? []);
-    root.querySelectorAll<SVGGElement>("[data-control]").forEach((g) => {
-      const id = g.getAttribute("data-control") ?? "";
-      if (active.has(id)) g.setAttribute("data-active", "true");
-      else g.removeAttribute("data-active");
-    });
-  }, [frameIndex, frames]);
+  /**
+   * Activation is expressed as a React-owned attribute on the host, never as a
+   * post-render write into the injected SVG. The page re-renders this tree
+   * several times a second while the engine runs; imperative `data-active`
+   * attributes were being wiped by the very next render, which is what turned
+   * every gesture into a sub-frame flash.
+   */
+  const activeList = (frames[frameIndex]?.active ?? []).join(" ");
 
   return (
     <div
-      ref={host}
       className={`sp1-illustration w-full ${className ?? ""}`}
       role="img"
       aria-label="SP-1 control illustration"
+      data-active-controls={activeList}
       dangerouslySetInnerHTML={{ __html: MARKUP }}
     />
   );
-}
+});
+
