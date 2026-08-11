@@ -408,14 +408,22 @@ export class HeadLanes {
   toggleReverse(i: number): { ok: boolean; detail: string } {
     if (!this.active) return { ok: false, detail: "heads mode is not active" };
     const l = this.lanes[i]!;
-    l.posS = this.position(i);
+    // Freeze the CURRENT (still forward) read position BEFORE flipping, and
+    // re-assert it after stopLane. stopLane recomputes posS from the anchor,
+    // and with the direction already flipped that recomputation ran backwards
+    // from the old anchor and clamped the head to 0.
+    const at = this.position(i);
     l.reverse = !l.reverse;
     if (l.moving) {
       this.stopLane(i, "reverse");
+      l.posS = at;
       this.reconcile("reverse");
+    } else {
+      l.posS = at;
     }
-    return { ok: true, detail: `head ${i + 1} → ${l.reverse ? "REVERSE" : "forward"} at ${l.posS.toFixed(3)}s` };
+    return { ok: true, detail: `head ${i + 1} → ${l.reverse ? "REVERSE" : "forward"} at ${at.toFixed(3)}s` };
   }
+
 
   // --------------------------------------------------------------- scrub
 
