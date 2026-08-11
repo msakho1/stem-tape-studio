@@ -173,6 +173,8 @@ interface Lesson {
   body: string;
   highlight: Control[];
   motion: MiniMotion;
+  /** Controls held down for the whole gesture (drawn solid, never blinking). */
+  held?: Control[];
 }
 
 /** The essential moves, in the order a performer learns them. */
@@ -216,6 +218,7 @@ export const LESSONS: Lesson[] = [
     body: "Hold FUNCTION and move a fader: that stem scrubs audibly under your finger. Release at the sound you want — the stem parks there. Then double-tap its Track button to capture a bar from that point.",
     highlight: ["function", "fader-1"],
     motion: "fader",
+    held: ["function"],
   },
   {
     id: "scrub-all",
@@ -224,6 +227,7 @@ export const LESSONS: Lesson[] = [
     body: "Hold FUNCTION and push the rocker to shuttle all four stems together, forwards or backwards. Release and playback lands cleanly at the new position.",
     highlight: ["function", "rocker-fwd", "rocker-rwd"],
     motion: "rocker",
+    held: ["function"],
   },
   {
     id: "reverse",
@@ -232,6 +236,7 @@ export const LESSONS: Lesson[] = [
     body: "Hold FUNCTION and double-tap a Track button to play that stem backwards — with or without a loop. Its hidden song position keeps moving, so turning reverse off rejoins the song where it now is.",
     highlight: ["function", "track-button-4"],
     motion: "double",
+    held: ["function"],
   },
   {
     id: "resize",
@@ -240,6 +245,7 @@ export const LESSONS: Lesson[] = [
     body: "Hold FUNCTION and the Track button, then press VOL − or VOL + to halve or double that lane's loop length.",
     highlight: ["function", "track-button-1", "volume-minus", "volume-plus"],
     motion: "press",
+    held: ["function", "track-button-1"],
   },
   {
     id: "varispeed",
@@ -264,6 +270,7 @@ export const LESSONS: Lesson[] = [
     body: "Hold FUNCTION and triple-tap PLAY. Each stem gets its own tape head that plays on its own clock — even while the transport is paused. Tap to mute, hold to audition, triple-tap to latch a head playing, FUNCTION + fader to scrub it. Leaving Heads discards head-only loops and reverses and rejoins the song where it now is.",
     highlight: ["function", "play"],
     motion: "triple",
+    held: ["function"],
   },
 ];
 
@@ -315,7 +322,7 @@ export function ControlsGuide({
                 {isOpen && (
                   <div className="grid gap-2 border-t border-[var(--bench-line)] px-3 py-3 md:grid-cols-[1fr_180px]">
                     <p className="font-mono text-[11px] leading-relaxed text-[var(--ink-dim)]">{l.body}</p>
-                    <MiniSurface highlight={l.highlight} motion={l.motion} />
+                    <MiniSurface highlight={l.highlight} motion={l.motion} held={l.held} />
                   </div>
                 )}
               </div>
