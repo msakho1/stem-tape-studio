@@ -52,7 +52,7 @@ export function MiniSurface({
   const line = "var(--ink)";
 
   return (
-    <svg viewBox="30 30 660 750" className="h-56 w-full" role="img" aria-label="SP-1 control diagram">
+    <svg viewBox="26 26 668 768" className="h-56 w-full" role="img" aria-label="SP-1 control diagram">
       <rect x="52" y="52" width="616" height="676" rx="26" fill="none" stroke={line} strokeWidth="8" />
       {/* faders — slot plus the SP-1's tall cap */}
       {FADER_X.map((x, i) => (
