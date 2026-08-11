@@ -86,9 +86,59 @@ function LabPage() {
     arbiter,
     heldKeys,
     globalScrub,
+    applyEngineHeads,
   } = useDeviceSurface();
 
-  const { engine, status, acks, unlock, unlockNote } = useAudioEngine(state.commands);
+  const { engine, status, acks, unlock, unlockNote, headsInFlight } = useAudioEngine(state.commands);
+
+  // ---- Heads: the engine's ack is the only writer of headsMode -------------
+  const [headsNotice, setHeadsNotice] = useState<string | null>(null);
+  const headsAck = acks.find((a) => a.type === "heads.enter" || a.type === "heads.exit");
+  const headsAckId = headsAck?.id ?? 0;
+  useEffect(() => {
+    if (!headsAck) return;
+    if (headsAck.type === "heads.exit") {
+      applyEngineHeads({ active: false });
+      setHeadsNotice(null);
+      return;
+    }
+    if (headsAck.status === "completed") {
+      applyEngineHeads({ active: true });
+      setHeadsNotice(null);
+      return;
+    }
+    // Rejected entry: the surface must NOT claim heads, and the musician gets
+    // product language, never the engine's internal detail string.
+    applyEngineHeads({ active: false });
+    setHeadsNotice(
+      /decoded lane|no output bus/i.test(headsAck.detail)
+        ? "HEADS unavailable · load a song first"
+        : "HEADS unavailable · audio engine locked",
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [headsAckId]);
+
+  // Clear the notice once it has been read.
+  useEffect(() => {
+    if (!headsNotice) return;
+    const id = window.setTimeout(() => setHeadsNotice(null), 3200);
+    return () => window.clearTimeout(id);
+  }, [headsNotice]);
+
+  // Low-frequency failsafe ONLY: catches an engine that stopped heads on its
+  // own (context loss, lifecycle reconcile). It never runs while a heads
+  // command is in flight, so it cannot fight the ack path.
+  const engineHeadsActive = status.heads.active;
+  useEffect(() => {
+    if (headsInFlight > 0) return;
+    const id = window.setInterval(() => {
+      if (headsInFlight > 0) return;
+      if (engine.heads.active !== state.headsMode) applyEngineHeads({ active: engine.heads.active });
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [engine, headsInFlight, state.headsMode, applyEngineHeads, engineHeadsActive]);
+
+
   const control = {
     faders: state.tracks.map((t) => t.volume),
     mutes: state.tracks.map((t) => t.content === "muted"),
