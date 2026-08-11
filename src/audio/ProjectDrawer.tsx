@@ -3,10 +3,10 @@ import { DEMO_NOTICE, buildDemoProject } from "@/audio/demo";
 import { ROLE_LABEL, STEM_ROLE_LIST, formatBytes, type StemRole } from "@/audio/format";
 import { analyzeGridForSession, ingestSequential, ingestStem, ROLE_TRACK } from "@/audio/ingest";
 import { describeGrid } from "@/audio/gridAnalysis";
-import { describeVerdict, formatMiB, judge, reverseCostBytes } from "@/audio/memory";
+import { formatMiB } from "@/audio/memory";
 import { downmixToMonoWav, persistDerived, predictMonoDownmix } from "@/audio/saver";
-import { resolveBpm, session, toStoredProject, type SessionState } from "@/audio/session";
-import { projectStore, type StorageReport, type StoredProject } from "@/audio/store";
+import { session, toStoredProject, type SessionState } from "@/audio/session";
+import { projectStore, type StoredProject } from "@/audio/store";
 import type { AudioEngine, EngineStatus, TrackId } from "@/audio/engine";
 
 interface Props {
@@ -16,10 +16,14 @@ interface Props {
   control: StoredProject["control"];
 }
 
+/** A file waiting for the musician to confirm which stem cell it lands in. */
+interface PendingFile {
+  file: File;
+  role: StemRole | "skip";
+}
+
 /**
  * Project page — the only place audio enters or leaves the prototype.
- * Privacy contract: no network request in this app ever contains user-selected
- * or user-recorded audio. (Bundled demo assets are ordinary app fetches.)
  *
  * Unit contract: every memory figure below is MiB (1024²), labelled MiB.
  */
@@ -27,10 +31,10 @@ export function ProjectDrawer({ engine, status, control }: Props) {
   const [sess, setSess] = useState<SessionState>(() => session.get());
   const [busy, setBusy] = useState<string | null>(null);
   const [log, setLog] = useState<{ ok: boolean; text: string }[]>([]);
-  const [report, setReport] = useState<StorageReport | null>(null);
   const [projects, setProjects] = useState<StoredProject[]>([]);
-  const [manualBpm, setManualBpm] = useState<string>("");
-  const [expanded, setExpanded] = useState(false);
+  const [pending, setPending] = useState<PendingFile[] | null>(null);
+  const [renaming, setRenaming] = useState(false);
+  const [nameDraft, setNameDraft] = useState("");
   const inputs = useRef<Partial<Record<StemRole, HTMLInputElement | null>>>({});
   const allInput = useRef<HTMLInputElement | null>(null);
   const abort = useRef<AbortController | null>(null);
@@ -42,7 +46,6 @@ export function ProjectDrawer({ engine, status, control }: Props) {
     };
   }, []);
   const refresh = useCallback(async () => {
-    setReport(await projectStore.report());
     setProjects(await projectStore.listProjects());
   }, []);
   useEffect(() => {
@@ -50,6 +53,12 @@ export function ProjectDrawer({ engine, status, control }: Props) {
   }, [refresh]);
 
   const note = (ok: boolean, text: string) => setLog((prev) => [{ ok, text }, ...prev].slice(0, 10));
+
+  const detectGrid = useCallback(async () => {
+    setBusy("detecting tempo grid…");
+    const grid = await analyzeGridForSession(engine);
+    note(!!grid, grid ? `grid — ${describeGrid(grid)}` : "grid — no periodic structure detected");
+  }, [engine]);
 
   const onPick = useCallback(
     async (role: StemRole, file: File | undefined) => {
@@ -61,43 +70,46 @@ export function ProjectDrawer({ engine, status, control }: Props) {
       note(r.ok, `${ROLE_LABEL[role]} — ${r.detail}`);
       session.set({ source: "upload", saved: false });
       // Tempo is detected from the audio itself on every stem change.
-      setBusy("detecting tempo grid…");
-      const grid = await analyzeGridForSession(engine);
-      note(!!grid, grid ? `grid — ${describeGrid(grid)}` : "grid — no periodic structure detected");
-
+      await detectGrid();
       abort.current = null;
       setBusy(null);
       void refresh();
     },
-    [engine, refresh],
+    [engine, refresh, detectGrid],
   );
 
-  const onPickAll = useCallback(
-    async (files: FileList | null) => {
-      if (!files || files.length === 0) return;
-      setBusy("ingesting stems…");
-      const controller = new AbortController();
-      abort.current = controller;
-      const picked = Array.from(files).slice(0, STEM_ROLE_LIST.length);
-      await ingestSequential(
-        engine,
-        picked.map((file, i) => ({
-          role: STEM_ROLE_LIST[i] as StemRole,
-          file,
-          provenance: "user-private" as const,
-        })),
-        {
-          signal: controller.signal,
-          onResult: (r) => note(r.ok, `${ROLE_LABEL[r.role]} — ${r.detail}`),
-        },
-      );
-      session.set({ source: "upload", saved: false });
-      abort.current = null;
-      setBusy(null);
-      void refresh();
-    },
-    [engine, refresh],
-  );
+  /** Stage 1 of "load all": propose a mapping, do not ingest yet. */
+  const stageAll = useCallback((files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    const picked = Array.from(files).slice(0, STEM_ROLE_LIST.length);
+    setPending(
+      picked.map((file, i) => ({ file, role: (STEM_ROLE_LIST[i] as StemRole | undefined) ?? "skip" })),
+    );
+  }, []);
+
+  /** Stage 2: the mapping was visibly confirmed — now decode. */
+  const confirmAll = useCallback(async () => {
+    if (!pending) return;
+    const jobs = pending.filter((p): p is { file: File; role: StemRole } => p.role !== "skip");
+    setPending(null);
+    if (jobs.length === 0) return;
+    setBusy("ingesting stems…");
+    const controller = new AbortController();
+    abort.current = controller;
+    await ingestSequential(
+      engine,
+      jobs.map(({ role, file }) => ({ role, file, provenance: "user-private" as const })),
+      {
+        signal: controller.signal,
+        onResult: (r) => note(r.ok, `${ROLE_LABEL[r.role]} — ${r.detail}`),
+      },
+    );
+    session.set({ source: "upload", saved: false });
+    await detectGrid();
+    abort.current = null;
+    setBusy(null);
+    void refresh();
+  }, [engine, pending, refresh, detectGrid]);
 
   const loadDemo = useCallback(async () => {
     setBusy("generating demo stems…");
@@ -128,7 +140,7 @@ export function ProjectDrawer({ engine, status, control }: Props) {
     const backend = await projectStore.blobBackend();
     await projectStore.saveProject(toStoredProject(session.get(), control, backend));
     session.set({ saved: true, savedAt: Date.now() });
-    note(true, `saved locally to ${backend} — audio stays on this device`);
+    note(true, `saved locally to ${backend}`);
     setBusy(null);
     void refresh();
   }, [control, refresh]);
@@ -142,11 +154,9 @@ export function ProjectDrawer({ engine, status, control }: Props) {
         projectId: project.id,
         name: project.name,
         source: "restored",
-        highMemoryMode: project.highMemoryMode ?? false,
         bpm: project.control.grid.bpm ?? 120,
         bpmSource: (project.control.grid.source as SessionState["bpmSource"]) ?? "provisional",
       });
-      engine.setHighMemoryMode(project.highMemoryMode ?? false);
       const controller = new AbortController();
       abort.current = controller;
       for (const stem of project.stems) {
@@ -168,14 +178,12 @@ export function ProjectDrawer({ engine, status, control }: Props) {
       }
       abort.current = null;
       // Restored stems are re-analysed: the grid is derived from audio, not trusted from disk.
-      setBusy("detecting tempo grid…");
-      const grid = await analyzeGridForSession(engine);
-      note(!!grid, grid ? `grid — ${describeGrid(grid)}` : "grid — no periodic structure detected");
+      await detectGrid();
       // Amendment 2: a song load stops the transport and waits for PLAY.
       engine.execute({ id: -1, t: performance.now(), type: "song.load", payload: { song: 0 } });
       setBusy(null);
     },
-    [engine],
+    [engine, detectGrid],
   );
 
   const applyMemorySaver = useCallback(
@@ -198,44 +206,23 @@ export function ProjectDrawer({ engine, status, control }: Props) {
     [engine, refresh, sess],
   );
 
-  const setBpm = useCallback(() => {
-    const n = Number(manualBpm);
-    if (!Number.isFinite(n) || n <= 0) return;
-    const r = resolveBpm(null, n);
-    session.set({ bpm: r.bpm, bpmSource: r.source, saved: false });
-    note(true, `project BPM set manually to ${r.bpm} — future ±1 BPM steps use it; current playback rate unchanged`);
-  }, [manualBpm]);
-
-  const toggleHighMemory = useCallback(() => {
-    const on = !sess.highMemoryMode;
-    engine.setHighMemoryMode(on);
-    session.set({ highMemoryMode: on, saved: false });
-    note(true, `High Memory Mode ${on ? "enabled" : "disabled"} — ceiling ${formatMiB(status.budget.highMemoryBlockBytes)}`);
-  }, [engine, sess.highMemoryMode, status.budget.highMemoryBlockBytes]);
+  const commitName = useCallback(() => {
+    const next = nameDraft.trim();
+    setRenaming(false);
+    if (!next || next === sess.name) return;
+    session.set({ name: next, saved: false });
+    note(true, `session renamed to “${next}”`);
+  }, [nameDraft, sess.name]);
 
   const cancel = useCallback(() => {
     abort.current?.abort();
     note(false, "load cancelled — remaining stems not decoded, intermediates dereferenced (GC timing not controlled)");
   }, []);
 
-  const memory = useMemo(() => {
-    const loaded = STEM_ROLE_LIST.map((role) => ({ role, stem: sess.stems[role] })).filter((s) => s.stem);
-    const retained = status.decodedBytes;
-    const peak = retained + Math.max(0, ...STEM_ROLE_LIST.map((r) => sess.stems[r]?.fileBytes ?? 0));
-    const perStem = loaded.length ? retained / loaded.length : 0;
-    const projectedFour = loaded.length > 0 && loaded.length < 4 ? Math.round(perStem * 4) : null;
-    return {
-      retained,
-      peak,
-      projectedFour,
-      reverse: reverseCostBytes(retained),
-      verdict: judge(retained, status.budget, sess.highMemoryMode),
-      statement: describeVerdict(retained, status.budget, sess.highMemoryMode),
-      loadedCount: loaded.length,
-    };
-  }, [sess, status.decodedBytes, status.budget, sess.highMemoryMode]);
-
-  const health = memory.verdict === "ok" ? "healthy" : memory.verdict === "warn" ? "tight" : "at ceiling";
+  const loadedCount = useMemo(
+    () => STEM_ROLE_LIST.filter((role) => sess.stems[role]).length,
+    [sess.stems],
+  );
 
   return (
     <section className="st-pj" data-testid="project-drawer">
@@ -243,7 +230,33 @@ export function ProjectDrawer({ engine, status, control }: Props) {
       <header className="st-pj-banner">
         <div className="min-w-0">
           <p className="st-pj-banner__eyebrow">project 01</p>
-          <h2 className="st-pj-banner__name">{sess.name}</h2>
+          {renaming ? (
+            <input
+              autoFocus
+              value={nameDraft}
+              data-testid="session-name-input"
+              onChange={(e) => setNameDraft(e.target.value)}
+              onBlur={commitName}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") commitName();
+                if (e.key === "Escape") setRenaming(false);
+              }}
+              className="w-full border border-[var(--bench-line)] bg-transparent px-2 py-1 font-mono text-sm text-[var(--ink)]"
+            />
+          ) : (
+            <button
+              type="button"
+              className="st-pj-banner__name text-left"
+              data-testid="session-name"
+              title="rename session"
+              onClick={() => {
+                setNameDraft(sess.name);
+                setRenaming(true);
+              }}
+            >
+              {sess.name} <span className="text-[var(--ink-faint)]">✎</span>
+            </button>
+          )}
         </div>
         <span className="st-pj-banner__state" data-saved={sess.saved}>
           <i aria-hidden />
@@ -279,10 +292,7 @@ export function ProjectDrawer({ engine, status, control }: Props) {
                       data-decode-count={track?.decodeCount ?? 0}
                       data-buffer-reused={String(track?.bufferReused ?? false)}
                     >
-                      decoded {formatMiB(stem.decodedBytes)} · estimate{" "}
-                      {stem.estimate ? formatMiB(stem.estimate.decodedBytes) : "—"}
-                      {stem.estimate?.uncertain ? " (uncertain)" : " (exact)"} · decodes {track?.decodeCount ?? 0} ·{" "}
-                      {track?.bufferReused ? "probe buffer reused" : "re-decoded"}
+                      decoded {formatMiB(stem.decodedBytes)} · decodes {track?.decodeCount ?? 0}
                       {stem.derived ? " · mono working copy" : ""}
                     </p>
                   )}
@@ -304,7 +314,12 @@ export function ProjectDrawer({ engine, status, control }: Props) {
                   type="file"
                   accept=".wav,.mp3,.m4a,.aac,.flac,.aif,.aiff,audio/*"
                   className="hidden"
-                  onChange={(e) => void onPick(role, e.target.files?.[0])}
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    // Reset so re-picking the SAME file still fires `change`.
+                    e.target.value = "";
+                    void onPick(role, file);
+                  }}
                 />
                 <button type="button" className="st-pj-select" onClick={() => inputs.current[role]?.click()}>
                   select
@@ -320,10 +335,13 @@ export function ProjectDrawer({ engine, status, control }: Props) {
           multiple
           accept=".wav,.mp3,.m4a,.aac,.flac,.aif,.aiff,audio/*"
           className="hidden"
-          onChange={(e) => void onPickAll(e.target.files)}
+          onChange={(e) => {
+            stageAll(e.target.files);
+            e.target.value = "";
+          }}
         />
         <div className="st-pj-actions">
-          <button type="button" className="st-pj-btn" onClick={() => allInput.current?.click()}>
+          <button type="button" className="st-pj-btn" data-testid="load-all" onClick={() => allInput.current?.click()}>
             <span aria-hidden>↑</span> load all
           </button>
           <button type="button" className="st-pj-btn st-pj-btn--accent" onClick={() => void loadDemo()} data-testid="load-demo">
@@ -332,97 +350,76 @@ export function ProjectDrawer({ engine, status, control }: Props) {
         </div>
       </div>
 
+      {/* ---------- load-all mapping confirmation ---------- */}
+      {pending && (
+        <div className="st-pj-card" data-testid="load-all-mapping">
+          <p className="st-pj-card__title">confirm stem mapping</p>
+          <p className="font-mono text-[10px] text-[var(--ink-faint)]">
+            check each file lands in the right cell before decoding. nothing is loaded until you confirm.
+          </p>
+          <div className="mt-2 grid gap-1">
+            {pending.map((p, i) => (
+              <div key={i} className="flex items-center gap-2">
+                <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-[var(--ink)]">{p.file.name}</span>
+                <span aria-hidden className="font-mono text-[10px] text-[var(--ink-faint)]">
+                  →
+                </span>
+                <select
+                  value={p.role}
+                  data-testid={`map-${i}`}
+                  className="border border-[var(--bench-line)] bg-transparent px-2 py-1 font-mono text-[10px] text-[var(--ink)]"
+                  onChange={(e) => {
+                    const role = e.target.value as StemRole | "skip";
+                    setPending((prev) =>
+                      (prev ?? []).map((row, j) =>
+                        j === i
+                          ? { ...row, role }
+                          : // a role can only be used once
+                            row.role === role && role !== "skip"
+                            ? { ...row, role: "skip" }
+                            : row,
+                      ),
+                    );
+                  }}
+                >
+                  {STEM_ROLE_LIST.map((role) => (
+                    <option key={role} value={role}>
+                      {ROLE_LABEL[role]}
+                    </option>
+                  ))}
+                  <option value="skip">do not load</option>
+                </select>
+              </div>
+            ))}
+          </div>
+          <div className="mt-3 flex gap-2">
+            <button type="button" className="st-toggle" data-testid="confirm-mapping" onClick={() => void confirmAll()}>
+              confirm &amp; load
+            </button>
+            <button type="button" className="st-toggle" onClick={() => setPending(null)}>
+              cancel
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* ---------- status tiles ---------- */}
       <div className="st-pj-tiles">
         <div className="st-pj-tile" data-testid="bpm-field">
           <p className="st-pj-tile__k">tempo</p>
-          <p className="st-pj-tile__v">{sess.songGrid ? sess.songGrid.bpm.toFixed(2) : sess.bpm} bpm</p>
+          <p className="st-pj-tile__v">{sess.songGrid ? `${sess.songGrid.bpm.toFixed(2)} bpm` : "—"}</p>
           <p className="st-pj-tile__sub">
-            {sess.songGrid
-              ? `detected · ${describeGrid(sess.songGrid)}`
-              : sess.bpmSource === "manual"
-                ? "manual"
-                : "no stems loaded"}
+            {sess.songGrid ? `detected · ${describeGrid(sess.songGrid)}` : "awaiting analysis"}
           </p>
         </div>
         <div className="st-pj-tile">
-          <p className="st-pj-tile__k">local storage</p>
-          <p className="st-pj-tile__v">{report?.persisted ? "on" : "off"}</p>
-          <p className="st-pj-tile__sub">{report?.backend ?? "…"}</p>
-        </div>
-        <button
-          type="button"
-          className="st-pj-tile st-pj-tile--button"
-          aria-expanded={expanded}
-          onClick={() => setExpanded((v) => !v)}
-        >
-          <p className="st-pj-tile__k">system resources</p>
-          <p className="st-pj-tile__v" data-verdict={memory.verdict}>
-            {health}
+          <p className="st-pj-tile__k">stems loaded</p>
+          <p className="st-pj-tile__v">{loadedCount} / 4</p>
+          <p className="st-pj-tile__sub" data-retained-bytes={status.decodedBytes}>
+            {formatMiB(status.decodedBytes)} decoded
           </p>
-          <p className="st-pj-tile__sub">{formatMiB(memory.retained)} retained</p>
-          <span className="st-pj-tile__chev" data-open={expanded} aria-hidden>
-            ⌄
-          </span>
-        </button>
+        </div>
       </div>
-
-      {expanded && (
-        <div className="st-pj-card" data-testid="memory-meter">
-          <p className="st-pj-card__title">memory detail</p>
-          <div className="grid gap-1 font-mono text-[10px] text-[var(--ink-dim)]">
-            <p data-testid="memory-total" data-retained-bytes={memory.retained}>
-              retained decoded total: <span className="text-[var(--ink)]">{formatMiB(memory.retained)}</span>
-              {memory.projectedFour != null
-                ? ` · projected 4-role total ≈ ${formatMiB(memory.projectedFour)} (estimate)`
-                : ""}
-            </p>
-            <p>estimated peak during load: {formatMiB(memory.peak)}</p>
-            <p>estimated reverse-copy cost (Phase 5): {formatMiB(memory.reverse)}</p>
-            <p>
-              {status.budget.platform} thresholds — warn {formatMiB(status.budget.warnBytes)} · standard{" "}
-              {formatMiB(status.budget.standardBlockBytes)} · high-memory ceiling{" "}
-              {formatMiB(status.budget.highMemoryBlockBytes)}
-            </p>
-            <p data-verdict={memory.verdict} data-testid="memory-statement" className="text-[var(--ink)]">
-              {memory.statement}
-            </p>
-            {report?.usage != null && report.quota != null && (
-              <p className="text-[var(--ink-faint)]">
-                device storage (not RAM): {formatBytes(report.usage)} of {formatBytes(report.quota)}
-              </p>
-            )}
-          </div>
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              className="st-toggle"
-              data-on={sess.highMemoryMode}
-              data-testid="high-memory-toggle"
-              onClick={toggleHighMemory}
-            >
-              high memory mode {sess.highMemoryMode ? "on" : "off"}
-            </button>
-            <button type="button" className="st-toggle" onClick={() => void projectStore.requestPersistence().then(refresh)}>
-              request persistence
-            </button>
-            <input
-              inputMode="decimal"
-              value={manualBpm}
-              onChange={(e) => setManualBpm(e.target.value)}
-              placeholder="set bpm"
-              className="w-20 border border-[var(--bench-line)] bg-transparent px-2 py-1 font-mono text-[10px] text-[var(--ink)]"
-            />
-            <button type="button" className="st-toggle" data-testid="set-bpm" onClick={setBpm}>
-              apply
-            </button>
-          </div>
-          <p className="mt-2 font-mono text-[10px] leading-relaxed text-[var(--ink-faint)]">
-            this project may use substantial browser memory. on some phones, loading it may cause the page to reload or
-            audio to stop. your original files remain untouched.
-          </p>
-        </div>
-      )}
 
       {/* ---------- save ---------- */}
       <button type="button" className="st-pj-save" onClick={() => void save()}>
@@ -469,10 +466,7 @@ export function ProjectDrawer({ engine, status, control }: Props) {
         )}
       </div>
 
-      <p className="font-mono text-[10px] leading-relaxed text-[var(--ink-faint)]">
-        no network request in this app contains your audio — files are decoded in this tab and stored on this device
-        only. demo: {DEMO_NOTICE}
-      </p>
+      <p className="font-mono text-[10px] leading-relaxed text-[var(--ink-faint)]">demo: {DEMO_NOTICE}</p>
 
       {busy && (
         <div className="flex items-center gap-3">

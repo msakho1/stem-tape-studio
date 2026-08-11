@@ -298,8 +298,12 @@ export class AudioEngine {
   private listeners = new Set<Listener>();
   private schedulerTimer: ReturnType<typeof setInterval> | null = null;
   budget: MemoryBudget = SSR_BUDGET;
-  /** Explicit opt-in; only meaningful above the standard threshold. */
-  highMemoryMode = false;
+  /**
+   * The memory-mode concept was removed from the product: the engine always
+   * runs at the platform's high-memory ceiling. Kept as a field only because
+   * judge()/describeVerdict() take it as a parameter.
+   */
+  readonly highMemoryMode = true;
   lastError: string | null = null;
   lastDecodeMs: number | null = null;
   /** Published for the diagnostics panel. */
@@ -409,9 +413,8 @@ export class AudioEngine {
     return this.budget;
   }
 
-  setHighMemoryMode(on: boolean) {
-    this.highMemoryMode = on;
-  }
+  /** No-op: memory mode was removed; the ceiling is always the high one. */
+  setHighMemoryMode(_on?: boolean) {}
 
   onAck(fn: Listener) {
     this.listeners.add(fn);
@@ -1650,11 +1653,29 @@ export class AudioEngine {
     this.spawnHeadVoice(t, i, at, true);
   }
 
+  /**
+   * Snapshot of the NORMAL song mixer taken when Heads is entered: mutes,
+   * solos, reverse flags, loop windows and fader levels. Heads is a temporary
+   * performance layer, so everything here is restored verbatim on exit.
+   * The hidden song timeline is deliberately NOT part of it — it keeps
+   * advancing while the transport plays, and the stems rejoin wherever it has
+   * got to.
+   */
+  private headsEntrySnapshot:
+    | { muted: boolean; soloed: boolean; level: number; loop: TrackRuntime["loop"] }[]
+    | null = null;
+
   enterHeadsMode(): { ok: boolean; detail: string } {
     if (!this.ctx) return { ok: false, detail: "audio not unlocked" };
     if (this.heads.active) return { ok: true, detail: "heads already active" };
     const r = this.headLanes.enter();
     if (!r.ok) return r;
+    this.headsEntrySnapshot = this.tracks.map((t) => ({
+      muted: t.muted,
+      soloed: t.soloed,
+      level: t.level,
+      loop: { ...t.loop },
+    }));
     // The reducer-visible flag only; geometry belongs to HeadLanes now. There
     // is no heads SOURCE any more: head N is lane N by construction.
     this.heads = { ...emptyHeads(), active: true, engine: null, enteredAtFrame: Math.round(this.ctx.currentTime * this.ctx.sampleRate) };
@@ -1667,6 +1688,32 @@ export class AudioEngine {
     if (!this.heads.active) return { ok: true, detail: "heads already off" };
     const r = this.headLanes.exit();
     this.heads = exitHeads(this.heads);
+    // Restore the entry mixer exactly. Anything the musician did to a LANE
+    // while Heads was open (reverse, loop capture, resize) was a heads-only
+    // performance and is discarded here.
+    const snap = this.headsEntrySnapshot;
+    this.headsEntrySnapshot = null;
+    if (snap) {
+      for (let i = 0; i < this.tracks.length; i++) {
+        const t = this.tracks[i]!;
+        const s = snap[i]!;
+        t.muted = s.muted;
+        t.soloed = s.soloed;
+        t.level = s.level;
+        if (t.loop.reverse !== s.loop.reverse) {
+          this.execute({
+            id: Date.now() + i,
+            t: Date.now(),
+            type: "tape.reverse",
+            payload: { track: i, on: s.loop.reverse },
+          } as AudioCommand);
+        }
+        t.loop = { ...s.loop };
+        if (this.ctx) this.setGain(t.gain.gain, s.level);
+      }
+    }
+    // Stems rejoin the hidden timeline where it now is, through the normal
+    // click-free audibility ramp.
     this.applyAudibilityAll();
     return r;
   }

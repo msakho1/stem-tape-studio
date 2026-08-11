@@ -173,13 +173,32 @@ export function useAudioEngine(commands: AudioCommand[]) {
 
 
   // --- lifecycle: suspension, backgrounding, route changes ----------------
+  // Audio is always on. There is no user-facing enable control: the first
+  // interaction of any kind unlocks the context, and returning to a
+  // backgrounded tab resumes it.
   useEffect(() => {
+    const unlockNow = () => {
+      void engine.unlock().then((r) => {
+        setUnlockNote(r.detail);
+        setStatus(engine.status());
+      });
+    };
+    const opts = { capture: true, passive: true } as AddEventListenerOptions;
+    const events = ["pointerdown", "touchstart", "keydown", "mousedown"] as const;
+    for (const ev of events) window.addEventListener(ev, unlockNow, opts);
+
     const reconcile = () => {
-      void engine.reconcileLifecycle().then(() => setStatus(engine.status()));
+      void engine.reconcileLifecycle().then(() => {
+        // Returning to the foreground must restore audio without any
+        // "enable audio" affordance.
+        if (document.visibilityState === "visible" && engine.ready) unlockNow();
+        else setStatus(engine.status());
+      });
     };
     document.addEventListener("visibilitychange", reconcile);
     window.addEventListener("pagehide", reconcile);
     return () => {
+      for (const ev of events) window.removeEventListener(ev, unlockNow, opts);
       document.removeEventListener("visibilitychange", reconcile);
       window.removeEventListener("pagehide", reconcile);
     };

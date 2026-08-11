@@ -53,7 +53,6 @@ export interface SessionState {
   /** Hybrid BPM model: tempo-grid ?? manual ?? provisional 120. */
   bpm: number;
   bpmSource: BpmSource;
-  highMemoryMode: boolean;
   lastError: string | null;
   /** Automatic analysed grid for this song, persisted in seconds. */
   songGrid: SongGrid | null;
@@ -80,7 +79,6 @@ function emptySession(): SessionState {
     source: "none",
     bpm: PROVISIONAL_BPM,
     bpmSource: "provisional",
-    highMemoryMode: false,
     lastError: null,
     songGrid: null,
   };
@@ -130,7 +128,6 @@ export function toStoredProject(s: SessionState, control: StoredProject["control
       grid: { bpm: s.bpm, source: s.bpmSource },
       songGrid: s.songGrid ?? control.songGrid ?? null,
     },
-    highMemoryMode: s.highMemoryMode,
     stems: Object.values(s.stems).map((stem) => ({
       role: stem.role,
       filename: stem.filename,

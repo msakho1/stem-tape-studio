@@ -86,25 +86,6 @@ export function SystemPage({ engine, status, acks, unlockNote, ...diag }: Props)
   const migration = status.tracks[0]?.migrationStatus ?? "stable";
   const ready = status.contextState === "running";
 
-  const exportReport = () => {
-    const blob = new Blob(
-      [
-        JSON.stringify(
-          { at: new Date().toISOString(), status, coverage, machine: diag.state, leds: diag.leds, acks },
-          null,
-          2,
-        ),
-      ],
-      { type: "application/json" },
-    );
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "stem-tape-system-report.json";
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-
   const rows: { id: string; icon: React.ReactNode; label: string; value: string; body: React.ReactNode }[] = [
     {
       id: "engine",
@@ -292,10 +273,6 @@ export function SystemPage({ engine, status, acks, unlockNote, ...diag }: Props)
               ))}
             </div>
           </div>
-
-          <button type="button" className="st-pj-save" onClick={exportReport}>
-            ⤓ export report
-          </button>
         </>
       )}
 
