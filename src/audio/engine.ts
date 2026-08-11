@@ -1703,7 +1703,7 @@ export class AudioEngine {
     const preferred = this.tracks[this.lastTargetedTrack]?.buffer ? this.lastTargetedTrack : null;
     const source = preferred ?? this.tracks.findIndex((t) => t.buffer != null);
     if (source < 0) return { ok: false, detail: "heads rejected — no decoded lane to read" };
-    const sourceName = this.tracks[source]?.name ?? `stem ${source + 1}`;
+    const sourceName = (this.tracks[source]?.name ?? `stem ${source + 1}`).replace(/\.[a-z0-9]+$/i, "");
     const r = this.headLanes.enter({ source, sourceName, playing: this.requestedPlaying });
     if (!r.ok) return r;
 
