@@ -162,8 +162,10 @@ export const Sp1GuideIllustration = memo(function Sp1GuideIllustration({
       role="img"
       aria-label="SP-1 control illustration"
       data-active-controls={activeList}
+      data-gesture={motion}
       dangerouslySetInnerHTML={{ __html: MARKUP }}
     />
+
   );
 });
 
