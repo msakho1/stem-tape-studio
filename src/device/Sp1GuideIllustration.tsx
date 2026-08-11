@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import type { Control } from "@/device/geometry";
 import svgMarkup from "@/assets/stem-tape-sp1-outline.svg?raw";
 
