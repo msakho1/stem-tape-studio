@@ -131,11 +131,12 @@ export function ProjectDrawer({ engine, status, control }: Props) {
         onResult: (r) => note(r.ok, `${ROLE_LABEL[r.role]} — ${r.detail}`),
       },
     );
-    session.set({ name: "demo session", source: "demo" });
+    session.set({ name: DEMO_TITLE, source: "demo" });
+    await detectGrid();
     abort.current = null;
     setBusy(null);
     void refresh();
-  }, [engine, refresh]);
+  }, [engine, refresh, detectGrid]);
 
   const save = useCallback(async () => {
     setBusy("saving project…");
