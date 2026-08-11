@@ -352,7 +352,7 @@ export class GestureEngine {
     if (prev?.timer) clearTimeout(prev.timer);
     const timer = setTimeout(() => this.taps.delete(control), this.timings.multiTapGapMs);
     this.taps.set(control, { count, lastReleaseAt: t, timer });
-    this.emit({ type: "tap", control, count, t });
+    this.emit({ type: "tap", control, count, t, qualified: rec.qualified });
   }
 
   /** Pointer cancellation / lost capture. Never leaves a stuck control. */
