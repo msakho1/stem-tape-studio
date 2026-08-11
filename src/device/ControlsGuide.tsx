@@ -166,7 +166,7 @@ export function ControlsGuide({
                 {isOpen && (
                   <div className="grid gap-2 border-t border-[var(--bench-line)] px-3 py-3 md:grid-cols-[1fr_240px]">
                     <p className="font-mono text-[11px] leading-relaxed text-[var(--ink-dim)]">{l.body}</p>
-                    <MiniSurface highlight={l.highlight} motion={l.motion} held={l.held ?? []} />
+                    <Sp1GuideIllustration highlight={l.highlight} motion={l.motion} held={l.held ?? []} />
                   </div>
                 )}
               </div>
