@@ -1662,7 +1662,7 @@ export class AudioEngine {
    * got to.
    */
   private headsEntrySnapshot:
-    | { muted: boolean; soloed: boolean; level: number; reversed: boolean; loop: TrackRuntime["loop"] }[]
+    | { muted: boolean; soloed: boolean; level: number; loop: TrackRuntime["loop"] }[]
     | null = null;
 
   enterHeadsMode(): { ok: boolean; detail: string } {
@@ -1674,7 +1674,6 @@ export class AudioEngine {
       muted: t.muted,
       soloed: t.soloed,
       level: t.level,
-      reversed: t.reversed,
       loop: { ...t.loop },
     }));
     // The reducer-visible flag only; geometry belongs to HeadLanes now. There
@@ -1701,7 +1700,13 @@ export class AudioEngine {
         t.muted = s.muted;
         t.soloed = s.soloed;
         t.level = s.level;
-        if (t.reversed !== s.reversed) this.setLaneReverse(i as TrackId, s.reversed);
+        if (t.loop.reverse !== s.loop.reverse) {
+          this.execute({
+            id: `heads-exit-reverse-${i}`,
+            type: "tape.reverse",
+            payload: { track: i, on: s.loop.reverse },
+          } as Command);
+        }
         t.loop = { ...s.loop };
         if (this.ctx) this.setGain(t.gain.gain, s.level);
       }
