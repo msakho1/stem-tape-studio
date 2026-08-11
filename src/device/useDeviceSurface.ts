@@ -850,6 +850,16 @@ export function useDeviceSurface() {
     heldKeys,
     globalScrub: state.globalScrub,
 
+    /** Photographic instrument adapter — same bus, same engine, same reducer. */
+    photo: {
+      faderStart: photoFaderStart,
+      faderMove: photoFaderMove,
+      faderEnd: photoFaderEnd,
+      press: photoPress,
+      release: photoRelease,
+    },
+
+
     handlers: {
       onControlPointerDown,
       onControlPointerMove,
