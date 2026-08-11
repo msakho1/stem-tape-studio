@@ -112,14 +112,16 @@ export function ProjectDrawer({ engine, status, control }: Props) {
   }, [engine, pending, refresh, detectGrid]);
 
   const loadDemo = useCallback(async () => {
-    setBusy("generating demo stems…");
+    setBusy("downloading demo stems…");
     session.reset();
     engine.resetDecodeCounters();
     const controller = new AbortController();
     abort.current = controller;
+    const stems = await buildDemoProject(controller.signal);
+    setBusy("decoding demo stems…");
     await ingestSequential(
       engine,
-      buildDemoProject().map((stem) => ({
+      stems.map((stem) => ({
         role: stem.role,
         file: new File([stem.blob], stem.filename, { type: "audio/wav" }),
         provenance: "bundled-demo" as const,
