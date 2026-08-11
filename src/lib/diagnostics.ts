@@ -24,6 +24,8 @@ export interface DiagnosticsBridge {
   /** Every semantic command emitted so far this session, in order. */
   commands: AudioCommand[];
   buildAlgorithm: typeof buildAlgorithm;
+  /** Measured first-release → committed-tap latency for deferred controls. */
+  tapLatencyMs: number[];
 }
 
 const BUS_LIMIT = 4000;
@@ -43,6 +45,7 @@ function bridge(): DiagnosticsBridge {
       surface: null,
       commands: [],
       buildAlgorithm,
+      tapLatencyMs: [],
     };
   }
   return w.__stemTape;
@@ -70,4 +73,10 @@ export function publishSurface(state: SurfaceState) {
   const b = bridge();
   b.surface = state;
   b.commands = state.commands;
+}
+
+/** Publish the gesture engine's measured multi-tap decision latencies. */
+export function publishTapLatency(samples: number[]) {
+  if (typeof window === "undefined") return;
+  bridge().tapLatencyMs = samples;
 }

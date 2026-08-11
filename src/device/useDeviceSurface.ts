@@ -28,7 +28,7 @@ import {
 import { controlBus, type ContinuousChannel } from "@/audio/controlBus";
 import { getAudioEngine } from "@/audio/engine";
 import { FaderSessionManager, type FaderIndex } from "@/input/faderSessions";
-import { installDiagnostics, publishSurface } from "@/lib/diagnostics";
+import { installDiagnostics, publishSurface, publishTapLatency } from "@/lib/diagnostics";
 
 
 
@@ -161,6 +161,7 @@ export function useDeviceSurface() {
 
 
   const engine = useMemo(() => new GestureEngine(), []);
+  publishTapLatency(engine.decisionLatencyMs);
   /**
    * Ordered chord arbitration sits BETWEEN raw input and the v2.6 dispatch:
    * a control claimed by a chord never reaches `applyGesture`, so no base
