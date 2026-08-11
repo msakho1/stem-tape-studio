@@ -320,7 +320,7 @@ function LabPage() {
                 <p className="mt-1 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--signal)]">
                   {l.gesture}
                 </p>
-                <MiniSurface highlight={l.highlight} motion={l.motion} />
+                <MiniSurface highlight={l.highlight} motion={l.motion} held={l.held ?? []} />
                 <p className="mt-2 font-mono text-[11px] leading-relaxed text-[var(--ink-dim)]">{l.body}</p>
               </section>
             ))}
