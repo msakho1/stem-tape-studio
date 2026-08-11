@@ -1702,7 +1702,7 @@ export class AudioEngine {
         t.level = s.level;
         if (t.loop.reverse !== s.loop.reverse) {
           this.execute({
-            id: `heads-exit-reverse-${i}`,
+            id: Date.now() + i,
             t: Date.now(),
             type: "tape.reverse",
             payload: { track: i, on: s.loop.reverse },
