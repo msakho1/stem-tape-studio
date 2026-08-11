@@ -1,0 +1,195 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 900 1120"
+     role="img"
+     aria-labelledby="sp1-title sp1-description"
+     data-asset="stem-tape-sp1-outline"
+     data-version="1.0">
+  <title id="sp1-title">Stem Tape SP-1 control outline</title>
+  <desc id="sp1-description">A refined front-view line illustration of the SP-1 with two top volume buttons, a left rocker, four faders, four status lights, four track buttons, the right-side Play control, and the lower Function control.</desc>
+
+  <style>
+    :root {
+      --sp1-line: #4a4a47;
+      --sp1-soft-line: #94948e;
+      --sp1-face: #f3f3f0;
+      --sp1-side: #fff9e8;
+      --sp1-slot: #242422;
+      --sp1-control-fill: #e3e3df;
+      --sp1-led: #d9d9d4;
+      --sp1-accent: #ef7479;
+      --sp1-active-fill: rgba(239, 116, 121, 0.11);
+    }
+
+    .line,
+    .soft-line,
+    .control-shape,
+    .highlight {
+      vector-effect: non-scaling-stroke;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .line { stroke: #4a4a47; stroke-width: 1.65; }
+    .soft-line { stroke: #94948e; stroke-width: 1.35; }
+    .control-shape { stroke: #4a4a47; stroke-width: 1.55; }
+    .highlight {
+      fill: rgba(239, 116, 121, 0.11);
+      stroke: #ef7479;
+      stroke-width: 2.5;
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    [data-control].is-active .highlight,
+    [data-control][data-active="true"] .highlight { opacity: 1; }
+
+    [data-control].is-active .control-shape,
+    [data-control][data-active="true"] .control-shape {
+      stroke: #ef7479;
+      stroke-width: 2;
+    }
+  </style>
+
+  <!-- Device silhouette -->
+  <g id="sp1-device" data-part="device">
+    <!-- Side-mounted controls sit behind the face. -->
+    <g id="rocker-housing" data-part="rocker-housing">
+      <rect x="50" y="210" width="55" height="92" rx="12"
+            fill="#fff9e8" class="line"/>
+    </g>
+
+    <g id="play-housing" data-part="play-housing">
+      <path d="M798 190h38a12 12 0 0 1 12 12v126a12 12 0 0 1-12 12h-38z"
+            fill="#fff9e8" class="line"/>
+    </g>
+
+    <g id="function-housing" data-part="function-housing">
+      <path d="M798 760h38a12 12 0 0 1 12 12v126a12 12 0 0 1-12 12h-38z"
+            fill="#fff9e8" class="line"/>
+    </g>
+
+    <!-- Main chassis and warm right-side control strip. -->
+    <rect x="100" y="72" width="700" height="978" rx="31"
+          fill="#f3f3f0" class="line"/>
+    <path d="M682 72h87a31 31 0 0 1 31 31v916a31 31 0 0 1-31 31h-87z"
+          fill="#fff9e8" class="line"/>
+    <line x1="682" y1="73" x2="682" y2="1049" class="soft-line"/>
+
+    <!-- Small reference details on the right control strip. -->
+    <g data-part="side-indicators">
+      <circle cx="744" cy="815" r="10" fill="none" stroke="#ef7479" stroke-width="2" vector-effect="non-scaling-stroke"/>
+      <circle cx="744" cy="815" r="4.5" fill="#ef7479"/>
+      <circle cx="744" cy="840" r="7" fill="#ef7479" opacity="0.28"/>
+    </g>
+  </g>
+
+  <!-- Top volume buttons -->
+  <g id="volume-minus" data-control="volume-minus" class="sp1-control">
+    <rect class="highlight" x="163" y="31" width="100" height="51" rx="12"/>
+    <rect class="control-shape" x="171" y="41" width="84" height="36" rx="8"
+          fill="#e3e3df"/>
+    <line x1="195" y1="59" x2="231" y2="59" class="soft-line"/>
+  </g>
+
+  <g id="volume-plus" data-control="volume-plus" class="sp1-control">
+    <rect class="highlight" x="296" y="31" width="100" height="51" rx="12"/>
+    <rect class="control-shape" x="304" y="41" width="84" height="36" rx="8"
+          fill="#e3e3df"/>
+    <line x1="328" y1="59" x2="364" y2="59" class="soft-line"/>
+    <line x1="346" y1="47" x2="346" y2="71" class="soft-line"/>
+  </g>
+
+  <!-- Left rocker -->
+  <g id="rocker" data-control="rocker" class="sp1-control">
+    <rect class="highlight" x="41" y="199" width="73" height="114" rx="16"/>
+    <path class="control-shape" d="M69 226l13-9 13 9M67 256h30M69 283l13 9 13-9"
+          fill="none"/>
+    <path class="control-shape" d="M99 213v86" fill="none" opacity="0.35"/>
+  </g>
+
+  <!-- Play -->
+  <g id="play" data-control="play" class="sp1-control">
+    <rect class="highlight" x="710" y="178" width="149" height="174" rx="20"/>
+    <path class="control-shape" d="M743 230l25 42h-50z"
+          fill="#ef7479" stroke="#ef7479"/>
+    <path class="control-shape" d="M800 195h35a8 8 0 0 1 8 8v124a8 8 0 0 1-8 8h-35"
+          fill="none"/>
+  </g>
+
+  <!-- Four fader lanes -->
+  <g id="fader-1" data-control="fader-1" class="sp1-control">
+    <rect class="highlight" x="163" y="408" width="90" height="218" rx="30"/>
+    <rect class="control-shape" x="190" y="432" width="36" height="164" rx="18"
+          fill="#242422"/>
+    <line x1="208" y1="458" x2="208" y2="580" stroke="#555550" stroke-width="3" stroke-linecap="round" opacity="0.42" vector-effect="non-scaling-stroke"/>
+    <circle class="control-shape" cx="208" cy="438" r="19" fill="#e3e3df"/>
+  </g>
+
+  <g id="fader-2" data-control="fader-2" class="sp1-control">
+    <rect class="highlight" x="293" y="408" width="90" height="218" rx="30"/>
+    <rect class="control-shape" x="320" y="432" width="36" height="164" rx="18"
+          fill="#242422"/>
+    <line x1="338" y1="458" x2="338" y2="580" stroke="#555550" stroke-width="3" stroke-linecap="round" opacity="0.42" vector-effect="non-scaling-stroke"/>
+    <circle class="control-shape" cx="338" cy="438" r="19" fill="#e3e3df"/>
+  </g>
+
+  <g id="fader-3" data-control="fader-3" class="sp1-control">
+    <rect class="highlight" x="423" y="408" width="90" height="218" rx="30"/>
+    <rect class="control-shape" x="450" y="432" width="36" height="164" rx="18"
+          fill="#242422"/>
+    <line x1="468" y1="458" x2="468" y2="580" stroke="#555550" stroke-width="3" stroke-linecap="round" opacity="0.42" vector-effect="non-scaling-stroke"/>
+    <circle class="control-shape" cx="468" cy="438" r="19" fill="#e3e3df"/>
+  </g>
+
+  <g id="fader-4" data-control="fader-4" class="sp1-control">
+    <rect class="highlight" x="553" y="408" width="90" height="218" rx="30"/>
+    <rect class="control-shape" x="580" y="432" width="36" height="164" rx="18"
+          fill="#242422"/>
+    <line x1="598" y1="458" x2="598" y2="580" stroke="#555550" stroke-width="3" stroke-linecap="round" opacity="0.42" vector-effect="non-scaling-stroke"/>
+    <circle class="control-shape" cx="598" cy="438" r="19" fill="#e3e3df"/>
+  </g>
+
+  <!-- Track status lights -->
+  <g id="track-leds" data-part="track-leds" fill="#d9d9d4" stroke="#94948e" stroke-width="1" vector-effect="non-scaling-stroke">
+    <circle id="track-led-1" data-led="track-1" cx="208" cy="673" r="9"/>
+    <circle id="track-led-2" data-led="track-2" cx="338" cy="673" r="9"/>
+    <circle id="track-led-3" data-led="track-3" cx="468" cy="673" r="9"/>
+    <circle id="track-led-4" data-led="track-4" cx="598" cy="673" r="9"/>
+  </g>
+
+  <!-- Four track buttons -->
+  <g id="track-1" data-control="track-1" class="sp1-control">
+    <rect class="highlight" x="166" y="732" width="84" height="112" rx="17"/>
+    <rect class="control-shape" x="187" y="749" width="42" height="78" rx="7"
+          fill="#e3e3df"/>
+  </g>
+
+  <g id="track-2" data-control="track-2" class="sp1-control">
+    <rect class="highlight" x="296" y="732" width="84" height="112" rx="17"/>
+    <rect class="control-shape" x="317" y="749" width="42" height="78" rx="7"
+          fill="#e3e3df"/>
+  </g>
+
+  <g id="track-3" data-control="track-3" class="sp1-control">
+    <rect class="highlight" x="426" y="732" width="84" height="112" rx="17"/>
+    <rect class="control-shape" x="447" y="749" width="42" height="78" rx="7"
+          fill="#e3e3df"/>
+  </g>
+
+  <g id="track-4" data-control="track-4" class="sp1-control">
+    <rect class="highlight" x="556" y="732" width="84" height="112" rx="17"/>
+    <rect class="control-shape" x="577" y="749" width="42" height="78" rx="7"
+          fill="#e3e3df"/>
+  </g>
+
+  <!-- Function -->
+  <g id="function" data-control="function" class="sp1-control">
+    <rect class="highlight" x="710" y="744" width="149" height="179" rx="20"/>
+    <path class="control-shape" d="M800 766h35a8 8 0 0 1 8 8v123a8 8 0 0 1-8 8h-35"
+          fill="none"/>
+    <circle class="control-shape" cx="744" cy="815" r="10" fill="none" stroke="#ef7479"/>
+    <circle cx="744" cy="815" r="4.5" fill="#ef7479"/>
+    <circle cx="744" cy="840" r="7" fill="#ef7479" opacity="0.28"/>
+  </g>
+</svg>

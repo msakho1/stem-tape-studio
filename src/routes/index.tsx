@@ -3,7 +3,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { DeviceSurface } from "@/device/DeviceSurface";
 import { KeyboardPanel } from "@/device/KeyboardPanel";
 import { SystemPage } from "@/device/SystemPage";
-import { ControlsGuide, LESSONS, MiniSurface } from "@/device/ControlsGuide";
+import { ControlsGuide, LESSONS } from "@/device/ControlsGuide";
+import { Sp1GuideIllustration } from "@/device/Sp1GuideIllustration";
 import { SupportButton } from "@/components/SupportButton";
 import { KEY_HINTS, useDeviceSurface } from "@/device/useDeviceSurface";
 import { CONTROL_LABELS } from "@/device/geometry";
@@ -320,7 +321,7 @@ function LabPage() {
                 <p className="mt-1 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--signal)]">
                   {l.gesture}
                 </p>
-                <MiniSurface highlight={l.highlight} motion={l.motion} held={l.held ?? []} />
+                <Sp1GuideIllustration highlight={l.highlight} motion={l.motion} held={l.held ?? []} />
                 <p className="mt-2 font-mono text-[11px] leading-relaxed text-[var(--ink-dim)]">{l.body}</p>
               </section>
             ))}

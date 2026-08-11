@@ -1033,3 +1033,21 @@
   padding: 0.3rem 0.6rem;
   cursor: pointer;
 }
+
+/* Authoritative SP-1 illustration (src/assets/stem-tape-sp1-outline.svg) */
+.sp1-illustration {
+  max-width: 280px;
+  margin-inline: auto;
+}
+.sp1-illustration > svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  object-fit: contain;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+}
+.sp1-illustration [data-control] .highlight {
+  transition: opacity 120ms linear;
+}
