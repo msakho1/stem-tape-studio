@@ -210,14 +210,6 @@ export class HeadLanes {
   exit(): { ok: boolean; detail: string } {
     if (!this.active) return { ok: true, detail: "heads already off" };
     for (let i = 0; i < 4; i++) this.stopLane(i, "exit");
-    for (const g of this.laneBuses) {
-      try {
-        g?.disconnect();
-      } catch {
-        /* noop */
-      }
-    }
-    this.laneBuses = [null, null, null, null];
     if (this.bus) {
       try {
         this.bus.disconnect();
@@ -229,16 +221,20 @@ export class HeadLanes {
     this.bus = null;
     this.tap = null;
     this.active = false;
+    this.source = null;
+    this.sourceName = null;
     this.lanes = [0, 1, 2, 3].map(freshLane);
-    this.note("heads.exit", -1, "heads off — stem mixer restored, transport untouched");
-    return { ok: true, detail: "heads off — four lanes released, transport untouched" };
+    this.note("heads.exit", -1, "heads off — heads bus disconnected, stem mapping restored");
+    return { ok: true, detail: "heads off — four readers stopped, transport untouched" };
   }
 
   // ------------------------------------------------------------- positions
 
-  duration(i: number): number {
-    return this.host.buffer(i)?.duration ?? 0;
+  /** Duration of the ONE source buffer every head reads. */
+  duration(_i?: number): number {
+    return this.host.sourceBuffer()?.duration ?? 0;
   }
+
 
   position(i: number): number {
     const l = this.lanes[i];
