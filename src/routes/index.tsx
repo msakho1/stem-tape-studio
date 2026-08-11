@@ -248,6 +248,7 @@ function LabPage() {
                 {mounted && status.contextState === "running" ? `audio live · ${status.sampleRate ?? "?"} Hz` : "audio ready"}
               </p>
             </div>
+            <HeadsStatus active={state.headsMode} heads={status.headLanes} notice={headsNotice} />
             <DeviceSurface
               svgRef={svgRef}
               capRefs={capRefs}
