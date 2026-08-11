@@ -21,41 +21,59 @@ export function assetControlId(c: Control): string {
 const MARKUP = svgMarkup.replace(/<\?xml[^>]*\?>/, "");
 
 interface Frame {
-  /** milliseconds from the start of the 3 s cycle */
+  /** milliseconds from the start of the cycle */
   at: number;
   active: string[];
 }
 
-const CYCLE_MS = 3000;
+/**
+ * Gesture cadence, in milliseconds. A tap must read as a deliberate press and
+ * release, not a strobe: the control stays lit long enough to be seen (ON),
+ * clears fully between taps (GAP), and the whole gesture is followed by a rest
+ * so the eye can count the taps before the cycle repeats.
+ */
+const LEAD_MS = 700; // qualifier (FUNCTION etc.) engages first
+const ON_MS = 520; // a tap is visibly held
+const GAP_MS = 380; // release between taps in a multi-tap
+const SUSTAIN_MS = 2600; // fader travel / rocker deflection / hold
+const REST_MS = 1500; // dark rest before the gesture repeats
 
 /**
  * Build the gesture timeline: qualifiers (held controls, e.g. FUNCTION) engage
  * first and stay lit, then the target control pulses once / twice / three
  * times, or stays lit for continuous motions (fader travel, rocker deflection)
- * and holds.
+ * and holds. Returns the frames plus the total cycle length so slower gestures
+ * are not clipped by a fixed period.
  */
-function buildFrames(target: string[], held: string[], motion: MiniMotion): Frame[] {
+function buildFrames(
+  target: string[],
+  held: string[],
+  motion: MiniMotion,
+): { frames: Frame[]; cycle: number } {
   const base = held;
   const all = [...held, ...target.filter((t) => !held.includes(t))];
   const frames: Frame[] = [{ at: 0, active: [] }];
-  const lead = held.length > 0 ? 500 : 0;
-  if (lead) frames.push({ at: 220, active: base });
+  const lead = held.length > 0 ? LEAD_MS : 0;
+  if (lead) frames.push({ at: 200, active: base });
+
+  const start = lead + 200;
 
   if (motion === "fader" || motion === "rocker" || motion === "hold") {
-    frames.push({ at: lead + 220, active: all });
-    frames.push({ at: 2500, active: base });
-    return frames;
+    frames.push({ at: start, active: all });
+    frames.push({ at: start + SUSTAIN_MS, active: base });
+    return { frames, cycle: start + SUSTAIN_MS + REST_MS };
   }
 
   const count = motion === "double" ? 2 : motion === "triple" ? 3 : 1;
-  let t = lead + 220;
+  let t = start;
   for (let i = 0; i < count; i++) {
     frames.push({ at: t, active: all });
-    frames.push({ at: t + 220, active: base });
-    t += 400;
+    frames.push({ at: t + ON_MS, active: base });
+    t += ON_MS + GAP_MS;
   }
-  return frames;
+  return { frames, cycle: t + REST_MS };
 }
+
 
 export function Sp1GuideIllustration({
   highlight = [],
