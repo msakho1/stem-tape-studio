@@ -119,10 +119,8 @@ export function ProjectDrawer({ engine, status, control }: Props) {
   /** Stage 1 of "load all": propose a mapping, do not ingest yet. */
   const stageAll = useCallback((files: FileList | null) => {
     if (!files || files.length === 0) return;
-    const picked = Array.from(files).slice(0, STEM_ROLE_LIST.length);
-    setPending(
-      picked.map((file, i) => ({ file, role: (STEM_ROLE_LIST[i] as StemRole | undefined) ?? "skip" })),
-    );
+    setPending(proposeMapping(Array.from(files)));
+
   }, []);
 
   /** Stage 2: the mapping was visibly confirmed — now decode. */
