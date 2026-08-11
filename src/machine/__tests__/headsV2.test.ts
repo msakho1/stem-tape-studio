@@ -17,7 +17,7 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
-import { applyGesture, initialSurfaceState, pressControl, releaseControl, type SurfaceState } from "@/machine/surface";
+import { applyGesture, applyHeadsFeedback, initialSurfaceState, pressControl, releaseControl, type SurfaceState } from "@/machine/surface";
 import { GestureEngine, type Gesture } from "@/input/gestures";
 
 let clock = 0;
@@ -26,17 +26,32 @@ const tap = (control: string, count = 1): Gesture =>
 const holdStart = (control: string): Gesture =>
   ({ type: "holdStart", control, level: "hold", duration: 500, t: (clock += 1000) }) as Gesture;
 
-/** FUNCTION + triple-tap PLAY = heads on (v2.6 `play.heads`). */
+/**
+ * FUNCTION + triple-tap PLAY = heads REQUESTED (v2.6 `play.heads`). The reducer
+ * only emits `heads.enter`; the engine's ack, replayed here through
+ * `applyHeadsFeedback`, is what actually turns heads on.
+ */
 function headsOn(): SurfaceState {
   let s = pressControl(initialSurfaceState(), "function");
   s = applyGesture(s, tap("play", 3));
   s = releaseControl(s, "function");
-  return s;
+  return applyHeadsFeedback(s, { active: true });
 }
 
 const types = (s: SurfaceState, from = 0) => s.commands.slice(from).map((c) => c.type);
 
 describe("Heads v2 · entry", () => {
+  it("does not claim heads until the engine accepts", () => {
+    let s = pressControl(initialSurfaceState(), "function");
+    s = applyGesture(s, tap("play", 3));
+    s = releaseControl(s, "function");
+    expect(types(s)).toContain("heads.enter");
+    expect(s.headsMode).toBe(false);
+    // Engine rejection leaves the surface off — no split-brain state.
+    expect(applyHeadsFeedback(s, { active: false }).headsMode).toBe(false);
+    expect(applyHeadsFeedback(s, { active: true }).headsMode).toBe(true);
+  });
+
   it("turns four independent heads on without touching the transport", () => {
     const s = headsOn();
     expect(s.headsMode).toBe(true);
@@ -47,6 +62,7 @@ describe("Heads v2 · entry", () => {
     expect(s.tracks.every((t) => !t.headLatched && !t.headLoop.active && !t.headReverse)).toBe(true);
   });
 });
+
 
 describe("Heads v2 · Track button table", () => {
   it("×1 mutes only that head", () => {

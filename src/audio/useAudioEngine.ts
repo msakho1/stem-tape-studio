@@ -21,6 +21,8 @@ export function useAudioEngine(commands: AudioCommand[]) {
    */
   const commandTail = useRef<Promise<void>>(Promise.resolve());
   const [acks, setAcks] = useState<Ack[]>([]);
+  /** >0 while a heads.enter / heads.exit is still queued or executing. */
+  const [headsInFlight, setHeadsInFlight] = useState(0);
   const [status, setStatus] = useState<EngineStatus>(() => engine.status());
   const [unlockNote, setUnlockNote] = useState<string>("audio locked — press PLAY or enable audio");
 
@@ -82,6 +84,8 @@ export function useAudioEngine(commands: AudioCommand[]) {
       const d = engine.status();
       return {
         active: engine.headLanes.active,
+        engineHeadsActive: engine.heads.active,
+        contextState: d.contextState,
         transportPosition: d.position,
         transportPlaying: d.actuallyPlaying,
         headsRms: engine.headsRms(),
@@ -108,6 +112,8 @@ export function useAudioEngine(commands: AudioCommand[]) {
     if (pending.length === 0) return;
     watermark.current = pending[pending.length - 1]!.id;
     for (const cmd of pending) {
+      const isHeadsSwitch = cmd.type === "heads.enter" || cmd.type === "heads.exit";
+      if (isHeadsSwitch) setHeadsInFlight((n) => n + 1);
       commandTail.current = commandTail.current.then(async () => {
         const needsAudio =
           cmd.type.startsWith("transport.") ||
@@ -119,12 +125,22 @@ export function useAudioEngine(commands: AudioCommand[]) {
           const result = await engine.unlock();
           setUnlockNote(result.detail);
         }
-        const ack = engine.execute(cmd);
+        let ack = engine.execute(cmd);
+        // Heads entry retries EXACTLY once behind a fresh resume: on mobile the
+        // first unlock can still be settling when the triple-tap completes, and
+        // a locked context must not read as "heads unavailable".
+        if (cmd.type === "heads.enter" && ack.status === "rejected" && /unlock|suspend|locked|closed/i.test(ack.detail)) {
+          const retry = await engine.unlock();
+          setUnlockNote(retry.detail);
+          if (retry.ok) ack = engine.execute(cmd);
+        }
         setAcks((prev) => [ack, ...prev].slice(0, 60));
         setStatus(engine.status());
+        if (isHeadsSwitch) setHeadsInFlight((n) => Math.max(0, n - 1));
       });
     }
   }, [commands, engine]);
+
 
   // --- continuous control bus → AudioParam / scrub kernel -----------------
   useEffect(() => {
@@ -228,5 +244,5 @@ export function useAudioEngine(commands: AudioCommand[]) {
     return r;
   }, [engine]);
 
-  return { engine, status, acks, unlock, unlockNote };
+  return { engine, status, acks, unlock, unlockNote, headsInFlight };
 }

@@ -15,6 +15,14 @@
  *  - A head with no loop stops at the end of its source rather than wrapping.
  */
 
+/**
+ * Per-lane entry descriptor captured by the engine BEFORE any heads state is
+ * touched: was this stem audible at the instant Heads was entered?
+ */
+export interface HeadEntryLane {
+  audible: boolean;
+}
+
 export interface HeadLaneSnapshot {
   lane: number;
   /** Audible + moving right now. */
@@ -110,14 +118,24 @@ export class HeadLanes {
 
   // ------------------------------------------------------------- lifecycle
 
-  enter(): { ok: boolean; detail: string } {
+  enter(entries?: HeadEntryLane[]): { ok: boolean; detail: string } {
     const ctx = this.host.ctx();
-    if (!ctx) return { ok: false, detail: "audio not unlocked" };
+    this.note("heads.enter.requested", -1, `entry requested — ctx ${ctx ? ctx.state : "absent"}`);
+    if (!ctx) {
+      this.note("heads.enter.rejected", -1, "audio not unlocked");
+      return { ok: false, detail: "audio not unlocked" };
+    }
     if (this.active) return { ok: true, detail: "heads already active" };
     const loaded = [0, 1, 2, 3].filter((i) => this.host.buffer(i) != null);
-    if (loaded.length === 0) return { ok: false, detail: "heads rejected — no decoded lane to read" };
+    if (loaded.length === 0) {
+      this.note("heads.enter.rejected", -1, "no decoded lane to read");
+      return { ok: false, detail: "heads rejected — no decoded lane to read" };
+    }
     const dest0 = this.host.destination();
-    if (!dest0) return { ok: false, detail: "heads rejected — no output bus" };
+    if (!dest0) {
+      this.note("heads.enter.rejected", -1, "no output bus");
+      return { ok: false, detail: "heads rejected — no output bus" };
+    }
     const bus = ctx.createGain();
     bus.gain.value = 1;
     bus.connect(dest0);
@@ -135,6 +153,9 @@ export class HeadLanes {
       g.connect(tap);
       return g;
     });
+    // POSITION FIRST. Every lane is parked exactly where the song is before any
+    // moving/latch/anchor state is written, so no stale anchor can recompute an
+    // entry position (the reverse-continuity bug).
     const at = Math.max(0, this.host.songPosition());
     this.lanes = [0, 1, 2, 3].map(() => {
       const l = freshLane();
@@ -142,12 +163,29 @@ export class HeadLanes {
       return l;
     });
     this.active = true;
-    this.note("heads.enter", -1, `four independent heads parked at ${at.toFixed(3)}s — transport untouched`);
-    return {
-      ok: true,
-      detail: `heads on — head N reads lane N, parked at ${at.toFixed(3)}s, nothing playing until a Track is held or latched`,
-    };
+    // Musical continuity: a stem that was audible at the instant of entry keeps
+    // sounding as its own head from `at`. Muted/inactive stems (and everything,
+    // when the transport is paused) stay parked at the same position.
+    const carried: number[] = [];
+    for (let i = 0; i < 4; i++) {
+      if (entries?.[i]?.audible && this.host.buffer(i) != null) {
+        this.lanes[i]!.latched = true;
+        carried.push(i + 1);
+      }
+    }
+    if (carried.length > 0) this.reconcile("entry continuation");
+    const detail =
+      carried.length > 0
+        ? `heads on — heads ${carried.join("+")} carried the playing stems from ${at.toFixed(3)}s, the rest parked there`
+        : `heads on — head N reads lane N, parked at ${at.toFixed(3)}s`;
+    this.note("heads.enter.accepted", -1, detail);
+    for (let i = 0; i < 4; i++) {
+      const l = this.lanes[i]!;
+      this.note("head.state", i, `pos ${l.posS.toFixed(3)}s moving ${l.moving} latched ${l.latched} muted ${l.muted} reverse ${l.reverse}`);
+    }
+    return { ok: true, detail };
   }
+
 
   exit(): { ok: boolean; detail: string } {
     if (!this.active) return { ok: true, detail: "heads already off" };

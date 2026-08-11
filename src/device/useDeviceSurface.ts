@@ -16,6 +16,7 @@ import {
   applyFader,
   applyGesture,
   applyGlobalScrub,
+  applyHeadsFeedback,
   applyPerfIntent,
   deriveLeds,
   initialSurfaceState,
@@ -76,6 +77,7 @@ type Action =
   | { type: "gesture"; gesture: Gesture }
   | { type: "perf"; intent: PerfIntent }
   | { type: "globalScrub"; dir: 1 | -1 | null }
+  | { type: "headsFeedback"; patch: { active?: boolean; source?: number | null } }
   | { type: "faderCommit"; index: number; value: number; claimed?: ContinuousChannel };
 
 
@@ -95,6 +97,9 @@ function reducer(state: SurfaceState, action: Action): SurfaceState {
       return applyGesture({ ...state, lastGesture: describeGesture(action.gesture) }, action.gesture);
     case "globalScrub":
       return applyGlobalScrub(state, action.dir, performance.now());
+    case "headsFeedback":
+      // Engine truth. The reducer never sets headsMode itself.
+      return applyHeadsFeedback(state, action.patch);
     case "faderCommit":
       return applyFader(state, action.index, action.value, action.claimed);
   }
@@ -498,6 +503,11 @@ export function useDeviceSurface() {
     (control: Control, e: React.PointerEvent) => {
       e.preventDefault();
       if (!readyRef.current) return;
+      // Mobile Chromium/Safari grant AudioContext creation and resume() only
+      // inside the trusted gesture call stack. Every control press starts the
+      // unlock synchronously here — before any await, microtask or command
+      // queue — so FN + PLAY ×3 can enter Heads without a second gesture.
+      void getAudioEngine().unlock();
       // Capture is an optimisation, never a gate: if the UA refuses it the
       // gesture must still reach the engine.
       try {
@@ -751,8 +761,17 @@ export function useDeviceSurface() {
   const leds = useMemo(() => deriveLeds(state), [state]);
   const observed = useMemo(() => observedRows(state, leds), [state, leds]);
 
+  /**
+   * The engine's verdict on heads entry/exit. Called from the ack subscription;
+   * it is the only path that may change `headsMode`.
+   */
+  const applyEngineHeads = useCallback((patch: { active?: boolean; source?: number | null }) => {
+    dispatch({ type: "headsFeedback", patch });
+  }, []);
+
   return {
     state,
+    applyEngineHeads,
     leds,
     observed,
     engine,
