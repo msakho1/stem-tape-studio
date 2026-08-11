@@ -47,6 +47,7 @@ export const InteractiveSP1 = memo(function InteractiveSP1({
   useEffect(() => {
     const host = hostRef.current;
     const svg = host?.querySelector("svg") as SVGSVGElement | null;
+    (window as unknown as Record<string, unknown>)["__sp1boot"] = svg ? "found" : "missing";
     if (!svg) return;
     svgRef.current = svg;
     svg.style.width = "100%";
