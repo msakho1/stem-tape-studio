@@ -41,17 +41,21 @@ interface Frame {
  * so the eye can count the taps before the cycle repeats.
  */
 const LEAD_MS = 700; // qualifier (FUNCTION etc.) engages first
-const ON_MS = 520; // a tap is visibly held
-const GAP_MS = 380; // release between taps in a multi-tap
+const ON_MS = 520; // a single tap is visibly held
+const MULTI_ON_MS = 260; // a tap inside a double/triple is quick
+const MULTI_GAP_MS = 140; // release between taps in a multi-tap
+const SEQ_ON_MS = 480; // one button of a two-button sequence
+const SEQ_GAP_MS = 420; // deliberate pause between the two buttons
 const SUSTAIN_MS = 2600; // fader travel / rocker deflection / hold
 const REST_MS = 1500; // dark rest before the gesture repeats
 
 /**
  * Build the gesture timeline: qualifiers (held controls, e.g. FUNCTION) engage
  * first and stay lit, then the target control pulses once / twice / three
- * times, or stays lit for continuous motions (fader travel, rocker deflection)
- * and holds. Returns the frames plus the total cycle length so slower gestures
- * are not clipped by a fixed period.
+ * times, cycles through its targets one at a time (`sequence`), or stays lit
+ * for continuous motions (fader travel, rocker deflection) and holds. Returns
+ * the frames plus the total cycle length so slower gestures are not clipped by
+ * a fixed period.
  */
 function buildFrames(
   target: string[],
@@ -66,18 +70,30 @@ function buildFrames(
 
   const start = lead + 200;
 
-  if (motion === "fader" || motion === "rocker" || motion === "hold") {
+  if (motion === "fader" || motion === "rocker" || motion === "rocker-click" || motion === "hold") {
     frames.push({ at: start, active: all });
     frames.push({ at: start + SUSTAIN_MS, active: base });
     return { frames, cycle: start + SUSTAIN_MS + REST_MS };
   }
 
+  if (motion === "sequence") {
+    let t = start;
+    for (const id of target) {
+      frames.push({ at: t, active: [...base, id] });
+      frames.push({ at: t + SEQ_ON_MS, active: base });
+      t += SEQ_ON_MS + SEQ_GAP_MS;
+    }
+    return { frames, cycle: t + REST_MS };
+  }
+
   const count = motion === "double" ? 2 : motion === "triple" ? 3 : 1;
+  const on = count > 1 ? MULTI_ON_MS : ON_MS;
+  const gap = count > 1 ? MULTI_GAP_MS : ON_MS;
   let t = start;
   for (let i = 0; i < count; i++) {
     frames.push({ at: t, active: all });
-    frames.push({ at: t + ON_MS, active: base });
-    t += ON_MS + GAP_MS;
+    frames.push({ at: t + on, active: base });
+    t += on + gap;
   }
   return { frames, cycle: t + REST_MS };
 }
