@@ -86,6 +86,7 @@ export const InteractiveSP1 = memo(function InteractiveSP1({
       },
     });
 
+    (window as unknown as Record<string, unknown>)["__sp1boot"] = "api:" + typeof (svg as WithApi).stemTape;
     // Seed the photographed caps from the authoritative state.
     const api = (svg as WithApi).stemTape;
     for (let i = 0; i < 4; i++) api?.setFader((i + 1) as StemChannel, faderValues[i] ?? 1);
