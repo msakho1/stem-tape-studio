@@ -298,8 +298,12 @@ export class AudioEngine {
   private listeners = new Set<Listener>();
   private schedulerTimer: ReturnType<typeof setInterval> | null = null;
   budget: MemoryBudget = SSR_BUDGET;
-  /** Explicit opt-in; only meaningful above the standard threshold. */
-  highMemoryMode = false;
+  /**
+   * The memory-mode concept was removed from the product: the engine always
+   * runs at the platform's high-memory ceiling. Kept as a field only because
+   * judge()/describeVerdict() take it as a parameter.
+   */
+  readonly highMemoryMode = true;
   lastError: string | null = null;
   lastDecodeMs: number | null = null;
   /** Published for the diagnostics panel. */
