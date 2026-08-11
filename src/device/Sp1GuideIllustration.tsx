@@ -9,7 +9,15 @@ import svgMarkup from "@/assets/stem-tape-sp1-outline.svg?raw";
  * asset's existing `[data-control]` groups.
  */
 
-export type MiniMotion = "press" | "fader" | "rocker" | "double" | "triple" | "hold";
+export type MiniMotion =
+  | "press"
+  | "fader"
+  | "rocker"
+  | "rocker-click"
+  | "sequence"
+  | "double"
+  | "triple"
+  | "hold";
 
 /** Map internal control ids onto the asset's data-control ids. */
 export function assetControlId(c: Control): string {
