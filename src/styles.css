@@ -1117,7 +1117,8 @@
   80%, 85% { transform: translateY(9px); }
   90%, 100% { transform: translateY(0); }
 }
-.sp1-illustration [data-control] {
+.sp1-illustration [data-control],
+.sp1-illustration [data-control] circle.control-shape {
   transform-box: fill-box;
   transform-origin: center;
 }
