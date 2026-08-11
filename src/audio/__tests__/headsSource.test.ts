@@ -32,7 +32,7 @@ describe("heads initial distribution", () => {
 
   it("falls back to 20/40/60/80 % on very short sources", () => {
     const p = distributeHeads(4, 1);
-    expect(p).toEqual([0.8, 1.6, 2.4, 3.2000000000000006]);
+    expect(p.map((x) => +x.toFixed(3))).toEqual([0.8, 1.6, 2.4, 3.2]);
     expect(distinct(p)).toBe(true);
   });
 
