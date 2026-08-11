@@ -1682,8 +1682,15 @@ export class AudioEngine {
   enterHeadsMode(): { ok: boolean; detail: string } {
     if (!this.ctx) return { ok: false, detail: "audio not unlocked" };
     if (this.heads.active) return { ok: true, detail: "heads already active" };
-    const r = this.headLanes.enter();
+    // Captured BEFORE anything about the heads is written: which stems the
+    // musician can actually hear right now. Those become moving heads.
+    const anySolo = this.tracks.some((t) => t.soloed);
+    const entries = this.tracks.map((t) => ({
+      audible: this.requestedPlaying && t.buffer != null && !t.muted && (!anySolo || t.soloed),
+    }));
+    const r = this.headLanes.enter(entries);
     if (!r.ok) return r;
+
     this.headsEntrySnapshot = this.tracks.map((t) => ({
       muted: t.muted,
       soloed: t.soloed,
