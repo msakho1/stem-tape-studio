@@ -104,8 +104,15 @@ export const LESSONS: Lesson[] = [
     title: "How to use FX",
     gesture: "VOL − + VOL + together",
     body: "Press both volume buttons together to open FX mode. Each Track button is a bank — TONE, MOD, MOTION, SPACE — held for momentary, FUNCTION + Track to latch. VOL −/+ cycles the algorithm inside the selected bank.",
-    highlight: ["volume-minus", "volume-plus"],
-    motion: "press",
+    highlight: [
+      "volume-minus",
+      "volume-plus",
+      "track-button-1",
+      "track-button-2",
+      "track-button-3",
+      "track-button-4",
+    ],
+    motion: "fx",
   },
   {
     id: "heads",

@@ -17,7 +17,8 @@ export type MiniMotion =
   | "sequence"
   | "double"
   | "triple"
-  | "hold";
+  | "hold"
+  | "fx";
 
 /** Map internal control ids onto the asset's data-control ids. */
 export function assetControlId(c: Control): string {
@@ -85,6 +86,24 @@ function buildFrames(
     }
     return { frames, cycle: t + REST_MS };
   }
+
+  // FX: both volume buttons together open the mode, then a pause, then each
+  // track button is pressed in turn to show the four banks.
+  if (motion === "fx") {
+    const vol = target.filter((id) => id.startsWith("volume-"));
+    const tracks = target.filter((id) => id.startsWith("track-"));
+    let t = start;
+    frames.push({ at: t, active: [...base, ...vol] });
+    frames.push({ at: t + ON_MS, active: base });
+    t += ON_MS + 900;
+    for (const id of tracks) {
+      frames.push({ at: t, active: [...base, id] });
+      frames.push({ at: t + SEQ_ON_MS, active: base });
+      t += SEQ_ON_MS + SEQ_GAP_MS;
+    }
+    return { frames, cycle: t + REST_MS };
+  }
+
 
   const count = motion === "double" ? 2 : motion === "triple" ? 3 : 1;
   const on = count > 1 ? MULTI_ON_MS : ON_MS;
