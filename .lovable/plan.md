@@ -1,50 +1,80 @@
-# Heads mode: why "nothing happened", and the fix
+# Heads mode: engine-authoritative entry, live head readout
 
-## What I verified in the running app
+## Verified current behaviour
 
-I drove the real control surface in a headless browser at your viewport (420 px, touch): held FUNCTION, tapped PLAY three times, released.
+- `src/machine/surface.ts:470-478` flips `headsMode` optimistically and *then* emits `heads.enter`. Nothing ever reconciles it.
+- `applyHeadsFeedback` exists at `src/machine/surface.ts:933` and is called from no live path — `useDeviceSurface` never sees engine acks.
+- `HeadLanes.enter()` (`src/audio/headLanes.ts:113-150`) rejects with `"audio not unlocked"` when there is no context and `"heads rejected — no decoded lane to read"` when no buffer is decoded. Both surface verbatim through `engine.ack`.
+- On success it parks all four lanes at `songPosition()` with `moving:false`, regardless of what was audible.
+- `useAudioEngine` already exposes `acks` and already owns the async unlock-and-retry pattern (`commandTail`).
+- `engine.status().heads` already carries the per-head snapshot (position, playing, latched, held, muted, reverse, loop).
 
-Reducer state before: `headsMode: false`
-Reducer state after: `headsMode: true`
-Command tail emitted:
+## What changes
+
+### 1. Entry becomes provisional until the engine acks
+
+`heads.enter` is emitted with the reducer's heads state left **unchanged**. `useDeviceSurface` subscribes to acks and calls `applyHeadsFeedback`:
 
 ```text
-rollback
-rate.set        play.snap     (the ×2 step, rolled back)
-rollback
-heads.enter     play.heads
+FN + PLAY x3 -> heads.enter (provisional)
+              -> engine.enterHeadsMode()
+   accepted   -> applyHeadsFeedback({active:true})  -> headsMode = true
+   rejected   -> headsMode stays false + reason shown
 ```
 
-So the gesture, the deferred multi-tap arbitration and the reducer are all working. The failure is downstream of the reducer, in three places:
+Same for `heads.exit`. A periodic reconcile compares `status.heads.active` with `state.headsMode` and forces the reducer to the engine's value, so the split-brain state cannot exist even transiently after an unexpected engine stop.
 
-1. **The engine can silently refuse.** `HeadLaneEngine.enter()` returns `heads rejected — no decoded lane to read` when no stem is decoded, and `audio not unlocked` when the AudioContext is still suspended. Nothing reverts the surface after a refusal: `applyHeadsFeedback` exists in `src/machine/surface.ts` but is never called from `useDeviceSurface`. Result: the surface believes heads are on, the audio engine knows they are off.
-2. **There is no visible heads state on mobile.** The only heads-aware UI element in `src/routes/index.tsx` is `KeyboardPanel`, wrapped in `hidden lg:block`. Below the `lg` breakpoint nothing on screen changes at all — no banner, no head strip, no rejection notice.
-3. **Even a successful entry is silent by design.** On entry the four heads are parked, not playing: "nothing playing until a Track is held or latched". So a correct entry with stems loaded also produces no sound until you hold or triple-tap a Track button.
+### 2. Automatic unlock on entry
 
-## The fix
+`heads.enter` joins the existing `commandTail` unlock path: if the context is missing or suspended, resume it inside the same gesture stack, then retry `heads.enter` once. Rejection only after the retry.
 
-### 1. Make the engine's verdict authoritative
+### 3. Entry preserves the musical state
 
-- Subscribe to engine acks in `useDeviceSurface` and route `heads.enter` / `heads.exit` results into `applyHeadsFeedback`. A rejected entry flips `headsMode` back to `false` and surfaces the reason.
-- Show the rejection text ("no decoded lane to read", "audio not unlocked") in the existing "what just happened" narration line so a refusal is never silent.
+`HeadLanes.enter()` takes an entry descriptor from the engine: for each decoded lane, `{ audible, position }` captured **before** any lane state is touched.
 
-### 2. Auto-satisfy the preconditions instead of refusing
+- Capture `at = currentTransportPosition` first; set `lane.posS = at` for all four lanes before any anchor/moving/reverse write. No `stopLane`/reconcile recompute from stale anchors.
+- Transport playing + lane audible: head starts **moving** from `at` (anchor set to `ctx.currentTime`), so the composition does not drop out.
+- Transport playing + lane muted/inactive: head parked at `at`, muted.
+- Transport paused: all heads parked at `at`, nothing sounds, UI still goes active.
 
-- If the AudioContext is suspended when `heads.enter` arrives, unlock it inside the same gesture call stack (the pattern already used for global scrub) and retry once before rejecting.
-- Keep the "no decoded lane" refusal, but state it plainly: *heads need at least one loaded stem — load a song or the demo kit first.*
+Never reset to 0 s.
 
-### 3. Give heads mode a visible presence at every width
+### 4. Minimal heads status layer
 
-- A heads banner at the top of the device column, visible on mobile and desktop: `HEADS · four independent lane heads` plus the one-line control legend (tap = mute, hold = solo audition, ×3 = latch, FN + fader = scrub, FN + ×2 = reverse, FN + Track + VOL ± = resize).
-- A four-head strip showing, per head: playing / latched / muted / reversed, loop bars, and position in seconds — read from the head-lane engine so it reflects audio truth, not reducer intent.
-- Exiting heads mode removes both, restoring the current layout exactly.
+A compact indicator directly above the device, at every width (no `lg:` gating), no legend, no instructions:
 
-### 4. Confirm the entry gesture landed
+```text
+HEADS   1 ▸ 12.4   2 ■ 12.4   3 ▸ 12.4 ↺   4 ✕ 12.4
+```
 
-- Flash the heads banner and pulse the FUNCTION LED (`breathe`, already specified in the LED frame) on entry so the triple-tap is acknowledged even when no stem is loaded yet.
+Per head: position (s), moving/parked, latched, reverse, muted. Values are read from `engine.status().heads`, never from reducer state. It disappears on exit.
 
-## Technical notes
+### 5. Entry acknowledgement
 
-Files touched: `src/device/useDeviceSurface.ts` (ack → `applyHeadsFeedback` wiring, unlock-and-retry), `src/audio/engine.ts` / `src/audio/headLanes.ts` (retry after unlock, unchanged rejection semantics otherwise), `src/routes/index.tsx` (heads banner + head strip, no breakpoint gating), and a small new heads status component. No changes to the gesture engine or the reducer's heads table — both are proven correct by the run above.
+On accepted entry: FUNCTION LED breathes (existing heads LED frame), a brief `HEADS` confirmation flashes, and the four indicators appear immediately — including when every head is parked.
 
-Verification: replay the same headless run at 420 px and at desktop width, with and without stems loaded, and assert (a) rejection reverts `headsMode` and shows the reason, (b) successful entry shows the banner and strip, (c) holding Track 1 makes head 1 audible while the transport stays paused.
+### 6. Product-facing rejection copy
+
+Engine detail strings are mapped at the UI boundary; raw text stays in logs.
+
+| engine detail | shown |
+| --- | --- |
+| no decoded lane to read | HEADS unavailable · load a song first |
+| audio not unlocked / retry failed | HEADS unavailable · audio engine locked |
+| no output bus | HEADS unavailable · audio engine locked |
+
+### 7. Track semantics stay as implemented
+
+Tap = mute, hold = solo audition, ×3 = latch, FN + fader = scrub, FN + Track ×2 = reverse, FN + Track + VOL ± = resize. These already dispatch into `headLanes` while `heads.active`; the pass only verifies no path falls back to transport once heads are live. Multi-tap gesture arbitration is not touched.
+
+### 8. Diagnostics
+
+`HeadLanes.log` gains the named events `heads.enter.requested`, `heads.enter.audioUnlocked`, `heads.enter.accepted`, `heads.enter.rejected`, `heads.exit`, and per-head `position/moving/latched/reverse` samples, all readable through the existing `window.__stemTape` heads bridge.
+
+## Acceptance run
+
+Chromium at 420 px and desktop, scenarios A–J from the brief: no song (reject + copy, `headsMode` false), suspended context (auto-unlock, single gesture), all four stems audible (no dropout, four moving heads at the song position), stems 1+3 audible (2 and 4 parked at the same position), paused transport (parked, UI active, silent), hold Track 1, triple-tap latch, FN + fader 1 isolation, FN + Track 1 ×2 reverse with continuous position, and exit reconcile. Each asserted against `engine.status().heads`, plus an invariant check that `headsMode === status.heads.active` at every step.
+
+## Files
+
+`src/machine/surface.ts` (provisional entry), `src/device/useDeviceSurface.ts` (ack subscription + reconcile + rejection copy), `src/audio/useAudioEngine.ts` (unlock-and-retry for `heads.enter`), `src/audio/engine.ts` (entry descriptor), `src/audio/headLanes.ts` (position-first init, audible-lane continuation, named log events), `src/routes/index.tsx` + a small heads status component.
