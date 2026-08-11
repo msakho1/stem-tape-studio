@@ -5,6 +5,7 @@ import { KeyboardPanel } from "@/device/KeyboardPanel";
 import { SystemPage } from "@/device/SystemPage";
 import { ControlsGuide, LESSONS } from "@/device/ControlsGuide";
 import { Sp1GuideIllustration } from "@/device/Sp1GuideIllustration";
+import { HeadsStatus } from "@/device/HeadsStatus";
 import { SupportButton } from "@/components/SupportButton";
 import { KEY_HINTS, useDeviceSurface } from "@/device/useDeviceSurface";
 import { CONTROL_LABELS } from "@/device/geometry";
