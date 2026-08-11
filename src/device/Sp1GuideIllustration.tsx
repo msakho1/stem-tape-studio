@@ -96,7 +96,7 @@ export function Sp1GuideIllustration({
     .map(assetControlId)
     .filter((id) => !heldKey.split(",").includes(id))
     .join(",");
-  const frames = useMemo(
+  const { frames, cycle } = useMemo(
     () =>
       buildFrames(
         targetKey ? targetKey.split(",") : [],
@@ -105,7 +105,6 @@ export function Sp1GuideIllustration({
       ),
     [targetKey, heldKey, motion],
   );
-
 
   useEffect(() => {
     setFrameIndex(0);
@@ -116,14 +115,14 @@ export function Sp1GuideIllustration({
       frames.forEach((f, i) => {
         timers.push(window.setTimeout(() => !stopped && setFrameIndex(i), f.at));
       });
-      timers.push(window.setTimeout(run, CYCLE_MS));
+      timers.push(window.setTimeout(run, cycle));
     };
     run();
     return () => {
       stopped = true;
       timers.forEach(clearTimeout);
     };
-  }, [frames]);
+  }, [frames, cycle]);
 
   useEffect(() => {
     const root = host.current?.querySelector("svg");
@@ -135,6 +134,7 @@ export function Sp1GuideIllustration({
       else g.removeAttribute("data-active");
     });
   }, [frameIndex, frames]);
+
 
   return (
     <div
