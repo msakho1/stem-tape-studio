@@ -114,3 +114,51 @@ describe("bar-synced loop release", () => {
     expect(engine.status().tracks[1]!.loop.enabled).toBe(false);
   });
 });
+
+describe("release target survives pre-boundary cleanup", () => {
+  it("keeps the queued replacement by identity, lands within 2 frames, leaves one source", async () => {
+    const { engine, ctx, advance, tick } = await rig();
+    engine.execute(cmd("transport.play"));
+    advance(3.0);
+    engine.execute(cmd("loop.capture", { lane: 0, bars: 1 }));
+    for (let i = 0; i < 20; i++) {
+      advance(0.25);
+      tick();
+    }
+
+    const before = ctx.started.length;
+    engine.execute(cmd("loop.release", { lane: 0 }));
+    const plan = (engine as unknown as {
+      lastReleasePlan: { lane: number; boundaryPos: number; sourceFrame: number; at: number }[];
+    }).lastReleasePlan.at(-1)!;
+    const target = ctx.started.slice(before)[0]!.node;
+
+    const tracks = (engine as unknown as {
+      tracks: { sources: { node: unknown; startAt: number; startPos: number }[] }[];
+    }).tracks;
+
+    // Grind the scheduler across the whole pre-boundary window: wraps, seams
+    // and sweeps all run, and none of them may delete the target.
+    while (ctx.currentTime < plan.at - 0.02) {
+      advance(0.01);
+      tick();
+      expect(tracks[0]!.sources.some((s) => s.node === target)).toBe(true);
+      expect(target.stoppedAt == null || target.stoppedAt > plan.at).toBe(true);
+    }
+
+    // Boundary + fade: the target is promoted and is the only voice left.
+    advance(plan.at + 0.05 - ctx.currentTime);
+    tick();
+    const live = tracks[0]!.sources.filter((s) => s.node === target);
+    expect(live).toHaveLength(1);
+    const started = ctx.started.find((s) => s.node === target)!;
+    expect(Math.abs(Math.round(started.offset * SR) - plan.sourceFrame)).toBeLessThanOrEqual(2);
+    expect(
+      tracks[0]!.sources.filter((s) => {
+        const n = s.node as { stoppedAt: number | null };
+        return n.stoppedAt == null || n.stoppedAt > ctx.currentTime;
+      }),
+    ).toHaveLength(1);
+    expect(engine.status().tracks[0]!.loop.enabled).toBe(false);
+  });
+});
