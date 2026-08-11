@@ -1122,10 +1122,11 @@
   transform-box: fill-box;
   transform-origin: center;
 }
-.sp1-illustration[data-gesture="fader"][data-active-controls~="fader-1"] [data-control="fader-1"],
-.sp1-illustration[data-gesture="fader"][data-active-controls~="fader-2"] [data-control="fader-2"],
-.sp1-illustration[data-gesture="fader"][data-active-controls~="fader-3"] [data-control="fader-3"],
-.sp1-illustration[data-gesture="fader"][data-active-controls~="fader-4"] [data-control="fader-4"] {
+/* Only the fader cap travels — the slot stays fixed, like a real fader. */
+.sp1-illustration[data-gesture="fader"][data-active-controls~="fader-1"] [data-control="fader-1"] circle.control-shape,
+.sp1-illustration[data-gesture="fader"][data-active-controls~="fader-2"] [data-control="fader-2"] circle.control-shape,
+.sp1-illustration[data-gesture="fader"][data-active-controls~="fader-3"] [data-control="fader-3"] circle.control-shape,
+.sp1-illustration[data-gesture="fader"][data-active-controls~="fader-4"] [data-control="fader-4"] circle.control-shape {
   animation: sp1-fader-travel 1600ms ease-in-out infinite;
 }
 .sp1-illustration[data-gesture="rocker"][data-active-controls~="rocker"] [data-control="rocker"] {
