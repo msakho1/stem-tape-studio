@@ -1135,21 +1135,3 @@
 .sp1-illustration[data-gesture="rocker-click"][data-active-controls~="rocker"] [data-control="rocker"] {
   animation: sp1-rocker-click 2200ms ease-out infinite;
 }
-
-/* Photographic SP-1 instrument surface: the SVG is the device, nothing behind it. */
-.st-sp1-photo {
-  width: 100%;
-  max-width: 520px;
-  margin: 0 auto;
-  background: transparent;
-  touch-action: none;
-  user-select: none;
-  -webkit-user-select: none;
-  -webkit-tap-highlight-color: transparent;
-}
-.st-sp1-photo svg {
-  width: 100%;
-  height: auto;
-  display: block;
-  touch-action: none;
-}
