@@ -32,6 +32,14 @@ export type WorkletMessage =
       applyAtContextFrame: number;
     }
   | { type: "setWindow"; seq: number; start: number; end: number; enabled: boolean; applyAtContextFrame: number }
+  /** Bar-synced loop release: drop the window and land on an absolute source frame. */
+  | {
+      type: "releaseLoop";
+      seq: number;
+      targetSourceFrame: number;
+      fadeFrames: number;
+      applyAtContextFrame: number;
+    }
   | { type: "setChop"; seq: number; division: number; index: number; applyAtContextFrame: number }
   | { type: "setLoopMode"; seq: number; mode: "fixed" | "variable"; applyAtContextFrame: number }
   | { type: "setDirection"; seq: number; direction: 1 | -1; applyAtContextFrame: number }

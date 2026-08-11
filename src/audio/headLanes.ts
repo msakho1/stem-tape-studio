@@ -54,6 +54,14 @@ interface LaneRuntime {
   anchorCtx: number;
   anchorPos: number;
   loop: { startS: number; lengthS: number; bars: number } | null;
+  /**
+   * HIDDEN pointer: where this head would be if it had never looped. Captured
+   * when a loop starts and advanced from ctx.currentTime like any other
+   * position, so releasing the loop rejoins the head's own continuing timeline
+   * instead of dropping it back on the captured loop start.
+   */
+  hiddenAnchorCtx: number | null;
+  hiddenAnchorPos: number;
   scrubCandidate: number | null;
   ended: boolean;
   voice: { node: AudioBufferSourceNode; gain: GainNode } | null;
@@ -92,6 +100,8 @@ function freshLane(): LaneRuntime {
     anchorCtx: 0,
     anchorPos: 0,
     loop: null,
+    hiddenAnchorCtx: null,
+    hiddenAnchorPos: 0,
     scrubCandidate: null,
     ended: false,
     voice: null,
@@ -251,6 +261,31 @@ export class HeadLanes {
     return Math.min(Math.max(0, raw), Math.max(0, dur));
   }
 
+  /**
+   * The head's hidden (never-looped) position. Falls back to the audible
+   * position when no loop has ever been armed on this lane.
+   */
+  hiddenPosition(i: number): number {
+    const l = this.lanes[i];
+    const ctx = this.host.ctx();
+    if (!l || l.hiddenAnchorCtx == null || !ctx) return this.position(i);
+    const dir = l.reverse ? -1 : 1;
+    const raw = l.hiddenAnchorPos + (ctx.currentTime - l.hiddenAnchorCtx) * dir;
+    return Math.min(Math.max(0, raw), Math.max(0, this.duration(i)));
+  }
+
+  /** Arm/disarm the hidden pointer around a loop's lifetime. */
+  private markHidden(i: number, on: boolean) {
+    const l = this.lanes[i]!;
+    const ctx = this.host.ctx();
+    if (on) {
+      l.hiddenAnchorPos = this.position(i);
+      l.hiddenAnchorCtx = ctx ? ctx.currentTime : null;
+    } else {
+      l.hiddenAnchorCtx = null;
+    }
+  }
+
   /** Called from the status poll: parks any unlooped head that ran off its end. */
   tick() {
     if (!this.active) return;
@@ -402,10 +437,15 @@ export class HeadLanes {
     if (!this.active) return { ok: false, detail: "heads mode is not active" };
     const l = this.lanes[i]!;
     if (l.loop) {
-      // A single tap while looping releases the loop back into normal playback.
+      // A single tap while looping releases the loop back into normal playback
+      // at the head's HIDDEN position, not at the captured loop start.
+      const hidden = this.hiddenPosition(i);
       l.loop = null;
+      this.markHidden(i, false);
+      l.posS = hidden;
       if (l.moving) {
         this.stopLane(i, "loop released");
+        l.posS = hidden;
         this.reconcile("loop released");
       }
       return { ok: true, detail: `head ${i + 1} loop released — back to straight playback from ${l.posS.toFixed(3)}s` };
@@ -419,12 +459,16 @@ export class HeadLanes {
     if (!this.active) return { ok: false, detail: "heads mode is not active" };
     const l = this.lanes[i]!;
     if (l.loop) {
+      const hidden = this.hiddenPosition(i);
       l.loop = null;
+      this.markHidden(i, false);
+      l.posS = hidden;
       if (l.moving) {
         this.stopLane(i, "loop toggled off");
+        l.posS = hidden;
         this.reconcile("loop toggled off");
       }
-      return { ok: true, detail: `head ${i + 1} loop released` };
+      return { ok: true, detail: `head ${i + 1} loop released at ${hidden.toFixed(3)}s (hidden timeline)` };
     }
     const dur = this.duration(i);
     const lengthS = Math.min(Math.max(0.05, bars * this.host.barSeconds()), Math.max(0.05, dur));
@@ -435,6 +479,7 @@ export class HeadLanes {
     const start = Math.min(Math.max(0, raw), Math.max(0, dur - lengthS));
     l.scrubCandidate = null;
     l.posS = start;
+    this.markHidden(i, true);
     l.loop = { startS: start, lengthS, bars };
     if (l.moving) this.stopLane(i, "loop capture reseat");
     if (!l.latched && !l.held) l.latched = true; // a captured loop repeats
