@@ -1705,7 +1705,7 @@ export class AudioEngine {
             id: `heads-exit-reverse-${i}`,
             type: "tape.reverse",
             payload: { track: i, on: s.loop.reverse },
-          } as Command);
+          } as AudioCommand);
         }
         t.loop = { ...s.loop };
         if (this.ctx) this.setGain(t.gain.gain, s.level);
