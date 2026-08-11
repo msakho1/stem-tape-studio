@@ -89,6 +89,8 @@ export function useAudioEngine(commands: AudioCommand[]) {
         transportPosition: d.position,
         transportPlaying: d.actuallyPlaying,
         headsRms: engine.headsRms(),
+        source: engine.headLanes.source,
+        sourceName: engine.headLanes.sourceName,
         heads: engine.headLanes.snapshot(),
         summary: engine.headLanes.summary(),
         log: engine.headLanes.log.slice(-40),
