@@ -189,8 +189,11 @@ export class HeadLanes {
     if (!l.moving || !ctx) return l.posS;
     const dir = l.reverse ? -1 : 1;
     const raw = l.anchorPos + (ctx.currentTime - l.anchorCtx) * dir;
-    if (l.loop) return l.loop.startS + mod(raw - l.loop.startS, Math.max(1e-4, l.loop.lengthS));
     const dur = this.duration(i);
+    if (l.loop) {
+      const looped = l.loop.startS + mod(raw - l.loop.startS, Math.max(1e-4, l.loop.lengthS));
+      return Math.min(Math.max(0, looped), Math.max(0, dur));
+    }
     return Math.min(Math.max(0, raw), Math.max(0, dur));
   }
 
@@ -369,11 +372,16 @@ export class HeadLanes {
       }
       return { ok: true, detail: `head ${i + 1} loop released` };
     }
-    const lengthS = Math.max(0.05, bars * this.host.barSeconds());
-    const start = l.scrubCandidate != null ? l.scrubCandidate : this.position(i);
+    const dur = this.duration(i);
+    const lengthS = Math.min(Math.max(0.05, bars * this.host.barSeconds()), Math.max(0.05, dur));
+    const raw = l.scrubCandidate != null ? l.scrubCandidate : this.position(i);
+    // A loop must live INSIDE the source. Parking at the very end (a scrub
+    // landing at duration) previously produced a loop window past the end,
+    // which read silence and reported positions beyond the buffer.
+    const start = Math.min(Math.max(0, raw), Math.max(0, dur - lengthS));
     l.scrubCandidate = null;
     l.posS = start;
-    l.loop = { startS: Math.max(0, start), lengthS, bars };
+    l.loop = { startS: start, lengthS, bars };
     if (l.moving) this.stopLane(i, "loop capture reseat");
     if (!l.latched && !l.held) l.latched = true; // a captured loop repeats
     this.reconcile("loop capture");
