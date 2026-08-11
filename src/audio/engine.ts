@@ -75,7 +75,7 @@ import {
   type SourceCandidate,
   headReadPosition,
 } from "./heads";
-import { HeadLanes } from "./headLanes";
+import { HeadLanes, type HeadLaneSnapshot } from "./headLanes";
 import {
   HEAD_SCRUB_MAX_RATE,
   SCRUB_SILENCE_RATE,
