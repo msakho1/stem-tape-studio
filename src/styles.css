@@ -1098,8 +1098,7 @@
  */
 @keyframes sp1-fader-travel {
   0%, 100% { transform: translateY(0); }
-  25% { transform: translateY(-14px); }
-  75% { transform: translateY(14px); }
+  50% { transform: translateY(150px); }
 }
 @keyframes sp1-rocker-travel {
   0%, 100% { transform: translateY(0); }
