@@ -52,31 +52,34 @@ export function MiniSurface({
   const line = "var(--ink)";
 
   return (
-    <svg viewBox="40 40 640 700" className="h-56 w-full" role="img" aria-label="SP-1 control diagram">
+    <svg viewBox="30 30 660 750" className="h-56 w-full" role="img" aria-label="SP-1 control diagram">
       <rect x="52" y="52" width="616" height="676" rx="26" fill="none" stroke={line} strokeWidth="8" />
-      {/* faders */}
+      {/* faders — slot plus the SP-1's tall cap */}
       {FADER_X.map((x, i) => (
         <g key={i}>
-          <rect x={x - 4} y={FADER_SLOT_Y} width="8" height={FADER_SLOT_H} rx="4" fill="none" stroke={line} strokeWidth="4" />
-          <circle
-            cx={x}
-            cy={FADER_SLOT_Y + FADER_SLOT_H * 0.45}
-            r="13"
-            fill={on(`fader-${i + 1}` as Control) ? "var(--signal)" : "none"}
+          <rect x={x - 5} y={FADER_SLOT_Y} width="10" height={FADER_SLOT_H} rx="5" fill="none" stroke={line} strokeWidth="4" />
+          <rect
+            x={x - 11}
+            y={FADER_SLOT_Y + FADER_SLOT_H * 0.45 - 28}
+            width="22"
+            height="56"
+            rx="11"
+            fill={on(`fader-${i + 1}` as Control) ? "var(--signal)" : "var(--ink)"}
             stroke={line}
-            strokeWidth="6"
+            strokeWidth="4"
           >
             {motion === "fader" && on(`fader-${i + 1}` as Control) && (
               <animate
-                attributeName="cy"
-                values={`${FADER_SLOT_Y + 16};${FADER_SLOT_Y + FADER_SLOT_H - 16};${FADER_SLOT_Y + 16}`}
+                attributeName="y"
+                values={`${FADER_SLOT_Y + 4};${FADER_SLOT_Y + FADER_SLOT_H - 60};${FADER_SLOT_Y + 4}`}
                 dur="2.4s"
                 repeatCount="indefinite"
               />
             )}
-          </circle>
+          </rect>
         </g>
       ))}
+
       {/* track buttons */}
       {FADER_X.map((x, i) => (
         <circle
