@@ -55,6 +55,9 @@ export interface HeadLaneHost {
   /** Where the heads bus lands. Deliberately NOT the per-track chain: heads
    *  must survive stem mutes and the transport being stopped. */
   destination(): AudioNode | null;
+  /** Per-lane landing node: lane N's head rides stem N's FX chain, entering
+   *  AFTER the stem's mute gate so a muted stem still passes its head. */
+  laneDestination(lane: number): AudioNode | null;
   buffer(lane: number): AudioBuffer | null;
   reversed(lane: number): AudioBuffer | null;
   barSeconds(): number;
@@ -91,6 +94,8 @@ export class HeadLanes {
   active = false;
   private lanes: LaneRuntime[] = [0, 1, 2, 3].map(freshLane);
   private bus: GainNode | null = null;
+  /** One gain per lane, landing in that lane's own FX chain. */
+  private laneBuses: (GainNode | null)[] = [null, null, null, null];
   private tap: AnalyserNode | null = null;
   private scrubbing: (boolean | null)[] = [null, null, null, null];
   /** Ordered evidence trail; the browser proof reads it verbatim. */
@@ -111,16 +116,25 @@ export class HeadLanes {
     if (this.active) return { ok: true, detail: "heads already active" };
     const loaded = [0, 1, 2, 3].filter((i) => this.host.buffer(i) != null);
     if (loaded.length === 0) return { ok: false, detail: "heads rejected — no decoded lane to read" };
-    const dest = this.host.destination();
-    if (!dest) return { ok: false, detail: "heads rejected — no output bus" };
+    const dest0 = this.host.destination();
+    if (!dest0) return { ok: false, detail: "heads rejected — no output bus" };
     const bus = ctx.createGain();
     bus.gain.value = 1;
-    bus.connect(dest);
+    bus.connect(dest0);
     const tap = ctx.createAnalyser();
     tap.fftSize = 2048;
     bus.connect(tap);
     this.bus = bus;
     this.tap = tap;
+    this.laneBuses = [0, 1, 2, 3].map((i) => {
+      const g = ctx.createGain();
+      g.gain.value = 1;
+      const dest = this.host.laneDestination(i) ?? dest0;
+      g.connect(dest);
+      // Measurement tap only — the audible path is the lane FX chain.
+      g.connect(tap);
+      return g;
+    });
     const at = Math.max(0, this.host.songPosition());
     this.lanes = [0, 1, 2, 3].map(() => {
       const l = freshLane();
@@ -138,6 +152,14 @@ export class HeadLanes {
   exit(): { ok: boolean; detail: string } {
     if (!this.active) return { ok: true, detail: "heads already off" };
     for (let i = 0; i < 4; i++) this.stopLane(i, "exit");
+    for (const g of this.laneBuses) {
+      try {
+        g?.disconnect();
+      } catch {
+        /* noop */
+      }
+    }
+    this.laneBuses = [null, null, null, null];
     if (this.bus) {
       try {
         this.bus.disconnect();
@@ -212,14 +234,15 @@ export class HeadLanes {
   private startLane(i: number, why: string) {
     const ctx = this.host.ctx();
     const l = this.lanes[i]!;
-    if (!ctx || !this.bus || l.moving) return;
+    const laneBus = this.laneBuses[i] ?? this.bus;
+    if (!ctx || !laneBus || l.moving) return;
     const buf = this.host.buffer(i);
     if (!buf) return;
     if (l.ended && !l.loop && l.posS >= buf.duration - 1e-3) l.posS = 0;
     l.ended = false;
     const at = ctx.currentTime + 0.01;
     const gain = ctx.createGain();
-    gain.connect(this.bus);
+    gain.connect(laneBus);
     const node = ctx.createBufferSource();
     const dur = buf.duration;
     const rev = l.reverse;
@@ -426,10 +449,11 @@ export class HeadLanes {
   private grain(i: number, atS: number) {
     const ctx = this.host.ctx();
     const buf = this.host.buffer(i);
-    if (!ctx || !buf || !this.bus) return;
+    const laneBus = this.laneBuses[i] ?? this.bus;
+    if (!ctx || !buf || !laneBus) return;
     const l = this.lanes[i]!;
     const g = ctx.createGain();
-    g.connect(this.bus);
+    g.connect(laneBus);
     const n = ctx.createBufferSource();
     n.buffer = buf;
     n.connect(g);
