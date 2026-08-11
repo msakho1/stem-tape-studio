@@ -1500,17 +1500,21 @@ export class AudioEngine {
 
   /** RMS of the heads bus only. 0 when heads mode is not serving audio. */
   /**
-   * Heads Mode v2: FOUR INDEPENDENT LANE HEADS. Head N reads lane N on its own
-   * clock, so heads sound while the main transport is paused and the song
-   * playhead never moves because a head moved.
+   * Heads Mode: FOUR INDEPENDENT READERS over ONE selected stem buffer, each
+   * parked at a different moment of the song. The decoded buffer is shared by
+   * reference — never duplicated, never mutated — and the four voices mix into
+   * a dedicated heads bus that lands in the master chain.
    */
   readonly headLanes = new HeadLanes({
     ctx: () => this.ctx,
     destination: () => this.master,
-    laneDestination: (i) => this.tracks[i]?.input ?? null,
-    buffer: (i) => this.tracks[i]?.buffer ?? null,
-    reversed: (i) => {
-      const t = this.tracks[i];
+    sourceBuffer: () => {
+      const s = this.headLanes.source;
+      return s == null ? null : (this.tracks[s]?.buffer ?? null);
+    },
+    reversedSource: () => {
+      const s = this.headLanes.source;
+      const t = s == null ? null : this.tracks[s];
       if (!t?.buffer || !this.ctx) return null;
       if (!t.reversed) t.reversed = reverseBuffer(this.ctx, t.buffer);
       return t.reversed;
@@ -1518,6 +1522,13 @@ export class AudioEngine {
     barSeconds: () => this.barSeconds(),
     songPosition: () => this.position(),
   });
+
+  /**
+   * Most recently targeted track — the Heads source when Heads is entered.
+   * Updated by any track-scoped command while Heads is NOT active.
+   */
+  lastTargetedTrack = 0;
+
 
   headsRms(): number {
     return this.headLanes.rms();
