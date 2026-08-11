@@ -242,5 +242,5 @@ export function useAudioEngine(commands: AudioCommand[]) {
     return r;
   }, [engine]);
 
-  return { engine, status, acks, unlock, unlockNote };
+  return { engine, status, acks, unlock, unlockNote, headsInFlight };
 }
