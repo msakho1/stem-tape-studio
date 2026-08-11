@@ -467,18 +467,13 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
 
       if (c === "play") {
         if (fn && g.count === 3) {
+          // PROVISIONAL. The reducer does NOT flip headsMode here: the audio
+          // engine's ack is the only thing that may change it (applyHeadsFeedback).
+          // Optimistic entry is what allowed the surface to claim Heads while
+          // HeadLanes had rejected it.
           const on = !next.headsMode;
-          // The completed triple-tap has already rolled back the ×1 transport
-          // toggle and the ×2 1.0× snap above, so no lower-precedence Play
-          // command survives into heads entry/exit.
-          const tracks = [...next.tracks] as SurfaceState["tracks"];
-          for (let i = 0; i < 4; i++)
-            tracks[i] = { ...tracks[i]!, headPos: 0, headReverse: false, headMuted: false, headLevel: 0.8, headLatched: false, headLoop: { active: false, bars: 1 } };
-          next = { ...next, headsMode: on, tracks, headsSource: on ? next.headsSource : null };
           next = emit(next, on ? "heads.enter" : "heads.exit", {}, { rowId: "play.heads", t });
-          next = fire(next, "play.heads", `heads mode ${on ? "on" : "off"}`, t);
-          if (on)
-            next = fire(next, "heads.lane.play", "heads 1·2·3·4 are four independent lane heads — hold a Track to play one, triple-tap to latch it", t);
+          next = fire(next, "play.heads", `heads ${on ? "on" : "off"} requested — waiting for the audio engine`, t);
           return next;
         }
 
