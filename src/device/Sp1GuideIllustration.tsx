@@ -17,7 +17,8 @@ export type MiniMotion =
   | "sequence"
   | "double"
   | "triple"
-  | "hold";
+  | "hold"
+  | "fx";
 
 /** Map internal control ids onto the asset's data-control ids. */
 export function assetControlId(c: Control): string {
