@@ -728,6 +728,88 @@ export function useDeviceSurface() {
     [releaseControlPointer],
   );
 
+  /**
+   * Adapter for the photographic instrument surface (InteractiveSP1).
+   *
+   * It re-uses the EXACT same paths as the rendered surface did: faders travel
+   * on the continuous control bus and commit through the reducer; buttons and
+   * the rocker are pressed into the gesture engine as their existing controls.
+   * No new behaviour, no second source of truth.
+   */
+  const photoFaderStart = useCallback(
+    (index: FaderIndex, value: number, pointerId: number) => {
+      if (!readyRef.current) return;
+      faderValuesRef.current[index] = value;
+      controlBus.send({
+        channel: resolveChannel(),
+        index,
+        value,
+        committed: false,
+        pointerId,
+        phase: "start",
+        timestamp: performance.now(),
+      });
+    },
+    [resolveChannel],
+  );
+
+  const photoFaderMove = useCallback(
+    (index: FaderIndex, value: number, pointerId: number) => {
+      if (!readyRef.current) return;
+      faderValuesRef.current[index] = value;
+      controlBus.send({
+        channel: resolveChannel(),
+        index,
+        value,
+        committed: false,
+        pointerId,
+        phase: "move",
+        timestamp: performance.now(),
+      });
+    },
+    [resolveChannel],
+  );
+
+  const photoFaderEnd = useCallback(
+    (index: FaderIndex, value: number, pointerId: number, cancelled: boolean) => {
+      if (!readyRef.current) return;
+      const channel = resolveChannel();
+      if (cancelled) {
+        const committed = controlBus.reconcile(channel, index, stateRef.current.tracks[index]?.volume ?? 0);
+        faderValuesRef.current[index] = committed;
+        return;
+      }
+      faderValuesRef.current[index] = value;
+      controlBus.send({
+        channel,
+        index,
+        value,
+        committed: true,
+        pointerId,
+        phase: "end",
+        timestamp: performance.now(),
+      });
+      dispatch({ type: "faderCommit", index, value, claimed: channel });
+    },
+    [resolveChannel],
+  );
+
+  const photoPress = useCallback(
+    (control: Control, pointerId: number) => {
+      if (!readyRef.current) return;
+      engine.press(control, pointerId);
+    },
+    [engine],
+  );
+
+  const photoRelease = useCallback(
+    (control: Control, pointerId: number, cancelled: boolean) => {
+      if (cancelled) engine.cancel(control, pointerId);
+      else engine.release(control, pointerId);
+    },
+    [engine],
+  );
+
 
 
   // Read-only verification fixture: the ordered command stream and the last
