@@ -836,6 +836,10 @@ export class AudioEngine {
 
 
   private fadeOutAndStop(t: TrackRuntime, live: LiveSource, at: number) {
+    // A scheduled release's replacement source is protected by IDENTITY: no
+    // pre-boundary cleanup (wrap, relocate, respawn, sweep) may fade or stop
+    // it, or the lane rejoins the song seconds behind the hidden timeline.
+    if (this.isReleaseTarget(t, live)) return;
     live.fade.gain.cancelScheduledValues(at);
     live.fade.gain.setValueAtTime(1, at);
     live.fade.gain.setValueCurveAtTime(sampleCurve(equalPower, "a"), at, SEAM_FADE_S);
@@ -942,7 +946,7 @@ export class AudioEngine {
       // loop start, which is exactly how a released loop used to rejoin the
       // song several seconds behind the hidden timeline.
       const pendingRel = this.pendingRelease[li];
-      const pool = pendingRel ? t.sources.filter((s) => s.gen !== pendingRel.newGen) : t.sources;
+      const pool = pendingRel ? t.sources.filter((s) => s !== pendingRel.target) : t.sources;
       const live = pool[pool.length - 1];
       if (!live) continue;
       // The lane's seam is derived from ITS OWN read pointer, expressed in the
@@ -1024,7 +1028,21 @@ export class AudioEngine {
    * the value the shared integrated-rate timeline has reached — NOT from the
    * bar the loop was captured on, and NOT from the loop window.
    */
-  private pendingRelease: ({ at: number; pos: number; oldGen: number; newGen: number } | null)[] = [
+  /** True while `live` is the protected replacement of a pending release. */
+  private isReleaseTarget(t: TrackRuntime, live: LiveSource): boolean {
+    const i = this.tracks.indexOf(t);
+    if (i < 0) return false;
+    const p = this.pendingRelease[i];
+    return p != null && p.target === live;
+  }
+
+  private pendingRelease: ({
+    at: number;
+    pos: number;
+    oldGen: number;
+    newGen: number;
+    target: LiveSource;
+  } | null)[] = [
     null,
     null,
     null,
@@ -1075,7 +1093,7 @@ export class AudioEngine {
       return { ok: false, detail: `lane ${id + 1} release failed — no decoded buffer` };
     }
     for (const s of outgoing) this.fadeOutAndStop(t, s, at);
-    this.pendingRelease[id] = { at, pos: boundaryPos, oldGen, newGen: live.gen };
+    this.pendingRelease[id] = { at, pos: boundaryPos, oldGen, newGen: live.gen, target: live };
     this.lastReleasePlan = [
       ...this.lastReleasePlan.filter((r) => r.lane !== id).slice(-3),
       { lane: id, boundaryPos, sourceFrame, at },
@@ -1111,18 +1129,18 @@ export class AudioEngine {
       t.seamGeneration++;
       // Any straggler from before the boundary is gone by construction, but
       // sweep by generation so a mis-timed wrap can never survive the release.
+      // Promotion: protection is cleared FIRST so the sweep below is the only
+      // thing that can touch sources, then every voice other than the promoted
+      // target (by identity) is removed.
+      this.pendingRelease[i] = null;
       for (const s of [...t.sources]) {
-        // Only the release replacement survives the boundary — every other
-        // voice (including a wrap spawned while the release was pending) is
-        // reading the loop window, not the hidden song timeline.
-        if (s.gen === p.newGen) continue;
+        if (s === p.target) continue;
         try {
           s.node.stop();
         } catch {
           /* already stopped */
         }
       }
-      this.pendingRelease[i] = null;
     }
   }
 
