@@ -214,6 +214,7 @@ function LabPage() {
                 globalScrub={globalScrub}
               />
             </div>
+            <ControlsGuide showHitZones={showHitZones} onToggleHitZones={() => setShowHitZones((v) => !v)} />
           </section>
 
           {/* ---------- live readout ---------- */}
