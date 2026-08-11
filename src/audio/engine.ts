@@ -934,7 +934,16 @@ export class AudioEngine {
       if (t.committedSeamAt != null && t.committedSeamAt > now) continue;
       const bounds = this.loopBounds(t);
       if (!bounds || bounds.length <= SEAM_FADE_S * 2) continue;
-      const live = t.sources[t.sources.length - 1];
+      // A scheduled release has ALREADY queued its replacement source at the
+      // bar boundary, and that replacement is the newest entry in `sources`.
+      // The wrap scheduler must ignore it entirely: the audible voice is the
+      // newest source from before the release (gen <= oldGen). Wrapping off the
+      // raw tail would fade out the replacement and respawn the lane from the
+      // loop start, which is exactly how a released loop used to rejoin the
+      // song several seconds behind the hidden timeline.
+      const pendingRel = this.pendingRelease[li];
+      const pool = pendingRel ? t.sources.filter((s) => s.gen <= pendingRel.oldGen) : t.sources;
+      const live = pool[pool.length - 1];
       if (!live) continue;
       // The lane's seam is derived from ITS OWN read pointer, expressed in the
       // shared integrated-rate timeline:
@@ -950,11 +959,15 @@ export class AudioEngine {
       const at = Math.max(fadeStart, now + 0.005);
       // Never wrap a lane past a scheduled loop release — the release spawn
       // owns everything at and after its bar boundary.
-      const pending = this.pendingRelease[li];
-      if (pending && at >= pending.at - 1e-6) continue;
-      const outgoing = t.sources[t.sources.length - 1];
-      if (outgoing) this.fadeOutAndStop(t, outgoing, at);
-      this.spawn(t, at, bounds.start, true);
+      if (pendingRel && at >= pendingRel.at - 1e-6) continue;
+      this.fadeOutAndStop(t, live, at);
+      const wrapped = this.spawn(t, at, bounds.start, true);
+      // A wrap spawned UNDER a pending release must die at the boundary too —
+      // the replacement owns everything from that bar onwards.
+      if (wrapped && pendingRel) {
+        this.fadeOutAndStop(t, wrapped, pendingRel.at);
+        this.pendingRelease[li] = { ...pendingRel, oldGen: wrapped.gen };
+      }
       t.committedSeamAt = seamAt;
       t.seamCount++;
     }
