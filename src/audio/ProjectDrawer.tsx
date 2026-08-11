@@ -17,10 +17,48 @@ interface Props {
 }
 
 /** A file waiting for the musician to confirm which stem cell it lands in. */
-interface PendingFile {
+export interface PendingFile {
   file: File;
   role: StemRole | "skip";
 }
+
+/**
+ * Bulk pick → one distinct role per file. Filename inference first, then the
+ * remaining roles in canonical order, so four files always propose four cells.
+ */
+export function proposeMapping(files: File[]): PendingFile[] {
+  const rows: PendingFile[] = files.slice(0, STEM_ROLE_LIST.length).map((file) => ({ file, role: "skip" }));
+  const taken = new Set<StemRole>();
+  for (const row of rows) {
+    const guess = inferRole(row.file.name);
+    if (guess && !taken.has(guess)) {
+      row.role = guess;
+      taken.add(guess);
+    }
+  }
+  for (const row of rows) {
+    if (row.role !== "skip") continue;
+    const free = STEM_ROLE_LIST.find((r) => !taken.has(r));
+    if (!free) break;
+    row.role = free;
+    taken.add(free);
+  }
+  return rows;
+}
+
+/**
+ * Reassigning a role SWAPS with the row that already holds it. The old
+ * behaviour forced that row to "skip", which silently dropped the fourth file.
+ */
+export function reassignRole(rows: PendingFile[], index: number, role: StemRole | "skip"): PendingFile[] {
+  const previous = rows[index]?.role ?? "skip";
+  return rows.map((row, j) => {
+    if (j === index) return { ...row, role };
+    if (role !== "skip" && row.role === role) return { ...row, role: previous };
+    return row;
+  });
+}
+
 
 /**
  * Project page — the only place audio enters or leaves the prototype.
