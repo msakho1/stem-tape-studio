@@ -2,7 +2,7 @@
  * Shared demo-project loader so the header "TRY DEMO" button and the project
  * drawer run the exact same ingest path (sequential, lowest peak RAM).
  */
-import { buildDemoProject } from "./demo";
+import { buildDemoProject, DEMO_TITLE } from "./demo";
 import { ingestSequential } from "./ingest";
 import { session } from "./session";
 import { ROLE_LABEL } from "./format";
