@@ -503,6 +503,11 @@ export function useDeviceSurface() {
     (control: Control, e: React.PointerEvent) => {
       e.preventDefault();
       if (!readyRef.current) return;
+      // Mobile Chromium/Safari grant AudioContext creation and resume() only
+      // inside the trusted gesture call stack. Every control press starts the
+      // unlock synchronously here — before any await, microtask or command
+      // queue — so FN + PLAY ×3 can enter Heads without a second gesture.
+      void getAudioEngine().unlock();
       // Capture is an optimisation, never a gate: if the UA refuses it the
       // gesture must still reach the engine.
       try {
