@@ -290,9 +290,6 @@ function LabPage() {
             <button type="button" className="st-link mt-4" onClick={() => setTab("projects")}>
               manage project
             </button>
-            <p className="mt-6 font-mono text-[10px] leading-relaxed text-[var(--ink-faint)]">
-              No network request in this app ever contains your audio. Everything decodes and stays on this device.
-            </p>
           </aside>
         </div>
       )}
@@ -304,33 +301,58 @@ function LabPage() {
       )}
 
       {tab === "guide" && (
-        <div className="grid gap-5 px-4 py-5 md:px-8 lg:grid-cols-2">
+        <div className="grid gap-5 px-4 py-5 md:px-8">
           <section className="st-section">
-            <p className="st-section__title">keyboard parity</p>
-            <div className="flex flex-wrap gap-x-4 gap-y-1 font-mono text-[11px] text-[var(--ink-dim)]">
-              {KEY_HINTS.map(([key, ctrl]) => (
-                <span key={ctrl}>
-                  <span className="text-[var(--ink)]">{key.toLowerCase()}</span> → {CONTROL_LABELS[ctrl]}
-                </span>
-              ))}
-            </div>
-            <p className="mt-3 font-mono text-[11px] leading-relaxed text-[var(--ink-faint)]">
-              Hold two controls to emit a chord. Taps fire optimistically and revise upward (×1 → ×2 → ×3) so a single
-              tap is never delayed by the multi-tap window.
+            <p className="st-section__title">how to perform with stem tape</p>
+            <p className="mt-1 font-mono text-[11px] leading-relaxed text-[var(--ink-dim)]">
+              Load four stems (or press TRY DEMO), press PLAY, and perform with the Track buttons, the faders and
+              FUNCTION. Tempo, beat phase and bar lines are detected automatically from the audio — you never set a
+              grid.
             </p>
           </section>
-          <section className="st-section">
-            <p className="st-section__title">first moves</p>
-            <ol className="grid gap-2 font-mono text-[11px] text-[var(--ink-dim)]">
-              <li>1 · press TRY DEMO, then PLAY on the device.</li>
-              <li>2 · drag a fader to ride a stem's level.</li>
-              <li>3 · tap a track button to mute or unmute it.</li>
-              <li>4 · hold FUNCTION + a track for bank / song navigation.</li>
-              <li>5 · use the rocker for varispeed; double-tap to snap back.</li>
-            </ol>
-          </section>
+
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {LESSONS.map((l, i) => (
+              <section key={l.id} className="st-section" data-testid={`guide-${l.id}`}>
+                <p className="st-section__title">
+                  {String(i + 1).padStart(2, "0")} · {l.title}
+                </p>
+                <p className="mt-1 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--signal)]">
+                  {l.gesture}
+                </p>
+                <MiniSurface highlight={l.highlight} motion={l.motion} />
+                <p className="mt-2 font-mono text-[11px] leading-relaxed text-[var(--ink-dim)]">{l.body}</p>
+              </section>
+            ))}
+          </div>
+
+          <div className="grid gap-5 lg:grid-cols-2">
+            <section className="st-section">
+              <p className="st-section__title">keyboard parity</p>
+              <div className="flex flex-wrap gap-x-4 gap-y-1 font-mono text-[11px] text-[var(--ink-dim)]">
+                {KEY_HINTS.map(([key, ctrl]) => (
+                  <span key={ctrl}>
+                    <span className="text-[var(--ink)]">{key.toLowerCase()}</span> → {CONTROL_LABELS[ctrl]}
+                  </span>
+                ))}
+              </div>
+              <p className="mt-3 font-mono text-[11px] leading-relaxed text-[var(--ink-faint)]">
+                Y/H · U/J · I/K · O/L ride faders 1–4 and can be held at the same time. Hold two controls to emit a
+                chord. Single, double and triple taps are mutually exclusive — the surface waits out the multi-tap
+                window before committing a Track action.
+              </p>
+            </section>
+            <section className="st-section">
+              <p className="st-section__title">signal order</p>
+              <p className="font-mono text-[11px] leading-relaxed text-[var(--ink-dim)]">
+                stem → TONE → MOD → MOTION → SPACE → fader → solo → master. Each of the four FX banks holds three
+                algorithms; the selected one is named in the readout the moment it fires.
+              </p>
+            </section>
+          </div>
         </div>
       )}
+
 
       {tab === "system" && (
         <div className="px-4 py-5 md:px-8">
