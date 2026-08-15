@@ -249,7 +249,9 @@ export class CueStore {
   private noteOff(ctx: CueEventContext, key: string): CueAction {
     const cap = this.captures.get(key);
     if (!cap) {
-      if (this.markers.has(key)) return { type: "ignored", key, reason: "playback-note-off" };
+      const marker = this.markers.get(key);
+      // Playback Note Off is a RELEASE keyed by channel:note, not an ignore.
+      if (marker) return { type: "cue.release", key, marker };
       return { type: "ignored", key, reason: "note-off-unmatched" };
     }
     this.captures.delete(key);
