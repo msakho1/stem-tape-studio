@@ -57,8 +57,13 @@ async def main():
         await page.wait_for_selector('[data-control="play"]')
         await page.wait_for_function("() => !!window.__stemTape")
 
+        # Warm-up: the first press of a session also unlocks audio, so it is
+        # never a timing sample.
+        await page.evaluate(RUN, [100, 120])
+        await asyncio.sleep(0.6)
+
         cases = {
-            "claim_449_release_250": (420, 250),   # inside claim window, short overlap -> solo
+            "claim_449_release_250": (440, 250),   # inside claim window, short overlap -> solo
             "late_450_release_250": (520, 250),    # boundary: PLAY owned by hold -> no chord
             "claim_200_hold_700": (200, 800),      # overlap reaches 700 ms -> link
         }
