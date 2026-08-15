@@ -25,25 +25,68 @@ Disambiguation: the 2021 Kano "Donda Stem Player" (RE'd by `krystalgamer/stem-pl
 - Bootloader: TE stock, community-bypassed; entry = hold Track 1 + Track 4 while plugging USB-C. Image format = raw unsigned `.bin`.
 - Recovery: **no documented unbrick path** — the single largest risk.
 
-## 3. Port matrix (Stem Tape behaviour = source of truth)
+## 3. Three provenance-separated maps
 
-**A. Already in Tape Looper:** eMMC audio streaming, UAC2 out, ADC control scan, LED driver, transport, varispeed/rocker, per-track loop record/play, tap tempo, WebSerial transfer protocol, battery gauge.
+**Correction:** `V26_ROWS_AS_REGISTRY` is not stock SP-1 behaviour. Its own source header states it is "transcribed verbatim from chattock.github.io/sp1-tape-looper (the v2.6 reference card)" (`src/machine/v26map.ts:1-14`). That is the **Tape Looper** documentation as imported into the web app — a mapping contract, not a record of untouched TE firmware. Nothing about stock SP-1 behaviour may be inferred from it, from row names, or from Tape Looper.
 
-**B. Stock SP-1 behaviour to reproduce:** the 37 `V26_ROWS_AS_REGISTRY` rows in `src/machine/stemTapeV1Map.ts` — these are already Tape Looper v2.6 semantics, so mostly "don't break".
+Three maps are maintained separately, each row carrying its own evidence field. A row without a citation is `unknown` and stays `unknown`.
 
-**C. Stem Tape additions to port (C firmware):**
-1. Four-stem simultaneous playback + per-stem fader gain (`STEM_ROWS`).
-2. Chord/gesture arbiter: `src/machine/chordArbiter.ts`, `src/input/gestures.ts` — deferred tap arbitration (single/double/triple), 450/600/700/900 ms thresholds, `suppresses` sets.
-3. Remapped rows: `play.cue`, `rocker.chop.play`, `rocker.scrub`.
-4. Global scrub + frame-exact handoff (`SCRUB_HANDOFF_FADE_S = 4 ms`, landing ≤2 frames).
-5. Lane scrub via FUNCTION + fader, capped **1.5×** (`HEAD_SCRUB_MAX_RATE`).
-6. Per-lane one-bar loops with **hidden-timeline rejoin** at the next bar (`relocateShared`/`relocateLane`, `scheduleLoopRelease`).
-7. Heads mode v2: four playheads on one source, dual-bus isolation (normal bus gated to 0, 40 ms equal-power crossfade), entry snapshot restore.
-8. Lane reverse (loop-only vs. free-running rejoin).
-9. Inertia envelopes on play/stop (`src/audio/inertia.ts`).
-10. FX: 4 banks × 3 (`src/machine/fx12.ts`), signal order TONE→MOD→MOTION→SPACE.
+### STOCK_SP1_MAP — evidence: original SP-1 guide, or observation of an untouched physical unit
 
-**D. Stays browser-only (transfer tool):** file import/decode, mono downmix, **BPM/beat-phase/bar detection** (`gridAnalysis.ts` — ship the detected grid as metadata alongside the stems), waveform rendering, project/session store (OPFS/IndexedDB), WAV export, the guide/illustration, `.stemtape` packaging.
+Admissible evidence: TE's own printed/online guide for the SP-1, or a logged test session on a unit that has never been reflashed (control pressed → observed audio/LED result, recorded).
+
+**Current status: entirely `unknown`.** No stock TE SP-1 documentation was located in research, and no untouched unit has been tested. Every row below is a slot to be filled by Phase 0 observation, not an assertion:
+
+- transport (PLAY tap / hold) — unknown
+- rocker behaviour — unknown
+- fader function — unknown
+- Track button function — unknown
+- FUNCTION-qualified gestures — unknown
+- heads mode existence — unknown
+- LED semantics — unknown
+- song/bank model, storage limits — unknown
+- USB/transfer behaviour — unknown
+- power-on/off gesture — unknown
+
+Populate this map during Phase 0, **before** the first flash, while the donor unit is still on stock firmware. That observation pass is the only chance to capture it.
+
+### TAPE_LOOPER_MAP — evidence: named tag, file and line in `chattock/sp1-tape-looper`
+
+Admissible evidence: a citation of the form `v2.7.1-official : firmware/src/main.c : L####`, read from the fork.
+
+**Current status: cited only to the v2.6 reference card as transcribed at `src/machine/v26map.ts:26-79` (37 rows), not yet to firmware source.** Before any porting work, each row must be re-verified against `v2.7.1-official` source and re-cited to file and line; the reference card may lag the firmware. Rows whose behaviour cannot be found in source are marked `unknown`, not assumed.
+
+Firmware-side capabilities to cite the same way (currently attributed to the repo's README and file list, not to line-level source): eMMC audio streaming (`firmware/src/sp1_emmc.c`), UAC2 output, ADC control scan (`firmware/app.overlay`), LED driver, transport, varispeed/rocker, per-track loop record/play, tap tempo, WebSerial transfer protocol, battery gauge.
+
+### STEM_TAPE_MAP — evidence: current web-app mapping registry and engine code
+
+This map is fully cited and is the behavioural specification for the port:
+
+1. Four-stem playback + per-stem fader gain — `src/machine/stemTapeV1Map.ts` `STEM_ROWS` (L60-113).
+2. Chord/deferred-tap arbiter, single/double/triple, thresholds 450/600/700/900 ms, `suppresses` sets — `src/machine/chordArbiter.ts`, `src/input/gestures.ts`, thresholds declared per row in `stemTapeV1Map.ts`.
+3. Remapped rows `play.cue`, `rocker.scrub`, `rocker.chop.play` — `stemTapeV1Map.ts` `TRANSPORT_OVERRIDE_ROWS` (L115-170), each carrying its own `supersedes` and `originalBehaviour` fields.
+4. Global scrub + frame-exact handoff — `src/audio/engine.ts:114-116` (`SCRUB_HANDOFF_MIN_S`, `SCRUB_HANDOFF_FADE_S = 4 ms`), landing ≤2 frames per `src/audio/__tests__/scrubHandoff.test.ts`.
+5. Lane scrub, FUNCTION + fader, ceiling 1.5× — `src/audio/scrub.ts:37` (`HEAD_SCRUB_MAX_RATE`), row `heads.lane.scrub` (`stemTapeV1Map.ts:229-245`).
+6. Per-lane one-bar loops with hidden-timeline rejoin at the next bar — `src/audio/engine.ts` (`relocateShared`, `relocateLane`, `scheduleLoopRelease`), `src/audio/__tests__/loopRejoin.test.ts`.
+7. Heads v2: four playheads on one source, dual-bus isolation, 40 ms equal-power crossfade, entry-snapshot restore — `src/audio/headLanes.ts`, `src/audio/engine.ts`, `src/audio/__tests__/busIsolation.test.ts`, rows `HEADS_V2_ROWS` (L179-266).
+8. Lane reverse, loop-only vs. free-running rejoin — `src/audio/engine.ts` (`respawnLane`), row `heads.lane.reverse` (L246-255).
+9. Play/stop inertia envelopes — `src/audio/inertia.ts`.
+10. Twelve FX as 4 banks × 3, signal order TONE→MOD→MOTION→SPACE — `src/machine/fx12.ts:68-112`, `src/audio/fx/banks.ts`.
+
+### Retain / replace / remove, relative to stock
+
+Every entry here is **provisional and unresolvable until STOCK_SP1_MAP is populated**, because the "replaces" column currently compares against Tape Looper v2.6, not stock. What the registry actually records:
+
+- **Replaces (Tape Looper v2.6 rows, self-declared):** `play.restart` → `play.cue`; `rocker.chop` → `rocker.scrub` with chop moved to PLAY + rocker; `heads.source` → `heads.lane.play`; `heads.replay` → `heads.lane.latch`; `heads.scrub` → `heads.lane.scrub`. Each carries an `originalBehaviour` string in `stemTapeV1Map.ts`.
+- **Retains:** the remaining v2.6 rows, marked `provenance: "v2.6"`.
+- **Removes:** live-input recording and PRINT (removed in earlier phases), `track.delete`.
+- **Adds with no v2.6 antecedent:** `provenance: "extension"` rows — four-stem selection/solo/link, FX overlay, grid rows, WAV export.
+- **Against stock: unknown in all four columns.** Do not state that Stem Tape retains, replaces or removes any stock behaviour until the stock map exists.
+
+### Stays browser-only (transfer tool)
+
+File import/decode, mono downmix, **BPM/beat-phase/bar detection** (`src/audio/gridAnalysis.ts` — ship the detected grid as metadata alongside the stems), waveform rendering, project/session store (OPFS/IndexedDB), WAV export, guide/illustration, `.stemtape` packaging.
+
 
 ## 4. Fork structure
 
