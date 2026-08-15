@@ -2,7 +2,6 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { DeviceSurface } from "@/device/DeviceSurface";
 import { KeyboardPanel } from "@/device/KeyboardPanel";
-import { SystemPage } from "@/device/SystemPage";
 import { ControlsGuide, LESSONS } from "@/device/ControlsGuide";
 import { Sp1GuideIllustration } from "@/device/Sp1GuideIllustration";
 import { HeadsStatus } from "@/device/HeadsStatus";
@@ -40,12 +39,11 @@ export const Route = createFileRoute("/")({
   }),
 });
 
-type Tab = "tape" | "projects" | "guide" | "system";
+type Tab = "tape" | "projects" | "guide";
 const TABS: { id: Tab; label: string }[] = [
   { id: "tape", label: "tape" },
   { id: "projects", label: "projects" },
   { id: "guide", label: "guide" },
-  { id: "system", label: "system" },
 ];
 
 const TRACK_ROLES = ["vocals", "drums", "bass", "instruments"] as const;
@@ -446,30 +444,6 @@ function LabPage() {
       )}
 
 
-      {tab === "system" && (
-        <div className="px-4 py-5 md:px-8">
-          <SystemPage
-            engine={engine}
-            status={status}
-            acks={acks}
-            unlockNote={unlockNote}
-            state={state}
-            leds={leds}
-            observed={observed}
-            ready={ready}
-            powerHoldMs={powerHoldMs}
-            setPowerHoldMs={setPowerHoldMs}
-            rawLog={rawLog}
-            gestureLog={gestureLog}
-            faderValuesRef={faderValuesRef}
-            svgRef={svgRef}
-            arbiter={arbiter}
-            audio={status}
-          />
-        </div>
-      )}
-
-
       {/* ---------- transport bar ---------- */}
       <div className="hidden border-t border-[var(--bench-line)] px-8 py-3 lg:flex lg:items-center lg:gap-6">
         <span className="font-mono text-[12px] tabular-nums text-[var(--ink)]">
@@ -483,7 +457,7 @@ function LabPage() {
       </div>
 
       {/* ---------- mobile tab bar ---------- */}
-      <nav className="fixed inset-x-0 bottom-0 z-20 grid grid-cols-4 border-t border-[var(--bench-line)] bg-[var(--bench)] lg:hidden" aria-label="Sections">
+      <nav className="fixed inset-x-0 bottom-0 z-20 grid grid-cols-3 border-t border-[var(--bench-line)] bg-[var(--bench)] lg:hidden" aria-label="Sections">
         {TABS.map((t) => (
           <button key={t.id} type="button" className="st-tab st-tab--bar" data-on={tab === t.id} onClick={() => setTab(t.id)}>
             {t.label}
