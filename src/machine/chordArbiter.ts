@@ -493,7 +493,17 @@ export class ChordArbiter {
         if (overlap >= this.timings.pairingMs) {
           this.emit({ type: "system.pairing" }, [control, other], `pairing gesture (${overlap.toFixed(0)} ms)`);
         } else if (overlap < this.timings.overlayShortMs) {
-          this.emit({ type: "fx.overlay", on: !fxOverlay }, [control, other], `FX overlay ${fxOverlay ? "closed" : "opened"} (${overlap.toFixed(0)} ms)`);
+          // Scope is decided by whether FUNCTION qualified the chord, and only
+          // on OPEN. A bare two-volume chord always closes an open overlay,
+          // whichever scope it was opened in.
+          const fnQualified = this.down.has("function") || this.claimed.has("function");
+          const scope: FxScope = fnQualified ? "global" : "stem";
+          if (fnQualified) this.claim("function");
+          this.emit(
+            { type: "fx.overlay", on: !fxOverlay, scope: fxOverlay ? (this.view().fxScope ?? "stem") : scope },
+            [control, other],
+            `FX overlay ${fxOverlay ? "closed" : `opened in ${scope.toUpperCase()} scope`} (${overlap.toFixed(0)} ms)`,
+          );
         } else {
           this.emit(
             { type: "system.noop", detail: `ambiguous volume chord ${overlap.toFixed(0)} ms (600–2000 ms band)` },
