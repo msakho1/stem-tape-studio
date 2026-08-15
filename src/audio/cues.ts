@@ -94,8 +94,9 @@ export type CueAction =
   | { type: "learn.discard"; key: string; reason: DiscardReason }
   | { type: "learn.reject"; key: string; reason: LearnRejectReason }
   | { type: "cue.play"; key: string; marker: CueMarker }
+  | { type: "cue.release"; key: string; marker: CueMarker }
   | { type: "cue.reject"; key: string; reason: "source-replaced" }
-  | { type: "ignored"; key: string; reason: "unlearned" | "playback-note-off" | "note-off-unmatched" | "all-notes-off" };
+  | { type: "ignored"; key: string; reason: "unlearned" | "note-off-unmatched" | "all-notes-off" };
 
 type Capture = {
   key: string;
@@ -248,7 +249,9 @@ export class CueStore {
   private noteOff(ctx: CueEventContext, key: string): CueAction {
     const cap = this.captures.get(key);
     if (!cap) {
-      if (this.markers.has(key)) return { type: "ignored", key, reason: "playback-note-off" };
+      const marker = this.markers.get(key);
+      // Playback Note Off is a RELEASE keyed by channel:note, not an ignore.
+      if (marker) return { type: "cue.release", key, marker };
       return { type: "ignored", key, reason: "note-off-unmatched" };
     }
     this.captures.delete(key);
@@ -343,11 +346,11 @@ export function describeCueAction(a: CueAction): string {
       return `cannot learn ${a.key} — ${describeReason(a.reason)}`;
     case "cue.play":
       return `cue ${a.key} triggered`;
+    case "cue.release":
+      return `cue ${a.key} released`;
     case "cue.reject":
       return `cue ${a.key} unplayable — ${describeReason(a.reason)}`;
     case "ignored":
-      return a.reason === "playback-note-off"
-        ? `note off ignored — ${a.key} is a one-shot`
-        : `ignored ${a.key} — ${a.reason}`;
+      return `ignored ${a.key} — ${a.reason}`;
   }
 }

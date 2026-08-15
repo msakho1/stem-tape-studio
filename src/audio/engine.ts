@@ -1750,6 +1750,8 @@ export class AudioEngine {
   private cueVoices: (CueVoice | null)[] = [null, null, null, null];
   private cueOverride: boolean[] = [false, false, false, false];
   private cueTimers: (ReturnType<typeof setTimeout> | null)[] = [null, null, null, null];
+  /** Song timeline parked by a held GLOBAL cue: the frame to resume from. */
+  private cuePark: { pos: number; wasPlaying: boolean; phase: AudioEngine["transportPhase"] } | null = null;
   lastCueDetail: string | null = null;
   readonly cueLog: { t: number; action: string; detail: string }[] = [];
 
@@ -1824,10 +1826,62 @@ export class AudioEngine {
       const r = this.playCue(action.marker);
       detail = r.detail;
     }
+    if (action.type === "cue.release") {
+      detail = this.releaseCueByKey(action.key).detail;
+    }
     if (ev.kind === "allNotesOff") this.stopAllCues("all notes off");
     this.noteCue(action.type, detail);
     return { action, detail };
   }
+
+  /**
+   * Held-pad release, keyed by channel:note. Every cue voice carrying that key
+   * fades out across the seam; a global cue also unparks the song timeline and
+   * resumes all four stems from the exact frame the Note On froze.
+   */
+  private releaseCueByKey(key: string): { ok: boolean; detail: string } {
+    let released = 0;
+    for (let lane = 0; lane < this.cueVoices.length; lane++) {
+      const voice = this.cueVoices[lane];
+      if (!voice || voice.key !== key) continue;
+      this.stopCueVoice(lane, "released");
+      const timer = this.cueTimers[lane];
+      if (timer) clearTimeout(timer);
+      this.cueTimers[lane] = null;
+      this.cueOverride[lane] = false;
+      if (this.ctx) this.applyAudibility(lane as TrackId);
+      released++;
+    }
+    if (released === 0) return { ok: false, detail: `cue ${key} was not sounding` };
+    const resumed = this.resumeCuePark();
+    return {
+      ok: true,
+      detail: `cue ${key} released — ${released} lane${released === 1 ? "" : "s"} rejoined${resumed ? ` · song resumed at ${resumed.toFixed(3)}s` : ""}`,
+    };
+  }
+
+  /**
+   * Unpark the song after the last global cue voice goes away. The tape restarts
+   * from the frame the cue froze — transport, loop, mixer and FX untouched.
+   */
+  private resumeCuePark(): number | null {
+    const park = this.cuePark;
+    if (!park || !this.ctx) return null;
+    if (this.cueVoices.some((v) => v && v.scope === "global")) return null;
+    this.cuePark = null;
+    const now = this.ctx.currentTime;
+    this.timeline.anchor(now, park.pos);
+    this.timelineFrozenAt = now;
+    if (park.wasPlaying) {
+      this.stopSources();
+      this.requestedPlaying = true;
+      this.transportPhase = park.phase;
+      this.startAll(park.pos);
+      this.invalidateSeams();
+    }
+    return park.pos;
+  }
+
 
   /** Schedule one marker. Global markers hit all four lanes at the SAME time. */
   private playCue(marker: CueMarker): { ok: boolean; detail: string } {
@@ -1847,12 +1901,26 @@ export class AudioEngine {
     const at = ctx.currentTime + SEAM_FADE_S;
     const startS = marker.startFrame / marker.sampleRate;
     const durS = (marker.endFrame - marker.startFrame) / marker.sampleRate;
+    // A GLOBAL cue parks the song: the timeline freezes on the exact frame the
+    // Note On landed on and every ordinary source stops, so nothing advances
+    // underneath. Transport, loop, mixer and FX state are left untouched.
+    if (marker.scope === "global" && !this.cuePark) {
+      const pos = this.position();
+      this.cuePark = { pos, wasPlaying: this.requestedPlaying, phase: this.transportPhase };
+      if (this.requestedPlaying) {
+        this.stopSources();
+        this.requestedPlaying = false;
+      }
+      this.timeline.anchor(ctx.currentTime, pos);
+      this.timelineFrozenAt = ctx.currentTime;
+    }
     for (const lane of lanes) this.spawnCue(lane, marker, startS, durS, at);
     return {
       ok: true,
-      detail: `cue ${marker.key} · ${marker.scope === "global" ? "all four stems" : `lane ${lanes[0]! + 1}`} · ${(durS * 1000).toFixed(0)} ms from ${startS.toFixed(3)}s`,
+      detail: `cue ${marker.key} · ${marker.scope === "global" ? "all four stems (song parked)" : `lane ${lanes[0]! + 1}`} · ${(durS * 1000).toFixed(0)} ms from ${startS.toFixed(3)}s`,
     };
   }
+
 
   /**
    * DEDICATED cue spawn. Not `spawn()`: a cue never loops, never mirrors into
@@ -1926,6 +1994,8 @@ export class AudioEngine {
       /* already torn down */
     }
     if (this.ctx) this.applyAudibility(lane as TrackId);
+    // Passage ended before the pad was released: return automatically.
+    this.resumeCuePark();
     this.noteCue("cue.release", `lane ${lane + 1} rejoined its underlay — ${reason}`);
   }
 
@@ -1947,7 +2017,7 @@ export class AudioEngine {
   }
 
   /** Song change, panic, disposal. */
-  stopAllCues(reason: string) {
+  stopAllCues(reason: string, resumeSong = true) {
     for (let i = 0; i < this.tracks.length; i++) {
       const voice = this.cueVoices[i];
       if (!voice) continue;
@@ -1958,6 +2028,8 @@ export class AudioEngine {
       this.cueTimers[i] = null;
       if (this.ctx) this.applyAudibility(i as TrackId);
     }
+    if (resumeSong) this.resumeCuePark();
+    else this.cuePark = null;
     for (const a of this.cues.cancelAllCaptures("cancelled")) this.noteCue(a.type, describeCueAction(a));
   }
 
@@ -4158,7 +4230,7 @@ export class AudioEngine {
           if (this.ctx) {
             // Lifecycle (correction 8): momentary state cleared, DSP history
             // faded out, Beat Repeat rings dropped. Stored FX config survives.
-            this.stopAllCues("song loaded");
+            this.stopAllCues("song loaded", false);
             this.flushAllFx();
             this.stopSources();
 
@@ -4584,7 +4656,7 @@ export class AudioEngine {
   }
 
   dispose() {
-    this.stopAllCues("engine disposed");
+    this.stopAllCues("engine disposed", false);
     for (const t of this.tracks) {
       t.fxRack?.dispose();
       t.fxRack = null;

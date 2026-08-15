@@ -251,15 +251,13 @@ describe("playback", () => {
     expect((a as { marker: { startFrame: number } }).marker.startFrame).toBe(10000);
   });
 
-  it("playback Note Off does nothing", () => {
+  it("playback Note Off releases the cue without touching the marker", () => {
     const s = new CueStore();
     learn(s, 73, fn);
     s.handle(ev("noteOn", 73), ctx(0));
-    expect(s.handle(ev("noteOff", 73), ctx(5000))).toEqual({
-      type: "ignored",
-      key: "0:73",
-      reason: "playback-note-off",
-    });
+    const off = s.handle(ev("noteOff", 73), ctx(5000));
+    expect(off.type).toBe("cue.release");
+    expect(off.key).toBe("0:73");
     expect(s.get("0:73")).toMatchObject({ startFrame: 10000, endFrame: 100000 });
   });
 
