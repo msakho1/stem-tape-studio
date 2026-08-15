@@ -463,7 +463,9 @@ Save just one stem
 Hold its TRACK button instead of FUNCTION, then do the same thing.
 
 Play it
-Tap the learned MIDI key. Your saved section plays once, then the song keeps going.
+Hold a learned pad to play its cue. Release it to return. A whole-song cue parks the tape; a stem cue lets the other three stems continue.
+
+Each pad needs a unique note, channel, or combination. If your pads transmit the same note, assign them different channels.
 
 “MIDI works in supported browsers such as desktop Chrome and Edge. It is not currently available in iPhone or iPad browsers.”`,
     highlight: ["function", "track-button-1", "play"],
