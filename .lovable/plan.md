@@ -204,14 +204,15 @@ Web engine
 - `src/audio/midi/webMidi.ts` (new) — Web MIDI adapter (desktop/Android).
 - `src/audio/midi/nativeBridge.ts` (new) — `window.__stemTapeMidi` batched-array queue + bridge-ready handshake.
 - `src/audio/cues.ts` (new) — marker store keyed by `channel:note`, learn/play state machines, eligibility gate, invalidation — all pure over `StemMidiEvent`.
-- `src/audio/engine.ts` — add `cueOwner: (CueOwner|null)[]`; extend the existing identity protection so `fadeOutAndStop` `:845`/`isReleaseTarget` `:849` also spare a cue voice; add handlers `cue.learn.start`, `cue.learn.end`, `cue.play`, `cue.stopAll`, `cue.clear` that reuse `spawn` `:782`, `fadeOutAndStop` `:845` and the existing rejoin math; schedule completion + per-lane rejoin at play time; reschedule on rate change; `tick()` reaps only. **No change** to `releaseGlobalLoop` `:1074`, `scheduleLoopRelease` `:1147`, or `applyAudibility` `:1650`.
+- `src/audio/engine.ts` — add `cueOwner: (CueOwner|null)[]`; extend the existing identity protection so `fadeOutAndStop` `:845`/`isReleaseTarget` `:849` also spare a cue voice; add **one `cueOwner[lane]` guard** at the small number of places that create an audible normal source (`spawn` call sites in the wrap/seam path `:967-980`, `relocateLane` `:1021`, `respawnLane` `:828`, the `tick()` scheduler) so an owned lane creates none; add handlers `cue.learn.start`, `cue.learn.end`, `cue.play`, `cue.stopAll`, `cue.clear` reusing `spawn` `:782` and `fadeOutAndStop` `:845`; schedule the fixed-1× completion + per-lane rejoin at play time; `tick()` reaps only. **No change** to `releaseGlobalLoop` `:1074`, `scheduleLoopRelease` `:1147`, or `applyAudibility` `:1650`.
 - `src/audio/commands.ts` — append the five command types to the union `:14-94`.
 
-Input/qualifiers
-- `src/device/useDeviceSurface.ts` — subscribe both adapters, read `functionHeld` `surface.ts:95` and held-Track lanes `surface.ts:324` at event time, dispatch cue commands. No gesture-engine change.
+Input/qualifiers (smallest claim change)
+- `src/machine/chordArbiter.ts` — **one new public method**, `claimExternal(controls: Control[], detail: string)`, that calls the existing `private claim(...)` `:161` and pushes a log record. The existing machinery then does the rest for free: `isClaimed` `:167` makes the v2.6 consumer drop those controls' base gestures, and a claim is cleared on the control's own release `:236-238`, so no lifecycle code is added. A hold-audition already dispatched on press is untouched and restores normally.
+- `src/device/useDeviceSurface.ts` — subscribe both adapters; on a learn Note On, read `functionHeld` `surface.ts:95` / held-Track lanes `surface.ts:324` **and immediately** `arbiter.claimExternal(["function"])` or `claimExternal([trackControl])`. FUNCTION release can then no longer arm active-track selection, and Track release can no longer emit mute/loop/tap. No gesture-engine change.
 
 Persistence
-- `src/audio/store.ts` — `control.cues?` type; `src/audio/session.ts:117` — write/restore, plus per-role `sourceGeneration` bumping on stem adoption.
+- `src/audio/store.ts` — `control.cues?` type; `src/audio/session.ts:117` — write/restore. `contentHash` only; **no `sourceGeneration` is ever persisted.**
 
 UI status
 - `src/device/CueStatus.tsx` (new), beside `HeadsStatus.tsx`: transport source (native bridge vs Web MIDI vs none), device name, armed scope, learned/invalid marker counts, last event, last rejection reason, and the browser-only Silent Mode + no-MIDI disclosure. No pads, no editor.
@@ -220,44 +221,56 @@ Native
 - New `ios/` folder per §10; not part of the Vite build.
 
 Guide
-- `src/device/guideContent.ts` — feature id `stem.instrument.cues` and one lesson that animates FUNCTION-held global learning then a single-Track-held isolated learn on the SP-1 outline (existing `Control`s and motions only, `:250-260`), with body copy distinguishing **native iPhone/iPad MIDI (CoreMIDI app)** from **browser MIDI (desktop/Android Web MIDI)**. No drawn pads, no new SVG.
-- Because `guideCoverage.test.ts:21-23` pins 20 lessons and `:44-47` pins 80 ids, the new lesson either replaces content inside an existing lesson slot or both counts are updated together in the same change — decided at implementation time and stated in the checkpoint.
+- `src/device/guideContent.ts` — **the Guide extends to 21 lessons and 81 feature ids.** No existing lesson is replaced or deleted. New feature id `stem.instrument.cues` in `PERFORMANCE` `:44-82`, new lesson appended to `LESSONS` `:262-470` animating FUNCTION-held global learning then a single-Track-held isolated learn on the SP-1 outline (existing `Control`s and motions only, `Lesson` `:249-260`), with body copy distinguishing **native iPhone/iPad MIDI (CoreMIDI app)** from **browser MIDI (desktop/Android Web MIDI)**. No drawn pads, no new SVG.
+- `src/device/__tests__/guideCoverage.test.ts` — the two pinned counts move together in the same change: 20 → 21 lessons (`:21-23`) and 80 → 81 unique ids (`:44-47`).
 
 ## 12. Tests
 
+**Audible-voice measurement.** `t.sources` holds queued-future and fading nodes as well as the live one, so a raw array length proves nothing. Every voice assertion uses an `audibleAt(lane, ctxFrame)` probe: a source counts only if `startAt ≤ f` and (`stopAt == null` or `stopAt > f`) and its fade gain at `f` is > 0. Required: **one audible path steady-state, at most two inside the 12 ms (`SEAM_FADE_S`) seam, exactly one after it.**
+
 Unit (vitest, injected `StemMidiEvent`s, `MockCtx` from `src/audio/__tests__/mockAudio.ts`)
-- Timestamp conversion: an event delivered 120 ms late still resolves the frame at its own timestamp, ≤ 2 frames error.
+- Timestamp conversion: an event delivered 120 ms late still resolves the frame at its own timestamp, ≤ 2 frames error (internal engine measurement).
 - Learning: global, isolated, overwrite on same channel+note, interleaved overlapping captures on two keys stay independent, sub-minimum discard.
-- Eligibility: learning rejected in Heads / scrub / reverse / global loop / lane loop / stopped, each with a distinct reason; a capture interrupted by a loop capture is discarded.
+- Eligibility: learning rejected in Heads / scrub / reverse / global loop / lane loop / stopped / off-1× rate, each with a distinct reason; a capture interrupted by a loop capture is discarded.
 - Two Tracks held → explicit rejection, no marker written.
-- Voice counts: at the seam ≤ 2 voices on an affected lane, after the seam exactly 1; unaffected lanes never change voice identity during an isolated cue.
+- Qualifier claim: FUNCTION release after a global learn arms **no** active-track selection; Track release after an isolated learn emits **no** mute/loop/tap action; an audition already running before the note continues and restores the prior mix exactly.
+- Suppression: while `cueOwner[lane]` exists, driving wraps, seams, relocate, respawn and many `tick()` cycles produces **zero** additional audible normal sources on that lane, while `timeline.positionAt` and the loop windows keep advancing.
+- Voice counts via `audibleAt`: at the seam ≤ 2, steady-state 1; unaffected lanes' audible source identity is unchanged during an isolated cue.
 - One-shot: Note Off during playback changes nothing; retrigger yields one bounded crossfade.
-- Rejoin matrix: all four §6 underlays, per lane, ≤ 2 frames (tolerance style of `loopRejoin.test.ts:93`); one global-cue case where the four lanes have three different underlays.
-- Scheduling: completion seam is scheduled at play time — a test that never calls `tick()` still observes the scheduled rejoin start.
-- Invalidation: replacing one stem invalidates its isolated markers and all global markers, and leaves others playable.
-- Persistence round-trip; privacy test asserts no audio bytes in markers.
+- Fixed 1×: a varispeed change mid-cue neither reschedules nor stretches the cue; the completion lands at the originally scheduled frame.
+- Stopped transport: a global cue while stopped produces four audible cue voices and, at completion, zero audible sources; an isolated cue produces one and then zero; the shared timeline is never anchored.
+- Rejoin matrix: every §6 underlay, per lane, ≤ 2 frames (internal tolerance, style of `loopRejoin.test.ts:93`); one global-cue case where the four lanes have three different underlays.
+- Scheduling: the completion seam is scheduled at play time — a test that never calls `tick()` still observes the scheduled rejoin start.
+- Invalidation: replacing one stem (new `contentHash`) invalidates its isolated markers and all global markers, leaves others playable.
+- Persistence round-trip asserts no `sourceGeneration` field is written; privacy test asserts no audio bytes in markers.
 
 Browser (Playwright, `tests/browser/`)
-- Events injected via `window.__stemTapeMidi`: learn + play with the FX overlay open; `normalBus` RMS proves faders and FX process cue audio; live source-count probe proves no doubling outside the seam.
+- Events injected via `window.__stemTapeMidi`: learn + play with the FX overlay open; `normalBus` RMS proves faders and FX process cue audio; the `audibleAt` probe proves no doubling outside the seam.
 
-Physical device (TestFlight)
-- USB class-compliant and BLE MIDI 1.0 controllers: hot-plug add/remove mid-performance; note-to-audio latency (target < 20 ms median); Silent switch ON must **not** mute the native app; call interruption then resume re-anchors the clock and audio; backgrounding leaves no stuck cue; a 30-minute run shows no clock drift beyond the 2-frame rejoin tolerance.
+Physical device (TestFlight) — reported, not asserted against the engine tolerance
+- USB class-compliant and BLE MIDI 1.0 controllers: hot-plug add/remove mid-performance.
+- **Input-to-audio latency reported as median and p95** across ≥ 200 notes per transport (USB and BLE separately), measured by recording the acoustic/line output against the controller's own key event. No end-to-end two-frame claim is made: the ≤ 2 frame figure is an internal engine-rejoin measurement only.
+- **Clock drift reported** over a 30-minute run as observed native↔page anchor error (median and p95), before and after a forced re-anchor.
+- Silent switch ON must **not** mute the native app; call interruption then resume re-anchors clock and audio; backgrounding leaves no stuck cue.
 
 ## 13. Implementation checkpoints (each independently reviewable)
 
 1. Contract + clock calibration + both adapters + `CueStatus` strip. No audio behavior. Review: events and timestamps visible on screen.
 2. `cues.ts` — marker store, keying, eligibility gate, invalidation. Pure, fully unit-tested, no engine change.
-3. Engine: cue voice ownership with identity protection, **isolated cues only**, scheduled completion + rejoin for normal play. Review: voice-count and rejoin tests.
-4. Rejoin matrix completed (global loop phase, lane loop phase, stopped) — still isolated cues.
-5. Global cues: four-lane ownership, per-lane independent underlay return, precedence arbitration.
-6. Persistence + migration + invalidation wired to stem replacement.
-7. Guide card + coverage test update.
-8. iOS wrapper: client + input port, batched `callAsyncJavaScript`, `AVAudioSession.playback`, re-anchoring; TestFlight build and the physical-device acceptance list.
+3. Qualifier claim API (`claimExternal`) + MIDI dispatcher wiring. Review: the claim tests in §12, no audio behavior yet.
+4. Engine: cue voice ownership, identity protection, **normal-source suppression while owned**, isolated cues only, scheduled fixed-1× completion + rejoin for normal play.
+5. Rejoin matrix completed: global-loop phase, lane-loop phase, and the stopped-transport (silence) case — still isolated cues.
+6. Global cues: four-lane ownership, per-lane independent underlay return, precedence arbitration.
+7. Persistence + migration + `contentHash` invalidation wired to stem replacement.
+8. Guide: 21st lesson + 81st feature id, coverage test counts updated together.
+9. iOS wrapper: client + input port, batched `callAsyncJavaScript`, `AVAudioSession.playback`, re-anchoring; TestFlight build and the physical-device reporting list.
+
 
 ## 14. Exclusions
 
 No MIDI clock or output, no quantization, no launch modes, no cue editor, no onscreen pads, no fixed note bank, no new FX, no change to global-loop or lane-loop semantics, no Heads redesign, no unrelated UI, no offline bundling in the first iOS delivery, and no implementation in this response.
 
-## 15. Open decision
+## 15. Open decisions
 
-Only one remains: whether the Guide's `stem.instrument.cues` lesson should **replace** an existing lesson slot (keeping the pinned 20-lesson / 80-feature counts) or **extend** the Guide to 21 lessons / 81 features with the coverage test updated. Everything else in this plan is settled.
+None. Every previously open item is now settled: the Guide extends to 21 lessons / 81 feature ids, cues are per project, playback is a fixed-1× one-shot, and initial iOS delivery is the TestFlight WKWebView shell.
+
