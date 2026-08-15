@@ -97,7 +97,7 @@ Every entry here is **provisional and unresolvable until STOCK_SP1_MAP is popula
 - **Retains:** the remaining v2.6 rows, marked `provenance: "v2.6"`.
 - **Removes:** live-input recording and PRINT (removed in earlier phases), `track.delete`.
 - **Adds with no v2.6 antecedent:** `provenance: "extension"` rows — four-stem selection/solo/link, FX overlay, grid rows, WAV export.
-- **Against stock: unknown in all four columns.** Do not state that Stem Tape retains, replaces or removes any stock behaviour until the stock map exists.
+- **Against stock, from S1 only (documentary, unconfirmed on hardware):** *retains* power hold, volume, PLAY/PAUSE tap, per-track fader volume, solo-by-hold, and the presence of a hold-engaged FX set; *replaces* the rocker (stock = skip track → Stem Tape = varispeed/scrub/chop) and the stock four-effect set (Filter · Delay/Echo · Distortion · Gate/Stutter → 12 FX in four banks, of which Filter, Echo and a Gate survive by name); *removes* nothing provably, since no stock row is yet known to be dropped. Every other stock comparison stays `unknown` until the Phase 0 observation pass completes the stock map.
 
 ### Stays browser-only (transfer tool)
 
