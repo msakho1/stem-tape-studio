@@ -272,7 +272,7 @@ export function setBankMomentary(
   return patchBank(s, index, bank, (b) => ({ ...b, momentary: on }));
 }
 
-export function toggleBankLatch(s: StemPerformanceState, index: number, bank: BankIndex): StemPerformanceState {
+export function toggleBankLatch(s: StemPerformanceState, index: FxTarget, bank: BankIndex): StemPerformanceState {
   return patchBank(s, index, bank, (b) => ({ ...b, latched: !b.latched }));
 }
 

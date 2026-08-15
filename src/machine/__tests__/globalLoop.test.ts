@@ -173,7 +173,7 @@ describe("FUNCTION + PLAY ×1 is half speed", () => {
 
 describe("FX overlay survives an active-stem change", () => {
   it("keeps fxOverlay open when the active stem is switched", () => {
-    let s = applyPerfIntent(initialSurfaceState(), { type: "fx.overlay", on: true });
+    let s = applyPerfIntent(initialSurfaceState(), { type: "fx.overlay", on: true, scope: "stem" });
     s = applyPerfIntent(s, { type: "stem.select", dir: 1 });
     expect(s.perf.fxOverlay).toBe(true);
     expect(s.activeTrack).toBe(1);
