@@ -44,8 +44,19 @@ export interface GestureTimings {
    * a first tap that mutes and then un-mutes when the second tap arrives is
    * audible. The first release opens this window; a timeout confirms one tap, a
    * second press claims the double-tap.
+   *
+   * It is ALSO the inter-tap gap for Track buttons: one constant is both the
+   * gap and the decision delay, so a legal second tap can never arrive after
+   * the first has already been dispatched.
    */
   trackDecisionMs: number;
+  /**
+   * DEFERRED FUNCTION + PLAY decision window. ×1 half-speed, ×2 snap to 1.0×,
+   * ×3 Heads: all three are mutually exclusive, so none may fire optimistically.
+   * 300 ms keeps the single-tap half-speed from feeling sluggish while still
+   * admitting a deliberate triple-tap.
+   */
+  fnPlayDecisionMs: number;
   /** Max gap between a tap's release and a following press for tap-then-hold. */
   tapThenHoldGapMs: number;
   /** Two controls pressed within this window count as a chord. */
