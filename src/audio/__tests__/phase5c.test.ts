@@ -194,10 +194,19 @@ describe("stem performance state", () => {
     expect(JSON.stringify(json)).not.toContain("momentary");
     expect(JSON.stringify(json)).not.toContain("fxOverlay");
 
+    // Stored solo/link values are preserved on disk for compatibility …
+    expect(json.tracks[1].soloed).toBe(true);
+    expect(json.tracks[3].linked).toBe(false);
+
     const back = deserializePerformance(json);
     expect(back.fxOverlay).toBe(false);
-    expect(back.tracks[1]!.soloed).toBe(true);
-    expect(back.tracks[3]!.linked).toBe(false);
+    // … but the RUNTIME state is normalised: PLAY + Track is retired, so a
+    // restored solo or link would be unreachable and impossible to clear.
+    expect(back.tracks.every((t) => !t.soloed && !t.linked)).toBe(true);
+    expect(back.tracks[1]!.storedSoloed).toBe(true);
+    expect(back.tracks[3]!.storedLinked).toBe(false);
+    // Re-saving must not rewrite the stored values.
+    expect(serializePerformance(back).tracks[1]!.soloed).toBe(true);
     expect(back.tracks[0]!.fx12.banks[2]!.selectedAlgorithm).toBe(1);
     expect(back.tracks[0]!.fx12.banks[3]!.latched).toBe(true);
     expect(back.tracks[0]!.fx12.banks[3]!.momentary).toBe(false);
@@ -205,9 +214,9 @@ describe("stem performance state", () => {
     expect(back.tracks[0]!.fx12.selectedBank).toBe(null);
   });
 
-  it("migrates pre-5C projects to linked / no solo / no latch / algorithm 0", () => {
+  it("migrates pre-5C projects to unlinked / no solo / no latch / algorithm 0", () => {
     const legacy = deserializePerformance({ version: 2, tracks: [{ soloed: true }] });
-    expect(legacy.tracks.every((t) => t.linked && !t.soloed)).toBe(true);
+    expect(legacy.tracks.every((t) => !t.linked && !t.soloed)).toBe(true);
     expect(
       legacy.tracks.every((t) => t.fx12.banks.every((b) => !b.latched && !b.momentary && b.selectedAlgorithm === 0)),
     ).toBe(true);
