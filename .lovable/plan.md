@@ -98,44 +98,60 @@ Evidence check: **Beat Repeat and Pump are already removed and already replaced*
 
 Therefore the remaining FX work is genuinely **not DSP**: it is (a) exposing stock-recognisable names in the Guide and overlay copy — Filter (TONE 1), Delay/Echo (MOTION 1), Distortion → the existing Dirt/Crusher, Gate/Shutter → the existing Rhythmic Gate — as **display aliases only**, leaving `AlgorithmId` untouched so saved projects keep loading; (b) no map change beyond the alias table; (c) tests asserting alias↔id stability and that the legacy migration key still resolves. **No algorithm is invented, removed or renamed at the id level.** If you intended a *thirteenth/fourteenth* algorithm beyond this set, that is an **unresolved decision** — nothing in project history names one.
 
-## 6. Guide inventory (public `featureId`s)
+## 6. Guide inventory (public `featureId`s) — derived counts, total **80**
 
-Every entry below gets exactly one Guide card. Coverage test is bidirectional: a `featureId` with no reachable implementation fails, and a reachable public feature with no card fails.
+Every entry is one card carrying all seven fields: purpose · exact down/up gesture order · visual result (LED / overlay / readout) · audible result · restrictions (mode, suppression, PVR flags) · keyboard equivalent (or "none — pointer only") · animated faithful `stem-tape-sp1-outline.svg` illustration. A generic rectangle fails review. Coverage is bidirectional: a card without a reachable feature fails, and a reachable public feature without a card fails.
 
-**Tape (18):** `tape.transport.toggle`, `tape.transport.cue`, `tape.loop.global.hold`, `tape.loop.global.division`, `tape.loop.global.move`, `tape.loop.global.latch`, `tape.loop.global.release`, `tape.speed.rocker`, `tape.speed.glide`, `tape.speed.semitone`, `tape.speed.snap`, `tape.speed.half`, `tape.scrub.global`, `tape.scrub.speed`, `tape.scrub.latch`, `tape.song.skip`, `tape.track.select`, `tape.master.volume`.
-**Lane (7):** `lane.mute`, `lane.audition`, `lane.audition.chord`, `lane.loop.capture`, `lane.loop.resize`, `lane.reverse`, `lane.scrub.fader`, plus `lane.fader.volume`.
-**Heads (9):** `heads.enter`, `heads.exit`, `heads.head.gain`, `heads.head.mute`, `heads.head.solo`, `heads.head.latch`, `heads.head.scrub`, `heads.head.loop`, `heads.head.reverse`.
-**FX (18):** `fx.overlay.open`, `fx.overlay.close`, `fx.bank.select`, `fx.momentary`, `fx.latch`, `fx.clearLatches`, `fx.algorithm.cycle`, `fx.macro`, plus one card per algorithm: `fx.alg.filter`, `.isolator`, `.dirt`, `.reelFlange`, `.formantShift`, `.gate`, `.echo`, `.pitchEcho`, `.scatter`, `.reverb`, `.shimmer`, `.freeze`.
-**Keyboard (1 card + table):** `kbd.map` covering every binding in `keyboardMap.ts`, including simultaneous fader keys.
-**Projects (8):** `project.new`, `project.rename`, `project.stem.load`, `project.stem.map`, `project.stem.replace`, `project.trash.restore`, `project.memory.budget`, `project.grid.correct` (new home for manual grid correction).
-**Loading / mapping (4):** `load.demo`, `load.bulk`, `load.individual`, `load.format.rules`.
-**Session (4):** `session.save`, `session.restore`, `session.export.stemtape`, `session.export.wav`.
-**Guide (3):** `guide.navigate`, `guide.animation.replay`, `guide.diagram.legend`.
-**System (4):** `system.diagnostics`, `system.hitzones`, `system.commandLog`, `system.privacy`.
+**Tape — 21:** `tape.transport.toggle`, `tape.transport.cue`, `tape.loop.global.hold`, `.division`, `.move`, `.latch`, `.release`, `tape.loop.interaction` (global × lane transition table), `tape.speed.rocker`, `.glide`, `.semitone`, `.snap`, `.half`, `tape.scrub.global`, `.speed`, `.latch`, `tape.song.skip`, `tape.track.select`, `tape.track.select.leds`, `tape.master.volume`, `tape.grid.auto` (automatic BPM/beat-phase/bar detection; local, deterministic, non-AI).
+**Lane — 8:** `lane.mute`, `lane.audition`, `lane.audition.chord`, `lane.loop.capture`, `lane.loop.resize`, `lane.reverse`, `lane.scrub.fader`, `lane.fader.volume`.
+**Heads — 9:** `heads.enter`, `heads.exit`, `heads.head.gain`, `heads.head.mute`, `heads.head.solo`, `heads.head.latch`, `heads.head.scrub`, `heads.head.loop`, `heads.head.reverse`.
+**FX — 21:** `fx.overlay.open`, `fx.overlay.close`, `fx.bank.select`, `fx.momentary`, `fx.latch`, `fx.clearLatches`, `fx.algorithm.cycle`, `fx.macro`, `fx.signalOrder` (TONE → MOD → MOTION → SPACE, `fx12.ts:1-16`), plus twelve algorithm cards `fx.alg.filter`, `.isolator`, `.dirt`, `.reelFlange`, `.formantShift`, `.gate`, `.echo`, `.pitchEcho`, `.scatter`, `.reverb`, `.shimmer`, `.freeze`.
+**Keyboard — 1:** `kbd.map`, the full table from `keyboardMap.ts`, explicitly preserving Y/H, U/J, I/K, O/L as faders 1–4 (simultaneous).
+**Projects — 7:** `project.new`, `project.rename`, `project.stem.load`, `project.stem.map`, `project.stem.replace`, `project.trash.restore`, `project.grid.correct` (new manual-correction home). Memory budget is a **readout**, not a lesson — removed.
+**Loading / mapping — 4:** `load.demo`, `load.bulk`, `load.individual`, `load.format.rules`.
+**Session — 2:** `session.save`, `session.restore`. `.stemtape` and performance-WAV export have **no reachable UI** (`src/audio/export/*` and `src/workers/wavWorker.ts` are unreferenced by any component) — excluded until wired.
+**Guide — 3:** `guide.navigate`, `guide.animation.replay`, `guide.diagram.legend`.
+**System — 4:** `system.diagnostics`, `system.hitzones`, `system.commandLog`, `system.mapExport` (reachable at `DiagnosticPanel.tsx:218-227`). `system.privacy` removed.
 
-**Excluded internal commands (with reasons):** `rollback` (transaction repair, never user-initiated), `emitHold` / mask plumbing (transport of state), `heads.play.hold` ack (engine acknowledgement), `system.noop` (diagnostics band), `commandTail` ordering, `applyHeadsFeedback`, worklet budget messages.
+**Excluded internal commands (reasons):** `rollback` (transaction repair, never user-initiated), `emitHold` / mask plumbing (state transport), `heads.play.hold` ack and `applyHeadsFeedback` (engine acknowledgement), `system.noop` (diagnostics band), `commandTail` ordering, worklet budget messages.
 
-**Hardware-only reference section (clearly labelled, no tutorial affordance):** power 5 s hold, charging, battery display, headphone muting, Bluetooth pairing chord, PO sync out, MIDI clock mode, auto-off.
+**Hardware-only reference block** (labelled, non-interactive, no animation, no keyboard row): power 5 s hold, charging, battery display, headphone muting, Bluetooth pairing chord, PO sync out, MIDI clock mode, auto-off.
 
 ## 7. Smallest file changes
 
-- `src/input/gestures.ts` — rename `trackDecisionMs` → `tapDecisionMs`, value 200 → 300; expose `decisionLatencyMs` per gesture type.
-- `src/machine/chordArbiter.ts` — remove `stem.select`; add global-loop precedence tier above Play-first; add G2 latch resolution on FUNCTION **up**; add FX Track-ownership suppression list.
-- `src/machine/surface.ts` — hold-PLAY branch by transport state; global-loop state (division / move / latch / release); FN arm + Track select; delete tempo-tap and FN×4 grid rows; rocker-stopped song skip; delete chop and `play.loopMode`.
-- `src/machine/stemTapeV1Map.ts`, `src/machine/v26map.ts` — row add/remove, each deletion carrying `supersedes` + `originalBehaviour`.
-- `src/audio/engine.ts` — global one-bar loop reusing `scheduleLoopRelease`; scrub-speed steps; half-speed toggle.
+- `src/input/gestures.ts` — `trackDecisionMs` stays 200 and becomes the single shared Track gap+decision constant; add `fnPlayDecisionMs = 420`; leave every other path immediate.
+- `src/machine/chordArbiter.ts` — retire `stem.select`; retain PLAY+Track solo/link at its new precedence; global-loop tier; release-order scrub latch on FUNCTION up while rocker down; FX Track-ownership list that explicitly **excludes** FN-qualified lane gestures and FN+Volume.
+- `src/machine/surface.ts` — hold-PLAY by transport state; global-loop state + division/move/latch/release with the transition table; FN arm + LED pulse + active-track select; delete tempo-tap, FN×4, chop, `play.loopMode`; rocker-stopped song skip; Heads Track tap loop-release-else-mute; paused-transport head audition.
+- `src/machine/stemTapeV1Map.ts`, `src/machine/v26map.ts` — row edits; every deletion carries `supersedes` + `originalBehaviour`.
+- `src/audio/engine.ts` — global loop via `scheduleLoopRelease`; per-case audible-pointer / hidden-rejoin handling; scrub-speed steps; half-speed; keep FX rack live on the heads bus.
+- `src/audio/headLanes.ts` — head loop release, paused-transport audition, discard-on-exit.
 - `src/machine/fx12.ts` — display-alias table only.
-- `src/audio/ProjectDrawer.tsx` — manual grid correction control.
-- `src/device/ControlsGuide.tsx`, `Sp1GuideIllustration.tsx`, `narrate.ts` — featureId-driven Guide (last).
+- `src/audio/ProjectDrawer.tsx` — manual grid correction.
+- `src/device/keyboardMap.ts`, `src/device/useDeviceSurface.ts`, `src/device/KeyboardPanel.tsx` — bindings for every changed gesture (global loop division/move/latch, scrub latch, FN-arm select, song skip, half-speed), dismissible desktop panel updated; Y/H, U/J, I/K, O/L untouched.
+- `src/device/ControlsGuide.tsx`, `Sp1GuideIllustration.tsx`, `narrate.ts` — featureId-driven Guide with the seven-field card schema (last).
 
 ## 8. Targeted tests
 
-`globalLoop.test.ts` (division, move, latch, PLAY-tap release without stopping, coexistence with a lane loop, hidden-timeline rejoin ≤2 frames), `latchGrammar.test.ts` (the 6-step scrub table plus its non-firing assertions for `rate.set` / transport / `fn.*`), `tapTiming.test.ts` (single/double/triple latency ≤330 ms, no intermediate command), `fnContext.test.ts` (FN arm → Track select; FN + Vol is always division), `songSkip.test.ts`, `fxAlias.test.ts` (alias↔id, legacy `beatRepeat` migration intact), `precedence.test.ts` (per-mode suppression lists), `guideCoverage.test.ts` (bidirectional featureId coverage, hardware-only section excluded from tutorials). Rewrite `chopRemap.test.ts` as a removal test. Keep `loopRejoin`, `busIsolation`, `headsV2`, `laneControls`, `laneScrub`, `globalScrub`. Playwright: audible global loop bar-locked, latch survives PLAY tap, scrub latch/release, FN+Track select, Heads unchanged, Guide at 420 px and desktop with no clipping.
+- `globalLoop.test.ts` — division, move, latch, PLAY-tap release without stopping.
+- `loopCoexistence.test.ts` — all four transition-table rows; asserts the audible pointer and the hidden rejoin frame per row, ≤2 frames.
+- `latchOrder.test.ts` — the six-step release-order scrub table plus non-firing assertions (`rate.set`, `transport.*`, `fn.*`, `song.*`).
+- `tapTiming.test.ts` — Track single/double/triple commit ≤220 ms; FN+PLAY ×3 ≤440 ms; bare PLAY / Volume / rocker / fader / FX momentary commit ≤1 frame.
+- `fnContext.test.ts` — FN+Volume is division in Tape **and** in FX; FN-arm → Track select; LED arm-pulse → solid.
+- `fxLaneAccess.test.ts` — FN+fader, FN+Track double-tap, FN+Track+Volume all reachable in FX; bare Track is FX-owned.
+- `headsBehaviour.test.ts` — tap releases head loop else mutes; audition of any 1–4 group while paused and restore; triple-tap latch; FX audible in Heads; discard-on-exit with lanes rejoining the advancing hidden timeline.
+- `playTrackSolo.test.ts` — PLAY+Track solo/link still fires and never collides with the global loop.
+- `precedence.test.ts` — per-mode suppression lists.
+- `fxAlias.test.ts` — alias↔id stability, legacy `beatRepeat` migration intact.
+- `guideCoverage.test.ts` — bidirectional featureId coverage, seven required fields per card, hardware block excluded from tutorials, counts 21/8/9/21/1/7/4/2/3/4.
+- `keyboardParity.test.ts` — every changed gesture has a binding; Y/H, U/J, I/K, O/L unchanged and simultaneous.
+- Rewrite `chopRemap.test.ts` as a removal test; keep `loopRejoin`, `busIsolation`, `headsV2`, `laneControls`, `laneScrub`, `globalScrub`.
+- Playwright: audible bar-locked global loop, latch survives PLAY tap, scrub latch/release, FN+Track select LEDs, FX in Heads, Guide at 420 px and desktop without clipping.
 
 ## 9. Implementation order
 
-1. Timing model + gesture grammars (`gestures.ts`, `chordArbiter.ts`) — no audio change, tests green.
-2. Map rows + `surface.ts` state, including removals.
-3. Audio behaviour (global loop, scrub speed, half-speed) + Projects grid correction.
-4. FX alias table.
-5. Guide rebuild against the featureId inventory, with the coverage test gating it.
+1. Timings + grammars + release-order latching (`gestures.ts`, `chordArbiter.ts`).
+2. Map rows and `surface.ts` state, including removals and PLAY+Track retention.
+3. Audio: global loop and coexistence table, scrub speed, half-speed, Heads corrections, FX-in-Heads.
+4. Keyboard map, `useDeviceSurface.ts`, Keyboard Controls panel.
+5. Projects grid correction + FX alias table.
+6. Guide rebuild gated by the coverage test.
