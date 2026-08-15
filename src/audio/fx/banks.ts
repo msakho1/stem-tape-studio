@@ -807,7 +807,11 @@ export class BankStage {
     this.current = algorithm;
     if (!this.active) return;
     const prev = this.graphs.get(previous);
-    if (prev) prev.output.disconnect(this.wet);
+    if (prev) {
+      prev.output.disconnect(this.wet);
+      prev.release?.(when);
+      if (prev.resetOnRelease) this.teardown(previous, prev);
+    }
     const next = this.ensure(algorithm);
     if (next) next.output.connect(this.wet);
     // Passthrough (Beat Repeat) means no wet leg: fall back to full dry.
