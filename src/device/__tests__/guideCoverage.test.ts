@@ -1,9 +1,10 @@
 /**
  * Guide coverage — by FEATURE ID, not by card count.
  *
- * The Guide is 20 animated lessons + 4 FX bank accordions + one keyboard table
- * + compact reference sections + one hardware-only section. All 80 documented
- * features must appear on one of those surfaces; nothing requires 80 cards.
+ * The Guide is 21 animated lessons (the twenty-first is Stem Instrument Mode)
+ * + 4 FX bank accordions + one keyboard table + compact reference sections +
+ * one hardware-only section. All 84 documented features must appear on one of
+ * those surfaces; nothing requires one card per feature.
  */
 
 import { describe, expect, it } from "vitest";
@@ -18,8 +19,8 @@ import {
 } from "@/device/guideContent";
 
 describe("guide structure", () => {
-  it("has exactly 20 animated performance lessons", () => {
-    expect(LESSONS).toHaveLength(20);
+  it("has exactly 21 animated performance lessons", () => {
+    expect(LESSONS).toHaveLength(21);
   });
 
   it("has four FX bank accordions carrying all twelve algorithms", () => {
@@ -41,12 +42,12 @@ describe("guide structure", () => {
 });
 
 describe("feature coverage", () => {
-  it("documents exactly 80 unique features", () => {
-    expect(new Set(FEATURE_IDS).size).toBe(80);
-    expect(FEATURE_IDS).toHaveLength(80);
+  it("documents exactly 84 unique features", () => {
+    expect(new Set(FEATURE_IDS).size).toBe(84);
+    expect(FEATURE_IDS).toHaveLength(84);
   });
 
-  it("covers all 80 features somewhere in the guide", () => {
+  it("covers all 84 features somewhere in the guide", () => {
     const covered = guideCoverage();
     const missing = FEATURE_IDS.filter((id) => !covered.has(id));
     expect(missing).toEqual([]);

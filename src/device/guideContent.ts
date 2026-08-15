@@ -38,7 +38,7 @@ export interface Feature {
 }
 
 /* ------------------------------------------------------------------ */
-/* Performance features (37) — covered by the 20 animated lessons.     */
+/* Performance features (41) — covered by the 21 animated lessons.     */
 /* ------------------------------------------------------------------ */
 
 const PERFORMANCE: [string, string][] = [
