@@ -276,6 +276,8 @@ export function initialSurfaceState(): SurfaceState {
     loopMode: "variable",
     headsMode: false,
     headsSource: null,
+    globalLoop: { active: false, latched: false, division: 1 },
+    trackSelectArmedAt: null,
 
     lights: "full",
     song: 0,
