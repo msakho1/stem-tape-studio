@@ -872,6 +872,17 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
     }
 
     case "holdEnd": {
+      if (g.control === "play" && next.globalLoop.active) {
+        // Release-order latching: a FUNCTION tap during the hold set `latched`,
+        // so the loop survives PLAY coming up. Otherwise the loop is momentary
+        // and ends exactly with the button.
+        if (next.globalLoop.latched) {
+          return fire(next, "tape.loop.global.latch", "global loop latched — PLAY released, loop continues", t);
+        }
+        next = { ...next, globalLoop: { ...next.globalLoop, active: false } };
+        next = emit(next, "loop.global.release", {}, { rowId: "tape.loop.global.release", t });
+        return fire(next, "tape.loop.global.release", "global loop released — back to the song", t);
+      }
       if (g.control.startsWith("rocker") || g.control.startsWith("volume")) {
         return { ...next, speedGlide: false, chopGlide: false };
       }
