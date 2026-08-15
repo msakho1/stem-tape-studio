@@ -393,6 +393,9 @@ export class AudioEngine {
       this.gridAnalysisDetail = "not analysed — no decoded stems";
       return null;
     }
+    // Cue markers are keyed to stem identity: mirror the hashes and re-check.
+    this.contentHashes = [0, 1, 2, 3].map((i) => hashes[i] ?? "");
+    this.cues.revalidate(this.contentHashes);
     const grid = analyzeSongGrid(inputs);
     this.gridAnalysisMs = (typeof performance !== "undefined" ? performance.now() : 0) - started;
     this.gridGeneration += 1;
@@ -497,6 +500,10 @@ export class AudioEngine {
       }
       if (this.ctx.state !== "running") await this.ctx.resume();
       const ok = this.ctx.state === "running";
+      // Re-anchor the MIDI calibration pair on every unlock: cue frames are
+      // derived from the event timestamp through THIS pair, so it must be
+      // sampled together with a live context time.
+      if (ok) midiClock.anchor(typeof performance !== "undefined" ? performance.now() : Date.now(), this.ctx.currentTime);
       return { ok, detail: ok ? `context running @ ${this.ctx.sampleRate} Hz` : `context is ${this.ctx.state}` };
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
