@@ -1,5 +1,3 @@
-ic: &ignore {}
-
 name: StemTape
 options:
   bundleIdPrefix: app.stemtape
