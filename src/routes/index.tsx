@@ -63,7 +63,13 @@ function LabPage() {
   const [mounted, setMounted] = useState(false);
   const [sess, setSess] = useState<SessionState>(() => session.get());
   const [demoBusy, setDemoBusy] = useState(false);
+  const [showRingerNotice, setShowRingerNotice] = useState(false);
   useEffect(() => setMounted(true), []);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const dismissed = window.sessionStorage.getItem("st-ringer-notice") === "1";
+    setShowRingerNotice(!dismissed);
+  }, []);
   useEffect(() => {
     const off = session.subscribe(setSess);
     return () => {
