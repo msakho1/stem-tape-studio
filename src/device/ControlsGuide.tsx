@@ -68,6 +68,7 @@ export function ControlsGuide({
 }) {
   const [open, setOpen] = useState<string | null>("play");
   const [details, setDetails] = useState(true);
+  const [midiOpen, setMidiOpen] = useState(false);
   const table = keyboardTable();
 
   const toggle = (id: string) => setOpen((cur) => (cur === id ? null : id));
@@ -82,7 +83,16 @@ export function ControlsGuide({
         <button type="button" className="st-toggle" data-on={showHitZones} onClick={onToggleHitZones}>
           {showHitZones ? "hide hit zones" : "show hit zones"}
         </button>
+        <button type="button" className="st-toggle" data-on={midiOpen} onClick={() => setMidiOpen((v) => !v)}>
+          {midiOpen ? "hide midi" : "show midi"}
+        </button>
       </div>
+
+      {midiOpen && (
+        <div className="mt-3" data-testid="midi-drawer-host">
+          <MidiDrawer />
+        </div>
+      )}
 
       {details && (
         <>
