@@ -191,7 +191,12 @@ function LabPage() {
           <p className="font-mono text-[9px] uppercase tracking-[0.24em] text-[var(--ink-faint)] md:text-[10px]">
             unofficial · independent r&amp;d · not affiliated with teenage engineering
           </p>
-          <SupportButton />
+          <div className="flex shrink-0 items-center gap-4">
+            <Link to="/shop" className="st-link font-mono text-[10px] uppercase tracking-[0.18em]">
+              shop
+            </Link>
+            <SupportButton />
+          </div>
         </div>
         <div className="flex flex-wrap items-center gap-x-8 gap-y-3 px-4 pb-4 pt-2 md:px-8">
           <div className="flex items-center gap-3">
