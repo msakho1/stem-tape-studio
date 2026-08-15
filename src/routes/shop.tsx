@@ -1,6 +1,7 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useState } from "react";
-import productAsset from "@/assets/sp1-product-2.png.asset.json";
+import productAsset from "@/assets/sp1-product-3.jpg.asset.json";
+import { SupportButton } from "@/components/SupportButton";
 
 export const Route = createFileRoute("/shop")({
   component: ShopPage,
@@ -53,8 +54,38 @@ function ShopPage() {
 
   return (
     <div className="min-h-screen">
+      {/* ---------- site header ---------- */}
+      <header className="border-b border-[var(--bench-line)]">
+        <div className="flex items-start justify-between gap-4 px-4 pt-3 md:px-8">
+          <p className="font-mono text-[9px] uppercase tracking-[0.24em] text-[var(--ink-faint)] md:text-[10px]">
+            unofficial · independent r&amp;d · not affiliated with teenage engineering
+          </p>
+          <SupportButton />
+        </div>
+        <div className="flex flex-wrap items-center gap-x-8 gap-y-3 px-4 pb-4 pt-2 md:px-8">
+          <Link to="/" className="flex items-center gap-3">
+            <svg width="34" height="34" viewBox="0 0 34 34" aria-hidden className="text-[var(--ink)]">
+              <path d="M17 5 L30 28 H4 Z" fill="none" stroke="currentColor" strokeWidth="1.2" />
+              <path d="M17 13 L23 24 H11 Z" fill="none" stroke="currentColor" strokeWidth="1" opacity="0.6" />
+            </svg>
+            <div>
+              <p className="font-mono text-xl tracking-tight text-[var(--ink)]">Stem Tape</p>
+              <p className="font-mono text-[11px] text-[var(--ink-dim)]">shop · sp-1 interface</p>
+            </div>
+          </Link>
+          <nav className="ml-auto flex items-center gap-6" aria-label="Shop">
+            <Link to="/" className="st-tab">
+              instrument
+            </Link>
+            <span className="st-tab" data-on>
+              shop
+            </span>
+          </nav>
+        </div>
+      </header>
+
       {/* breadcrumb */}
-      <header className="flex items-center justify-between gap-4 px-4 pb-6 pt-4 md:px-8">
+      <div className="flex items-center justify-between gap-4 px-4 pb-6 pt-4 md:px-8">
         <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--ink-dim)]">
           shop <span className="text-[var(--ink-faint)]">/</span> sp-1 interface{" "}
           <span className="text-[var(--ink-faint)]">/</span>{" "}
@@ -63,7 +94,7 @@ function ShopPage() {
         <Link to="/" className="st-link font-mono text-[10px] uppercase tracking-[0.18em]">
           ← instrument
         </Link>
-      </header>
+      </div>
 
       <main className="mx-auto w-full max-w-[820px] px-4 pb-20 md:px-8">
         {/* product photo */}
@@ -71,18 +102,8 @@ function ShopPage() {
           <img
             src={productAsset.url}
             alt="Stem Tape for SP-1 — four-fader stem player hardware, three-quarter view"
-            className="relative z-10 w-[74%] max-w-[420px] select-none"
+            className="relative z-10 w-full max-w-[560px] select-none"
             draggable={false}
-          />
-          {/* grounded contact shadow */}
-          <div
-            aria-hidden
-            className="pointer-events-none -mt-6 h-10 w-[58%] max-w-[340px] rounded-[50%]"
-            style={{
-              background:
-                "radial-gradient(50% 50% at 50% 50%, oklch(0 0 0 / 0.32) 0%, oklch(0 0 0 / 0.14) 45%, transparent 72%)",
-              filter: "blur(10px)",
-            }}
           />
           <figcaption className="mt-4 flex items-center gap-2" aria-hidden>
             {[0, 1, 2, 3, 4].map((i) => (
@@ -96,6 +117,7 @@ function ShopPage() {
             ))}
           </figcaption>
         </figure>
+
 
         {/* title block */}
         <h1 className="mt-10 font-mono text-[26px] uppercase tracking-[0.06em] text-[var(--ink)] md:text-[32px]">
