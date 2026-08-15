@@ -29,6 +29,8 @@ import {
 
 /** Wet-mix ramp for engaging or releasing an algorithm. */
 export const FX_ENGAGE_S = 0.012;
+/** Hard ceiling on the Spectral Freeze loop gain — never at or near unity. */
+export const FREEZE_FEEDBACK_MAX = 0.82;
 
 export interface AlgorithmGraph {
   input: GainNode;
@@ -611,39 +613,90 @@ function buildReverb(ctx: AudioContext, shimmer: boolean): AlgorithmGraph {
 }
 
 function buildFreeze(ctx: AudioContext): AlgorithmGraph {
-  // Spectral Freeze, node-only approximation: a near-unity feedback loop with
-  // heavy damping holds the last ~250 ms as a sustained pad. Feedback is
-  // capped strictly below 1 so it decays instead of exploding.
+  /**
+   * Spectral Freeze, node-only approximation — BOUNDED by construction.
+   *
+   * A damped feedback loop holds the last fraction of a second as a pad. Three
+   * rules stop the runaway screech that unbounded versions build up:
+   *   1. loop gain is hard-capped well below unity (0.82 max) and the loop
+   *      carries its own limiter, so energy per pass can only ever shrink;
+   *   2. the loop is low-passed AND high-shelf damped on every pass, so high
+   *      frequencies decay fastest instead of accumulating into a whistle;
+   *   3. `release()` kills the input, the feedback and every scheduled ramp at
+   *      once, and the stage disposes the graph afterwards — the next press
+   *      captures completely fresh material.
+   */
   const input = ctx.createGain();
   const out = ctx.createGain();
+  const capture = ctx.createGain();
+  capture.gain.value = 1;
   const delay = ctx.createDelay(1);
   delay.delayTime.value = 0.25;
   const damp = ctx.createBiquadFilter();
   damp.type = "lowpass";
-  damp.frequency.value = 5200;
+  damp.frequency.value = 3800;
+  const tilt = ctx.createBiquadFilter();
+  tilt.type = "highshelf";
+  tilt.frequency.value = 2600;
+  tilt.gain.value = -3.5;
+  const loopLimit = ctx.createDynamicsCompressor();
+  loopLimit.threshold.value = -16;
+  loopLimit.ratio.value = 20;
+  loopLimit.attack.value = 0.003;
+  loopLimit.release.value = 0.15;
   const fb = ctx.createGain();
-  fb.gain.value = 0.9;
-  const limiter = ctx.createDynamicsCompressor();
-  limiter.threshold.value = -8;
-  limiter.ratio.value = 20;
-  input.connect(delay);
+  fb.gain.value = 0.78;
+  const outLimit = ctx.createDynamicsCompressor();
+  outLimit.threshold.value = -10;
+  outLimit.ratio.value = 20;
+  outLimit.attack.value = 0.003;
+  outLimit.release.value = 0.2;
+
+  input.connect(capture);
+  capture.connect(delay);
   delay.connect(damp);
-  damp.connect(fb);
-  fb.connect(delay);
-  damp.connect(limiter);
-  limiter.connect(out);
+  damp.connect(tilt);
+  tilt.connect(loopLimit);
+  loopLimit.connect(fb);
+  fb.connect(delay); // the ONLY feedback edge in the graph
+  tilt.connect(outLimit);
+  outLimit.connect(out);
+
   return {
     input,
     output: out,
+    resetOnRelease: true,
     setMacro: (v, when) => {
       const t = Math.max(when, 0);
       const m = clamp01(v);
-      fb.gain.setValueAtTime(Math.min(0.985, 0.86 + 0.13 * m), t);
+      // The macro sets the frozen WINDOW and its damping — never the loop
+      // gain past the cap, so no macro position can make it grow.
       delay.delayTime.setValueAtTime(0.08 + 0.35 * m, t);
+      fb.gain.setValueAtTime(Math.min(FREEZE_FEEDBACK_MAX, 0.6 + 0.22 * m), t);
+      damp.frequency.setValueAtTime(2600 + 2200 * (1 - m), t);
+    },
+    release: (when) => {
+      const t = Math.max(when, 0);
+      // Stop capturing, collapse the loop and drop every scheduled ramp. The
+      // pad cannot survive its own release.
+      for (const p of [capture.gain, fb.gain, out.gain]) {
+        p.cancelScheduledValues(t);
+        p.setValueAtTime(p.value, t);
+        p.linearRampToValueAtTime(0, t + FX_ENGAGE_S);
+      }
+      delay.delayTime.cancelScheduledValues(t);
+      damp.frequency.cancelScheduledValues(t);
     },
     dispose: () => {
-      for (const n of [input, delay, damp, fb, out]) n.disconnect();
-      limiter.disconnect();
+      try {
+        fb.gain.value = 0;
+        capture.gain.value = 0;
+      } catch {
+        /* param already detached */
+      }
+      for (const n of [input, capture, delay, damp, tilt, fb, out]) n.disconnect();
+      loopLimit.disconnect();
+      outLimit.disconnect();
     },
   };
 }
