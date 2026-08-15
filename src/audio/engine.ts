@@ -1669,21 +1669,310 @@ export class AudioEngine {
     // track's own chain, so the source gate stays open while heads are active
     // even if the user has muted that stem in the dry mixer (which only
     // silences the normal copy — the head voices replace it).
-    const stemAudible = audibleBySolo && (!t.muted || t.soloed || (auditing && this.audition[id] === true));
+    // A CUE voice owns this lane: it is injected at `input`, downstream of the
+    // stem gate, so the ordinary copy is closed and the solo gate is forced
+    // open. Neither `muted` nor `soloed` is touched — the override disappears
+    // with the voice and the saved mix returns exactly as it was.
+    const cued = this.cueOverride[id] === true;
+    const stemAudible = !cued && audibleBySolo && (!t.muted || t.soloed || (auditing && this.audition[id] === true));
     // The FX rack stays OPEN whenever the stem is audible OR a head is riding
     // this lane, so Heads is processed by that lane's FX. The stem's own copy
     // is silenced at the gate instead.
     // Heads no longer ride the per-stem chains — they have their own bus into
     // the master — so the lane FX gate follows the stem alone.
-    t.fxRack?.setInputOpen(stemAudible);
+    t.fxRack?.setInputOpen(stemAudible || cued);
     this.setGain(t.stemGate.gain, stemAudible ? 1 : 0);
-    this.setGain(t.soloGain.gain, audibleBySolo ? 1 : 0);
+    this.setGain(t.soloGain.gain, cued || audibleBySolo ? 1 : 0);
   }
 
 
   private applyAudibilityAll() {
     for (let i = 0; i < this.tracks.length; i++) this.applyAudibility(i as TrackId);
   }
+
+  // ------------------------------------------------------- Stem Instrument
+  //
+  // A cue is a ONE-SHOT passage of a lane's own decoded buffer, injected at
+  // `t.input`. That single connection point is the whole isolation design:
+  //
+  //   cueGain → input → dry/filter → preFx → FX rack → fader → solo → bus
+  //             ▲
+  //             └── the stem gate (mute/solo) sits UPSTREAM of `input`, so the
+  //                 ordinary copy can be closed for the duration of the cue
+  //                 without the cue itself being gated.
+  //
+  // The underlay is never stopped. It keeps running silently behind a closed
+  // stem gate, which is why rejoin is exact rather than re-derived: when the
+  // gate reopens, the lane is already at the frame it would have reached.
+  //
+  // Cue voices live in `cueVoices`, NOT in `t.sources`. Seam scheduling, loop
+  // wraps, respawns and relocations only ever walk `t.sources`, so no ordinary
+  // transport event can retarget or kill a cue voice — identity protection by
+  // construction, not by flag checking.
+
+  readonly cues = new CueStore();
+  /** Content identity per lane, mirrored from the last grid analysis. */
+  contentHashes: string[] = ["", "", "", ""];
+  private cueVoices: (CueVoice | null)[] = [null, null, null, null];
+  private cueOverride: boolean[] = [false, false, false, false];
+  private cueTimers: (ReturnType<typeof setTimeout> | null)[] = [null, null, null, null];
+  lastCueDetail: string | null = null;
+  readonly cueLog: { t: number; action: string; detail: string }[] = [];
+
+  /** Restore persisted markers, then re-check them against the loaded stems. */
+  loadCueMarkers(markers: readonly CueMarker[]): { loaded: number; invalidated: number } {
+    this.cues.load(markers);
+    const r = this.cues.revalidate(this.contentHashes);
+    return { loaded: markers.length, invalidated: r.invalidated.length };
+  }
+
+  /** Engine conditions right now, in the pure module's shape. */
+  cueEligibility(): EligibilitySnapshot {
+    const scrubActive =
+      this.globalScrub != null ||
+      this.laneFaderScrub.some((s) => s != null) ||
+      this.laneScrub.some((s) => s != null);
+    return {
+      headsActive: this.heads.active || this.headLanes.active,
+      scrubActive,
+      reverseActive: this.tracks.some((t) => t.loop.reverse),
+      loopActive: this.globalLoop != null || this.tracks.some((t) => t.loop.enabled),
+      transportPlaying: this.requestedPlaying && this.transportPhase === "playing",
+      rate: this.timeline.musicalRate(),
+    };
+  }
+
+  /**
+   * The frame the event actually landed on.
+   *
+   * Derived from the MIDI timestamp through the calibrated clock and the
+   * integrated rate curve — never from `position()` at the moment JavaScript
+   * happened to run the handler.
+   */
+  private cueFrameOf(ev: Pick<StemMidiEvent, "timestampMs">): number {
+    const sr = this.ctx?.sampleRate ?? 48000;
+    const ctxTime = midiClock.isAnchored() ? midiClock.ctxTimeOf(ev) : (this.ctx?.currentTime ?? 0);
+    return Math.max(0, Math.round(this.positionAtCtxTime(ctxTime) * sr));
+  }
+
+  private positionAtCtxTime(ctxTime: number): number {
+    if (!this.ctx) return 0;
+    if (this.globalScrub) return Math.max(0, Math.min(this.duration, this.globalScrub.pos));
+    if (!this.requestedPlaying) return this.timeline.positionAt(this.timelineFrozenAt);
+    return Math.max(0, Math.min(this.duration, this.timeline.positionAt(ctxTime)));
+  }
+
+  private noteCue(action: string, detail: string) {
+    this.lastCueDetail = detail;
+    this.cueLog.push({ t: typeof performance !== "undefined" ? performance.now() : Date.now(), action, detail });
+    if (this.cueLog.length > 120) this.cueLog.splice(0, this.cueLog.length - 120);
+  }
+
+  /** One normalized MIDI event → one cue decision, plus its audible effect. */
+  handleMidiCue(ev: StemMidiEvent, qualifiers: QualifierSnapshot): { action: CueAction; detail: string } {
+    const eligibility = this.cueEligibility();
+    // An eligibility condition that began MID-capture discards the open
+    // captures first, so a commit can never straddle a loop or a scrub.
+    for (const stale of this.cues.syncEligibility(eligibility)) {
+      this.noteCue(stale.type, describeCueAction(stale));
+    }
+    const ctx: CueEventContext = {
+      frame: this.cueFrameOf(ev),
+      qualifiers,
+      eligibility,
+      sampleRate: this.ctx?.sampleRate ?? 48000,
+      contentHashes: this.contentHashes,
+    };
+    const action = this.cues.handle(ev, ctx);
+    let detail = describeCueAction(action);
+    if (action.type === "cue.play") {
+      const r = this.playCue(action.marker);
+      detail = r.detail;
+    }
+    if (ev.kind === "allNotesOff") this.stopAllCues("all notes off");
+    this.noteCue(action.type, detail);
+    return { action, detail };
+  }
+
+  /** Schedule one marker. Global markers hit all four lanes at the SAME time. */
+  private playCue(marker: CueMarker): { ok: boolean; detail: string } {
+    const ctx = this.ctx;
+    if (!ctx) return { ok: false, detail: "cue rejected — audio not unlocked" };
+    if (this.heads.active || this.headLanes.active) return { ok: false, detail: "cue rejected — Heads mode is active" };
+    if (this.globalScrub) return { ok: false, detail: "cue rejected — the shuttle is open" };
+    const lanes: number[] = marker.scope === "global" ? [0, 1, 2, 3] : [marker.lane ?? 0];
+    for (const lane of lanes) {
+      const t = this.tracks[lane];
+      if (!t?.buffer) return { ok: false, detail: `cue rejected — lane ${lane + 1} has no decoded stem` };
+      if (t.loop.reverse) return { ok: false, detail: `cue rejected — lane ${lane + 1} is reversed` };
+      if (this.laneFaderScrub[lane] || this.laneScrub[lane]) {
+        return { ok: false, detail: `cue rejected — lane ${lane + 1} is scrubbing` };
+      }
+    }
+    const at = ctx.currentTime + SEAM_FADE_S;
+    const startS = marker.startFrame / marker.sampleRate;
+    const durS = (marker.endFrame - marker.startFrame) / marker.sampleRate;
+    for (const lane of lanes) this.spawnCue(lane, marker, startS, durS, at);
+    return {
+      ok: true,
+      detail: `cue ${marker.key} · ${marker.scope === "global" ? "all four stems" : `lane ${lanes[0]! + 1}`} · ${(durS * 1000).toFixed(0)} ms from ${startS.toFixed(3)}s`,
+    };
+  }
+
+  /**
+   * DEDICATED cue spawn. Not `spawn()`: a cue never loops, never mirrors into
+   * the reversed copy, never follows varispeed and never joins `t.sources`.
+   */
+  private spawnCue(lane: number, marker: CueMarker, startS: number, durS: number, at: number): CueVoice | null {
+    const ctx = this.ctx!;
+    const t = this.tracks[lane];
+    const buf = t?.buffer;
+    if (!t || !buf) return null;
+    // Retrigger: the previous voice fades out across the same seam the new one
+    // fades in over — at most two cue voices, for at most SEAM_FADE_S.
+    this.stopCueVoice(lane, "retriggered", at);
+
+    const offset = Math.max(0, Math.min(buf.duration, startS));
+    const length = Math.max(0, Math.min(buf.duration - offset, durS));
+    if (length <= 0) return null;
+
+    const gain = ctx.createGain();
+    gain.gain.value = 0;
+    gain.connect(t.input);
+    const node = ctx.createBufferSource();
+    node.buffer = buf;
+    node.playbackRate.value = 1;
+    node.connect(gain);
+
+    // Uncorrelated material against the underlay → equal power, both ends.
+    const endAt = at + length;
+    const rise = sampleCurve(equalPower, "b", 32);
+    const fall = sampleCurve(equalPower, "a", 32);
+    gain.gain.setValueCurveAtTime(rise, at, SEAM_FADE_S);
+    gain.gain.setValueAtTime(1, at + SEAM_FADE_S);
+    if (length > SEAM_FADE_S * 2) gain.gain.setValueCurveAtTime(fall, endAt - SEAM_FADE_S, SEAM_FADE_S);
+    node.start(at, offset, length);
+    node.stop(endAt + 0.001);
+
+    const voice: CueVoice = {
+      key: marker.key,
+      scope: marker.scope,
+      lane,
+      node,
+      gain,
+      startAt: at,
+      endAt,
+      startPos: offset,
+      underlayAtStart: this.laneUnderlayPosition(lane),
+    };
+    this.cueVoices[lane] = voice;
+    this.cueOverride[lane] = true;
+    this.applyAudibility(lane as TrackId);
+    node.onended = () => this.releaseCue(lane, voice, "completed");
+    const ms = Math.max(0, (endAt - ctx.currentTime) * 1000) + 40;
+    const timer = this.cueTimers[lane];
+    if (timer) clearTimeout(timer);
+    this.cueTimers[lane] = setTimeout(() => this.releaseCue(lane, voice, "completed"), ms);
+    return voice;
+  }
+
+  /** Identity-checked release: a stale voice can never reopen a live lane. */
+  private releaseCue(lane: number, voice: CueVoice, reason: string) {
+    if (this.cueVoices[lane] !== voice) return;
+    this.cueVoices[lane] = null;
+    const timer = this.cueTimers[lane];
+    if (timer) clearTimeout(timer);
+    this.cueTimers[lane] = null;
+    this.cueOverride[lane] = false;
+    try {
+      voice.node.disconnect();
+      voice.gain.disconnect();
+    } catch {
+      /* already torn down */
+    }
+    if (this.ctx) this.applyAudibility(lane as TrackId);
+    this.noteCue("cue.release", `lane ${lane + 1} rejoined its underlay — ${reason}`);
+  }
+
+  private stopCueVoice(lane: number, reason: string, at?: number) {
+    const voice = this.cueVoices[lane];
+    if (!voice || !this.ctx) return;
+    const now = at ?? this.ctx.currentTime;
+    try {
+      voice.gain.gain.cancelScheduledValues(now);
+      voice.gain.gain.setValueCurveAtTime(sampleCurve(equalPower, "a", 32), now, SEAM_FADE_S);
+      voice.node.stop(now + SEAM_FADE_S + 0.001);
+    } catch {
+      /* already stopped */
+    }
+    // Ownership passes to the incoming voice; the outgoing one may not reopen
+    // the gate when its own `onended` fires.
+    this.cueVoices[lane] = null;
+    this.noteCue("cue.stop", `lane ${lane + 1} cue ${voice.key} — ${reason}`);
+  }
+
+  /** Song change, panic, disposal. */
+  stopAllCues(reason: string) {
+    for (let i = 0; i < this.tracks.length; i++) {
+      const voice = this.cueVoices[i];
+      if (!voice) continue;
+      this.stopCueVoice(i, reason);
+      this.cueOverride[i] = false;
+      const timer = this.cueTimers[i];
+      if (timer) clearTimeout(timer);
+      this.cueTimers[i] = null;
+      if (this.ctx) this.applyAudibility(i as TrackId);
+    }
+    for (const a of this.cues.cancelAllCaptures("cancelled")) this.noteCue(a.type, describeCueAction(a));
+  }
+
+  /**
+   * Where the lane's ordinary (possibly silenced) voice is reading right now.
+   * This is the underlay a finished cue rejoins; it never stopped, so the
+   * rejoin error is the difference between this and the song clock.
+   */
+  laneUnderlayPosition(lane: number): number | null {
+    const t = this.tracks[lane];
+    const ctx = this.ctx;
+    if (!t || !ctx) return null;
+    const live = t.sources[t.sources.length - 1];
+    if (!live) return null;
+    const now = this.requestedPlaying ? ctx.currentTime : this.timelineFrozenAt;
+    return live.startPos + (this.timeline.positionAt(now) - this.timeline.positionAt(live.startAt));
+  }
+
+  /** Read-only cue truth for the status strip and the browser proofs. */
+  cueSnapshot() {
+    const markers = this.cues.list();
+    return {
+      learned: markers.filter((m) => !m.invalidReason).length,
+      invalid: markers.filter((m) => m.invalidReason).length,
+      markers: markers.map((m) => ({
+        key: m.key,
+        scope: m.scope,
+        lane: m.lane,
+        frames: m.endFrame - m.startFrame,
+        startFrame: m.startFrame,
+        invalidReason: m.invalidReason,
+      })),
+      openCaptures: this.cues.openCaptures(),
+      owned: this.cueOverride.slice(),
+      voices: this.cueVoices.map((v, i) => (v ? { lane: i, key: v.key, scope: v.scope, startAt: v.startAt, endAt: v.endAt } : null)),
+      /** Per lane: cue voice + ordinary sources that are NOT gated shut. */
+      audibleVoices: this.tracks.map(
+        (t, i) => (this.cueVoices[i] ? 1 : 0) + (t.stemGate.gain.value > 0.01 ? t.sources.length : 0),
+      ),
+      underlay: this.tracks.map((_, i) => this.laneUnderlayPosition(i)),
+      stemGate: this.tracks.map((t) => Number(t.stemGate.gain.value.toFixed(4))),
+      soloGate: this.tracks.map((t) => Number(t.soloGain.gain.value.toFixed(4))),
+      fader: this.tracks.map((t) => Number(t.gain.gain.value.toFixed(4))),
+      eligibility: this.cueEligibility(),
+      lastDetail: this.lastCueDetail,
+      log: this.cueLog.slice(-40),
+    };
+  }
+
+
 
   /** Re-apply one FX family from the current slot flags. */
   private async applyFx(id: TrackId, family: FxFamily, latched: boolean): Promise<{ ok: boolean; detail: string }> {
