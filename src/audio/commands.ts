@@ -90,8 +90,16 @@ export type AudioCommandType =
   /** Selection arm / active-track choice (FUNCTION tap, then a Track tap). */
   | "stem.select"
 
+  // ---- Stem Instrument Mode (MIDI cues) ------------------------------------
+  // ONE ingress command per normalized MIDI event. The engine — not the
+  // reducer — decides learn vs play, because only the engine knows the frame
+  // the event landed on and whether the tape was eligible at that instant.
+  | "cue.event"
+  /** All Notes Off / device disconnect / backgrounding. */
+  | "cue.panic"
 
   | "rollback";
+
 
 
 
