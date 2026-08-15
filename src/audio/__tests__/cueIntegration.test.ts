@@ -83,7 +83,10 @@ function play(r: Rig, note: number) {
   return r.engine.handleMidiCue(r.ev("noteOn", note), NONE);
 }
 
+/** EXACT cue launch: no wind-up ramp, transport is `playing` immediately. */
 function startPlaying(r: Rig) {
+  r.engine.execute(cmd("transport.cue", { frame: 0 }));
+  r.advance(0.05);
   r.engine.execute(cmd("transport.play"));
   r.advance(1.0);
 }
