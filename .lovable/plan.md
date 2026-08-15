@@ -48,8 +48,7 @@ The 200/300 conflict is resolved by deleting the separate `multiTapGapMs` for Tr
 | Hold PLAY (stopped) | bare | same | cue to frame 0 | extension |
 | FN + Vol −/+ (no Track held) | G1 | `volume.chopWindow` — `surface.ts:797` | **global-loop division** — its only job, in **every** mode including FX; sets the pending division when no loop runs | S2 |
 | PLAY + Vol −/+ | — | `stem.select` — `chordArbiter.ts:335-342` | **retired** with `supersedes: ["stem.select"]` + `originalBehaviour`; superseded by FN-arm + Track select | obsolete |
-| **PLAY + Track, overlap <700 ms** | chord | `stem.solo` — `chordArbiter.ts:344-351` | **retained** (latching solo). Precedence below the global loop: it can only fire while PLAY has not crossed `holdMs`; the arbiter cancels a pending solo the instant the loop starts | extension, kept |
-| **PLAY + Track, overlap ≥700 ms** | chord | `stem.link` — `chordArbiter.ts:352-353` | **retained** (link/unlink), same precedence rule | extension, kept |
+| **PLAY + Track (solo, <700 ms; link/unlink, ≥700 ms)** | chord | `stem.solo` / `stem.link` — `chordArbiter.ts:344-353` | **RETIRED — structurally unreachable.** The global loop begins at `holdMs = 450`, so a ≥700 ms link overlap can never complete and a solo can be cancelled mid-gesture. Track hold already gives 1–4-stem momentary/group solo. Remove the **hardware mappings** only, each with `supersedes` + `originalBehaviour`; the underlying `stem.solo` / `stem.link` engine commands and any saved per-stem solo/link state stay intact and loadable | obsolete |
 | PLAY held + rocker | — | `rocker.chop.play` — `surface.ts:656-667, 790` | **move the global loop** ±1 division; chop retired with `supersedes` | S2 |
 | Short FN → Track 1–4 | G1 arm | FN tap = tempo tap — `surface.ts:492-518` | **active-track select** with LED arm/solid | stock (S2) |
 | FN ×4 grid rounding | — | `surface.ts:828-836` | **removed**; manual correction moves to Projects | obsolete |
