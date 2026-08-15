@@ -1,0 +1,72 @@
+name: firmware
+
+# Builds the untouched SP-1 Tape Looper firmware exactly as firmware/README.md
+# specifies: Zephyr v4.3.1 + Zephyr SDK 0.17.4, the UAC2 Windows FS-feedback
+# patch applied to the Zephyr tree, then a single west build.
+#
+# Layout note: this repo stores the board definition inside the firmware folder
+# (firmware/boards/teenageengineering/stem_player), so BOARD_ROOT points at
+# firmware/ instead of the repo root. No firmware file is modified.
+
+on:
+  push:
+    paths:
+      - 'firmware/**'
+      - '.github/workflows/firmware.yml'
+  pull_request:
+    paths:
+      - 'firmware/**'
+      - '.github/workflows/firmware.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/zephyrproject-rtos/ci:v0.27.4
+      options: --user root
+    env:
+      ZEPHYR_TOOLCHAIN_VARIANT: zephyr
+      ZEPHYR_SDK_INSTALL_DIR: /opt/toolchains/zephyr-sdk-0.17.4
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+        with:
+          path: project
+
+      - name: Initialize Zephyr v4.3.1 workspace
+        run: |
+          set -eux
+          west init -m https://github.com/zephyrproject-rtos/zephyr --mr v4.3.1 ws
+          cd ws
+          west update --narrow -o=--depth=1
+          west zephyr-export
+
+      - name: Apply documented Zephyr patch
+        run: |
+          set -eux
+          cd ws/zephyr
+          git apply --verbose \
+            "$GITHUB_WORKSPACE/project/firmware/patches/uac2-windows-fs-feedback.patch"
+
+      - name: Build (west build -p -b stem_player firmware)
+        run: |
+          set -eux
+          source ws/zephyr/zephyr-env.sh
+          cd "$GITHUB_WORKSPACE/project"
+          west build -p always -b stem_player firmware \
+            -- -DBOARD_ROOT="$GITHUB_WORKSPACE/project/firmware"
+
+      - name: Report artifact hash
+        run: |
+          set -eux
+          cd project/build/zephyr
+          cp zephyr.bin sp1_looper.bin
+          ls -l sp1_looper.bin
+          sha256sum sp1_looper.bin
+
+      - name: Upload sp1_looper.bin
+        uses: actions/upload-artifact@v4
+        with:
+          name: sp1_looper-bin
+          path: project/build/zephyr/sp1_looper.bin
