@@ -2837,82 +2837,116 @@ export class AudioEngine {
 
 
 
-  private scrubGrainAll(dtS: number) {
+  /**
+   * SCHEDULE-CURSOR shuttle (fixes the 1–2 s skip on release).
+   *
+   * The old scheduler advanced the position by WALL-CLOCK dt while queuing
+   * grains 0.8 × their length apart. The two clocks run at different speeds,
+   * so the grain queue drifted ahead of what was actually audible and the
+   * release integral landed up to a second past the last sounding frame.
+   *
+   * Now there is ONE clock: `gs.cursor`, the context time of the next grain,
+   * and `gs.pos`, the exact source position at that cursor. Grains are emitted
+   * only up to a small lookahead, and `pos(t) = gs.pos + dir·rate·(t − cursor)`
+   * is exact for any context time — including a handoff BEHIND the cursor. The
+   * landing frame is therefore the frame immediately after the last audible
+   * scrub frame, never a wall-clock estimate.
+   */
+  private scrubGrainAll(_dtS: number) {
     const gs = this.globalScrub;
     const ctx = this.ctx;
     if (!gs || !ctx) return;
-    const before = gs.pos;
-    gs.pos = Math.min(this.duration, Math.max(0, gs.pos + gs.dir * GLOBAL_SCRUB_RATE * dtS));
-    gs.posCtxTime = ctx.currentTime;
-    // ONE shared playhead: the timeline is re-anchored, every stem reads it.
-    this.timeline.anchor(ctx.currentTime, gs.pos);
-    this.timelineFrozenAt = ctx.currentTime;
-    for (const pt of gs.perTrack) pt.pos = gs.pos;
-    if (gs.pos === before) return; // parked at an end — no grain, no click
     const now = ctx.currentTime;
-    const dur = Math.min(0.12, Math.max(0.03, dtS * 1.6));
-    const backwards = gs.dir < 0;
+    const GRAIN_S = 0.06;
+    const HOP_S = GRAIN_S * 0.8;
+    const LOOKAHEAD_S = 0.05;
+    const advance = (from: number, seconds: number) =>
+      Math.min(this.duration, Math.max(0, from + gs.dir * GLOBAL_SCRUB_RATE * seconds));
+
+    // A late timer (tab throttling, GC) must not queue grains in the past:
+    // fast-forward the cursor and the position together, staying continuous.
+    if (gs.cursor < now) {
+      gs.pos = advance(gs.pos, now - gs.cursor);
+      gs.cursor = now;
+    }
+
     const gen = gs.gen;
     let emitted = 0;
-    for (let i = 0; i < this.tracks.length; i++) {
-      const t = this.tracks[i]!;
-      const pt = gs.perTrack[i];
-      if (!pt) continue;
-      if (pt.mode === "worklet") {
-        // The worklet kernel renders its own shuttle: it is already running at
-        // GLOBAL_SCRUB_RATE in `gs.dir`. Only re-align its read pointer so all
-        // four stems stay locked to the single shared playhead.
+    while (gs.cursor < now + LOOKAHEAD_S) {
+      const at = gs.cursor;
+      const offsetS = gs.pos;
+      const next = advance(offsetS, HOP_S);
+      gs.cursor = at + HOP_S;
+      gs.pos = next;
+      if (next === offsetS) continue; // parked at an end — no grain, no click
+      const backwards = gs.dir < 0;
+      for (let i = 0; i < this.tracks.length; i++) {
+        const t = this.tracks[i]!;
+        const pt = gs.perTrack[i];
+        if (!pt) continue;
+        if (pt.mode === "worklet") {
+          // The kernel renders its own shuttle at GLOBAL_SCRUB_RATE; only the
+          // shared playhead below re-aligns it.
+          pt.grains++;
+          emitted++;
+          continue;
+        }
+        const src = t.buffer ?? this.scrubPcm(t);
+        if (!src) continue;
+        if (backwards && !t.reversed) t.reversed = reverseBuffer(ctx, src);
+        const buffer = backwards ? t.reversed : src;
+        if (!buffer) continue;
+        const readAt = backwards ? buffer.duration - offsetS : offsetS;
+        const g = ctx.createGain();
+        g.connect(t.stemGate);
+        const tap = this.scrubTap(i);
+        if (tap) g.connect(tap);
+        const node = ctx.createBufferSource();
+        node.buffer = buffer;
+        node.playbackRate.value = GLOBAL_SCRUB_RATE;
+        node.connect(g);
+        const fade = Math.min(0.006, GRAIN_S / 3);
+        g.gain.setValueAtTime(0, at);
+        g.gain.linearRampToValueAtTime(GLOBAL_SCRUB_LEVEL, at + fade);
+        g.gain.setValueAtTime(GLOBAL_SCRUB_LEVEL, at + GRAIN_S - fade);
+        g.gain.linearRampToValueAtTime(0, at + GRAIN_S);
+        node.start(
+          at,
+          Math.min(Math.max(0, readAt), Math.max(0, buffer.duration - 1e-3)),
+          GRAIN_S * GLOBAL_SCRUB_RATE,
+        );
+        gs.lastGrainAt[i] = at;
         pt.grains++;
         emitted++;
-        continue;
+        const rec = { node, gain: g, at, endAt: at + GRAIN_S, gen };
+        (gs.live[i] ??= []).push(rec);
+        // Measured, not asserted: every sounding scrub path is registered here
+        // and only removed when the node actually ends.
+        this.liveScrubPaths.add(node);
+        node.onended = () => {
+          const cur = this.globalScrub;
+          if (cur) cur.live[i] = (cur.live[i] ?? []).filter((r) => r !== rec);
+          this.liveScrubPaths.delete(node);
+          try {
+            node.disconnect();
+            g.disconnect();
+          } catch {
+            /* noop */
+          }
+        };
       }
-      const src = t.buffer ?? this.scrubPcm(t);
-      if (!src) continue;
-      if (backwards && !t.reversed) t.reversed = reverseBuffer(ctx, src);
-      const buffer = backwards ? t.reversed : src;
-      if (!buffer) continue;
-      const at = Math.max(now, gs.lastGrainAt[i] ?? now);
-      const offsetS = backwards ? buffer.duration - gs.pos : gs.pos;
-      const g = ctx.createGain();
-      g.connect(t.stemGate);
-      const tap = this.scrubTap(i);
-      if (tap) g.connect(tap);
-      const node = ctx.createBufferSource();
-      node.buffer = buffer;
-      node.playbackRate.value = GLOBAL_SCRUB_RATE;
-      node.connect(g);
-      const fade = Math.min(0.006, dur / 3);
-      g.gain.setValueAtTime(0, at);
-      g.gain.linearRampToValueAtTime(GLOBAL_SCRUB_LEVEL, at + fade);
-      g.gain.setValueAtTime(GLOBAL_SCRUB_LEVEL, at + dur - fade);
-      g.gain.linearRampToValueAtTime(0, at + dur);
-      node.start(at, Math.min(Math.max(0, offsetS), Math.max(0, buffer.duration - 1e-3)), dur * GLOBAL_SCRUB_RATE);
-      gs.lastGrainAt[i] = at + dur * 0.8;
-      pt.grains++;
-      emitted++;
-      const rec = { node, gain: g, at, endAt: at + dur, gen };
-      (gs.live[i] ??= []).push(rec);
-      // Measured, not asserted: every sounding scrub path is registered here
-      // and only removed when the node actually ends, so a harness can read a
-      // true "active scrub path" count after release.
-      this.liveScrubPaths.add(node);
-      node.onended = () => {
-        const cur = this.globalScrub;
-        if (cur) cur.live[i] = (cur.live[i] ?? []).filter((r) => r !== rec);
-        this.liveScrubPaths.delete(node);
-
-        try {
-          node.disconnect();
-          g.disconnect();
-        } catch {
-          /* noop */
-        }
-      };
     }
+
+    // ONE shared playhead, anchored to the AUDIBLE position at `now` — the
+    // same function the release integral uses.
+    gs.posCtxTime = gs.cursor;
+    const audible = this.integrateScrubTo(now);
+    this.timeline.anchor(now, audible);
+    this.timelineFrozenAt = now;
+    for (const pt of gs.perTrack) pt.pos = audible;
     if (emitted > 0) gs.grains++;
     this.sampleScrubTaps();
   }
-
 
   /**
    * PCM for a track whose node buffer was released after worklet handoff.
@@ -2984,6 +3018,7 @@ export class AudioEngine {
       pos,
       startPos: pos,
       posCtxTime: now,
+      cursor: now,
       wasPlaying,
       musicalRate,
       gen: 1,
@@ -3017,9 +3052,10 @@ export class AudioEngine {
   private integrateScrubTo(atCtx: number): number {
     const gs = this.globalScrub;
     if (!gs) return this.position();
-    const dt = Math.max(0, atCtx - gs.posCtxTime);
-    const p = Math.min(this.duration, Math.max(0, gs.pos + gs.dir * GLOBAL_SCRUB_RATE * dt));
-    return p;
+    // Signed: the handoff frame is BEHIND the schedule cursor, so the integral
+    // must be able to run backwards to the last audible frame.
+    const dt = atCtx - gs.posCtxTime;
+    return Math.min(this.duration, Math.max(0, gs.pos + gs.dir * GLOBAL_SCRUB_RATE * dt));
   }
 
   setGlobalScrubDirection(dir: 1 | -1): { ok: boolean; detail: string } {
@@ -3028,8 +3064,11 @@ export class AudioEngine {
     if (gs.dir !== dir) {
       const ctx = this.ctx;
       if (ctx) {
+        // Reversal starts a fresh schedule at the audible frame: everything
+        // already queued past `now` is retired by the generation bump.
         gs.pos = this.integrateScrubTo(ctx.currentTime);
         gs.posCtxTime = ctx.currentTime;
+        gs.cursor = ctx.currentTime;
       }
       gs.dir = dir;
       this.worbletShuttle(dir, gs.pos, true);
