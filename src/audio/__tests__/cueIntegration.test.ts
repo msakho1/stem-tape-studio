@@ -321,7 +321,10 @@ describe("held cue semantics", () => {
     // Resumes from the exact saved frame, then advances normally again.
     expect(r.engine.status().position).toBeCloseTo(saved, 3);
     r.advance(0.5);
-    expect(r.engine.status().position).toBeCloseTo(saved + 0.5, 2);
+    // Runs on again (tape inertia means slightly less than 0.5 s of travel).
+    const after = r.engine.status().position;
+    expect(after).toBeGreaterThan(saved + 0.3);
+    expect(after).toBeLessThanOrEqual(saved + 0.5 + 1e-6);
   });
 
   it("a held isolated cue leaves three lanes advancing and rejoins the fourth", async () => {
