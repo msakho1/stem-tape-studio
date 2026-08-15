@@ -4,13 +4,15 @@ name: firmware
 # specifies: Zephyr v4.3.1 + Zephyr SDK 0.17.4, the UAC2 Windows FS-feedback
 # patch applied to the Zephyr tree, then a single west build.
 #
+# Workspace layout (all paths are relative to $GITHUB_WORKSPACE):
+#   project/           <- west workspace topdir (this repository)
+#   project/zephyr/    <- Zephyr v4.3.1 checkout created by action-zephyr-setup
+#   project/firmware/  <- Zephyr application + in-repo board + patches
+#   project/build/     <- build output
+#
 # No job-level Docker container: the zephyrproject-rtos/ci image unpacks every
 # toolchain (Xtensa included) and exhausts the runner disk. action-zephyr-setup
 # installs only the arm-zephyr-eabi toolchain.
-#
-# Layout note: this repo stores the board definition inside the firmware folder
-# (firmware/boards/teenageengineering/stem_player), so BOARD_ROOT points at
-# firmware/ instead of the repo root. No firmware file is modified.
 
 on:
   push:
@@ -45,30 +47,42 @@ jobs:
           toolchains: arm-zephyr-eabi
           sdk-version: 0.17.4
 
-      - name: Apply documented Zephyr patch
+      - name: Path preflight
+        working-directory: ${{ github.workspace }}/project
         run: |
           set -eux
-          cd zephyr
-          git apply --verbose \
-            "$GITHUB_WORKSPACE/project/firmware/patches/uac2-windows-fs-feedback.patch"
+          test -d zephyr
+          test -f zephyr/VERSION
+          test -d firmware
+          test -f firmware/CMakeLists.txt
+          test -d firmware/boards/teenageengineering/stem_player
+          test -f firmware/patches/uac2-windows-fs-feedback.patch
+          west topdir
 
-      - name: Build (west build -p -b stem_player firmware)
+      - name: Apply documented Zephyr patch
+        working-directory: ${{ github.workspace }}/project/zephyr
         run: |
           set -eux
-          cd "$GITHUB_WORKSPACE/project"
+          git apply --verbose ../firmware/patches/uac2-windows-fs-feedback.patch
+
+      - name: Build (west build -p always -b stem_player firmware)
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -eux
           west build -p always -b stem_player firmware \
             -- -DBOARD_ROOT="$GITHUB_WORKSPACE/project/firmware"
 
       - name: Report artifact hash
+        working-directory: ${{ github.workspace }}/project/build/zephyr
         run: |
           set -eux
-          cd project/build/zephyr
           cp zephyr.bin sp1_looper.bin
           ls -l sp1_looper.bin
-          sha256sum sp1_looper.bin | tee "$GITHUB_STEP_SUMMARY"
+          sha256sum sp1_looper.bin | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Upload sp1_looper.bin
         uses: actions/upload-artifact@v4
         with:
           name: sp1_looper-bin
           path: project/build/zephyr/sp1_looper.bin
+          if-no-files-found: error
