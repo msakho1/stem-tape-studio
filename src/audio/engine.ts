@@ -1901,12 +1901,26 @@ export class AudioEngine {
     const at = ctx.currentTime + SEAM_FADE_S;
     const startS = marker.startFrame / marker.sampleRate;
     const durS = (marker.endFrame - marker.startFrame) / marker.sampleRate;
+    // A GLOBAL cue parks the song: the timeline freezes on the exact frame the
+    // Note On landed on and every ordinary source stops, so nothing advances
+    // underneath. Transport, loop, mixer and FX state are left untouched.
+    if (marker.scope === "global" && !this.cuePark) {
+      const pos = this.position();
+      this.cuePark = { pos, wasPlaying: this.requestedPlaying, phase: this.transportPhase };
+      if (this.requestedPlaying) {
+        this.stopSources();
+        this.requestedPlaying = false;
+      }
+      this.timeline.anchor(ctx.currentTime, pos);
+      this.timelineFrozenAt = ctx.currentTime;
+    }
     for (const lane of lanes) this.spawnCue(lane, marker, startS, durS, at);
     return {
       ok: true,
-      detail: `cue ${marker.key} · ${marker.scope === "global" ? "all four stems" : `lane ${lanes[0]! + 1}`} · ${(durS * 1000).toFixed(0)} ms from ${startS.toFixed(3)}s`,
+      detail: `cue ${marker.key} · ${marker.scope === "global" ? "all four stems (song parked)" : `lane ${lanes[0]! + 1}`} · ${(durS * 1000).toFixed(0)} ms from ${startS.toFixed(3)}s`,
     };
   }
+
 
   /**
    * DEDICATED cue spawn. Not `spawn()`: a cue never loops, never mirrors into
