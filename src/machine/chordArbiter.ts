@@ -146,6 +146,33 @@ export class ChordArbiter {
     this.holdFired.add(control);
   }
 
+  /**
+   * An EXTERNAL layer (Stem Instrument Mode) consumed these qualifiers.
+   *
+   * A control whose hold has ALREADY fired is deliberately left unclaimed: its
+   * audition is audible right now and its release must still restore the mix.
+   * Only presses that have not yet produced a gesture are suppressed, so a
+   * FUNCTION or Track button used to qualify a MIDI cue cannot also arm
+   * selection or toggle a mute when it is released.
+   */
+  claimExternal(controls: readonly Control[], detail = "claimed by Stem Instrument Mode"): Control[] {
+    const taken: Control[] = [];
+    for (const c of controls) {
+      if (this.holdFired.has(c)) continue;
+      if (!this.down.has(c)) continue;
+      if (this.claimed.has(c)) continue;
+      this.claimed.add(c);
+      taken.push(c);
+    }
+    if (taken.length > 0) {
+      this.log.unshift({ t: Date.now(), controls: taken, intent: "external", suppressed: [...taken], detail });
+      if (this.log.length > 60) this.log.length = 60;
+    }
+    return taken;
+  }
+
+
+
 
   onIntent(fn: (i: PerfIntent) => void): () => void {
     this.listeners.add(fn);
