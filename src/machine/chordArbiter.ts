@@ -62,7 +62,7 @@ export type PerfIntent =
   | { type: "stem.select"; dir: 1 | -1 }
   | { type: "stem.solo"; stem: StemIndex; overlapMs: number }
   | { type: "stem.link"; stem: StemIndex; overlapMs: number }
-  | { type: "fx.overlay"; on: boolean }
+  | { type: "fx.overlay"; on: boolean; scope: FxScope }
   | { type: "system.pairing" }
   | { type: "system.noop"; detail: string }
   // Twelve-FX intents. Selection + momentary fire on POINTER-DOWN: there is no
@@ -102,9 +102,18 @@ function isRocker(c: Control): c is "rocker-fwd" | "rocker-rwd" {
 }
 
 
+/**
+ * Which rack the open FX overlay is driving.
+ *  - "stem"   → the selected lane's rack (per-stem FX, as before);
+ *  - "global" → the single post-sum rack on the whole audible Tape mix.
+ */
+export type FxScope = "stem" | "global";
+
 export interface ArbiterView {
   activeStem: StemIndex;
   fxOverlay: boolean;
+  /** Scope of the currently open overlay. Ignored while it is closed. */
+  fxScope?: FxScope;
   /** Which bank owns Volume ± right now. null = base master volume. */
   selectedBank: BankIndex | null;
 }
@@ -270,7 +279,12 @@ export class ChordArbiter {
     if (fxOverlay && isTrack(control)) {
       const bank = bankOfButton(TRACK_INDEX[control]!);
       const functionHeld = this.down.has("function");
-      const otherModifier = this.down.has("play") || this.down.has("volume-minus") || this.down.has("volume-plus");
+      // PLAY is deliberately NOT a modifier here. While the FX overlay is
+      // open the Track buttons belong to FX even if PLAY is held or the
+      // global loop is running: the loop keeps looping, the bank engages, and
+      // no stem.solo / stem.link can be formed. Solo/link is closed-overlay
+      // only. This is a precedence rule, not an undo after the fact.
+      const otherModifier = this.down.has("volume-minus") || this.down.has("volume-plus");
       if (functionHeld) {
         // ORDER IS THE DISCRIMINATOR. FUNCTION went down FIRST, so this press
         // belongs to the universal lane layer (FN + Track double-tap =
@@ -292,16 +306,34 @@ export class ChordArbiter {
       return;
     }
 
-    if (fxOverlay && isVolume(control)) {
+    if (isVolume(control)) {
       const other: Control = control === "volume-minus" ? "volume-plus" : "volume-minus";
       if (this.down.has(other)) {
-        // Vol− + Vol+ is the overlay/system chord — never a cycle or a macro.
+        // ATOMIC two-volume chord. Both controls are claimed on the SECOND
+        // pointer-down, before either base gesture can dispatch, so the chord
+        // can never leak a master-volume step or a loop-division change. If
+        // FUNCTION qualified the chord it is claimed too: its tap/hold row
+        // must not fire when the finger comes off.
         this.clearMacro(other);
         this.clearMacro(control);
         this.claim(control, other);
+        if (this.down.has("function")) this.claim("function");
         return;
       }
-      if (selectedBank != null) {
+      if (fxOverlay && this.down.has("function") && (this.view().fxScope ?? "stem") === "stem") {
+        // FUNCTION + one Volume button inside a STEM-scope overlay walks the
+        // FX target: Vocal ↔ Drums ↔ Bass ↔ Instrument. Selection only moves
+        // the target — no mute, solo, audition or stored mixer change.
+        this.claim(control, "function");
+        this.clearMacro(control);
+        this.emit(
+          { type: "stem.select", dir: control === "volume-plus" ? 1 : -1 },
+          [control, "function"],
+          `FX target ${control === "volume-plus" ? "next" : "previous"} stem`,
+        );
+        return;
+      }
+      if (fxOverlay && selectedBank != null) {
         // Claimed BEFORE dispatch: no master-volume command is ever emitted.
         this.claim(control);
         this.startMacroHold(control, control === "volume-plus" ? 1 : -1, activeStem, selectedBank);
@@ -340,7 +372,7 @@ export class ChordArbiter {
     //
     // Either way the claim suppresses PLAY's own transport gesture, so
     // releasing a claimed chord emits no transport and no loop command.
-    if (isTrack(control) && this.down.has("play")) {
+    if (isTrack(control) && this.down.has("play") && !fxOverlay) {
       const playHeld = this.heldSince("play", t) ?? Infinity;
       // Ownership is decided by whether the global-loop hold has ACTUALLY
       // fired, with the elapsed check as the fallback for headless callers
