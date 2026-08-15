@@ -3951,6 +3951,60 @@ export class AudioEngine {
           return this.ack(cmd, r.ok ? "completed" : "rejected", r.detail);
         }
 
+        // ---- GLOBAL loop: one bar-locked window shared by all four stems ----
+        // It is a single window applied to every lane, not four lane loops:
+        // one start, one length, so the stems can never drift apart. Lanes that
+        // already own a per-lane loop keep it — their audible pointer wins and
+        // the global window only supplies the hidden song target they rejoin.
+        case "loop.global.start":
+        case "loop.global.resize":
+        case "loop.global.move": {
+          const division = Math.max(1, Number(p["division"] ?? this.globalLoop?.division ?? 1));
+          const dur = this.duration;
+          if (!dur) return this.ack(cmd, "rejected", "no audio loaded");
+          const lengthS = this.barSeconds() / division;
+          const grid = this.songGrid;
+          const here = Math.max(0, this.position());
+          let start: number;
+          if (cmd.type === "loop.global.move" && this.globalLoop) {
+            const steps = Number(p["steps"] ?? 0);
+            start = this.globalLoop.start + steps * lengthS;
+          } else if (cmd.type === "loop.global.resize" && this.globalLoop) {
+            start = this.globalLoop.start;
+          } else {
+            start = grid ? Math.max(0, barStartAt(grid, here)) : here;
+          }
+          start = Math.max(0, Math.min(Math.max(0, dur - lengthS), start));
+          this.globalLoop = { start, lengthS, division };
+          const details: string[] = [];
+          for (let i = 0 as TrackId; i < 4; i = (i + 1) as TrackId) {
+            if (!this.tracks[i]) continue;
+            const res = this.execute({
+              ...cmd,
+              type: "loop.set",
+              payload: { track: i, enabled: true, start: start / dur, end: Math.min(1, (start + lengthS) / dur) },
+            });
+            details.push(`lane ${i + 1} ${res.status}`);
+          }
+          return this.ack(
+            cmd,
+            "completed",
+            `global loop 1/${division} bar @ ${start.toFixed(3)}s (${lengthS.toFixed(3)}s) — ${details.join(", ")}`,
+          );
+        }
+        case "loop.global.release": {
+          this.globalLoop = null;
+          const details: string[] = [];
+          for (let i = 0 as TrackId; i < 4; i = (i + 1) as TrackId) {
+            const t = this.tracks[i];
+            if (!t || !t.loop.enabled) continue;
+            const r = this.scheduleLoopRelease(i, t);
+            details.push(`lane ${i + 1} ${r.ok ? "released" : `rejected (${r.detail})`}`);
+          }
+          return this.ack(cmd, "completed", details.length ? details.join(", ") : "no global loop was running");
+        }
+
+
         default:
           return this.ack(cmd, "rejected", "unknown command type");
       }
