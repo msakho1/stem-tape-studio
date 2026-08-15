@@ -454,13 +454,21 @@ export const LESSONS: Lesson[] = [
   },
   {
     id: "instrument",
-    title: "How to play the tape from a MIDI keyboard",
-    gesture: "FUNCTION + key · Track + key · key",
-    body:
-      "Connect MIDI, then hold FUNCTION and press a key: the tape from that instant is learned onto the key as a whole-song cue, and the key is armed the moment you release it. Hold a Track button instead and only that stem is learned — the other three keep playing underneath. Press a learned key on its own and the cue fires once, over the top of the song; when it ends the tape is already exactly where it would have been, so it rejoins in phase. Releasing a playing key does nothing — a cue is a one-shot, not a sustain. Cues are saved with the project, and a marker is retired automatically if you replace the stem it was learned from.",
-    highlight: ["function", "track-button-1"],
+    title: "Play Stem Tape with MIDI",
+    gesture: "FUNCTION + MIDI key · Track + MIDI key · MIDI key",
+    body: `Save part of the whole song
+Hold FUNCTION and hold any MIDI key while the part you want plays. Release the key when the part ends. That key now holds that section of the song.
+
+Save just one stem
+Hold its TRACK button instead of FUNCTION, then do the same thing.
+
+Play it
+Tap the learned MIDI key. Your saved section plays once, then the song keeps going.
+
+“MIDI works in supported browsers such as desktop Chrome and Edge. It is not currently available in iPhone or iPad browsers.”`,
+    highlight: ["function", "track-button-1", "play"],
     motion: "sequence",
-    held: ["function"],
+    held: [],
     features: [
       "instrument.learn.global",
       "instrument.learn.isolated",
