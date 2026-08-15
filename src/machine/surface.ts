@@ -741,16 +741,32 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
           next = { ...next, lights: state.lights === "full" ? "dim" : "full" };
           return fire(next, "play.lights", `lights ${next.lights}`, t);
         }
-        if (g.level === "hold" && !fn)
-          // Correction 3: Hold Play is the UTILITY cue — 8 ms anti-click fade,
-          // sources stopped, every stem parked on frame zero. Tap Play stays the
-          // musical wind-up / wind-down control.
+        if (g.level === "hold" && !fn) {
+          // Hold PLAY is transport-state dependent (stock S1 LOOP):
+          //   playing → the GLOBAL one-bar loop, held, at the current division
+          //   stopped → the utility cue, every stem parked on frame zero
+          if (state.playing) {
+            next = { ...next, globalLoop: { ...next.globalLoop, active: true } };
+            next = emit(
+              next,
+              "loop.global.start",
+              { division: next.globalLoop.division },
+              { rowId: "tape.loop.global.hold", t },
+            );
+            return fire(
+              next,
+              "tape.loop.global.hold",
+              `global loop held · 1/${next.globalLoop.division} bar — all four stems, bar-locked`,
+              t,
+            );
+          }
           return fire(
             emit({ ...next, playing: false }, "transport.cue", { frame: 0 }, { rowId: "play.cue", t }),
             "play.cue",
             "cued at frame 0 — next Play tap launches EXACT",
             t,
           );
+        }
         return next;
       }
       if (c.startsWith("track-button") && g.level === "hold") {
