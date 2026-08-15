@@ -57,6 +57,14 @@ export interface FxSlotState {
 export interface StemTrackState {
   soloed: boolean;
   linked: boolean;
+  /**
+   * Compatibility echo of the values found in a stored project. The runtime
+   * `soloed` / `linked` above are normalised on load (solo off, unlinked)
+   * because PLAY + Track is retired and nothing can clear them; these two keep
+   * the saved file byte-compatible when it is written back.
+   */
+  storedSoloed?: boolean;
+  storedLinked?: boolean;
   /** Derived bridge to the existing rack processors. Never the source of truth. */
   fx: Record<FxFamily, FxSlotState>;
   /** Authoritative twelve-FX state: four banks × three algorithms. */
