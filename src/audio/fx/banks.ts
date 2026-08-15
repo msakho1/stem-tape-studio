@@ -819,6 +819,45 @@ export class BankStage {
     this.active = on;
     const graph = on ? this.ensure(this.current) : this.graphs.get(this.current);
     this.applyMix(on && graph != null, when);
+    if (on || !graph) return;
+    // Release teardown. `release()` collapses feedback and captured material
+    // immediately; a `resetOnRelease` algorithm (Spectral Freeze) is then
+    // disconnected and forgotten so the next press starts from clean state.
+    graph.release?.(when);
+    if (!graph.resetOnRelease) return;
+    const algorithm = this.current;
+    this.teardown(algorithm, graph);
+  }
+
+  /**
+   * Disconnect + forget one algorithm graph after its release fade. Exposed
+   * for tests and for `clear all`, which must reach the same clean state.
+   */
+  teardown(algorithm: AlgorithmIndex, graph?: AlgorithmGraph) {
+    const g = graph ?? this.graphs.get(algorithm);
+    if (!g) return;
+    this.graphs.delete(algorithm);
+    const finish = () => {
+      try {
+        g.output.disconnect(this.wet);
+      } catch {
+        /* already detached */
+      }
+      try {
+        this.input.disconnect(g.input);
+      } catch {
+        /* already detached */
+      }
+      g.dispose();
+    };
+    const delayMs = Math.ceil(FX_ENGAGE_S * 1000) + 20;
+    if (typeof setTimeout === "function") setTimeout(finish, delayMs);
+    else finish();
+  }
+
+  /** True while an algorithm graph exists (diagnostics + regression proof). */
+  hasGraph(algorithm: AlgorithmIndex): boolean {
+    return this.graphs.has(algorithm);
   }
 
   private applyMix(wetOn: boolean, when: number) {
