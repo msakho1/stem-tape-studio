@@ -365,9 +365,10 @@ export class GestureEngine {
         this.decisionLatencyMs.push(at - firstReleaseAt);
         if (this.decisionLatencyMs.length > 50) this.decisionLatencyMs.shift();
         this.emit({ type: "tap", control, count, t: at, qualified });
-      }, this.timings.trackDecisionMs);
+      }, deferMs);
       this.pending.set(control, { count, timer, firstReleaseAt, qualified });
       return;
+      }
     }
 
     // Optimistic tap: fire now, revise upward if more taps arrive.
