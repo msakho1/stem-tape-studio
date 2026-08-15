@@ -1,4 +1,4 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { DeviceSurface } from "@/device/DeviceSurface";
 import { KeyboardPanel } from "@/device/KeyboardPanel";
@@ -192,9 +192,6 @@ function LabPage() {
             unofficial · independent r&amp;d · not affiliated with teenage engineering
           </p>
           <div className="flex shrink-0 items-center gap-4">
-            <Link to="/shop" className="st-link font-mono text-[10px] uppercase tracking-[0.18em]">
-              shop
-            </Link>
             <SupportButton />
           </div>
         </div>
