@@ -169,7 +169,7 @@ cues?: {
 }
 ```
 
-- `contentHash` (from `StoredStem.contentHash` `store.ts:43`) is the **only** persisted source identity. A runtime `sourceGeneration` counter exists in memory only, used for cancelling scheduled cue work and rejecting stale async callbacks; it is never written to disk and never round-tripped.
+- `contentHash` (from `StoredStem.contentHash` `store.ts:43`) is the **only** persisted source identity. A marker is invalidated when its recorded `contentHash` no longer matches the current stem's `contentHash`. A global marker is invalidated if any of the four stems changed; an isolated marker only by its own lane.
 - **Invalidation**: on load and on any stem replacement, a marker whose recorded hash/generation no longer matches its stem is marked invalid — retained on disk, but unplayable and shown as "source replaced" in the status strip. A global marker is invalidated if *any* of the four stems changed; an isolated marker only by its own lane.
 - Rate mismatch: frames are converted through seconds using the recorded `sampleRate`; markers past the song duration are clamped and flagged.
 - `SCHEMA_VERSION` stays 2 (purely additive optional field). Absent → `{ version: 1, markers: [] }`.
