@@ -35,20 +35,36 @@ Three maps are maintained separately, each row carrying its own evidence field. 
 
 Admissible evidence: TE's own printed/online guide for the SP-1, or a logged test session on a unit that has never been reflashed (control pressed → observed audio/LED result, recorded).
 
-**Current status: entirely `unknown`.** No stock TE SP-1 documentation was located in research, and no untouched unit has been tested. Every row below is a slot to be filled by Phase 0 observation, not an assertion:
+**Source S1 — stock firmware tutorial page** (`user-uploads://IMG_4259.jpeg`, hand-drawn three-column TE guide, "1 BASIC / 2 STEMS / 3 FX-FUN", TE logo bottom right). Transcribed rows, documentary evidence only — none yet confirmed on hardware:
 
-- transport (PLAY tap / hold) — unknown
-- rocker behaviour — unknown
-- fader function — unknown
-- Track button function — unknown
-- FUNCTION-qualified gestures — unknown
-- heads mode existence — unknown
-- LED semantics — unknown
-- song/bank model, storage limits — unknown
-- USB/transfer behaviour — unknown
-- power-on/off gesture — unknown
+| Stock row | Gesture per S1 | Confidence |
+|---|---|---|
+| power | hold side button 5 s → ON/OFF | documented |
+| volume | volume + / − | documented |
+| transport | press → PLAY / PAUSE | documented |
+| skip track | rocker FWD / REV | documented |
+| solo track | hold (a button) + press a track control → SOLO TRACK | documented, held control not legible |
+| track volume | fader up / down, per track | documented |
+| tape effect | hold + move rocker | documented, held control not legible |
+| sound effects | four top buttons: **Filter · Delay/Echo · Distortion · Gate/Stutter**, engaged by hold | documented |
+| loop | hold (a control on the right side) → LOOP | documented, exact control not legible |
 
-Populate this map during Phase 0, **before** the first flash, while the donor unit is still on stock firmware. That observation pass is the only chance to capture it.
+Still `unknown` after S1 — no evidence in the guide, do not infer:
+
+- PLAY hold behaviour distinct from tap
+- FUNCTION button existence and any FUNCTION-qualified gestures
+- heads mode existence
+- LED semantics (dark / faint / pulse / bank)
+- song/bank model, number of songs, storage limits
+- USB and transfer behaviour
+- varispeed vs. track-skip on the rocker (S1 shows skip; pitch/speed is unattested)
+- multi-control chords beyond the two-control holds shown
+- whether the four FX are per-stem or master
+
+Two consequences: (a) the stock rocker is a **track skipper**, not a varispeed control, per S1 — Stem Tape's rocker semantics are a Tape Looper inheritance, not a stock one; (b) stock already ships four named effects, which is the closest antecedent to the FX overlay. Both remain documentary until confirmed on an untouched unit.
+
+Complete this map during Phase 0, **before** the first flash, while the donor unit is still on stock firmware: work S1 row by row on hardware, mark each confirmed or contradicted, and fill the unknown list. That observation pass is the only chance to capture it.
+
 
 ### TAPE_LOOPER_MAP — evidence: named tag, file and line in `chattock/sp1-tape-looper`
 
