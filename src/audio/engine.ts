@@ -327,6 +327,8 @@ export class AudioEngine {
   private masterAnalyser: AnalyserNode | null = null;
   /** Gate for the ENTIRE normal four-stem mix (dry + every FX return). */
   private normalBus: GainNode | null = null;
+  /** The single post-sum FX rack (GLOBAL scope). Never per lane. */
+  private globalRack: BankRack | null = null;
   /** Measurement tap AFTER the normal bus gain. */
   private normalTap: AnalyserNode | null = null;
 
@@ -526,7 +528,13 @@ export class AudioEngine {
     this.masterAnalyser.fftSize = 1024;
     this.transportGain = ctx.createGain();
     this.transportGain.gain.value = 1;
-    this.master.connect(this.transportGain);
+    // GLOBAL FX RACK — one post-sum rack on the complete audible Tape mix,
+    // after the normal + heads buses are summed at `master` and BEFORE the
+    // master output stage. Everything audible passes through it: ordinary
+    // playback, global loops, lane loops and MIDI cue voices alike.
+    this.globalRack = new BankRack(ctx);
+    this.master.connect(this.globalRack.input);
+    this.globalRack.output.connect(this.transportGain);
     this.transportGain.connect(this.masterAnalyser);
     this.masterAnalyser.connect(ctx.destination);
 
@@ -2125,19 +2133,34 @@ export class AudioEngine {
 
   // ------------------------------------------------- Workstream 3: 12 FX ---
 
+  /**
+   * Which rack a command addresses. "global" is the post-sum rack; a numeric
+   * id is that lane's rack. One code path drives both, so momentary, latch,
+   * unlatch and clear-all behave identically in either scope.
+   */
+  private rackOf(target: TrackId | "global"): BankRack | null {
+    if (target === "global") return this.globalRack;
+    return this.tracks[target]?.bankRack ?? null;
+  }
+
+  private fxLabelOf(target: TrackId | "global"): string {
+    return target === "global" ? "global mix" : `stem ${target + 1}`;
+  }
+
+
   /** Zero hold latency: the wet ramp starts at the current context time. */
   async setBankActive(
-    id: TrackId,
+    id: TrackId | "global",
     bank: BankIndex,
     algorithm: AlgorithmIndex,
     active: boolean,
     latched = false,
   ): Promise<{ ok: boolean; detail: string }> {
-    const t = this.tracks[id];
-    if (!t?.bankRack || !this.ctx) return { ok: false, detail: "audio not unlocked" };
+    const rack = this.rackOf(id);
+    if (!rack || !this.ctx) return { ok: false, detail: "audio not unlocked" };
     const def = algorithmDef(bank, algorithm);
-    const stage = t.bankRack.stage(bank);
-    stage.setTempo(this.effectiveBpm(id), this.ctx.currentTime);
+    const stage = rack.stage(bank);
+    stage.setTempo(this.effectiveBpm(id === "global" ? 0 : id), this.ctx.currentTime);
     stage.select(algorithm, this.ctx.currentTime);
     stage.setActive(active, this.ctx.currentTime);
     const rejected = stage.rejectionFor(algorithm);
@@ -2148,33 +2171,37 @@ export class AudioEngine {
     }
     return {
       ok: true,
-      detail: `stem ${id + 1} ${def.label} ${active ? "engaged" : "released"}${latched ? " (latched)" : ""} · wet ${stage.snapshot().wet.toFixed(3)}`,
+      detail: `${this.fxLabelOf(id)} ${def.label} ${active ? "engaged" : "released"}${latched ? " (latched)" : ""} · wet ${stage.snapshot().wet.toFixed(3)}`,
     };
   }
 
   /** Cycling never activates an inactive bank. */
-  selectBankAlgorithm(id: TrackId, bank: BankIndex, algorithm: AlgorithmIndex): { ok: boolean; detail: string } {
-    const t = this.tracks[id];
-    if (!t?.bankRack || !this.ctx) return { ok: false, detail: "audio not unlocked" };
-    const stage = t.bankRack.stage(bank);
-    stage.select(algorithm, this.ctx.currentTime);
-    return { ok: true, detail: `stem ${id + 1} bank ${bank + 1} → ${algorithmDef(bank, algorithm).label}` };
+  selectBankAlgorithm(id: TrackId | "global", bank: BankIndex, algorithm: AlgorithmIndex): { ok: boolean; detail: string } {
+    const rack = this.rackOf(id);
+    if (!rack || !this.ctx) return { ok: false, detail: "audio not unlocked" };
+    rack.stage(bank).select(algorithm, this.ctx.currentTime);
+    return { ok: true, detail: `${this.fxLabelOf(id)} bank ${bank + 1} → ${algorithmDef(bank, algorithm).label}` };
   }
 
   /** Macro values are PER ALGORITHM, never shared across a bank. */
-  setBankMacro(id: TrackId, bank: BankIndex, algorithm: AlgorithmIndex, value: number): { ok: boolean; detail: string } {
-    const t = this.tracks[id];
-    if (!t?.bankRack || !this.ctx) return { ok: false, detail: "audio not unlocked" };
+  setBankMacro(id: TrackId | "global", bank: BankIndex, algorithm: AlgorithmIndex, value: number): { ok: boolean; detail: string } {
+    const rack = this.rackOf(id);
+    if (!rack || !this.ctx) return { ok: false, detail: "audio not unlocked" };
     const v = Math.min(1, Math.max(0, value));
-    t.bankRack.stage(bank).setMacro(algorithm, v, this.ctx.currentTime);
-    return { ok: true, detail: `stem ${id + 1} ${algorithmDef(bank, algorithm).label} macro → ${v.toFixed(2)}` };
+    rack.stage(bank).setMacro(algorithm, v, this.ctx.currentTime);
+    return { ok: true, detail: `${this.fxLabelOf(id)} ${algorithmDef(bank, algorithm).label} macro → ${v.toFixed(2)}` };
   }
 
-  clearBanks(id: TrackId): { ok: boolean; detail: string } {
-    const t = this.tracks[id];
-    if (!t?.bankRack || !this.ctx) return { ok: false, detail: "audio not unlocked" };
-    for (const stage of t.bankRack.stages) stage.setActive(false, this.ctx.currentTime);
-    return { ok: true, detail: `stem ${id + 1} all four banks released` };
+  clearBanks(id: TrackId | "global"): { ok: boolean; detail: string } {
+    const rack = this.rackOf(id);
+    if (!rack || !this.ctx) return { ok: false, detail: "audio not unlocked" };
+    for (const stage of rack.stages) stage.setActive(false, this.ctx.currentTime);
+    return { ok: true, detail: `${this.fxLabelOf(id)} all four banks released` };
+  }
+
+  /** Diagnostics: the post-sum rack's stage snapshot, or null before unlock. */
+  globalBankSnapshot(): BankStageSnapshot[] | null {
+    return this.globalRack?.snapshot() ?? null;
   }
 
   bankSnapshots(): (BankStageSnapshot[] | null)[] {
