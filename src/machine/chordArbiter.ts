@@ -208,10 +208,11 @@ export class ChordArbiter {
       const functionHeld = this.down.has("function");
       const otherModifier = this.down.has("play") || this.down.has("volume-minus") || this.down.has("volume-plus");
       if (functionHeld) {
-        // FUNCTION + bank claims the gesture and toggles the latch. No momentary.
-        this.claim(control, "function");
-        this.emit({ type: "fx.bank.select", stem: activeStem, bank }, [control], `bank ${bank + 1} selected`);
-        this.emit({ type: "fx.latch", stem: activeStem, bank }, [control, "function"], `latch toggle bank ${bank + 1}`);
+        // ORDER IS THE DISCRIMINATOR. FUNCTION went down FIRST, so this press
+        // belongs to the universal lane layer (FN + Track double-tap =
+        // lane.reverse, FN + Track held + Volume = loop.resize). The arbiter
+        // must NOT claim it and must NOT emit any FX intent: latching is
+        // Track-first-then-FUNCTION only, resolved in onDown("function").
         return;
       }
       if (!otherModifier) {
@@ -260,10 +261,12 @@ export class ChordArbiter {
       if (this.log.length > 60) this.log.length = 60;
     }
 
-    // Play-first chords are resolved on RELEASE (they need a duration), but the
-    // modifier is claimed as soon as the partner arrives.
-    if (isVolume(control) && this.modifierFresh("play", t)) this.claim("play");
-    if (isTrack(control) && this.modifierFresh("play", t)) this.claim("play");
+    // PLAY-first chords are RETIRED (PLAY + Volume = stem.select, PLAY + Track
+    // = solo/link). Hold PLAY is exclusively the global one-bar loop, which
+    // begins at holdMs = 450 — a >=700 ms link overlap could never complete and
+    // a solo could be cancelled mid-gesture. Nothing is claimed here any more,
+    // so Volume stays master volume and Track keeps its own deferred group.
+    void this.modifierFresh;
 
     if (control === "function" && fxOverlay) {
       const heldTrack = this.activeFxTrackHeld();
@@ -329,31 +332,21 @@ export class ChordArbiter {
       }
     }
 
-    // ---- precedence 3: Play-first
-    const playAt = this.down.get("play");
-    if (playAt != null && downAt != null && Math.abs(downAt - playAt) <= this.timings.modifierArrivalMs) {
-      if (isVolume(control)) {
-        this.claim("play", control);
-        this.emit(
-          { type: "stem.select", dir: control === "volume-plus" ? 1 : -1 },
-          ["play", control],
-          `stem select ${control === "volume-plus" ? "+1" : "−1"}`,
-        );
-        return;
-      }
-      if (isTrack(control)) {
-        // Correction 1: duration is the OVERLAP of the two controls, not the
-        // time since the initial Play press.
-        const overlap = t - Math.max(playAt, downAt);
-        const stem = TRACK_INDEX[control]! as StemIndex;
-        this.claim("play", control);
-        if (overlap < this.timings.soloLinkMs) {
-          this.emit({ type: "stem.solo", stem, overlapMs: overlap }, ["play", control], `solo (overlap ${overlap.toFixed(0)} ms)`);
-        } else {
-          this.emit({ type: "stem.link", stem, overlapMs: overlap }, ["play", control], `link/unlink (overlap ${overlap.toFixed(0)} ms)`);
-        }
-        return;
-      }
+    // ---- precedence 3: PLAY-first chords — RETIRED.
+    // `stem.select` (PLAY + Volume), `stem.solo` and `stem.link` (PLAY + Track)
+    // no longer have hardware gestures. The intents and their reducer handlers
+    // survive only so stored sessions keep parsing. Nothing is emitted here and
+    // nothing is claimed, so PLAY + Track falls through to the deferred Track
+    // group and PLAY + Volume to master volume.
+    if (this.down.has("play") && (isVolume(control) || isTrack(control))) {
+      this.log.unshift({
+        t,
+        controls: ["play", control],
+        intent: "none",
+        suppressed: [],
+        detail: "PLAY-first chord retired (stem.select / stem.solo / stem.link) — base gesture runs",
+      });
+      if (this.log.length > 60) this.log.length = 60;
     }
 
     // ---- precedence 4: FX chords already resolved on press; releases only end

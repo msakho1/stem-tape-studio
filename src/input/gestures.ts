@@ -44,8 +44,19 @@ export interface GestureTimings {
    * a first tap that mutes and then un-mutes when the second tap arrives is
    * audible. The first release opens this window; a timeout confirms one tap, a
    * second press claims the double-tap.
+   *
+   * It is ALSO the inter-tap gap for Track buttons: one constant is both the
+   * gap and the decision delay, so a legal second tap can never arrive after
+   * the first has already been dispatched.
    */
   trackDecisionMs: number;
+  /**
+   * DEFERRED FUNCTION + PLAY decision window. ×1 half-speed, ×2 snap to 1.0×,
+   * ×3 Heads: all three are mutually exclusive, so none may fire optimistically.
+   * 300 ms keeps the single-tap half-speed from feeling sluggish while still
+   * admitting a deliberate triple-tap.
+   */
+  fnPlayDecisionMs: number;
   /** Max gap between a tap's release and a following press for tap-then-hold. */
   tapThenHoldGapMs: number;
   /** Two controls pressed within this window count as a chord. */
@@ -76,18 +87,28 @@ export const DEFAULT_TIMINGS: GestureTimings = {
   // 200 ms sits inside the approved 180–220 ms band: short enough that a single
   // musical mute still feels immediate, long enough for a deliberate double-tap.
   trackDecisionMs: 200,
+  fnPlayDecisionMs: 300,
   tapThenHoldGapMs: 300,
   chordWindowMs: 120,
   chordReleaseSpreadMs: 120,
 };
 
 /**
- * Controls whose taps are DEFERRED instead of optimistic. Only the four Track
- * buttons: they are the only controls whose ×1 action is audible and
- * irreversible-sounding (mute / loop release).
+ * Controls whose taps are DEFERRED instead of optimistic: the four Track
+ * buttons (their ×1 action is audible and irreversible-sounding) and PLAY
+ * while FUNCTION qualifies it (×1 half-speed / ×2 snap / ×3 Heads are mutually
+ * exclusive). Bare PLAY, Volume, rocker and faders keep NO arbitration timer.
  */
-export function isDeferredControl(control: Control): boolean {
-  return control.startsWith("track-button");
+export function isDeferredControl(control: Control, qualified = false): boolean {
+  if (control.startsWith("track-button")) return true;
+  return control === "play" && qualified;
+}
+
+/** Decision window for a deferred control, in ms. */
+export function deferralMsFor(control: Control, timings: GestureTimings, qualified = false): number | null {
+  if (control.startsWith("track-button")) return timings.trackDecisionMs;
+  if (control === "play" && qualified) return timings.fnPlayDecisionMs;
+  return null;
 }
 
 
@@ -316,12 +337,16 @@ export class GestureEngine {
     }
 
 
-    // ---- deferred Track arbitration -------------------------------------
-    if (isDeferredControl(control)) {
-      const claim = this.pending.get(control);
+    // ---- deferred arbitration (Track buttons, FN-qualified PLAY) ---------
+    {
+      const claim0 = this.pending.get(control);
+      const qualifiedNow = (claim0?.qualified ?? false) || rec.qualified;
+      const deferMs = deferralMsFor(control, this.timings, qualifiedNow);
+      if (deferMs != null) {
+      const claim = claim0;
       const count = claim ? claim.count : 1;
       const firstReleaseAt = claim ? claim.firstReleaseAt : t;
-      const qualified = (claim?.qualified ?? false) || rec.qualified;
+      const qualified = qualifiedNow;
       if (claim) clearTimeout(claim.timer);
       if (count >= 3) {
         // The third valid release confirms independent latched playback. One
@@ -340,9 +365,10 @@ export class GestureEngine {
         this.decisionLatencyMs.push(at - firstReleaseAt);
         if (this.decisionLatencyMs.length > 50) this.decisionLatencyMs.shift();
         this.emit({ type: "tap", control, count, t: at, qualified });
-      }, this.timings.trackDecisionMs);
+      }, deferMs);
       this.pending.set(control, { count, timer, firstReleaseAt, qualified });
       return;
+      }
     }
 
     // Optimistic tap: fire now, revise upward if more taps arrive.

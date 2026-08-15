@@ -62,7 +62,12 @@ export interface StoredProject {
     mutes: boolean[];
     masterVolume: number;
     speed: number;
-    chopDiv: number;
+    /**
+     * Global one-bar loop (Hold PLAY). Replaces the retired `chopDiv`; older
+     * projects that still carry `chopDiv` simply ignore it on load.
+     */
+    globalLoop: { active: boolean; latched: boolean; division: number };
+    chopDiv?: number;
     window: { start: number; end: number; shift: number; reverse: boolean };
     filter: { mode: string; amount: number };
     grid: { bpm: number | null; source: string };

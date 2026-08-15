@@ -255,10 +255,10 @@ export function DiagnosticPanel({
             </span>
           </div>
           <div className="st-kv">
-            <span className="st-kv__k">chop</span>
+            <span className="st-kv__k">global loop</span>
             <span className="st-kv__v">
-              1/{state.chopDiv} @ {state.chopWindowOffset.toFixed(3)}
-              {state.chopGlide ? " glide" : ""}
+              1/{state.globalLoop.division} bar{" "}
+              {state.globalLoop.latched ? "latched" : state.globalLoop.active ? "held" : "off"}
             </span>
           </div>
           <div className="st-kv">

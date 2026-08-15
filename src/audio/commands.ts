@@ -76,6 +76,20 @@ export type AudioCommandType =
   | "lane.scrub.start"
   | "lane.scrub.end"
   | "lane.scrub.park"
+  // ---- Global (all-four-stems) one-bar loop --------------------------------
+  // Hold PLAY while the transport runs. It is a SEPARATE object from the per
+  // lane loops: a lane loop keeps its own audible pointer, the global loop
+  // supplies the hidden song target that every unlooped lane follows.
+  /** payload.division = 1 | 2 | 4 | 8 (bar fraction). */
+  | "loop.global.start"
+  | "loop.global.release"
+  /** FUNCTION + Volume ± while the global loop exists. */
+  | "loop.global.resize"
+  /** PLAY held + rocker: nudge the global loop window by one division. */
+  | "loop.global.move"
+  /** Selection arm / active-track choice (FUNCTION tap, then a Track tap). */
+  | "stem.select"
+
 
   | "rollback";
 

@@ -144,7 +144,7 @@ function LabPage() {
     mutes: state.tracks.map((t) => t.content === "muted"),
     masterVolume: state.masterVolume,
     speed: state.speed,
-    chopDiv: state.chopDiv,
+    globalLoop: state.globalLoop,
     window: state.window,
     filter: { mode: state.filter.mode, amount: state.filter.amount },
     grid: { bpm: state.grid.bpm, source: state.grid.source },
@@ -278,7 +278,7 @@ function LabPage() {
               <span className="uppercase">{activeRole}</span>
             </h2>
             <p className="mt-1 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--ink-dim)]">
-              loop 1/{state.chopDiv} · filter {state.filter.mode === "off" ? "bypass" : state.filter.mode} ·{" "}
+              loop 1/{state.globalLoop.division}{state.globalLoop.active ? (state.globalLoop.latched ? " latched" : " held") : ""} · filter {state.filter.mode === "off" ? "bypass" : state.filter.mode} ·{" "}
               {state.window.reverse ? "reverse" : "forward"}
             </p>
 
@@ -302,7 +302,7 @@ function LabPage() {
             </ul>
 
             <div className="mt-4 border border-[var(--bench-line)] bg-[var(--bench-raised)] p-2">
-              <Waveform buffer={buffer} progress={progress} slices={state.chopDiv} loop={loopWindow} height={78} />
+              <Waveform buffer={buffer} progress={progress} slices={state.globalLoop.division} loop={loopWindow} height={78} />
             </div>
             <p className="mt-2 font-mono text-[11px] tabular-nums text-[var(--ink-dim)]">
               {clock(status.position)} / {clock(status.duration)}
@@ -437,7 +437,7 @@ function LabPage() {
           {clock(status.position)} / {clock(status.duration)}
         </span>
         <div className="min-w-0 flex-1">
-          <Waveform buffer={buffer} progress={progress} slices={state.chopDiv} loop={loopWindow} height={40} />
+          <Waveform buffer={buffer} progress={progress} slices={state.globalLoop.division} loop={loopWindow} height={40} />
         </div>
         <span className="font-mono text-[12px] text-[var(--ink-dim)]">{sess.songGrid ? `${sess.songGrid.bpm.toFixed(2)} BPM` : "— BPM"}</span>
         <span className="font-mono text-[12px] tabular-nums text-[var(--ink)]">{status.rate.toFixed(2)}×</span>

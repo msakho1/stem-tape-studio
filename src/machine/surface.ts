@@ -1,6 +1,13 @@
 import { COMMAND_LOG_LIMIT, makeCommand, type AudioCommand, type AudioCommandType } from "@/audio/commands";
 import type { Control, TrackIndex } from "@/device/geometry";
-import { TEMPO_TAP_IDLE_MS, type Gesture } from "@/input/gestures";
+import { type Gesture } from "@/input/gestures";
+
+/**
+ * How long a bare FUNCTION tap keeps active-track selection armed. Long enough
+ * to look down at the four Track buttons, short enough that the next unrelated
+ * Track tap is a normal mute and not a stray selection.
+ */
+export const TRACK_SELECT_ARM_MS = 1200;
 import { V26_ROW_BY_ID } from "@/machine/v26map";
 import type { PerfIntent } from "@/machine/chordArbiter";
 import {
@@ -105,6 +112,19 @@ export interface SurfaceState {
   headsMode: boolean;
   /** Track the four heads are reading while heads mode is active. */
   headsSource: number | null;
+  /**
+   * GLOBAL one-bar loop — all four stems, bar-locked. Distinct from the per
+   * lane loops: `active` while PLAY is physically held, `latched` once a
+   * FUNCTION tap during the hold makes it survive the release. `division` is
+   * the bar fraction set by FUNCTION + Volume ±.
+   */
+  globalLoop: { active: boolean; latched: boolean; division: 1 | 2 | 4 | 8 };
+  /**
+   * `performance.now()` of the FUNCTION tap that armed active-track selection,
+   * or null. While armed, a Track gesture emits ONLY `stem.select` — no mute,
+   * loop, audition or FX action may leak out of the selection.
+   */
+  trackSelectArmedAt: number | null;
 
   lights: "full" | "dim";
   song: number;
@@ -263,6 +283,8 @@ export function initialSurfaceState(): SurfaceState {
     loopMode: "variable",
     headsMode: false,
     headsSource: null,
+    globalLoop: { active: false, latched: false, division: 1 },
+    trackSelectArmedAt: null,
 
     lights: "full",
     song: 0,
@@ -481,7 +503,27 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
           next = { ...next, speed: 1 };
           return fire(emit(next, "rate.set", { rate: 1 }, { rowId: "play.snap", t }), "play.snap", "speed snapped to 1.000×", t);
         }
+        if (fn && g.count === 1) {
+          // ×1 = half-speed toggle. Mutually exclusive with ×2 and ×3, which is
+          // exactly why the gesture engine defers FUNCTION-qualified PLAY for
+          // fnPlayDecisionMs instead of firing this optimistically.
+          const rate = Math.abs(next.speed - 0.5) < 1e-6 ? 1 : 0.5;
+          next = { ...next, speed: rate };
+          return fire(
+            emit(next, "rate.set", { rate }, { rowId: "play.halfSpeed", t }),
+            "play.halfSpeed",
+            `speed ${rate.toFixed(3)}× — glided, all four stems`,
+            t,
+          );
+        }
         if (!fn && g.count === 1) {
+          if (next.globalLoop.latched) {
+            // A latched global loop owns the bare PLAY tap: the first tap
+            // releases the loop and the transport keeps running.
+            next = { ...next, globalLoop: { ...next.globalLoop, active: false, latched: false } };
+            next = emit(next, "loop.global.release", {}, { rowId: "tape.loop.global.release", t });
+            return fire(next, "tape.loop.global.release", "global loop released — song continues", t);
+          }
           next = { ...next, playing: !next.playing };
           next = emit(next, next.playing ? "transport.play" : "transport.stop", {}, { rowId: "play.toggle", t });
           return fire(next, "play.toggle", next.playing ? "play" : "stop", t);
@@ -490,40 +532,19 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
       }
 
       if (c === "function") {
-        // Tempo tapping is NOT the engine's multi-tap: at 120 BPM the gap is
-        // 500 ms, far outside the 300 ms multi-tap window, so `count` is always
-        // 1 here. We count taps ourselves with an INACTIVITY timeout between
-        // consecutive taps (TEMPO_TAP_IDLE_MS) — not a fixed first-to-fourth
-        // window, so e.g. 104 BPM (576.9 ms gaps, 1730.8 ms total) is accepted.
-        const prev = next.fnTapTimes;
-        const inRhythm = prev.length > 0 && t - prev[prev.length - 1]! <= TEMPO_TAP_IDLE_MS;
-        const times = (inRhythm ? [...prev, t] : [t]).slice(-4);
-        const count = times.length;
-        next = { ...next, fnTapTimes: times, fnTapCount: count };
-        if (count === 4) {
-          const gaps = times.slice(1).map((v, i) => v - times[i]!);
-          const mean = gaps.reduce((a, b) => a + b, 0) / gaps.length;
-          const bpm = 60000 / mean;
-          const farOff = next.grid.bpm != null && Math.abs(bpm - next.grid.bpm) / next.grid.bpm > 0.25;
-          if (farOff) {
-            next = { ...next, grid: { ...next.grid, rejected: true } };
-            return fire(
-              next,
-              "fn.gridReject",
-              `tapped ${bpm.toFixed(1)} vs grid ${next.grid.bpm!.toFixed(1)} — all four blink, nothing moves`,
-              t,
-            );
-          }
-          next = { ...next, grid: { bpm, rejected: false, source: "tapped" } };
-          return fire(next, "fn.tempoGrid", `grid = ${bpm.toFixed(1)} BPM`, t);
+        // Tempo tapping, FN ×4 rounding and beatmatch re-tap are REMOVED: the
+        // grid is detected automatically from the stems. A bare FUNCTION tap is
+        // now CONTEXT-SENSITIVE:
+        //   an operation is running (global loop held) → LATCH it
+        //   otherwise                                  → ARM active-track
+        //                                                selection for
+        //                                                TRACK_SELECT_ARM_MS
+        if (next.globalLoop.active && !next.globalLoop.latched) {
+          next = { ...next, globalLoop: { ...next.globalLoop, latched: true } };
+          return fire(next, "tape.loop.global.latch", "global loop latched — PLAY may be released", t);
         }
-        const held = next.grid.bpm;
-        if (held != null) {
-          next = { ...next, grid: { ...next.grid, source: "beatmatched", rejected: false } };
-          return fire(next, "fn.beatmatch", `re-tap over loops · ${held.toFixed(1)} BPM held`, t);
-        }
-
-        return next;
+        next = { ...next, trackSelectArmedAt: t };
+        return fire(next, "tape.track.arm", "active-track selection armed — tap a Track button", t);
       }
 
 
@@ -531,6 +552,18 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
       if (c.startsWith("track-button")) {
         const i = trackIndexOf(c);
         const slice = next.tracks[i]!;
+
+        // ---- armed selection is EXCLUSIVE ------------------------------------
+        // While the FUNCTION tap's arming window is open, the Track gesture
+        // emits ONLY `stem.select`. No mute, no loop capture/release, no
+        // audition, no FX bank action may leak out of a selection.
+        if (next.trackSelectArmedAt != null && t - next.trackSelectArmedAt <= TRACK_SELECT_ARM_MS) {
+          next = { ...next, trackSelectArmedAt: null, activeTrack: i, headsSource: next.headsMode ? i : next.headsSource };
+          next = emit(next, "stem.select", { stem: i }, { rowId: "tape.track.select", t });
+          return fire(next, "tape.track.select", `active track = ${i + 1} (selection only)`, t);
+        }
+        if (next.trackSelectArmedAt != null) next = { ...next, trackSelectArmedAt: null };
+
 
         // A Track button that took part in a CHORD audition never toggles mute
         // or loop on release: the chord already consumed that press.
@@ -656,15 +689,30 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
         // Stem Tape extension `rocker.chop.play`: chop lives on PLAY + rocker.
         // The arbiter claims PLAY before dispatch, so the transport never fires.
         if (state.pressed.includes("play")) {
-          if (g.count === 2) {
-            next = { ...next, chopDiv: 1, chopWindowOffset: 0, chopGlide: false };
-            for (let i = 0; i < 4; i++) next = emit(next, "loop.chop", { track: i, div: 1, index: 0 }, { rowId: "rocker.chop.play", t });
-            return fire(next, "rocker.chop.play", "chop reset → 1/1 (transport untouched)", t);
-          }
-          const chopDiv = Math.min(16, Math.max(1, dir > 0 ? next.chopDiv * 2 : next.chopDiv / 2));
-          next = { ...next, chopDiv };
-          for (let i = 0; i < 4; i++) next = emit(next, "loop.chop", { track: i, div: chopDiv, index: 0 }, { rowId: "rocker.chop.play", t });
-          return fire(next, "rocker.chop.play", `chop ${dir > 0 ? "double" : "half"} → 1/${chopDiv} (transport untouched)`, t);
+          // PLAY held + rocker MOVES the global loop window by one division.
+          // The chop family is retired: the same physical gesture now nudges
+          // the loop that Hold PLAY just created, which is what the rocker
+          // deflection was always suppressing the transport for.
+          next = emit(
+            next,
+            "loop.global.move",
+            { steps: dir, division: next.globalLoop.division },
+            { rowId: "tape.loop.global.move", t },
+          );
+          return fire(
+            next,
+            "tape.loop.global.move",
+            `global loop moved ${dir > 0 ? "forward" : "back"} 1/${next.globalLoop.division} bar`,
+            t,
+          );
+        }
+        if (!next.playing && !fn) {
+          // Stopped: the rocker is the stock SONG SKIP, not varispeed. Varispeed
+          // on a parked transport is inaudible and loses the cue.
+          const song = Math.max(0, next.song + dir);
+          next = { ...next, song };
+          next = emit(next, "transport.cue", { frame: 0 }, { rowId: "rocker.songSkip", t });
+          return fire(next, "rocker.songSkip", `song ${dir > 0 ? "next" : "previous"} → ${song + 1}, cued at 0:00`, t);
         }
         if (fn) {
           const seconds = dir * SCRUB_STEP_S;
@@ -719,9 +767,17 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
             }
             return fire(next, "loop.resize", notes.join(" · "), t);
           }
-          const chopWindowOffset = clamp01(next.chopWindowOffset + dir * 0.0625);
-          next = { ...next, chopWindowOffset };
-          return fire(next, "volume.chopWindow", `chop window → ${chopWindowOffset.toFixed(3)}`, t);
+          // FUNCTION + Volume with NO Track held ALWAYS sets the global-loop
+          // division — whether the loop is running, held or not yet captured.
+          // The division is remembered, so the next Hold PLAY starts there.
+          const order: (1 | 2 | 4 | 8)[] = [1, 2, 4, 8];
+          const at = order.indexOf(next.globalLoop.division);
+          const division = order[Math.max(0, Math.min(order.length - 1, at + (dir > 0 ? 1 : -1)))]!;
+          next = { ...next, globalLoop: { ...next.globalLoop, division } };
+          if (next.globalLoop.active) {
+            next = emit(next, "loop.global.resize", { division }, { rowId: "tape.loop.global.resize", t });
+          }
+          return fire(next, "tape.loop.global.resize", `global loop division → 1/${division} bar`, t);
         }
         const masterVolume = clamp01(next.masterVolume + dir * 0.0625);
         next = emit({ ...next, masterVolume }, "master.gain", { level: masterVolume }, { rowId: "volume.master", t });
@@ -741,16 +797,32 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
           next = { ...next, lights: state.lights === "full" ? "dim" : "full" };
           return fire(next, "play.lights", `lights ${next.lights}`, t);
         }
-        if (g.level === "hold" && !fn)
-          // Correction 3: Hold Play is the UTILITY cue — 8 ms anti-click fade,
-          // sources stopped, every stem parked on frame zero. Tap Play stays the
-          // musical wind-up / wind-down control.
+        if (g.level === "hold" && !fn) {
+          // Hold PLAY is transport-state dependent (stock S1 LOOP):
+          //   playing → the GLOBAL one-bar loop, held, at the current division
+          //   stopped → the utility cue, every stem parked on frame zero
+          if (state.playing) {
+            next = { ...next, globalLoop: { ...next.globalLoop, active: true } };
+            next = emit(
+              next,
+              "loop.global.start",
+              { division: next.globalLoop.division },
+              { rowId: "tape.loop.global.hold", t },
+            );
+            return fire(
+              next,
+              "tape.loop.global.hold",
+              `global loop held · 1/${next.globalLoop.division} bar — all four stems, bar-locked`,
+              t,
+            );
+          }
           return fire(
             emit({ ...next, playing: false }, "transport.cue", { frame: 0 }, { rowId: "play.cue", t }),
             "play.cue",
             "cued at frame 0 — next Play tap launches EXACT",
             t,
           );
+        }
         return next;
       }
       if (c.startsWith("track-button") && g.level === "hold") {
@@ -800,6 +872,17 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
     }
 
     case "holdEnd": {
+      if (g.control === "play" && next.globalLoop.active) {
+        // Release-order latching: a FUNCTION tap during the hold set `latched`,
+        // so the loop survives PLAY coming up. Otherwise the loop is momentary
+        // and ends exactly with the button.
+        if (next.globalLoop.latched) {
+          return fire(next, "tape.loop.global.latch", "global loop latched — PLAY released, loop continues", t);
+        }
+        next = { ...next, globalLoop: { ...next.globalLoop, active: false } };
+        next = emit(next, "loop.global.release", {}, { rowId: "tape.loop.global.release", t });
+        return fire(next, "tape.loop.global.release", "global loop released — back to the song", t);
+      }
       if (g.control.startsWith("rocker") || g.control.startsWith("volume")) {
         return { ...next, speedGlide: false, chopGlide: false };
       }
@@ -824,18 +907,11 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
 
 
     case "tapThenHold": {
-      if (g.control === "function") {
-        // This hold belongs to the grid rows, not to power.
-        next = { ...next, fnModifierUsed: true };
-        if (state.fnTapCount >= 4 && state.grid.bpm != null) {
-          const bpm = Math.round(state.grid.bpm);
-          next = { ...next, grid: { bpm, rejected: false, source: "rounded" } };
-          return fire(next, "fn.roundBpm", `rounded to ${bpm} BPM`, t);
-        }
-        next = { ...next, grid: { bpm: null, rejected: false, source: "none" }, fnTapTimes: [] };
-        return fire(next, "fn.clearGrid", "grid cleared", t);
-      }
-
+      // FUNCTION tap-then-hold used to round / clear the tapped tempo grid.
+      // Tempo tapping and FN ×4 rounding are REMOVED: the grid is detected
+      // automatically (local, deterministic, non-AI) and manual correction
+      // lives in Projects. FUNCTION is a pure modifier + selection arm now.
+      if (g.control === "function") return { ...next, fnModifierUsed: true };
       return next;
     }
 
@@ -855,10 +931,9 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
 
     case "chordRelease": {
       const set = g.controls;
-      if (set.includes("function") && set.includes("play") && g.releaseSpreadMs <= 120) {
-        next = { ...next, loopMode: state.loopMode === "fixed" ? "variable" : "fixed" };
-        return fire(next, "play.loopMode", `released together → ${next.loopMode} loops`, t);
-      }
+      // `play.loopMode` (FUNCTION + PLAY released together) is REMOVED: FUNCTION
+      // + PLAY is now a deferred ×1/×2/×3 group and a simultaneous release must
+      // not also flip a loop mode behind it.
       if (set.every((c) => c.startsWith("track-button")) && set.length >= 2) {
         const lanes = heldTrackLanes(next);
         const mask = lanes.length ? maskOf(lanes) : "";
