@@ -165,9 +165,11 @@ describe("cue routing and audible voices", () => {
     expect(second).not.toBe(first);
     // Old voice is fully faded by the end of its scheduled seam; the new one
     // is fully open by the end of its own. Only one steady voice remains.
-    const firstEnd = first.gain.gain.events.at(-1)!.time;
+    const ev = first.gain.gain.events;
+    const firstEnd = ev.at(-1)!.time;
+    const firstStop = ev.at(-2)!.time;
     const secondOpen = second.gain.gain.events[1]!.time;
-    expect(firstEnd - r.ctx.currentTime).toBeLessThanOrEqual(0.0121);
+    expect(firstEnd - firstStop).toBeCloseTo(0.012, 4);
     expect(first.gain.gain.at(firstEnd)).toBeCloseTo(0, 3);
     expect(second.gain.gain.at(secondOpen)).toBeCloseTo(1, 3);
     expect(voiceCounts(r.engine)[0]).toBe(1);
@@ -206,7 +208,7 @@ describe("cue eligibility, rejoin and transport", () => {
     startPlaying(r);
     learn(r, GLOBAL, 66, 0.5);
     r.engine.execute(cmd("transport.stop"));
-    r.advance(0.2);
+    r.advance(1.5); // let the wind-down and stop fade settle
     const posBefore = r.engine.status().position;
     play(r, 66);
     expect(r.engine.cueSnapshot().owned.filter(Boolean)).toHaveLength(4);
@@ -222,8 +224,7 @@ describe("cue eligibility, rejoin and transport", () => {
     const r = await rig();
     startPlaying(r);
     learn(r, lane(0), 68, 0.4);
-    r.engine.execute(cmd("loop.global.set", { start: 0.5, end: 2.5 }));
-    r.engine.execute(cmd("loop.global.enable", { on: true }));
+    r.engine.execute(cmd("loop.global.start", { division: 1 }));
     expect(learn(r, GLOBAL, 69).on.action.type).toBe("learn.reject");
     play(r, 68);
     const target = r.engine.cueSnapshot().underlay[0];
@@ -239,7 +240,7 @@ describe("cue eligibility, rejoin and transport", () => {
   it("rejects learning while a lane loop is enabled", async () => {
     const r = await rig();
     startPlaying(r);
-    r.engine.execute(cmd("loop.lane.enable", { id: 2, on: true }));
+    r.engine.execute(cmd("loop.capture", { lane: 2, bars: 1 }));
     const e = r.engine.cueEligibility();
     expect(e.loopActive).toBe(true);
     expect(learn(r, lane(2), 70).on.action.type).toBe("learn.reject");
@@ -248,7 +249,7 @@ describe("cue eligibility, rejoin and transport", () => {
   it("rejects learning while reversed or scrubbing", async () => {
     const r = await rig();
     startPlaying(r);
-    r.engine.execute(cmd("track.reverse", { id: 0, on: true }));
+    r.engine.execute(cmd("lane.reverse", { lane: 0 }));
     expect(r.engine.cueEligibility().reverseActive).toBe(true);
     expect(learn(r, lane(0), 71).on.action.type).toBe("learn.reject");
   });
