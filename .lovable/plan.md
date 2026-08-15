@@ -82,13 +82,14 @@ No step opens the enclosure. No SWD, no JTAG, no soldering. Every flash and ever
 - **RAM:** 256 KB total. No decoded-buffer model — everything must stream from eMMC with small ring buffers. Heads = 4 extra read cursors × ring buffer; size them in step 8 or cut head count.
 - **Flash:** 1 MB; Tape Looper already uses ~109 KB. Map table and FX coefficients must live in flash, not RAM.
 - **Licensing:** upstream MIT — fork freely with attribution. Stock TE firmware must never be copied or merged. Solderless flasher licensing is unknown; do not redistribute it.
-- **Unknowns/blockers:** no confirmed unbrick path; eMMC capacity; codec part number; whether the stock bootloader enforces signatures; real sample rate/latency ceiling; whether the shared analogue sense line can resolve the multi-control chords Stem Tape requires (FUNCTION + Track + Volume is three simultaneous presses).
-- **Hardware tests:** SWD recovery ×2, chord resolution matrix on the sense line, sustained 4-stream eMMC throughput, thermal/battery under load.
+- **Unknowns/blockers:** whether the Solderless updater can read firmware back at all (assume no); whether a hash-verified stock image exists; whether the bootloader survives a failed application write; eMMC capacity; codec part number; whether the stock bootloader enforces signatures; real sample rate/latency ceiling; whether the shared analogue sense line can resolve the multi-control chords Stem Tape requires (FUNCTION + Track + Volume is three simultaneous presses).
+- **Hardware tests:** two WebSerial round trips (Phase 0), chord resolution matrix on the sense line, sustained 4-stream eMMC throughput, thermal/battery under load.
 
 ## 7. Go / no-go
 
-**Conditional go.** The base is genuinely open (MIT, full Zephyr source), the SoC is documented, and the browser build is an exact behavioural spec. Two conditions gate it: a proven SWD recovery path, and evidence the analogue sense line can report the three-control chords the map depends on. Either failing means Stem Tape ships as a reduced mapping, not the full registry.
+**Conditional go.** The base is genuinely open (MIT, full Zephyr source), the SoC is documented, and the browser build is an exact behavioural spec. Three conditions gate it: two clean WebSerial round trips in Phase 0, a hash-verified stock image (or explicit acceptance that reversion to stock is unavailable), and evidence the analogue sense line can report the three-control chords the map depends on. Failing the last means Stem Tape ships as a reduced mapping, not the full registry.
 
-**Smallest safe first experiment:** on one donor unit, wire SWD, dump and restore stock firmware, then build and flash unmodified Tape Looper `v2.7.1-official` from source and recover back to stock. Success = the device survives two full round trips. Nothing Stem Tape-specific is written until that passes.
+**Smallest safe first experiment:** Phase 0a alone — connect one donor unit in firmware mode to the Solderless updater and document, with screenshots, exactly which operations it offers. Whether a read-back path exists decides whether the rest of Phase 0 is a reversible test or a one-way commitment. Nothing is flashed at this step.
+
 
 **First implementation milestone:** phase 3 — unmodified Tape Looper plus a serial trace of the ordered command stream, so the hardware's control events can be diffed against the browser twin's before any behaviour is forked.
