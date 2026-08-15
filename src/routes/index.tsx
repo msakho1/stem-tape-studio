@@ -192,6 +192,14 @@ function LabPage() {
             not affiliated with teenage engineering
           </p>
           <div className="flex shrink-0 items-center gap-4">
+            <nav className="hidden items-center gap-6 lg:flex" aria-label="Site">
+              <span className="st-tab" data-on>
+                instrument
+              </span>
+              <Link to="/about" className="st-tab">
+                about
+              </Link>
+            </nav>
             <SupportButton />
           </div>
         </div>
