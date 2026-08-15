@@ -1750,6 +1750,8 @@ export class AudioEngine {
   private cueVoices: (CueVoice | null)[] = [null, null, null, null];
   private cueOverride: boolean[] = [false, false, false, false];
   private cueTimers: (ReturnType<typeof setTimeout> | null)[] = [null, null, null, null];
+  /** Song timeline parked by a held GLOBAL cue: the frame to resume from. */
+  private cuePark: { pos: number; wasPlaying: boolean; phase: AudioEngine["transportPhase"] } | null = null;
   lastCueDetail: string | null = null;
   readonly cueLog: { t: number; action: string; detail: string }[] = [];
 
