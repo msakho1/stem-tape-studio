@@ -855,10 +855,9 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
 
     case "chordRelease": {
       const set = g.controls;
-      if (set.includes("function") && set.includes("play") && g.releaseSpreadMs <= 120) {
-        next = { ...next, loopMode: state.loopMode === "fixed" ? "variable" : "fixed" };
-        return fire(next, "play.loopMode", `released together → ${next.loopMode} loops`, t);
-      }
+      // `play.loopMode` (FUNCTION + PLAY released together) is REMOVED: FUNCTION
+      // + PLAY is now a deferred ×1/×2/×3 group and a simultaneous release must
+      // not also flip a loop mode behind it.
       if (set.every((c) => c.startsWith("track-button")) && set.length >= 2) {
         const lanes = heldTrackLanes(next);
         const mask = lanes.length ? maskOf(lanes) : "";
