@@ -189,7 +189,7 @@ function LabPage() {
       <header className="border-b border-[var(--bench-line)]">
         <div className="flex items-start justify-between gap-4 px-4 pt-3 md:px-8">
           <p className="font-mono text-[9px] uppercase tracking-[0.24em] text-[var(--ink-faint)] md:text-[10px]">
-            unofficial · independent r&amp;d · not affiliated with teenage engineering
+            not affiliated with teenage engineering
           </p>
           <div className="flex shrink-0 items-center gap-4">
             <SupportButton />
