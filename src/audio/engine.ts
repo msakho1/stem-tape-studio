@@ -393,9 +393,6 @@ export class AudioEngine {
       this.gridAnalysisDetail = "not analysed — no decoded stems";
       return null;
     }
-    // Cue markers are keyed to stem identity: mirror the hashes and re-check.
-    this.contentHashes = [0, 1, 2, 3].map((i) => hashes[i] ?? "");
-    this.cues.revalidate(this.contentHashes);
     const grid = analyzeSongGrid(inputs);
     this.gridAnalysisMs = (typeof performance !== "undefined" ? performance.now() : 0) - started;
     this.gridGeneration += 1;
@@ -700,7 +697,19 @@ export class AudioEngine {
   adoptBuffer(
     id: TrackId,
     buffer: AudioBuffer,
-    meta: { name: string; provenance: TrackRuntime["provenance"]; decodeMs?: number | undefined; reused?: boolean | undefined },
+    meta: {
+      name: string;
+      provenance: TrackRuntime["provenance"];
+      decodeMs?: number | undefined;
+      reused?: boolean | undefined;
+      /**
+       * Stem identity. Cue markers are keyed to it, so it MUST be recorded the
+       * instant the buffer is installed — recording it later (for example when
+       * the grid analysis finishes) would invalidate every marker learned in
+       * the meantime, because it would look like the stem had been replaced.
+       */
+      contentHash?: string | undefined;
+    },
   ): { ok: boolean; detail: string; bytes: number } {
     const track = this.tracks[id];
     if (!track) return { ok: false, detail: `no track ${id}`, bytes: 0 };
