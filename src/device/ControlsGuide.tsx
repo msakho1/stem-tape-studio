@@ -1,5 +1,6 @@
 import { Fragment, useState } from "react";
 import { Sp1GuideIllustration, type MiniMotion } from "@/device/Sp1GuideIllustration";
+import { MidiDrawer } from "@/device/MidiDrawer";
 import {
   FX_BANK_CARDS,
   HARDWARE_SECTION,
