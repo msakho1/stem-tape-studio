@@ -87,18 +87,28 @@ export const DEFAULT_TIMINGS: GestureTimings = {
   // 200 ms sits inside the approved 180–220 ms band: short enough that a single
   // musical mute still feels immediate, long enough for a deliberate double-tap.
   trackDecisionMs: 200,
+  fnPlayDecisionMs: 300,
   tapThenHoldGapMs: 300,
   chordWindowMs: 120,
   chordReleaseSpreadMs: 120,
 };
 
 /**
- * Controls whose taps are DEFERRED instead of optimistic. Only the four Track
- * buttons: they are the only controls whose ×1 action is audible and
- * irreversible-sounding (mute / loop release).
+ * Controls whose taps are DEFERRED instead of optimistic: the four Track
+ * buttons (their ×1 action is audible and irreversible-sounding) and PLAY
+ * while FUNCTION qualifies it (×1 half-speed / ×2 snap / ×3 Heads are mutually
+ * exclusive). Bare PLAY, Volume, rocker and faders keep NO arbitration timer.
  */
-export function isDeferredControl(control: Control): boolean {
-  return control.startsWith("track-button");
+export function isDeferredControl(control: Control, qualified = false): boolean {
+  if (control.startsWith("track-button")) return true;
+  return control === "play" && qualified;
+}
+
+/** Decision window for a deferred control, in ms. */
+export function deferralMsFor(control: Control, timings: GestureTimings, qualified = false): number | null {
+  if (control.startsWith("track-button")) return timings.trackDecisionMs;
+  if (control === "play" && qualified) return timings.fnPlayDecisionMs;
+  return null;
 }
 
 
