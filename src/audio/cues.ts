@@ -71,7 +71,8 @@ export type LearnRejectReason =
   | "loop-active"
   | "transport-stopped"
   | "rate-not-1x"
-  | "multiple-tracks-held";
+  | "multiple-tracks-held"
+  | "stem-not-decoded";
 
 export type DiscardReason = LearnRejectReason | "too-short" | "cancelled";
 
@@ -83,6 +84,8 @@ export type CueEventContext = {
   sampleRate: number;
   /** Current content hash of each lane, index = lane. */
   contentHashes: readonly string[];
+  /** Which lanes hold a decoded buffer right now. Absent = assume all four. */
+  decodedLanes?: readonly boolean[];
 };
 
 export type CueAction =
@@ -113,6 +116,7 @@ const REASON_TEXT: Record<DiscardReason, string> = {
   "transport-stopped": "the transport is stopped",
   "rate-not-1x": "playback is not aligned 1x forward",
   "multiple-tracks-held": "hold one Track button to learn an isolated cue",
+  "stem-not-decoded": "the stem is not decoded yet",
   "too-short": "the passage is shorter than the minimum length",
   cancelled: "the capture was cancelled",
 };
@@ -206,6 +210,18 @@ export class CueStore {
     if (q.kind === "reject") {
       this.captures.delete(key);
       return { type: "learn.reject", key, reason: "multiple-tracks-held" };
+    }
+
+    // A marker may only be learned against decoded audio: learning against a
+    // lane still being ingested would commit sources whose contentHash is
+    // about to change, invalidating the marker the instant it is created.
+    const decoded = ctx.decodedLanes;
+    if (decoded) {
+      const needed = q.kind === "global" ? [0, 1, 2, 3] : [q.lane];
+      if (needed.some((l) => decoded[l] !== true)) {
+        this.captures.delete(key);
+        return { type: "learn.reject", key, reason: "stem-not-decoded" };
+      }
     }
 
     const bad = learnRejection(ctx.eligibility);

@@ -1816,6 +1816,7 @@ export class AudioEngine {
       eligibility,
       sampleRate: this.ctx?.sampleRate ?? 48000,
       contentHashes: this.contentHashes,
+      decodedLanes: this.tracks.map((t) => !!t?.buffer),
     };
     const action = this.cues.handle(ev, ctx);
     let detail = describeCueAction(action);
