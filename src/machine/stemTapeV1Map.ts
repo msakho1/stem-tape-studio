@@ -277,7 +277,7 @@ export const SYSTEM_ROWS: StemTapeRow[] = [
     led: "both FUNCTION LEDs alternate-pulse while open",
     provenance: "reinterpreted",
     tutorial: {
-      plainLanguage: "Press both volume keys together to open or close the effects layer.",
+      plainLanguage: "Press both volume keys together to open the effects layer on the selected stem; hold FUNCTION first to open it on the whole mix.",
       highlight: ["volume-minus", "volume-plus"],
       expected: "Both FUNCTION LEDs alternate-pulse while the effects layer is open.",
     },

@@ -29,6 +29,8 @@ import {
 
 /** Wet-mix ramp for engaging or releasing an algorithm. */
 export const FX_ENGAGE_S = 0.012;
+/** Hard ceiling on the Spectral Freeze loop gain — never at or near unity. */
+export const FREEZE_FEEDBACK_MAX = 0.82;
 
 export interface AlgorithmGraph {
   input: GainNode;
@@ -37,6 +39,18 @@ export interface AlgorithmGraph {
   setMacro: (value: number, when: number) => void;
   /** Musical timing, re-applied whenever the grid tempo changes. */
   setTempo?: (bpm: number, when: number) => void;
+  /**
+   * Called the moment the stage is released. Kills any internal feedback,
+   * captured material or scheduled automation BEFORE the wet leg has finished
+   * fading, so nothing can keep circulating behind a silent output.
+   */
+  release?: (when: number) => void;
+  /**
+   * True for algorithms that must never be reused across presses (Spectral
+   * Freeze). The stage disposes and forgets the graph after the release fade,
+   * so the next press captures fresh material from a clean state.
+   */
+  resetOnRelease?: boolean;
   dispose: () => void;
 }
 
@@ -96,37 +110,88 @@ function buildFilter(ctx: AudioContext): AlgorithmGraph {
   };
 }
 
-function buildIsolator(ctx: AudioContext): AlgorithmGraph {
-  // Three-band isolator: the macro sweeps which band survives.
+/**
+ * Exciter: adds presence and upper harmonics, NOT another cutoff.
+ *
+ * The dry signal is split; a high-pass band (1.8–5 kHz, following the macro)
+ * is soft-clipped to generate even/odd harmonics above it, band-limited so it
+ * cannot turn into a dog whistle, then summed back UNDER the direct signal.
+ * There is no feedback path anywhere, and the stage output is trimmed by the
+ * energy the harmonic leg adds, so engaging it changes character, not level.
+ */
+function excitationCurve(): Float32Array<ArrayBuffer> {
+  const n = 1024;
+  const curve = new Float32Array(new ArrayBuffer(n * 4));
+  for (let i = 0; i < n; i++) {
+    const x = (i / (n - 1)) * 2 - 1;
+    // Asymmetric soft clip: 2nd + 3rd harmonics, bounded to ±1.
+    curve[i] = Math.tanh(2.2 * x) * 0.82 + 0.18 * Math.tanh(1.6 * x * x * Math.sign(x));
+  }
+  return curve;
+}
+
+function buildExciter(ctx: AudioContext): AlgorithmGraph {
   const input = ctx.createGain();
   const out = ctx.createGain();
-  const low = ctx.createBiquadFilter();
-  low.type = "lowshelf";
-  low.frequency.value = 220;
-  const mid = ctx.createBiquadFilter();
-  mid.type = "peaking";
-  mid.frequency.value = 1000;
-  mid.Q.value = 0.9;
-  const high = ctx.createBiquadFilter();
-  high.type = "highshelf";
-  high.frequency.value = 4200;
-  input.connect(low);
-  low.connect(mid);
-  mid.connect(high);
-  high.connect(out);
+  const direct = ctx.createGain();
+  direct.gain.value = 1;
+
+  const split = ctx.createBiquadFilter();
+  split.type = "highpass";
+  split.frequency.value = 2600;
+  split.Q.value = 0.7;
+  const drive = ctx.createGain();
+  drive.gain.value = 1.6;
+  const shaper = ctx.createWaveShaper();
+  shaper.oversample = "4x";
+  shaper.curve = excitationCurve();
+  // Band-limit the generated harmonics: an exciter must never become piercing.
+  const ceiling = ctx.createBiquadFilter();
+  ceiling.type = "lowpass";
+  ceiling.frequency.value = 11000;
+  ceiling.Q.value = 0.6;
+  const air = ctx.createBiquadFilter();
+  air.type = "highshelf";
+  air.frequency.value = 6000;
+  air.gain.value = 0;
+  const harmonics = ctx.createGain();
+  harmonics.gain.value = 0.35;
+  const tame = ctx.createDynamicsCompressor();
+  tame.threshold.value = -14;
+  tame.ratio.value = 8;
+  tame.attack.value = 0.002;
+  tame.release.value = 0.12;
+
+  input.connect(direct);
+  direct.connect(out);
+  input.connect(split);
+  split.connect(drive);
+  drive.connect(shaper);
+  shaper.connect(ceiling);
+  ceiling.connect(air);
+  air.connect(tame);
+  tame.connect(harmonics);
+  harmonics.connect(out);
+
   return {
     input,
     output: out,
     setMacro: (v, when) => {
       const t = Math.max(when, 0);
-      const depth = 36 * clamp01(v);
-      // v = 0 → flat; v = 1 → mids only (lows and highs cut).
-      low.gain.setValueAtTime(-depth, t);
-      high.gain.setValueAtTime(-depth, t);
-      mid.gain.setValueAtTime(depth * 0.25, t);
+      const m = clamp01(v);
+      // Low macro = a whisper of presence high up; high macro = broader,
+      // louder harmonic content starting lower down. Never a sweep to silence.
+      split.frequency.setValueAtTime(macroToFreq(1 - m, 1800, 5200), t);
+      drive.gain.setValueAtTime(1.2 + 2.2 * m, t);
+      harmonics.gain.setValueAtTime(0.18 + 0.5 * m, t);
+      air.gain.setValueAtTime(1.5 + 3 * m, t);
+      // Output compensation: the harmonic leg only ever ADDS energy, so the
+      // stage is trimmed back by the amount it added.
+      out.gain.setValueAtTime(1 / (1 + 0.55 * m), t);
     },
     dispose: () => {
-      for (const n of [input, low, mid, high, out]) n.disconnect();
+      for (const n of [input, direct, split, drive, shaper, ceiling, air, harmonics, out]) n.disconnect();
+      tame.disconnect();
     },
   };
 }
@@ -548,39 +613,90 @@ function buildReverb(ctx: AudioContext, shimmer: boolean): AlgorithmGraph {
 }
 
 function buildFreeze(ctx: AudioContext): AlgorithmGraph {
-  // Spectral Freeze, node-only approximation: a near-unity feedback loop with
-  // heavy damping holds the last ~250 ms as a sustained pad. Feedback is
-  // capped strictly below 1 so it decays instead of exploding.
+  /**
+   * Spectral Freeze, node-only approximation — BOUNDED by construction.
+   *
+   * A damped feedback loop holds the last fraction of a second as a pad. Three
+   * rules stop the runaway screech that unbounded versions build up:
+   *   1. loop gain is hard-capped well below unity (0.82 max) and the loop
+   *      carries its own limiter, so energy per pass can only ever shrink;
+   *   2. the loop is low-passed AND high-shelf damped on every pass, so high
+   *      frequencies decay fastest instead of accumulating into a whistle;
+   *   3. `release()` kills the input, the feedback and every scheduled ramp at
+   *      once, and the stage disposes the graph afterwards — the next press
+   *      captures completely fresh material.
+   */
   const input = ctx.createGain();
   const out = ctx.createGain();
+  const capture = ctx.createGain();
+  capture.gain.value = 1;
   const delay = ctx.createDelay(1);
   delay.delayTime.value = 0.25;
   const damp = ctx.createBiquadFilter();
   damp.type = "lowpass";
-  damp.frequency.value = 5200;
+  damp.frequency.value = 3800;
+  const tilt = ctx.createBiquadFilter();
+  tilt.type = "highshelf";
+  tilt.frequency.value = 2600;
+  tilt.gain.value = -3.5;
+  const loopLimit = ctx.createDynamicsCompressor();
+  loopLimit.threshold.value = -16;
+  loopLimit.ratio.value = 20;
+  loopLimit.attack.value = 0.003;
+  loopLimit.release.value = 0.15;
   const fb = ctx.createGain();
-  fb.gain.value = 0.9;
-  const limiter = ctx.createDynamicsCompressor();
-  limiter.threshold.value = -8;
-  limiter.ratio.value = 20;
-  input.connect(delay);
+  fb.gain.value = 0.78;
+  const outLimit = ctx.createDynamicsCompressor();
+  outLimit.threshold.value = -10;
+  outLimit.ratio.value = 20;
+  outLimit.attack.value = 0.003;
+  outLimit.release.value = 0.2;
+
+  input.connect(capture);
+  capture.connect(delay);
   delay.connect(damp);
-  damp.connect(fb);
-  fb.connect(delay);
-  damp.connect(limiter);
-  limiter.connect(out);
+  damp.connect(tilt);
+  tilt.connect(loopLimit);
+  loopLimit.connect(fb);
+  fb.connect(delay); // the ONLY feedback edge in the graph
+  tilt.connect(outLimit);
+  outLimit.connect(out);
+
   return {
     input,
     output: out,
+    resetOnRelease: true,
     setMacro: (v, when) => {
       const t = Math.max(when, 0);
       const m = clamp01(v);
-      fb.gain.setValueAtTime(Math.min(0.985, 0.86 + 0.13 * m), t);
+      // The macro sets the frozen WINDOW and its damping — never the loop
+      // gain past the cap, so no macro position can make it grow.
       delay.delayTime.setValueAtTime(0.08 + 0.35 * m, t);
+      fb.gain.setValueAtTime(Math.min(FREEZE_FEEDBACK_MAX, 0.6 + 0.22 * m), t);
+      damp.frequency.setValueAtTime(2600 + 2200 * (1 - m), t);
+    },
+    release: (when) => {
+      const t = Math.max(when, 0);
+      // Stop capturing, collapse the loop and drop every scheduled ramp. The
+      // pad cannot survive its own release.
+      for (const p of [capture.gain, fb.gain, out.gain]) {
+        p.cancelScheduledValues(t);
+        p.setValueAtTime(p.value, t);
+        p.linearRampToValueAtTime(0, t + FX_ENGAGE_S);
+      }
+      delay.delayTime.cancelScheduledValues(t);
+      damp.frequency.cancelScheduledValues(t);
     },
     dispose: () => {
-      for (const n of [input, delay, damp, fb, out]) n.disconnect();
-      limiter.disconnect();
+      try {
+        fb.gain.value = 0;
+        capture.gain.value = 0;
+      } catch {
+        /* param already detached */
+      }
+      for (const n of [input, capture, delay, damp, tilt, fb, out]) n.disconnect();
+      loopLimit.disconnect();
+      outLimit.disconnect();
     },
   };
 }
@@ -589,8 +705,8 @@ export function buildAlgorithm(ctx: AudioContext, id: AlgorithmId): AlgorithmGra
   switch (id) {
     case "filter":
       return buildFilter(ctx);
-    case "isolator":
-      return buildIsolator(ctx);
+    case "exciter":
+      return buildExciter(ctx);
     case "dirt":
       return buildDirt(ctx);
     case "reelFlange":
@@ -691,7 +807,11 @@ export class BankStage {
     this.current = algorithm;
     if (!this.active) return;
     const prev = this.graphs.get(previous);
-    if (prev) prev.output.disconnect(this.wet);
+    if (prev) {
+      prev.output.disconnect(this.wet);
+      prev.release?.(when);
+      if (prev.resetOnRelease) this.teardown(previous, prev);
+    }
     const next = this.ensure(algorithm);
     if (next) next.output.connect(this.wet);
     // Passthrough (Beat Repeat) means no wet leg: fall back to full dry.
@@ -703,6 +823,45 @@ export class BankStage {
     this.active = on;
     const graph = on ? this.ensure(this.current) : this.graphs.get(this.current);
     this.applyMix(on && graph != null, when);
+    if (on || !graph) return;
+    // Release teardown. `release()` collapses feedback and captured material
+    // immediately; a `resetOnRelease` algorithm (Spectral Freeze) is then
+    // disconnected and forgotten so the next press starts from clean state.
+    graph.release?.(when);
+    if (!graph.resetOnRelease) return;
+    const algorithm = this.current;
+    this.teardown(algorithm, graph);
+  }
+
+  /**
+   * Disconnect + forget one algorithm graph after its release fade. Exposed
+   * for tests and for `clear all`, which must reach the same clean state.
+   */
+  teardown(algorithm: AlgorithmIndex, graph?: AlgorithmGraph) {
+    const g = graph ?? this.graphs.get(algorithm);
+    if (!g) return;
+    this.graphs.delete(algorithm);
+    const finish = () => {
+      try {
+        g.output.disconnect(this.wet);
+      } catch {
+        /* already detached */
+      }
+      try {
+        this.input.disconnect(g.input);
+      } catch {
+        /* already detached */
+      }
+      g.dispose();
+    };
+    const delayMs = Math.ceil(FX_ENGAGE_S * 1000) + 20;
+    if (typeof setTimeout === "function") setTimeout(finish, delayMs);
+    else finish();
+  }
+
+  /** True while an algorithm graph exists (diagnostics + regression proof). */
+  hasGraph(algorithm: AlgorithmIndex): boolean {
+    return this.graphs.has(algorithm);
   }
 
   private applyMix(wetOn: boolean, when: number) {

@@ -327,6 +327,8 @@ export class AudioEngine {
   private masterAnalyser: AnalyserNode | null = null;
   /** Gate for the ENTIRE normal four-stem mix (dry + every FX return). */
   private normalBus: GainNode | null = null;
+  /** The single post-sum FX rack (GLOBAL scope). Never per lane. */
+  private globalRack: BankRack | null = null;
   /** Measurement tap AFTER the normal bus gain. */
   private normalTap: AnalyserNode | null = null;
 
@@ -526,7 +528,13 @@ export class AudioEngine {
     this.masterAnalyser.fftSize = 1024;
     this.transportGain = ctx.createGain();
     this.transportGain.gain.value = 1;
-    this.master.connect(this.transportGain);
+    // GLOBAL FX RACK — one post-sum rack on the complete audible Tape mix,
+    // after the normal + heads buses are summed at `master` and BEFORE the
+    // master output stage. Everything audible passes through it: ordinary
+    // playback, global loops, lane loops and MIDI cue voices alike.
+    this.globalRack = new BankRack(ctx);
+    this.master.connect(this.globalRack.input);
+    this.globalRack.output.connect(this.transportGain);
     this.transportGain.connect(this.masterAnalyser);
     this.masterAnalyser.connect(ctx.destination);
 
@@ -2125,19 +2133,34 @@ export class AudioEngine {
 
   // ------------------------------------------------- Workstream 3: 12 FX ---
 
+  /**
+   * Which rack a command addresses. "global" is the post-sum rack; a numeric
+   * id is that lane's rack. One code path drives both, so momentary, latch,
+   * unlatch and clear-all behave identically in either scope.
+   */
+  private rackOf(target: TrackId | "global"): BankRack | null {
+    if (target === "global") return this.globalRack;
+    return this.tracks[target]?.bankRack ?? null;
+  }
+
+  private fxLabelOf(target: TrackId | "global"): string {
+    return target === "global" ? "global mix" : `stem ${target + 1}`;
+  }
+
+
   /** Zero hold latency: the wet ramp starts at the current context time. */
   async setBankActive(
-    id: TrackId,
+    id: TrackId | "global",
     bank: BankIndex,
     algorithm: AlgorithmIndex,
     active: boolean,
     latched = false,
   ): Promise<{ ok: boolean; detail: string }> {
-    const t = this.tracks[id];
-    if (!t?.bankRack || !this.ctx) return { ok: false, detail: "audio not unlocked" };
+    const rack = this.rackOf(id);
+    if (!rack || !this.ctx) return { ok: false, detail: "audio not unlocked" };
     const def = algorithmDef(bank, algorithm);
-    const stage = t.bankRack.stage(bank);
-    stage.setTempo(this.effectiveBpm(id), this.ctx.currentTime);
+    const stage = rack.stage(bank);
+    stage.setTempo(this.effectiveBpm(id === "global" ? 0 : id), this.ctx.currentTime);
     stage.select(algorithm, this.ctx.currentTime);
     stage.setActive(active, this.ctx.currentTime);
     const rejected = stage.rejectionFor(algorithm);
@@ -2148,33 +2171,37 @@ export class AudioEngine {
     }
     return {
       ok: true,
-      detail: `stem ${id + 1} ${def.label} ${active ? "engaged" : "released"}${latched ? " (latched)" : ""} · wet ${stage.snapshot().wet.toFixed(3)}`,
+      detail: `${this.fxLabelOf(id)} ${def.label} ${active ? "engaged" : "released"}${latched ? " (latched)" : ""} · wet ${stage.snapshot().wet.toFixed(3)}`,
     };
   }
 
   /** Cycling never activates an inactive bank. */
-  selectBankAlgorithm(id: TrackId, bank: BankIndex, algorithm: AlgorithmIndex): { ok: boolean; detail: string } {
-    const t = this.tracks[id];
-    if (!t?.bankRack || !this.ctx) return { ok: false, detail: "audio not unlocked" };
-    const stage = t.bankRack.stage(bank);
-    stage.select(algorithm, this.ctx.currentTime);
-    return { ok: true, detail: `stem ${id + 1} bank ${bank + 1} → ${algorithmDef(bank, algorithm).label}` };
+  selectBankAlgorithm(id: TrackId | "global", bank: BankIndex, algorithm: AlgorithmIndex): { ok: boolean; detail: string } {
+    const rack = this.rackOf(id);
+    if (!rack || !this.ctx) return { ok: false, detail: "audio not unlocked" };
+    rack.stage(bank).select(algorithm, this.ctx.currentTime);
+    return { ok: true, detail: `${this.fxLabelOf(id)} bank ${bank + 1} → ${algorithmDef(bank, algorithm).label}` };
   }
 
   /** Macro values are PER ALGORITHM, never shared across a bank. */
-  setBankMacro(id: TrackId, bank: BankIndex, algorithm: AlgorithmIndex, value: number): { ok: boolean; detail: string } {
-    const t = this.tracks[id];
-    if (!t?.bankRack || !this.ctx) return { ok: false, detail: "audio not unlocked" };
+  setBankMacro(id: TrackId | "global", bank: BankIndex, algorithm: AlgorithmIndex, value: number): { ok: boolean; detail: string } {
+    const rack = this.rackOf(id);
+    if (!rack || !this.ctx) return { ok: false, detail: "audio not unlocked" };
     const v = Math.min(1, Math.max(0, value));
-    t.bankRack.stage(bank).setMacro(algorithm, v, this.ctx.currentTime);
-    return { ok: true, detail: `stem ${id + 1} ${algorithmDef(bank, algorithm).label} macro → ${v.toFixed(2)}` };
+    rack.stage(bank).setMacro(algorithm, v, this.ctx.currentTime);
+    return { ok: true, detail: `${this.fxLabelOf(id)} ${algorithmDef(bank, algorithm).label} macro → ${v.toFixed(2)}` };
   }
 
-  clearBanks(id: TrackId): { ok: boolean; detail: string } {
-    const t = this.tracks[id];
-    if (!t?.bankRack || !this.ctx) return { ok: false, detail: "audio not unlocked" };
-    for (const stage of t.bankRack.stages) stage.setActive(false, this.ctx.currentTime);
-    return { ok: true, detail: `stem ${id + 1} all four banks released` };
+  clearBanks(id: TrackId | "global"): { ok: boolean; detail: string } {
+    const rack = this.rackOf(id);
+    if (!rack || !this.ctx) return { ok: false, detail: "audio not unlocked" };
+    for (const stage of rack.stages) stage.setActive(false, this.ctx.currentTime);
+    return { ok: true, detail: `${this.fxLabelOf(id)} all four banks released` };
+  }
+
+  /** Diagnostics: the post-sum rack's stage snapshot, or null before unlock. */
+  globalBankSnapshot(): BankStageSnapshot[] | null {
+    return this.globalRack?.snapshot() ?? null;
   }
 
   bankSnapshots(): (BankStageSnapshot[] | null)[] {
@@ -2650,8 +2677,14 @@ export class AudioEngine {
     dir: 1 | -1;
     pos: number;
     startPos: number;
-    /** Context time at which `pos` was last integrated — the integral anchor. */
+    /** Context time at which `pos` is exact — the integral anchor (= cursor). */
     posCtxTime: number;
+    /**
+     * Schedule cursor: the context time of the NEXT grain. `pos` is the source
+     * position at exactly this time, so the audible position at any context
+     * time t is `pos + dir·rate·(t − cursor)`.
+     */
+    cursor: number;
     wasPlaying: boolean;
     musicalRate: number;
     timer: ReturnType<typeof setInterval> | null;
@@ -2810,82 +2843,116 @@ export class AudioEngine {
 
 
 
-  private scrubGrainAll(dtS: number) {
+  /**
+   * SCHEDULE-CURSOR shuttle (fixes the 1–2 s skip on release).
+   *
+   * The old scheduler advanced the position by WALL-CLOCK dt while queuing
+   * grains 0.8 × their length apart. The two clocks run at different speeds,
+   * so the grain queue drifted ahead of what was actually audible and the
+   * release integral landed up to a second past the last sounding frame.
+   *
+   * Now there is ONE clock: `gs.cursor`, the context time of the next grain,
+   * and `gs.pos`, the exact source position at that cursor. Grains are emitted
+   * only up to a small lookahead, and `pos(t) = gs.pos + dir·rate·(t − cursor)`
+   * is exact for any context time — including a handoff BEHIND the cursor. The
+   * landing frame is therefore the frame immediately after the last audible
+   * scrub frame, never a wall-clock estimate.
+   */
+  private scrubGrainAll(_dtS: number) {
     const gs = this.globalScrub;
     const ctx = this.ctx;
     if (!gs || !ctx) return;
-    const before = gs.pos;
-    gs.pos = Math.min(this.duration, Math.max(0, gs.pos + gs.dir * GLOBAL_SCRUB_RATE * dtS));
-    gs.posCtxTime = ctx.currentTime;
-    // ONE shared playhead: the timeline is re-anchored, every stem reads it.
-    this.timeline.anchor(ctx.currentTime, gs.pos);
-    this.timelineFrozenAt = ctx.currentTime;
-    for (const pt of gs.perTrack) pt.pos = gs.pos;
-    if (gs.pos === before) return; // parked at an end — no grain, no click
     const now = ctx.currentTime;
-    const dur = Math.min(0.12, Math.max(0.03, dtS * 1.6));
-    const backwards = gs.dir < 0;
+    const GRAIN_S = 0.06;
+    const HOP_S = GRAIN_S * 0.8;
+    const LOOKAHEAD_S = 0.05;
+    const advance = (from: number, seconds: number) =>
+      Math.min(this.duration, Math.max(0, from + gs.dir * GLOBAL_SCRUB_RATE * seconds));
+
+    // A late timer (tab throttling, GC) must not queue grains in the past:
+    // fast-forward the cursor and the position together, staying continuous.
+    if (gs.cursor < now) {
+      gs.pos = advance(gs.pos, now - gs.cursor);
+      gs.cursor = now;
+    }
+
     const gen = gs.gen;
     let emitted = 0;
-    for (let i = 0; i < this.tracks.length; i++) {
-      const t = this.tracks[i]!;
-      const pt = gs.perTrack[i];
-      if (!pt) continue;
-      if (pt.mode === "worklet") {
-        // The worklet kernel renders its own shuttle: it is already running at
-        // GLOBAL_SCRUB_RATE in `gs.dir`. Only re-align its read pointer so all
-        // four stems stay locked to the single shared playhead.
+    while (gs.cursor < now + LOOKAHEAD_S) {
+      const at = gs.cursor;
+      const offsetS = gs.pos;
+      const next = advance(offsetS, HOP_S);
+      gs.cursor = at + HOP_S;
+      gs.pos = next;
+      if (next === offsetS) continue; // parked at an end — no grain, no click
+      const backwards = gs.dir < 0;
+      for (let i = 0; i < this.tracks.length; i++) {
+        const t = this.tracks[i]!;
+        const pt = gs.perTrack[i];
+        if (!pt) continue;
+        if (pt.mode === "worklet") {
+          // The kernel renders its own shuttle at GLOBAL_SCRUB_RATE; only the
+          // shared playhead below re-aligns it.
+          pt.grains++;
+          emitted++;
+          continue;
+        }
+        const src = t.buffer ?? this.scrubPcm(t);
+        if (!src) continue;
+        if (backwards && !t.reversed) t.reversed = reverseBuffer(ctx, src);
+        const buffer = backwards ? t.reversed : src;
+        if (!buffer) continue;
+        const readAt = backwards ? buffer.duration - offsetS : offsetS;
+        const g = ctx.createGain();
+        g.connect(t.stemGate);
+        const tap = this.scrubTap(i);
+        if (tap) g.connect(tap);
+        const node = ctx.createBufferSource();
+        node.buffer = buffer;
+        node.playbackRate.value = GLOBAL_SCRUB_RATE;
+        node.connect(g);
+        const fade = Math.min(0.006, GRAIN_S / 3);
+        g.gain.setValueAtTime(0, at);
+        g.gain.linearRampToValueAtTime(GLOBAL_SCRUB_LEVEL, at + fade);
+        g.gain.setValueAtTime(GLOBAL_SCRUB_LEVEL, at + GRAIN_S - fade);
+        g.gain.linearRampToValueAtTime(0, at + GRAIN_S);
+        node.start(
+          at,
+          Math.min(Math.max(0, readAt), Math.max(0, buffer.duration - 1e-3)),
+          GRAIN_S * GLOBAL_SCRUB_RATE,
+        );
+        gs.lastGrainAt[i] = at;
         pt.grains++;
         emitted++;
-        continue;
+        const rec = { node, gain: g, at, endAt: at + GRAIN_S, gen };
+        (gs.live[i] ??= []).push(rec);
+        // Measured, not asserted: every sounding scrub path is registered here
+        // and only removed when the node actually ends.
+        this.liveScrubPaths.add(node);
+        node.onended = () => {
+          const cur = this.globalScrub;
+          if (cur) cur.live[i] = (cur.live[i] ?? []).filter((r) => r !== rec);
+          this.liveScrubPaths.delete(node);
+          try {
+            node.disconnect();
+            g.disconnect();
+          } catch {
+            /* noop */
+          }
+        };
       }
-      const src = t.buffer ?? this.scrubPcm(t);
-      if (!src) continue;
-      if (backwards && !t.reversed) t.reversed = reverseBuffer(ctx, src);
-      const buffer = backwards ? t.reversed : src;
-      if (!buffer) continue;
-      const at = Math.max(now, gs.lastGrainAt[i] ?? now);
-      const offsetS = backwards ? buffer.duration - gs.pos : gs.pos;
-      const g = ctx.createGain();
-      g.connect(t.stemGate);
-      const tap = this.scrubTap(i);
-      if (tap) g.connect(tap);
-      const node = ctx.createBufferSource();
-      node.buffer = buffer;
-      node.playbackRate.value = GLOBAL_SCRUB_RATE;
-      node.connect(g);
-      const fade = Math.min(0.006, dur / 3);
-      g.gain.setValueAtTime(0, at);
-      g.gain.linearRampToValueAtTime(GLOBAL_SCRUB_LEVEL, at + fade);
-      g.gain.setValueAtTime(GLOBAL_SCRUB_LEVEL, at + dur - fade);
-      g.gain.linearRampToValueAtTime(0, at + dur);
-      node.start(at, Math.min(Math.max(0, offsetS), Math.max(0, buffer.duration - 1e-3)), dur * GLOBAL_SCRUB_RATE);
-      gs.lastGrainAt[i] = at + dur * 0.8;
-      pt.grains++;
-      emitted++;
-      const rec = { node, gain: g, at, endAt: at + dur, gen };
-      (gs.live[i] ??= []).push(rec);
-      // Measured, not asserted: every sounding scrub path is registered here
-      // and only removed when the node actually ends, so a harness can read a
-      // true "active scrub path" count after release.
-      this.liveScrubPaths.add(node);
-      node.onended = () => {
-        const cur = this.globalScrub;
-        if (cur) cur.live[i] = (cur.live[i] ?? []).filter((r) => r !== rec);
-        this.liveScrubPaths.delete(node);
-
-        try {
-          node.disconnect();
-          g.disconnect();
-        } catch {
-          /* noop */
-        }
-      };
     }
+
+    // ONE shared playhead, anchored to the AUDIBLE position at `now` — the
+    // same function the release integral uses.
+    gs.posCtxTime = gs.cursor;
+    const audible = this.integrateScrubTo(now);
+    this.timeline.anchor(now, audible);
+    this.timelineFrozenAt = now;
+    for (const pt of gs.perTrack) pt.pos = audible;
     if (emitted > 0) gs.grains++;
     this.sampleScrubTaps();
   }
-
 
   /**
    * PCM for a track whose node buffer was released after worklet handoff.
@@ -2957,6 +3024,7 @@ export class AudioEngine {
       pos,
       startPos: pos,
       posCtxTime: now,
+      cursor: now,
       wasPlaying,
       musicalRate,
       gen: 1,
@@ -2990,9 +3058,10 @@ export class AudioEngine {
   private integrateScrubTo(atCtx: number): number {
     const gs = this.globalScrub;
     if (!gs) return this.position();
-    const dt = Math.max(0, atCtx - gs.posCtxTime);
-    const p = Math.min(this.duration, Math.max(0, gs.pos + gs.dir * GLOBAL_SCRUB_RATE * dt));
-    return p;
+    // Signed: the handoff frame is BEHIND the schedule cursor, so the integral
+    // must be able to run backwards to the last audible frame.
+    const dt = atCtx - gs.posCtxTime;
+    return Math.min(this.duration, Math.max(0, gs.pos + gs.dir * GLOBAL_SCRUB_RATE * dt));
   }
 
   setGlobalScrubDirection(dir: 1 | -1): { ok: boolean; detail: string } {
@@ -3001,8 +3070,11 @@ export class AudioEngine {
     if (gs.dir !== dir) {
       const ctx = this.ctx;
       if (ctx) {
+        // Reversal starts a fresh schedule at the audible frame: everything
+        // already queued past `now` is retired by the generation bump.
         gs.pos = this.integrateScrubTo(ctx.currentTime);
         gs.posCtxTime = ctx.currentTime;
+        gs.cursor = ctx.currentTime;
       }
       gs.dir = dir;
       this.worbletShuttle(dir, gs.pos, true);
@@ -4292,12 +4364,15 @@ export class AudioEngine {
         case "fx.macro":
         case "fx.variation":
         case "fx.clearLatches": {
+          // SCOPE ROUTING. `scope: "global"` addresses the one post-sum rack;
+          // anything else addresses the named lane's rack.
+          const global = p["scope"] === "global";
           const id = Number(p["track"]) as TrackId;
-          const t = this.tracks[id];
-          if (!t) return this.ack(cmd, "rejected", `no track ${id}`);
+          const target: TrackId | "global" = global ? "global" : id;
+          if (!global && !this.tracks[id]) return this.ack(cmd, "rejected", `no track ${id}`);
           if (!this.ctx) return this.ack(cmd, "rejected", "audio not unlocked");
           if (cmd.type === "fx.clearLatches") {
-            const res = this.clearBanks(id);
+            const res = this.clearBanks(target);
             return this.ack(cmd, res.ok ? "completed" : "rejected", res.detail);
           }
           const latched = Boolean(p["latched"]);
@@ -4313,18 +4388,22 @@ export class AudioEngine {
           if (!(bank >= 0 && bank <= 3)) return this.ack(cmd, "rejected", `unknown FX bank ${String(p["bank"])}`);
           const algorithm = Number(p["algorithm"] ?? 0) as AlgorithmIndex;
           if (cmd.type === "fx.algorithm.cycle") {
-            const res = this.selectBankAlgorithm(id, bank, algorithm);
+            const res = this.selectBankAlgorithm(target, bank, algorithm);
             return this.ack(cmd, res.ok ? "completed" : "rejected", res.detail);
           }
           if (cmd.type === "fx.macro") {
-            const res = this.setBankMacro(id, bank, algorithm, Number(p["value"]));
+            const res = this.setBankMacro(target, bank, algorithm, Number(p["value"]));
             return this.ack(cmd, res.ok ? "completed" : "rejected", res.detail);
           }
           const active = cmd.type === "fx.latch" ? Boolean(p["on"]) : cmd.type === "fx.momentary.start";
           // Accepted immediately (zero hold latency), completed once the wet
           // ramp is scheduled. Distinct acknowledgements, never merged.
-          const accepted = this.ack(cmd, "accepted", `stem ${id + 1} bank ${bank + 1} ${active ? "engaging" : "releasing"}`);
-          void this.setBankActive(id, bank, algorithm, active, latched).then((res) =>
+          const accepted = this.ack(
+            cmd,
+            "accepted",
+            `${global ? "global mix" : `stem ${id + 1}`} bank ${bank + 1} ${active ? "engaging" : "releasing"}`,
+          );
+          void this.setBankActive(target, bank, algorithm, active, latched).then((res) =>
             this.ack(cmd, res.ok ? "completed" : "rejected", res.detail),
           );
           return accepted;
@@ -4666,6 +4745,8 @@ export class AudioEngine {
       t.worklet = null;
       t.engineMode = "node";
     }
+    this.globalRack?.dispose();
+    this.globalRack = null;
     if (this.schedulerTimer) clearInterval(this.schedulerTimer);
     this.schedulerTimer = null;
     this.stopSources();

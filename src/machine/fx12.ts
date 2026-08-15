@@ -8,7 +8,7 @@
  * so Reel Flange / Formant Shift / Rhythmic Gate feed Echo and Reverb, and Echo / Reverb /
  * Shimmer tails stay natural downstream of them.
  *
- * Macro amounts are PER ALGORITHM, never shared per bank: Filter, Isolator and
+ * Macro amounts are PER ALGORITHM, never shared per bank: Filter, Exciter and
  * Dirt each remember their own amount. A rejected algorithm marks only itself,
  * so a device that cannot run Spectral Freeze can still cycle back to Reverb
  * or Shimmer inside the SPACE bank.
@@ -24,7 +24,7 @@ export type BankId = "tone" | "mod" | "motion" | "space";
 export type AlgorithmId =
   // TONE
   | "filter"
-  | "isolator"
+  | "exciter"
   | "dirt"
   // MOD
   | "reelFlange"
@@ -72,7 +72,7 @@ export const BANKS: [BankDef, BankDef, BankDef, BankDef] = [
     buttonIndex: 0,
     algorithms: [
       { id: "filter", label: "Filter", defaultMacro: 0.5, heavy: false, legacy: true },
-      { id: "isolator", label: "Isolator", defaultMacro: 0.5, heavy: false, legacy: false },
+      { id: "exciter", label: "Exciter", defaultMacro: 0.4, heavy: false, legacy: false },
       { id: "dirt", label: "Dirt / Crusher", defaultMacro: 0.35, heavy: false, legacy: false },
     ],
   },
@@ -299,3 +299,17 @@ export function deserializeStemFx(raw: unknown): StemFxState {
 }
 
 export type StemFxByStem = Record<StemIndex, StemFxState>;
+
+/**
+ * Retired algorithm ids. Saved projects store algorithm INDEXES, so nothing on
+ * disk breaks, but any id that leaked into a log, a map row or a stored string
+ * is migrated here. `isolator` was replaced by `exciter` in the TONE bank
+ * (same slot, same macro control) because it duplicated Filter audibly.
+ */
+export const LEGACY_ALGORITHM_ID: Record<string, AlgorithmId> = {
+  isolator: "exciter",
+};
+
+export function migrateAlgorithmId(id: string): AlgorithmId {
+  return LEGACY_ALGORITHM_ID[id] ?? (id as AlgorithmId);
+}

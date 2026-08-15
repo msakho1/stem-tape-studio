@@ -71,9 +71,20 @@ export interface StemTrackState {
   fx12: StemFxState;
 }
 
+/** FX target: one lane, or the single post-sum rack on the whole mix. */
+export type FxTarget = StemIndex | "global";
+export type FxScope = "stem" | "global";
+
 export interface StemPerformanceState {
   activeStem: StemIndex;
   fxOverlay: boolean;
+  /**
+   * Scope of the open overlay. Runtime only — never persisted, because a
+   * reload always comes up with the overlay closed.
+   */
+  fxScope: FxScope;
+  /** The one post-sum rack, driven when `fxScope === "global"`. */
+  globalFx: StemFxState;
   tracks: [StemTrackState, StemTrackState, StemTrackState, StemTrackState];
   /** Diagnostics only: the last rejected activation reason. */
   lastRejection: string | null;
@@ -137,6 +148,8 @@ export function initialStemPerformance(): StemPerformanceState {
   return {
     activeStem: 0,
     fxOverlay: false,
+    fxScope: "stem",
+    globalFx: initialStemFx(),
     tracks: [initialStemTrack(), initialStemTrack(), initialStemTrack(), initialStemTrack()],
     lastRejection: null,
   };
@@ -209,39 +222,63 @@ export function toggleLink(s: StemPerformanceState, index: number): StemPerforma
 
 // ------------------------------------------------------------ twelve-FX ops
 
+/**
+ * Every twelve-FX op below routes on its target: a lane index patches that
+ * lane's rack, "global" patches the single post-sum rack. The bank/algorithm/
+ * macro/latch semantics are IDENTICAL for both — one code path, two racks.
+ */
+function patchFx(
+  s: StemPerformanceState,
+  target: FxTarget,
+  fn: (fx: StemFxState) => StemFxState,
+): StemPerformanceState {
+  if (target === "global") return { ...s, globalFx: fn(s.globalFx) };
+  return patchTrack(s, target, (t) => syncLegacySlots({ ...t, fx12: fn(t.fx12) }));
+}
+
+/** Read the rack a target owns (overlay rendering + engine dispatch). */
+export function fxStateOf(s: StemPerformanceState, target: FxTarget): StemFxState {
+  return target === "global" ? s.globalFx : (s.tracks[target]?.fx12 ?? s.globalFx);
+}
+
+/** The target the open overlay is driving right now. */
+export function fxTargetOf(s: StemPerformanceState): FxTarget {
+  return s.fxScope === "global" ? "global" : s.activeStem;
+}
+
 function patchBank(
   s: StemPerformanceState,
-  index: number,
+  index: FxTarget,
   bank: BankIndex,
   fn: (b: StemFxState["banks"][number]) => StemFxState["banks"][number],
 ): StemPerformanceState {
-  return patchTrack(s, index, (t) => {
-    const banks = [...t.fx12.banks] as StemFxState["banks"];
+  return patchFx(s, index, (fx) => {
+    const banks = [...fx.banks] as StemFxState["banks"];
     banks[bank] = fn(banks[bank]!);
-    return syncLegacySlots({ ...t, fx12: { ...t.fx12, banks } });
+    return { ...fx, banks };
   });
 }
 
-export function selectBank(s: StemPerformanceState, index: number, bank: BankIndex): StemPerformanceState {
-  return patchTrack(s, index, (t) => ({ ...t, fx12: { ...t.fx12, selectedBank: bank } }));
+export function selectBank(s: StemPerformanceState, index: FxTarget, bank: BankIndex): StemPerformanceState {
+  return patchFx(s, index, (fx) => ({ ...fx, selectedBank: bank }));
 }
 
 export function setBankMomentary(
   s: StemPerformanceState,
-  index: number,
+  index: FxTarget,
   bank: BankIndex,
   on: boolean,
 ): StemPerformanceState {
   return patchBank(s, index, bank, (b) => ({ ...b, momentary: on }));
 }
 
-export function toggleBankLatch(s: StemPerformanceState, index: number, bank: BankIndex): StemPerformanceState {
+export function toggleBankLatch(s: StemPerformanceState, index: FxTarget, bank: BankIndex): StemPerformanceState {
   return patchBank(s, index, bank, (b) => ({ ...b, latched: !b.latched }));
 }
 
 export function cycleBankAlgorithm(
   s: StemPerformanceState,
-  index: number,
+  index: FxTarget,
   bank: BankIndex,
   dir: 1 | -1,
 ): StemPerformanceState {
@@ -250,7 +287,7 @@ export function cycleBankAlgorithm(
 
 export function nudgeBankMacro(
   s: StemPerformanceState,
-  index: number,
+  index: FxTarget,
   bank: BankIndex,
   dir: 1 | -1,
 ): StemPerformanceState {
@@ -259,7 +296,7 @@ export function nudgeBankMacro(
 
 export function rejectBankAlgorithm(
   s: StemPerformanceState,
-  index: number,
+  index: FxTarget,
   bank: BankIndex,
   algorithm: AlgorithmIndex,
   reason: string,
@@ -277,13 +314,8 @@ export function activeBankCount(t: StemTrackState): number {
   return t.fx12.banks.filter(isBankActive).length;
 }
 
-export function clearLatches(s: StemPerformanceState, index: number): StemPerformanceState {
-  return patchTrack(s, index, (t) =>
-    syncLegacySlots({
-      ...t,
-      fx12: clearBankLatches(t.fx12),
-    }),
-  );
+export function clearLatches(s: StemPerformanceState, index: FxTarget): StemPerformanceState {
+  return patchFx(s, index, (fx) => clearBankLatches(fx));
 }
 
 /**

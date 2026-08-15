@@ -99,7 +99,7 @@ export interface FxBankCard {
 
 const ALGO_BLURB: Record<string, string> = {
   filter: "One sweep from dark low-pass to thin high-pass.",
-  isolator: "Kills a band outright — DJ-style three-band cut.",
+  exciter: "Adds presence and upper harmonics, level-compensated — never a filter sweep.",
   dirt: "Saturation into bit/sample crush as the macro climbs.",
   reelFlange: "Tape flange from a second head running slightly out of step.",
   formantShift: "Moves vowel character without moving pitch.",
@@ -353,7 +353,7 @@ export const LESSONS: Lesson[] = [
     id: "fx",
     title: "How to use FX",
     gesture: "VOL − + VOL + together",
-    body: "Press both volume buttons together to open FX mode. Each Track button is a bank — TONE, MOD, MOTION, SPACE — held for momentary, FUNCTION + Track to latch. VOL −/+ cycles the algorithm inside the selected bank.",
+    body: "Press both volume buttons together to open FX on the selected stem (STEM scope). Hold FUNCTION first, then press both volume buttons, and FX opens on the whole mix instead (GLOBAL scope) — one rack over everything you hear, loops and MIDI cues included. Inside STEM scope, FUNCTION + VOL − / VOL + walks the target stem. Each Track button is a bank — TONE, MOD, MOTION, SPACE — held for momentary, FUNCTION + Track to latch. VOL −/+ cycles the algorithm inside the selected bank. Pressing both volume buttons again closes FX.",
     highlight: [
       "volume-minus",
       "volume-plus",

@@ -252,6 +252,21 @@ function LabPage() {
               </p>
             </div>
             <CueStatus />
+            {/* Touch devices route through the ringer switch on iOS; say so once,
+                where the musician is about to press PLAY. */}
+            <p className="mb-3 border border-[var(--bench-line)] px-2 py-1.5 font-mono text-[10px] leading-relaxed text-[var(--ink-faint)] lg:hidden">
+              On iPhone and iPad, turn the silent switch off and raise the volume — browsers route this audio through
+              the ringer.
+            </p>
+            {state.perf.fxOverlay && (
+              <p
+                className="mb-3 border border-[var(--signal)] px-2 py-1.5 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--signal)]"
+                data-testid="fx-scope-banner"
+                data-fx-scope={state.perf.fxScope}
+              >
+                fx {state.perf.fxScope === "global" ? "· global · whole mix" : `· stem · track ${state.perf.activeStem + 1}`}
+              </p>
+            )}
             <HeadsStatus active={state.headsMode} heads={status.headLanes} source={status.headsSource} notice={headsNotice} />
             <DeviceSurface
               svgRef={svgRef}
@@ -384,7 +399,7 @@ function LabPage() {
           </div>
 
           <div className="grid gap-5 lg:grid-cols-2">
-            <section className="st-section">
+            <section className="st-section hidden lg:block">
               <p className="st-section__title">keyboard parity</p>
               <div className="flex flex-wrap gap-x-4 gap-y-1 font-mono text-[11px] text-[var(--ink-dim)]">
                 {KEY_HINTS.map(([key, ctrl]) => (

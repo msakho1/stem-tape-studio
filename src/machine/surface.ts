@@ -14,6 +14,8 @@ import {
   FX_FAMILIES,
   clearLatches,
   cycleBankAlgorithm,
+  fxStateOf,
+  fxTargetOf,
   initialStemPerformance,
   nudgeBankMacro,
   patchSlot,
@@ -1158,6 +1160,11 @@ export function applyFader(
  * The arbiter has already suppressed the base Play / Volume / Track command, so
  * nothing here is emitted-then-undone.
  */
+/** Human label for whichever rack the overlay is driving. */
+function fxLabel(perf: StemPerformanceState): string {
+  return perf.fxScope === "global" ? "global mix" : `stem ${perf.activeStem + 1}`;
+}
+
 export function applyPerfIntent(state: SurfaceState, intent: PerfIntent): SurfaceState {
   const t = performance.now();
   let next = { ...state };
@@ -1184,86 +1191,100 @@ export function applyPerfIntent(state: SurfaceState, intent: PerfIntent): Surfac
       return fire(next, "stem.link", `stem ${intent.stem + 1} ${linked ? "linked" : "unlinked"} (overlap ${intent.overlapMs.toFixed(0)} ms)`, t);
     }
     case "fx.overlay": {
-      next = emit({ ...next, perf: { ...perf, fxOverlay: intent.on } }, "fx.overlay", { on: intent.on }, { rowId: "fx.overlay.toggle", t });
-      return fire(next, "fx.overlay.toggle", `FX overlay ${intent.on ? "open" : "closed"} — tape audio continues`, t);
+      // Opening sets the scope; closing keeps the scope it was opened with so
+      // the engine can address the right rack while the release fades.
+      const scope = intent.on ? intent.scope : perf.fxScope;
+      next = emit(
+        { ...next, perf: { ...perf, fxOverlay: intent.on, fxScope: scope } },
+        "fx.overlay",
+        { on: intent.on, scope },
+        { rowId: "fx.overlay.toggle", t },
+      );
+      return fire(
+        next,
+        "fx.overlay.toggle",
+        `FX overlay ${intent.on ? `open — ${scope.toUpperCase()} scope` : "closed"} — tape audio continues`,
+        t,
+      );
     }
     case "system.pairing":
       return fire(next, "system.pairing", "Bluetooth pairing gesture (stock)", t);
     case "system.noop":
       return fire(next, "system.volumechord.ambiguous", intent.detail, t);
     case "fx.bank.select": {
-      const p = selectBank(perf, intent.stem, intent.bank);
-      next = emit({ ...next, perf: p }, "fx.bank.select", { track: intent.stem, bank: intent.bank }, { rowId: "fx.bank.select", t });
-      return fire(next, "fx.bank.select", `stem ${intent.stem + 1} bank ${BANKS[intent.bank]!.id} selected`, t);
+      const target = fxTargetOf(perf);
+      const p = selectBank(perf, target, intent.bank);
+      next = emit({ ...next, perf: p }, "fx.bank.select", { track: intent.stem, bank: intent.bank, scope: perf.fxScope }, { rowId: "fx.bank.select", t });
+      return fire(next, "fx.bank.select", `${fxLabel(perf)} bank ${BANKS[intent.bank]!.id} selected`, t);
     }
     case "fx.momentary.start":
     case "fx.momentary.end": {
       const on = intent.type === "fx.momentary.start";
-      const p = setBankMomentary(perf, intent.stem, intent.bank, on);
-      const bank = p.tracks[intent.stem]!.fx12.banks[intent.bank]!;
+      const target = fxTargetOf(perf);
+      const p = setBankMomentary(perf, target, intent.bank, on);
+      const bank = fxStateOf(p, target).banks[intent.bank]!;
       const algo = algorithmDef(intent.bank, bank.selectedAlgorithm);
       next = emit(
         { ...next, perf: p },
         intent.type,
-        { track: intent.stem, bank: intent.bank, algorithm: bank.selectedAlgorithm, latched: bank.latched },
+        { track: intent.stem, bank: intent.bank, algorithm: bank.selectedAlgorithm, latched: bank.latched, scope: perf.fxScope },
         { rowId: `fx.${BANKS[intent.bank]!.id}.momentary`, t },
       );
-      return fire(
-        next,
-        `fx.${BANKS[intent.bank]!.id}.momentary`,
-        `stem ${intent.stem + 1} ${algo.label} ${on ? "engaged" : "released"}`,
-        t,
-      );
+      return fire(next, `fx.${BANKS[intent.bank]!.id}.momentary`, `${fxLabel(perf)} ${algo.label} ${on ? "engaged" : "released"}`, t);
     }
     case "fx.algorithm.cycle": {
-      const p = cycleBankAlgorithm(perf, intent.stem, intent.bank, intent.dir);
-      const bank = p.tracks[intent.stem]!.fx12.banks[intent.bank]!;
+      const target = fxTargetOf(perf);
+      const p = cycleBankAlgorithm(perf, target, intent.bank, intent.dir);
+      const bank = fxStateOf(p, target).banks[intent.bank]!;
       const algo = algorithmDef(intent.bank, bank.selectedAlgorithm);
       next = emit(
         { ...next, perf: p },
         "fx.algorithm.cycle",
-        { track: intent.stem, bank: intent.bank, algorithm: bank.selectedAlgorithm, latched: bank.latched },
+        { track: intent.stem, bank: intent.bank, algorithm: bank.selectedAlgorithm, latched: bank.latched, scope: perf.fxScope },
         { rowId: `fx.${BANKS[intent.bank]!.id}.algorithm`, t },
       );
-      return fire(next, `fx.${BANKS[intent.bank]!.id}.algorithm`, `stem ${intent.stem + 1} → ${algo.label}`, t);
+      return fire(next, `fx.${BANKS[intent.bank]!.id}.algorithm`, `${fxLabel(perf)} → ${algo.label}`, t);
     }
     case "fx.macro": {
-      const p = nudgeBankMacro(perf, intent.stem, intent.bank, intent.dir);
-      const bank = p.tracks[intent.stem]!.fx12.banks[intent.bank]!;
+      const target = fxTargetOf(perf);
+      const p = nudgeBankMacro(perf, target, intent.bank, intent.dir);
+      const bank = fxStateOf(p, target).banks[intent.bank]!;
       const value = bank.algorithms[bank.selectedAlgorithm]!.macroAmount;
       next = emit(
         { ...next, perf: p },
         "fx.macro",
-        { track: intent.stem, bank: intent.bank, algorithm: bank.selectedAlgorithm, value },
+        { track: intent.stem, bank: intent.bank, algorithm: bank.selectedAlgorithm, value, scope: perf.fxScope },
         { rowId: `fx.${BANKS[intent.bank]!.id}.macro`, t },
       );
       return fire(
         next,
         `fx.${BANKS[intent.bank]!.id}.macro`,
-        `stem ${intent.stem + 1} ${algorithmDef(intent.bank, bank.selectedAlgorithm).label} macro → ${value.toFixed(2)}`,
+        `${fxLabel(perf)} ${algorithmDef(intent.bank, bank.selectedAlgorithm).label} macro → ${value.toFixed(2)}`,
         t,
       );
     }
     case "fx.latch": {
-      const p = toggleBankLatch(perf, intent.stem, intent.bank);
-      const bank = p.tracks[intent.stem]!.fx12.banks[intent.bank]!;
+      const target = fxTargetOf(perf);
+      const p = toggleBankLatch(perf, target, intent.bank);
+      const bank = fxStateOf(p, target).banks[intent.bank]!;
       next = emit(
         { ...next, perf: p },
         "fx.latch",
-        { track: intent.stem, bank: intent.bank, on: bank.latched, algorithm: bank.selectedAlgorithm, latched: bank.latched },
+        { track: intent.stem, bank: intent.bank, on: bank.latched, algorithm: bank.selectedAlgorithm, latched: bank.latched, scope: perf.fxScope },
         { rowId: `fx.${BANKS[intent.bank]!.id}.latch`, t },
       );
       return fire(
         next,
         `fx.${BANKS[intent.bank]!.id}.latch`,
-        `stem ${intent.stem + 1} ${algorithmDef(intent.bank, bank.selectedAlgorithm).label} ${bank.latched ? "latched" : "unlatched"}`,
+        `${fxLabel(perf)} ${algorithmDef(intent.bank, bank.selectedAlgorithm).label} ${bank.latched ? "latched" : "unlatched"}`,
         t,
       );
     }
     case "fx.clearLatches": {
-      const p = clearLatches(perf, intent.stem);
-      next = emit({ ...next, perf: p }, "fx.clearLatches", { track: intent.stem }, { rowId: "fx.clearLatches", t });
-      return fire(next, "fx.clearLatches", `stem ${intent.stem + 1} latches cleared`, t);
+      const target = fxTargetOf(perf);
+      const p = clearLatches(perf, target);
+      next = emit({ ...next, perf: p }, "fx.clearLatches", { track: intent.stem, scope: perf.fxScope }, { rowId: "fx.clearLatches", t });
+      return fire(next, "fx.clearLatches", `${fxLabel(perf)} latches cleared`, t);
     }
   }
   return next;
@@ -1361,7 +1382,9 @@ export function deriveLeds(state: SurfaceState): LedFrame {
       // Side LEDs 1–4 = the four BANKS (physical order) for the ACTIVE stem,
       // read from the authoritative twelve-FX state, not the legacy families.
       const bankIndex = bankOfButton(i);
-      const bank = state.perf.tracks[state.perf.activeStem]!.fx12.banks[bankIndex]!;
+      // …and from the GLOBAL rack instead when the overlay was opened in
+      // global scope, so the LEDs always describe the rack being played.
+      const bank = fxStateOf(state.perf, fxTargetOf(state.perf)).banks[bankIndex]!;
       const def = algorithmDef(bankIndex, bank.selectedAlgorithm);
       const alg = bank.algorithms[bank.selectedAlgorithm]!;
       if (alg.rejected)

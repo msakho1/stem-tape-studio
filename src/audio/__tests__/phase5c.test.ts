@@ -86,7 +86,7 @@ describe("ordered chord arbitration (correction 1)", () => {
     short.ev("volume-minus", "down", 0);
     short.ev("volume-plus", "down", 50);
     short.ev("volume-plus", "up", 300);
-    expect(short.intents[0]).toEqual({ type: "fx.overlay", on: true });
+    expect(short.intents[0]).toEqual({ type: "fx.overlay", on: true, scope: "stem" });
 
     const pair = harness();
     pair.ev("volume-minus", "down", 0);
@@ -307,7 +307,7 @@ describe("mapping registry", () => {
 describe("LED priority table", () => {
   it("overlay side LEDs show momentary above latched, and arming above both", () => {
     let s = initialSurfaceState();
-    s = applyPerfIntent(s, { type: "fx.overlay", on: true });
+    s = applyPerfIntent(s, { type: "fx.overlay", on: true, scope: "stem" });
     s = applyPerfIntent(s, { type: "fx.latch", stem: 0, bank: 2 });
     let leds = deriveLeds(s);
     expect(leds["side-led-2"]!.pattern).toBe("solid");
@@ -325,7 +325,7 @@ describe("LED priority table", () => {
 
   it("overlay track LEDs show stem state: soloed > unlinked > active", () => {
     let s = initialSurfaceState();
-    s = applyPerfIntent(s, { type: "fx.overlay", on: true });
+    s = applyPerfIntent(s, { type: "fx.overlay", on: true, scope: "stem" });
     s = applyPerfIntent(s, { type: "stem.solo", stem: 1, overlapMs: 100 });
     s = applyPerfIntent(s, { type: "stem.link", stem: 2, overlapMs: 900 });
     const leds = deriveLeds(s);
@@ -346,7 +346,7 @@ describe("semantic dispatch", () => {
 
   it("overlay toggling never emits a transport or gain command", () => {
     let s = initialSurfaceState();
-    s = applyPerfIntent(s, { type: "fx.overlay", on: true });
+    s = applyPerfIntent(s, { type: "fx.overlay", on: true, scope: "stem" });
     expect(s.commands.map((c) => c.type)).toEqual(["fx.overlay"]);
     expect(s.playing).toBe(false);
   });
