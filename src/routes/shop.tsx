@@ -1,6 +1,7 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useState } from "react";
-import productAsset from "@/assets/sp1-product-2.png.asset.json";
+import productAsset from "@/assets/sp1-product-3.jpg.asset.json";
+import { SupportButton } from "@/components/SupportButton";
 
 export const Route = createFileRoute("/shop")({
   component: ShopPage,
