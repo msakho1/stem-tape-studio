@@ -24,7 +24,7 @@ Non-firing obligations, asserted across the whole stream from #1 to #6: no `rate
 
 The same release-order rule defines the **global-loop latch**: PLAY held with the loop running, FUNCTION down/up → latch; PLAY released first → normal loop end; PLAY tap while latched → release latch, transport keeps playing. **FX latch** already works this way (`chordArbiter.ts:210-215, 268-284`). **FN + fader** has no latch: release parks.
 
-**Active-track selection, with visible behaviour:** FUNCTION tap with nothing else down **arms** selection for `TRACK_SELECT_WINDOW = 1200 ms`; the four top LEDs **pulse** while armed; a Track tap inside the window selects that track, its LED goes **solid** and stays solid, the arm expires, and that track becomes the **FX target** (`activeStem` for every FX intent). FUNCTION tap while an operation is running is a latch, never a select.
+**Active-track selection, with visible behaviour:** FUNCTION tap with nothing else down **arms** selection for `TRACK_SELECT_WINDOW = 1200 ms`; **all four** top LEDs pulse while armed. A Track tap inside the window selects that track: its LED goes **solid** and stays solid, the other three **resume live meter activity**, the arm expires, and that track becomes the **Tape and FX target** (`activeStem`). FUNCTION tap while an operation is running is a latch, never a select.
 
 ## 2. Timing model
 
