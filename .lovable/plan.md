@@ -284,7 +284,14 @@ Physical device (TestFlight) — reported, not asserted against the engine toler
 
 No MIDI clock or output, no quantization, no launch modes, no cue editor, no onscreen pads, no fixed note bank, no new FX, no change to global-loop or lane-loop semantics, no Heads redesign, no unrelated UI, no offline bundling in the first iOS delivery, and no implementation in this response.
 
-## 15. Open decisions
+## 16. Final addendum (approved)
 
-None. Every previously open item is now settled: the Guide extends to 21 lessons / 81 feature ids, cues are per project, playback is a fixed-1× one-shot, and initial iOS delivery is the TestFlight WKWebView shell.
+1. **Cue spawn is dedicated, not reused.** `spawnCue({ track, startAt, startFrame, endFrame, reverse: false, window: null, playbackRate: 1 })` keeps the per-voice fade and the `t.stemGate` connection so fader/FX chains stay intact, but never inherits lane reverse, loop wrapping, or transport varispeed.
+2. **Playback rejection during scrub/reverse (v1).** An isolated cue is rejected if its target lane is scrubbing or reversed; a global cue is rejected if any lane is scrubbing or reversed. Playback over global and lane loops remains supported through the underlay-rejoin rules.
+3. **Cue audibility overrides mute/solo.** While `cueOwner[lane]` exists, the cue voice is audible regardless of that lane's mute/solo state, without mutating `t.muted` or `t.soloed`. Fader level and FX remain active; normal audibility restores on completion.
+4. **Invalidation uses `contentHash` only.** No persisted generation field exists.
+5. **Checkpoint 9 is Xcode-ready, not TestFlight-uploaded.** Actual signing and TestFlight upload require your Apple Developer account and Xcode and are outside Lovable's environment.
+
+No code will be written until you separately authorize implementation.
+
 
