@@ -1,48 +1,83 @@
-# Heads isolation + frame-accurate loop rejoin
+# Forking Tape Looper into Stem Tape on real SP-1 hardware
 
-Two independent defects, both confirmed by reading the engine graph and the loop command path.
+## 1. Authoritative sources (verified by fetch, not inference)
 
-## Root causes (verified in source)
+| Item | URL | Kind | License |
+|---|---|---|---|
+| Tape Looper firmware | github.com/chattock/sp1-tape-looper | full C source (`firmware/src/main.c`, `sp1_emmc.c/.h`, `app.overlay`, `prj.conf`, `boards/`, `zephyr-patches/uac2-windows-fs-feedback.patch`) | MIT |
+| Release `v2.7.1-official` | same repo, asset `sp1_looper.bin` (109,240 B, sha256 e1a9152b…) | prebuilt binary | MIT |
+| Latest sampled commit | `11bc91799e877b344475ce583a2c005fa6f657f7` | source | MIT |
+| Loop transfer tool | chattock.github.io/sp1-tape-looper (source in `docs/`) | WebSerial source | MIT |
+| Hardware/dev notes | github.com/timknapen/SP-1-dev (+ wiki, Discord) | documentation | MIT |
+| Flasher / stem loader | solderless.engineering | hosted binary tool, source not located | unknown |
+| Bootloader crack report | llllllll.co/t/te-stem-player/66795/709 | forum documentation | n/a |
 
-**Defect 1 — normal mix leaks under Heads.**
-`buildGraph()` (`src/audio/engine.ts:462-521`) wires each stem `... → soloGain → analyser → master`, and `headLanes` is constructed with `destination: () => this.master` (`engine.ts:1513`). There is no bus between the stems and the master, so the heads bus is purely additive. `applyAudibility()` (`engine.ts:1348-1367`) carries the comment "Heads no longer ride the per-stem chains" and gates only on mute/solo/audition — it never gates the stems while `heads.active`. Result: four normal stems + four heads sum into master.
+Disambiguation: the 2021 Kano "Donda Stem Player" (RE'd by `krystalgamer/stem-player-emulator`, web-app only) is a **different device**. All firmware work targets TE's unreleased SP-1. Stock TE SP-1 firmware is **closed source** — no merge is possible; Tape Looper is the only legal base.
 
-**Defect 2 — loop release rejoins at the wrong position.** Two compounding causes:
+## 2. Hardware audit
 
-1. `relocate()` (`engine.ts:923-935`) calls `this.timeline.anchor(at, toPosition)`. `relocate` is invoked from `loop.set` whenever a loop is enabled (`engine.ts:3311`). Capturing a one-bar loop on ONE lane therefore drags the **shared** song timeline back to that lane's loop start — the other three lanes' seam math, the playhead and the "hidden" position are all corrupted. There is no per-lane hidden pointer at all: `position()` is the single shared timeline.
-2. `loop.release` maps to `loop.set {enabled:false}` (`engine.ts:3615`), and `loop.set` only relocates when `enabled` is true (`bounds && enabled`). On release nothing respawns: the lane keeps playing forward from wherever the last seam wrapped it, permanently offset by (loopStart − hidden position). No bar-boundary scheduling, no crossfade, no generation invalidation.
+- SoC: Nordic **nRF52840**, Cortex-M4F @64 MHz, **256 KB RAM / 1 MB flash** on-chip.
+- Bulk storage: external **eMMC** (driver `sp1_emmc.c`); capacity UNKNOWN.
+- Audio: discrete codec, software-configured (firmware references codec init and a −19 dB pad); part number UNKNOWN.
+- Controls: 4 Track buttons, FUNCTION, PLAY — all five on **one shared analogue sense line** — 4 faders, 1 rocker; all read via ADC (`app.overlay`).
+- LEDs: per-track + status, dimmable, used as battery gauge and metronome.
+- USB: **UAC2** audio device + serial port (WebSerial transport). No mass storage.
+- Bootloader: TE stock, community-bypassed; entry = hold Track 1 + Track 4 while plugging USB-C. Image format = raw unsigned `.bin`.
+- Recovery: **no documented unbrick path** — the single largest risk.
 
-## Fix 1 — explicit bus handoff
+## 3. Port matrix (Stem Tape behaviour = source of truth)
 
-- Add `normalBus` and `headsBus` gain nodes in `buildGraph()`: every stem `analyser → normalBus → master`; `headLanes` destination becomes `headsBus → master`.
-- `enterHeadsMode` / `exitHeadsMode` schedule a short (~20 ms) complementary crossfade on the two bus gains at one shared context time. No mute, solo, fader, loop or FX state is touched.
-- FX-return leak: FX racks live upstream of the stem analyser, so gating `normalBus` also gates wet returns; verified by measuring the analyser after the racks. Reverb/echo tails therefore fade with the bus rather than leaking.
-- Hidden timeline keeps advancing: normal sources stay live and scheduled while `normalBus = 0`, so exit rejoins at the current hidden position with no respawn/rewind.
-- On exit, after the fade completes, assert one live source per stem and destroy heads voices (`headLanes.exit()` already stops voices; add a post-fade sweep + count assertion).
+**A. Already in Tape Looper:** eMMC audio streaming, UAC2 out, ADC control scan, LED driver, transport, varispeed/rocker, per-track loop record/play, tap tempo, WebSerial transfer protocol, battery gauge.
 
-## Fix 2 — per-lane hidden pointer and bar-boundary rejoin
+**B. Stock SP-1 behaviour to reproduce:** the 37 `V26_ROWS_AS_REGISTRY` rows in `src/machine/stemTapeV1Map.ts` — these are already Tape Looper v2.6 semantics, so mostly "don't break".
 
-- Stop `relocate()` from anchoring the shared timeline. Split it: `relocateShared()` (keeps `timeline.anchor`, used by transport/scrub handoff) and `relocateLane()` (no anchor, used by `loop.set`, `loop.chop`, reverse). This alone restores the hidden song pointer for every lane.
-- Give `TrackRuntime` an explicit `hidden` pointer derived from the shared integrated-rate timeline (`timeline.positionAt(ctx.currentTime)`), so varispeed and glides are inherited for free; the audible loop pointer stays the seam-driven loop read.
-- `loop.release` becomes a real handler (no longer an alias of `loop.set {enabled:false}`):
-  1. compute `releaseAt = nextBarAfter(grid, now)` on the shared grid (fallback: now + lookahead);
-  2. compute the lane's hidden song position at exactly `releaseAt` through the integrated rate curve;
-  3. spawn the replacement source at that frame with an equal-power fade-in scheduled at `releaseAt`;
-  4. equal-power fade the loop source out over the same window, `stop()` it at fade end, bump `t.generation` to invalidate the loop generation, and clear `committedSeamAt`;
-  5. clear `loop.enabled` only at the boundary so no seam is committed past it.
-- Worklet engine: mirror the same handoff via `setWindow`/`applyAtContextFrame` using the shared apply frame, so both engines land on the same frame.
+**C. Stem Tape additions to port (C firmware):**
+1. Four-stem simultaneous playback + per-stem fader gain (`STEM_ROWS`).
+2. Chord/gesture arbiter: `src/machine/chordArbiter.ts`, `src/input/gestures.ts` — deferred tap arbitration (single/double/triple), 450/600/700/900 ms thresholds, `suppresses` sets.
+3. Remapped rows: `play.cue`, `rocker.chop.play`, `rocker.scrub`.
+4. Global scrub + frame-exact handoff (`SCRUB_HANDOFF_FADE_S = 4 ms`, landing ≤2 frames).
+5. Lane scrub via FUNCTION + fader, capped **1.5×** (`HEAD_SCRUB_MAX_RATE`).
+6. Per-lane one-bar loops with **hidden-timeline rejoin** at the next bar (`relocateShared`/`relocateLane`, `scheduleLoopRelease`).
+7. Heads mode v2: four playheads on one source, dual-bus isolation (normal bus gated to 0, 40 ms equal-power crossfade), entry snapshot restore.
+8. Lane reverse (loop-only vs. free-running rejoin).
+9. Inertia envelopes on play/stop (`src/audio/inertia.ts`).
+10. FX: 4 banks × 3 (`src/machine/fx12.ts`), signal order TONE→MOD→MOTION→SPACE.
 
-## Tests
+**D. Stays browser-only (transfer tool):** file import/decode, mono downmix, **BPM/beat-phase/bar detection** (`gridAnalysis.ts` — ship the detected grid as metadata alongside the stems), waveform rendering, project/session store (OPFS/IndexedDB), WAV export, the guide/illustration, `.stemtape` packaging.
 
-New `src/audio/__tests__/headsIsolation.test.ts` and `src/audio/__tests__/loopRejoin.test.ts` over the existing offline/mocked graph:
+## 4. Fork structure
 
-- Heads: per-path contribution (normal bus tap ≈ 0, heads bus tap > 0), FX-return tap ≈ 0, hidden timeline advances while silent, exit landing error, source counts, no duplicate paths.
-- Loop rejoin: landing error ≤ 2 source frames against the hidden timeline and against the other stems' read frames; matrix over lanes 1-4, 1/2/3/4 simultaneous loops, ¼/½/1/2/4/8 bars, 0.5×/1×/2×, a glide while looping, a loop captured after per-lane scrub, 100 capture/release cycles asserting no source leak, both node and worklet modes.
+Fork `chattock/sp1-tape-looper` → `stem-tape-fw`, keep upstream as a remote and rebase onto tags. Never edit `sp1_emmc.c`, `boards/`, or the UAC2 patch in feature commits. New code in `firmware/src/stemtape/`: `gestures.c`, `arbiter.c`, `map_table.c` (generated from `stemTapeV1Map.ts` via `exportMapJson()`), `heads.c`, `scrub.c`, `fx/`. Likely modified upstream files: `main.c`, `prj.conf`, `app.overlay`, LED/ADC scan.
 
-## Browser acceptance
+Build: Zephyr **v4.3.1**, SDK **0.17.4**, apply the UAC2 patch, `west build -p -b stem_player firmware -- -DBOARD_ROOT=$(pwd)`.
 
-Playwright (Chromium, then WebKit) driving the rendered SP-1 with real pointer events only. Per scenario the log records: pointer sequence → resolved gesture → command → ack → scheduled context frame → audible source frame → hidden frame → bus gains → path count → measured RMS. Reported metrics: normal-bus RMS during Heads, heads-bus RMS, hidden advancement, exit landing error, per-stem release landing error, path counts, max seam discontinuity, console errors.
+## 5. Phased bring-up (each step a reversible checkpoint = archived `.bin` + tag)
 
-## Files expected to change
+0. **Backup/recovery first.** Dump stock firmware and eMMC; open one donor unit, wire SWD, prove a JTAG/SWD reflash works. Do nothing else until an unbrick is demonstrated twice.
+1. Build **unmodified** `v2.7.1-official` from source, flash, verify byte-behaviour against the released `.bin`.
+2. Donor hardware verification: ADC scan of all 11 controls, LED sweep, UAC2 enumeration, eMMC read/write, battery gauge.
+3. Instrumentation only: emit a serial command stream mirroring Stem Tape's ordered commands. No behaviour change.
+4. Gesture arbiter + generated map table (C-group 2/3).
+5. Four-stem playback + faders (C1).
+6. Varispeed/inertia, global scrub, lane scrub (C4, C5, C9).
+7. Lane loops + hidden-timeline rejoin, reverse (C6, C8).
+8. Heads mode + bus isolation (C7).
+9. FX banks, cheapest first; drop `heavy: true` algorithms (Scatter, Shimmer, Freeze) if the budget fails.
+10. Transfer-tool protocol extension: stems + grid metadata + mappings.
 
-`src/audio/engine.ts` (graph, bus gains, applyAudibility, relocate split, loop.release handler, diagnostics), `src/audio/headLanes.ts` (destination + exit sweep), `src/audio/useAudioEngine.ts` / `src/lib/diagnostics.ts` (per-bus RMS + path counts for the proof), plus the two new test files. No gesture, arbitration or control mapping changes.
+## 6. Budgets, risks, unknowns
+
+- **CPU:** 64 MHz M4F, no FPU-heavy headroom. Four streams at 44.1 k with resampling ≈ the whole budget; FX and Heads (4 extra voices on one source) are the risk. Measure cycles per block at step 5 before promising steps 8–9.
+- **RAM:** 256 KB total. No decoded-buffer model — everything must stream from eMMC with small ring buffers. Heads = 4 extra read cursors × ring buffer; size them in step 8 or cut head count.
+- **Flash:** 1 MB; Tape Looper already uses ~109 KB. Map table and FX coefficients must live in flash, not RAM.
+- **Licensing:** upstream MIT — fork freely with attribution. Stock TE firmware must never be copied or merged. Solderless flasher licensing is unknown; do not redistribute it.
+- **Unknowns/blockers:** no confirmed unbrick path; eMMC capacity; codec part number; whether the stock bootloader enforces signatures; real sample rate/latency ceiling; whether the shared analogue sense line can resolve the multi-control chords Stem Tape requires (FUNCTION + Track + Volume is three simultaneous presses).
+- **Hardware tests:** SWD recovery ×2, chord resolution matrix on the sense line, sustained 4-stream eMMC throughput, thermal/battery under load.
+
+## 7. Go / no-go
+
+**Conditional go.** The base is genuinely open (MIT, full Zephyr source), the SoC is documented, and the browser build is an exact behavioural spec. Two conditions gate it: a proven SWD recovery path, and evidence the analogue sense line can report the three-control chords the map depends on. Either failing means Stem Tape ships as a reduced mapping, not the full registry.
+
+**Smallest safe first experiment:** on one donor unit, wire SWD, dump and restore stock firmware, then build and flash unmodified Tape Looper `v2.7.1-official` from source and recover back to stock. Success = the device survives two full round trips. Nothing Stem Tape-specific is written until that passes.
+
+**First implementation milestone:** phase 3 — unmodified Tape Looper plus a serial trace of the ordered command stream, so the hardware's control events can be diffed against the browser twin's before any behaviour is forked.
