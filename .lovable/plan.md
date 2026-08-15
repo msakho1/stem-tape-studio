@@ -136,7 +136,8 @@ A global cue can therefore end with four *different* targets — e.g. two lanes 
 | Track hold that already produced `lane.audition` `:3979` | the audition continues and restores normally; only the button's *release* action is suppressed |
 | FX overlay open | learning eligibility unchanged; playback allowed; FX controls untouched |
 | Heads mode | learning and playback both rejected (Heads owns `headsBus` `:1802`) |
-| Scrub / reverse / any loop / off-1× rate | learning rejected; playback allowed and rejoins per §6 |
+| Scrub / reverse | learning rejected; **playback rejected in v1** (isolated: if its lane is scrubbing/reversed; global: if any lane is scrubbing/reversed) |
+| Any loop / off-1× rate | learning rejected; playback allowed and rejoins per §6 |
 | Transport stopped | learning rejected; **playback allowed**, completion returns to silence |
 | Same channel+note relearned | overwrite |
 | Note On while that note plays | retrigger from `startFrame`, one bounded crossfade |
