@@ -546,6 +546,18 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
         const i = trackIndexOf(c);
         const slice = next.tracks[i]!;
 
+        // ---- armed selection is EXCLUSIVE ------------------------------------
+        // While the FUNCTION tap's arming window is open, the Track gesture
+        // emits ONLY `stem.select`. No mute, no loop capture/release, no
+        // audition, no FX bank action may leak out of a selection.
+        if (next.trackSelectArmedAt != null && t - next.trackSelectArmedAt <= TRACK_SELECT_ARM_MS) {
+          next = { ...next, trackSelectArmedAt: null, activeTrack: i, headsSource: next.headsMode ? i : next.headsSource };
+          next = emit(next, "stem.select", { stem: i }, { rowId: "tape.track.select", t });
+          return fire(next, "tape.track.select", `active track = ${i + 1} (selection only)`, t);
+        }
+        if (next.trackSelectArmedAt != null) next = { ...next, trackSelectArmedAt: null };
+
+
         // A Track button that took part in a CHORD audition never toggles mute
         // or loop on release: the chord already consumed that press.
         if (next.auditionChord.includes(i)) {
