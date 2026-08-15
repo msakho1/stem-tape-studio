@@ -1,6 +1,13 @@
 import { COMMAND_LOG_LIMIT, makeCommand, type AudioCommand, type AudioCommandType } from "@/audio/commands";
 import type { Control, TrackIndex } from "@/device/geometry";
-import { TEMPO_TAP_IDLE_MS, type Gesture } from "@/input/gestures";
+import { type Gesture } from "@/input/gestures";
+
+/**
+ * How long a bare FUNCTION tap keeps active-track selection armed. Long enough
+ * to look down at the four Track buttons, short enough that the next unrelated
+ * Track tap is a normal mute and not a stray selection.
+ */
+export const TRACK_SELECT_ARM_MS = 1200;
 import { V26_ROW_BY_ID } from "@/machine/v26map";
 import type { PerfIntent } from "@/machine/chordArbiter";
 import {
