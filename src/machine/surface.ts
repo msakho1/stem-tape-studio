@@ -262,6 +262,50 @@ function emitHold(state: SurfaceState, mask: string, t: number, rowId: string): 
   return emit(state, heads ? "heads.play.hold" : "lane.audition", { mask }, { rowId: heads ? "heads.play" : rowId, t });
 }
 
+/**
+ * Stem Instrument Mode ingress.
+ *
+ * The reducer does NOT decide learn vs play — only the engine knows the frame
+ * the event landed on and whether the tape was eligible at that instant. It
+ * appends ONE ordered command carrying the normalized event plus the hardware
+ * qualifiers held at that moment, so cues stay in the same ordered stream as
+ * every gesture and can never overtake a mute or a loop.
+ */
+export function applyMidiEvent(
+  state: SurfaceState,
+  ev: {
+    kind: "noteOn" | "noteOff" | "allNotesOff";
+    note: number;
+    velocity: number;
+    channel: number;
+    timestampMs: number;
+    source: string;
+    deviceId: string;
+    deviceName: string;
+  },
+): SurfaceState {
+  const tracksHeld = [0, 1, 2, 3]
+    .map((i) => (state.pressed.includes(`track-button-${i + 1}` as Control) ? "1" : "0"))
+    .join("");
+  return emit(
+    state,
+    ev.kind === "allNotesOff" ? "cue.panic" : "cue.event",
+    {
+      kind: ev.kind,
+      note: ev.note,
+      velocity: ev.velocity,
+      channel: ev.channel,
+      timestampMs: ev.timestampMs,
+      source: ev.source,
+      deviceId: ev.deviceId,
+      deviceName: ev.deviceName,
+      functionHeld: state.functionHeld,
+      tracksHeld,
+    },
+    { rowId: "cue.midi", t: ev.timestampMs },
+  );
+}
+
 export function initialSurfaceState(): SurfaceState {
   return {
     power: "on",
