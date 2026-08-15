@@ -33,8 +33,8 @@ Latency is per family — not a universal 300 ms.
 | Family | Constant | Value | Commit latency after last finger-up |
 |---|---|---|---|
 | Track buttons (tap / double / triple / hold) | `trackDecisionMs` — one shared gap **and** decision window | **200 ms** (tunable 200–220) | ≤220 ms for all counts |
-| FN + PLAY multi-tap | `fnPlayDecisionMs` (own longer window) | **420 ms** | ≤440 ms |
-| Bare PLAY, Volume, rocker, faders, FX momentary | none | immediate | ≤1 audio frame (FX momentary fires on pointer-**down**, `chordArbiter.ts:217-226`) |
+| FN + PLAY multi-tap | `fnPlayDecisionMs` | **300 ms** | ≤330 ms (single-tap half-speed must not feel sluggish) |
+| Bare PLAY, Volume, rocker, faders, FX momentary | none | **no intentional arbitration timer** — the command is emitted **synchronously in the same input-event turn** (FX momentary on pointer-**down**, `chordArbiter.ts:217-226`) | engine/audio acknowledgement is measured **separately**, never conflated with input latency |
 | tap → hold | `holdMs` | 450 ms | — |
 | G1 arrival | `modifierArrivalMs` | 400 ms | — |
 
