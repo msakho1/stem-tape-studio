@@ -150,6 +150,8 @@ function LabPage() {
     filter: { mode: state.filter.mode, amount: state.filter.amount },
     grid: { bpm: state.grid.bpm, source: state.grid.source },
     song: state.song,
+    // Stem Instrument Mode markers travel with the project.
+    cues: mounted ? engine.cues.list() : [],
   };
 
   const active = state.activeTrack;

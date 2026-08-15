@@ -4566,6 +4566,7 @@ export class AudioEngine {
   }
 
   dispose() {
+    this.stopAllCues("engine disposed");
     for (const t of this.tracks) {
       t.fxRack?.dispose();
       t.fxRack = null;

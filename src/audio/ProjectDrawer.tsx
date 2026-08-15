@@ -218,6 +218,15 @@ export function ProjectDrawer({ engine, status, control }: Props) {
       abort.current = null;
       // Restored stems are re-analysed: the grid is derived from audio, not trusted from disk.
       await detectGrid();
+      // Markers load AFTER analysis, so revalidation runs against the hashes of
+      // the stems that were actually decoded.
+      const cueLoad = engine.loadCueMarkers(project.control.cues ?? []);
+      if (cueLoad.loaded > 0) {
+        note(
+          cueLoad.invalidated === 0,
+          `cues — ${cueLoad.loaded} marker${cueLoad.loaded === 1 ? "" : "s"} restored${cueLoad.invalidated ? `, ${cueLoad.invalidated} unplayable (source replaced)` : ""}`,
+        );
+      }
       // Amendment 2: a song load stops the transport and waits for PLAY.
       engine.execute({ id: -1, t: performance.now(), type: "song.load", payload: { song: 0 } });
       setBusy(null);
