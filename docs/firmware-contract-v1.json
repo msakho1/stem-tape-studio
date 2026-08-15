@@ -1,0 +1,1312 @@
+{
+  "contract": "stem-tape-firmware-contract",
+  "contractVersion": "1.0.0",
+  "mapVersion": "stem-tape-v1.0.0",
+  "target": "Teenage Engineering x Kanye West SP-1 (unreleased) — 4 mono stem lanes",
+  "principles": [
+    "Audio truth lives in the engine; the control surface emits an ordered command stream, never snapshot diffs.",
+    "Playhead is derived from the audio clock through the integrated rate curve, never ticked.",
+    "Tempo, beat phase and downbeat detection are automatic, local, deterministic and non-AI.",
+    "No user audio leaves the device. Memory figures are MiB (1024^2)."
+  ],
+  "controls": {
+    "buttons": [
+      "play",
+      "record",
+      "function",
+      "track-button-1",
+      "track-button-2",
+      "track-button-3",
+      "track-button-4",
+      "volume-minus",
+      "volume-plus"
+    ],
+    "rockers": [
+      "rocker-fwd",
+      "rocker-rev"
+    ],
+    "faders": [
+      "fader-1",
+      "fader-2",
+      "fader-3",
+      "fader-4"
+    ]
+  },
+  "timing": {
+    "playTapHoldMs": 450,
+    "stemSoloLinkThresholdMs": 700,
+    "fxOverlayReleaseMs": 600,
+    "fxOverlaySecondPressMs": 120,
+    "pairingHoldMs": 2000,
+    "exportHoldMs": 900,
+    "antiClickFadeMs": 8,
+    "cueSeamMs": 12,
+    "staleMidiEventMs": 250
+  },
+  "midi": {
+    "identity": "channel:note",
+    "accepted": [
+      "noteOn",
+      "noteOff",
+      "allNotesOff (CC 123)"
+    ],
+    "normalizations": [
+      "noteOn velocity 0 -> noteOff",
+      "CC 123 -> allNotesOff",
+      "clock/aftertouch/program change/sysex dropped"
+    ],
+    "event": {
+      "kind": "noteOn|noteOff|allNotesOff",
+      "note": "0..127",
+      "velocity": "0..127",
+      "channel": "0..15",
+      "timestampMs": "performance.now() domain, monotonic",
+      "source": "webmidi|coremidi-bridge|test",
+      "deviceId": "string",
+      "deviceName": "string"
+    },
+    "cues": {
+      "globalLearn": "FUNCTION + hold MIDI key",
+      "isolatedLearn": "TRACK n + hold MIDI key",
+      "playback": "hold learned key = play cue, release = return",
+      "globalPlayback": "parks the song timeline; resumes at the saved frame on release",
+      "isolatedPlayback": "replaces one lane; other three lanes and the timeline continue; lane rejoins on release",
+      "minCaptureFrames": 1024,
+      "invalidation": "contentHash change on the owning lane(s)"
+    }
+  },
+  "layers": [
+    {
+      "layer": "tape",
+      "rows": [
+        {
+          "id": "rocker.speed",
+          "controls": [
+            "fwd / rwd"
+          ],
+          "thresholdMs": null,
+          "command": "speed and pitch, ±1 BPM",
+          "suppresses": [],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "v2.6 stock behaviour",
+          "provenance": "v2.6",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "rocker.semitone",
+          "controls": [
+            "double-click"
+          ],
+          "thresholdMs": null,
+          "command": "exact semitone",
+          "suppresses": [],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "txn-snapshot",
+          "led": "v2.6 stock behaviour",
+          "provenance": "v2.6",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "rocker.chop",
+          "controls": [
+            "FN + fwd / rwd"
+          ],
+          "thresholdMs": null,
+          "command": "chop half / double · hold = glide",
+          "suppresses": [],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "v2.6 stock behaviour",
+          "provenance": "v2.6",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "rocker.chopReset",
+          "controls": [
+            "FN + dbl-click"
+          ],
+          "thresholdMs": null,
+          "command": "chop reset",
+          "suppresses": [],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "v2.6 stock behaviour",
+          "provenance": "v2.6",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "volume.master",
+          "controls": [
+            "vol − +"
+          ],
+          "thresholdMs": null,
+          "command": "master volume",
+          "suppresses": [],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "v2.6 stock behaviour",
+          "provenance": "v2.6",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "volume.chopWindow",
+          "controls": [
+            "FN + vol"
+          ],
+          "thresholdMs": null,
+          "command": "slide the chop window · hold = glide",
+          "suppresses": [],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "v2.6 stock behaviour",
+          "provenance": "v2.6",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "fader.trackVolume",
+          "controls": [
+            "1–4"
+          ],
+          "thresholdMs": null,
+          "command": "track volumes · per head in heads mode",
+          "suppresses": [],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "v2.6 stock behaviour",
+          "provenance": "v2.6",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "fader.window",
+          "controls": [
+            "FN + 1 · 2 · 3"
+          ],
+          "thresholdMs": null,
+          "command": "window start · end · shift, free sizes",
+          "suppresses": [],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "v2.6 stock behaviour",
+          "provenance": "v2.6",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "fader.windowReverse",
+          "controls": [
+            "FN + 1 past 2"
+          ],
+          "thresholdMs": null,
+          "command": "the window plays in reverse",
+          "suppresses": [],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "v2.6 stock behaviour",
+          "provenance": "v2.6",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "fader.filter",
+          "controls": [
+            "FN + 4"
+          ],
+          "thresholdMs": null,
+          "command": "filter: mid = off · down LP · up HP",
+          "suppresses": [],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "v2.6 stock behaviour",
+          "provenance": "v2.6",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "fader.headScrub",
+          "controls": [
+            "in heads"
+          ],
+          "thresholdMs": null,
+          "command": "faders scrub the heads",
+          "suppresses": [],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "v2.6 stock behaviour",
+          "provenance": "v2.6",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "track.record",
+          "controls": [
+            "hold"
+          ],
+          "thresholdMs": null,
+          "command": "record — starts on your first sound",
+          "suppresses": [],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "v2.6 stock behaviour",
+          "provenance": "v2.6",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "track.tap",
+          "controls": [
+            "tap"
+          ],
+          "thresholdMs": null,
+          "command": "stop the take · mute / unmute",
+          "suppresses": [],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "v2.6 stock behaviour",
+          "provenance": "v2.6",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "loop.capture",
+          "controls": [
+            "double-tap"
+          ],
+          "thresholdMs": null,
+          "command": "capture one-bar loop (delete removed)",
+          "suppresses": [],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "v2.6 stock behaviour",
+          "provenance": "v2.6",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "track.bank",
+          "controls": [
+            "FN + track"
+          ],
+          "thresholdMs": null,
+          "command": "banks: jump · tap again = next song",
+          "suppresses": [],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "v2.6 stock behaviour",
+          "provenance": "v2.6",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "play.toggle",
+          "controls": [
+            "tap"
+          ],
+          "thresholdMs": null,
+          "command": "play / stop",
+          "suppresses": [],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "v2.6 stock behaviour",
+          "provenance": "v2.6",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "play.restart",
+          "controls": [
+            "hold"
+          ],
+          "thresholdMs": null,
+          "command": "restart from the top",
+          "suppresses": [],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "v2.6 stock behaviour",
+          "provenance": "v2.6",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "play.loopMode",
+          "controls": [
+            "FN + play, release together"
+          ],
+          "thresholdMs": null,
+          "command": "fixed / variable loops",
+          "suppresses": [],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "v2.6 stock behaviour",
+          "provenance": "v2.6",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "play.snap",
+          "controls": [
+            "FN + tap ×2"
+          ],
+          "thresholdMs": null,
+          "command": "snap to 1.0×",
+          "suppresses": [],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "v2.6 stock behaviour",
+          "provenance": "v2.6",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "play.heads",
+          "controls": [
+            "FN + tap ×3"
+          ],
+          "thresholdMs": null,
+          "command": "heads mode",
+          "suppresses": [],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "v2.6 stock behaviour",
+          "provenance": "v2.6",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "play.lights",
+          "controls": [
+            "hold thru 5 s"
+          ],
+          "thresholdMs": null,
+          "command": "dim / full lights",
+          "suppresses": [],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "v2.6 stock behaviour",
+          "provenance": "v2.6",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "fn.power",
+          "controls": [
+            "hold"
+          ],
+          "thresholdMs": null,
+          "command": "power on / off",
+          "suppresses": [],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "v2.6 stock behaviour",
+          "provenance": "v2.6",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "fn.tempoGrid",
+          "controls": [
+            "tap ×4 in rhythm"
+          ],
+          "thresholdMs": null,
+          "command": "the song gets a tempo grid",
+          "suppresses": [],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "v2.6 stock behaviour",
+          "provenance": "v2.6",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "fn.beatmatch",
+          "controls": [
+            "re-tap over loops"
+          ],
+          "thresholdMs": null,
+          "command": "beatmatch to your taps",
+          "suppresses": [],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "v2.6 stock behaviour",
+          "provenance": "v2.6",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "fn.clearGrid",
+          "controls": [
+            "tap, then quick hold"
+          ],
+          "thresholdMs": null,
+          "command": "clear the grid",
+          "suppresses": [],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "v2.6 stock behaviour",
+          "provenance": "v2.6",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "fn.roundBpm",
+          "controls": [
+            "tap ×4, then hold"
+          ],
+          "thresholdMs": null,
+          "command": "round to the nearest whole BPM",
+          "suppresses": [],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "v2.6 stock behaviour",
+          "provenance": "v2.6",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "fn.gridReject",
+          "controls": [
+            "unless it's far off"
+          ],
+          "thresholdMs": null,
+          "command": "all four blink, nothing moves",
+          "suppresses": [],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "v2.6 stock behaviour",
+          "provenance": "v2.6",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "heads.toggle",
+          "controls": [
+            "FN + triple-tap PLAY"
+          ],
+          "thresholdMs": null,
+          "command": "heads on / off",
+          "suppresses": [],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "v2.6 stock behaviour",
+          "provenance": "v2.6",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "heads.replay",
+          "controls": [
+            "heads on"
+          ],
+          "thresholdMs": null,
+          "command": "3 tracks replay the source, a quarter apart",
+          "suppresses": [],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "v2.6 stock behaviour",
+          "provenance": "v2.6",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "heads.source",
+          "controls": [
+            "hold a track"
+          ],
+          "thresholdMs": null,
+          "command": "a loaded track becomes the heads source",
+          "suppresses": [],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "v2.6 stock behaviour",
+          "provenance": "v2.6",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "heads.scrub",
+          "controls": [
+            "FN + faders · double-tap"
+          ],
+          "thresholdMs": null,
+          "command": "scrub the heads · double-tap = reverse",
+          "suppresses": [],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "v2.6 stock behaviour",
+          "provenance": "v2.6",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "lights.base",
+          "controls": [
+            "track lights"
+          ],
+          "thresholdMs": null,
+          "command": "dark = empty · faint = muted content",
+          "suppresses": [],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "v2.6 stock behaviour",
+          "provenance": "v2.6",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "lights.pulse",
+          "controls": [
+            "playing"
+          ],
+          "thresholdMs": null,
+          "command": "each light pulses as its own loop wraps (polyrhythm)",
+          "suppresses": [],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "v2.6 stock behaviour",
+          "provenance": "v2.6",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "lights.songRow",
+          "controls": [
+            "song row"
+          ],
+          "thresholdMs": null,
+          "command": "solid = song · blink = bank",
+          "suppresses": [],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "v2.6 stock behaviour",
+          "provenance": "v2.6",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "songs.memory",
+          "controls": [
+            "16 songs"
+          ],
+          "thresholdMs": null,
+          "command": "every song remembers loops, speed, chop, mutes, grid",
+          "suppresses": [],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "v2.6 stock behaviour",
+          "provenance": "v2.6",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "songs.length",
+          "controls": [
+            "takes"
+          ],
+          "thresholdMs": null,
+          "command": "to 8:00 · longer with the tape slowed",
+          "suppresses": [],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "v2.6 stock behaviour",
+          "provenance": "v2.6",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "songs.transfer",
+          "controls": [
+            "transfer page"
+          ],
+          "thresholdMs": null,
+          "command": "WAVs in + out",
+          "suppresses": [],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "v2.6 stock behaviour",
+          "provenance": "v2.6",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "play.cue",
+          "controls": [
+            "play"
+          ],
+          "thresholdMs": 450,
+          "command": "transport.cue frame=0 (8 ms anti-click fade, sources stopped, EXACT launch armed)",
+          "suppresses": [
+            "transport.restart"
+          ],
+          "supersedes": [
+            "play.restart"
+          ],
+          "originalBehaviour": "v2.6: hold PLAY restarts the loop from the top immediately.",
+          "rollback": "none",
+          "led": "PLAY indicator slow-blinks while cued",
+          "provenance": "reinterpreted",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "rocker.scrub",
+          "controls": [
+            "function",
+            "rocker-fwd"
+          ],
+          "thresholdMs": null,
+          "command": "transport.scrub.start direction=±1 → transport.scrub.end (held audible four-stem shuttle, one shared playhead)",
+          "suppresses": [
+            "rocker.chop",
+            "rate.set",
+            "transport.scrub"
+          ],
+          "supersedes": [
+            "rocker.chop"
+          ],
+          "originalBehaviour": "v2.6: FUNCTION + rocker halves/doubles the chop division. Chop now lives on PLAY + rocker.",
+          "rollback": "none",
+          "led": "rocker LED flashes in the scrub direction while held",
+          "provenance": "reinterpreted",
+          "family": null,
+          "keys": [
+            "KeyF+KeyQ",
+            "KeyF+KeyA"
+          ]
+        },
+        {
+          "id": "rocker.chop.play",
+          "controls": [
+            "play",
+            "rocker-fwd"
+          ],
+          "thresholdMs": null,
+          "command": "loop.chop half / double (PLAY held + rocker deflection; PLAY is claimed before dispatch)",
+          "suppresses": [
+            "transport.play",
+            "transport.stop",
+            "transport.cue",
+            "rate.set"
+          ],
+          "supersedes": [
+            "rocker.chop"
+          ],
+          "originalBehaviour": "v2.6: FUNCTION + rocker halved/doubled the chop. Stem Tape moves chop to PLAY + rocker so FUNCTION + rocker can shuttle.",
+          "rollback": "none",
+          "led": "chop division shown on the four track LEDs while PLAY is held",
+          "provenance": "extension",
+          "family": null,
+          "keys": [
+            "Space+KeyQ",
+            "Space+KeyA"
+          ]
+        }
+      ]
+    },
+    {
+      "layer": "stem",
+      "rows": [
+        {
+          "id": "stem.select.next",
+          "controls": [
+            "play",
+            "volume-plus"
+          ],
+          "thresholdMs": null,
+          "command": "stem.select dir=+1 (wrap Vocals→Drums→Bass→Instruments)",
+          "suppresses": [
+            "transport.play",
+            "master.gain"
+          ],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "active stem LED brightens",
+          "provenance": "extension",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "stem.select.prev",
+          "controls": [
+            "play",
+            "volume-minus"
+          ],
+          "thresholdMs": null,
+          "command": "stem.select dir=−1",
+          "suppresses": [
+            "transport.play",
+            "master.gain"
+          ],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "active stem LED brightens",
+          "provenance": "extension",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "stem.solo",
+          "controls": [
+            "play",
+            "track-button-n"
+          ],
+          "thresholdMs": 700,
+          "command": "stem.solo (overlap < 700 ms, measured from the two-control overlap)",
+          "suppresses": [
+            "transport.play",
+            "track.mute",
+            "track.unmute"
+          ],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "soloed stem solid, non-solo stems faint",
+          "provenance": "extension",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "stem.link",
+          "controls": [
+            "play",
+            "track-button-n"
+          ],
+          "thresholdMs": 700,
+          "command": "stem.link toggle (overlap ≥ 700 ms) — phase-continuous, never restarts",
+          "suppresses": [
+            "transport.play",
+            "track.mute",
+            "track.unmute"
+          ],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "unlinked stem double-pulses",
+          "provenance": "extension",
+          "family": null,
+          "keys": []
+        }
+      ]
+    },
+    {
+      "layer": "heads",
+      "rows": [
+        {
+          "id": "heads.lane.play",
+          "controls": [
+            "track-button-n"
+          ],
+          "thresholdMs": null,
+          "command": "heads.play.hold mask=<held> (hold plays exactly the held heads; release restores the previous mix)",
+          "suppresses": [
+            "heads.source",
+            "lane.audition"
+          ],
+          "supersedes": [
+            "heads.source"
+          ],
+          "originalBehaviour": "v2.6: holding a loaded track made it the single source feeding all four heads.",
+          "rollback": "none",
+          "led": "held heads solid, the rest faint",
+          "provenance": "reinterpreted",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "heads.lane.mute",
+          "controls": [
+            "track-button-n"
+          ],
+          "thresholdMs": null,
+          "command": "heads.mute toggle (single tap, emitted only after the ×2/×3 window closes)",
+          "suppresses": [
+            "track.mute"
+          ],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "muted head faint",
+          "provenance": "extension",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "heads.lane.latch",
+          "controls": [
+            "track-button-n"
+          ],
+          "thresholdMs": null,
+          "command": "heads.latch toggle (triple-tap — independent playback that survives the release)",
+          "suppresses": [
+            "heads.replay"
+          ],
+          "supersedes": [
+            "heads.replay"
+          ],
+          "originalBehaviour": "v2.6: heads on = three tracks replay the source a quarter apart.",
+          "rollback": "none",
+          "led": "latched head solid",
+          "provenance": "reinterpreted",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "heads.lane.loop",
+          "controls": [
+            "track-button-n"
+          ],
+          "thresholdMs": null,
+          "command": "heads.loop.capture (double-tap captures one bar from the parked position · tap releases it)",
+          "suppresses": [
+            "track.loop"
+          ],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "looping head chases",
+          "provenance": "extension",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "heads.lane.scrub",
+          "controls": [
+            "function",
+            "fader-n"
+          ],
+          "thresholdMs": null,
+          "command": "heads.scrub.start/preview/end on head N (audible positional scrub; release parks the loop start)",
+          "suppresses": [
+            "fader.headScrub",
+            "lane.scrub"
+          ],
+          "supersedes": [
+            "heads.scrub"
+          ],
+          "originalBehaviour": "v2.6: FUNCTION + faders scrubbed the shared heads; double-tap reversed them.",
+          "rollback": "none",
+          "led": "scrubbed head solid while held",
+          "provenance": "reinterpreted",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "heads.lane.reverse",
+          "controls": [
+            "function",
+            "track-button-n"
+          ],
+          "thresholdMs": null,
+          "command": "heads.reverse toggle (FUNCTION + double-tap, per head)",
+          "suppresses": [
+            "lane.reverse"
+          ],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "reversed head chases backwards",
+          "provenance": "extension",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "heads.lane.resize",
+          "controls": [
+            "function",
+            "track-button-n",
+            "volume-up"
+          ],
+          "thresholdMs": null,
+          "command": "heads.loop.resize half / double the held head's loop (0.25–8 bars)",
+          "suppresses": [
+            "volume.master"
+          ],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "resized head flashes its new length",
+          "provenance": "extension",
+          "family": null,
+          "keys": []
+        }
+      ]
+    },
+    {
+      "layer": "fx-overlay",
+      "rows": [
+        {
+          "id": "fx.filter.momentary",
+          "controls": [
+            "track-button-1"
+          ],
+          "thresholdMs": null,
+          "command": "fx.momentary.start/end filter on the active stem (bipolar DJ filter)",
+          "suppresses": [
+            "track.mute",
+            "track.unmute"
+          ],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "side LED 1 breathing",
+          "provenance": "extension",
+          "family": "filter",
+          "keys": []
+        },
+        {
+          "id": "fx.filter.variation",
+          "controls": [
+            "track-button-1",
+            "volume-minus|volume-plus"
+          ],
+          "thresholdMs": null,
+          "command": "fx.variation filter ±1 (4 presets)",
+          "suppresses": [
+            "master.gain",
+            "track.mute",
+            "track.unmute"
+          ],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "side LEDs show the variation number, then time out",
+          "provenance": "extension",
+          "family": "filter",
+          "keys": []
+        },
+        {
+          "id": "fx.filter.latch",
+          "controls": [
+            "track-button-1",
+            "function"
+          ],
+          "thresholdMs": null,
+          "command": "fx.latch filter toggle",
+          "suppresses": [
+            "track.mute",
+            "track.unmute",
+            "function.hold"
+          ],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "side LED 1 solid while latched",
+          "provenance": "extension",
+          "family": "filter",
+          "keys": []
+        },
+        {
+          "id": "fx.echo.momentary",
+          "controls": [
+            "track-button-2"
+          ],
+          "thresholdMs": null,
+          "command": "fx.momentary.start/end echo on the active stem (tempo-synced echo)",
+          "suppresses": [
+            "track.mute",
+            "track.unmute"
+          ],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "side LED 2 breathing",
+          "provenance": "extension",
+          "family": "echo",
+          "keys": []
+        },
+        {
+          "id": "fx.echo.variation",
+          "controls": [
+            "track-button-2",
+            "volume-minus|volume-plus"
+          ],
+          "thresholdMs": null,
+          "command": "fx.variation echo ±1 (4 presets)",
+          "suppresses": [
+            "master.gain",
+            "track.mute",
+            "track.unmute"
+          ],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "side LEDs show the variation number, then time out",
+          "provenance": "extension",
+          "family": "echo",
+          "keys": []
+        },
+        {
+          "id": "fx.echo.latch",
+          "controls": [
+            "track-button-2",
+            "function"
+          ],
+          "thresholdMs": null,
+          "command": "fx.latch echo toggle",
+          "suppresses": [
+            "track.mute",
+            "track.unmute",
+            "function.hold"
+          ],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "side LED 2 solid while latched",
+          "provenance": "extension",
+          "family": "echo",
+          "keys": []
+        },
+        {
+          "id": "fx.reverb.momentary",
+          "controls": [
+            "track-button-3"
+          ],
+          "thresholdMs": null,
+          "command": "fx.momentary.start/end reverb on the active stem (algorithmic reverb)",
+          "suppresses": [
+            "track.mute",
+            "track.unmute"
+          ],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "side LED 3 breathing",
+          "provenance": "extension",
+          "family": "reverb",
+          "keys": []
+        },
+        {
+          "id": "fx.reverb.variation",
+          "controls": [
+            "track-button-3",
+            "volume-minus|volume-plus"
+          ],
+          "thresholdMs": null,
+          "command": "fx.variation reverb ±1 (4 presets)",
+          "suppresses": [
+            "master.gain",
+            "track.mute",
+            "track.unmute"
+          ],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "side LEDs show the variation number, then time out",
+          "provenance": "extension",
+          "family": "reverb",
+          "keys": []
+        },
+        {
+          "id": "fx.reverb.latch",
+          "controls": [
+            "track-button-3",
+            "function"
+          ],
+          "thresholdMs": null,
+          "command": "fx.latch reverb toggle",
+          "suppresses": [
+            "track.mute",
+            "track.unmute",
+            "function.hold"
+          ],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "side LED 3 solid while latched",
+          "provenance": "extension",
+          "family": "reverb",
+          "keys": []
+        },
+        {
+          "id": "fx.clearLatches",
+          "controls": [
+            "track-button-1",
+            "track-button-2",
+            "track-button-3",
+            "track-button-4",
+            "function"
+          ],
+          "thresholdMs": null,
+          "command": "fx.clearLatches on the active stem",
+          "suppresses": [
+            "track.mute",
+            "track.unmute",
+            "function.hold"
+          ],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "all four side LEDs blink once, then dark",
+          "provenance": "extension",
+          "family": null,
+          "keys": []
+        }
+      ]
+    },
+    {
+      "layer": "system",
+      "rows": [
+        {
+          "id": "fx.overlay.toggle",
+          "controls": [
+            "volume-minus",
+            "volume-plus"
+          ],
+          "thresholdMs": 600,
+          "command": "fx.overlay toggle (second press within 120 ms, both released < 600 ms)",
+          "suppresses": [
+            "master.gain"
+          ],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "both FUNCTION LEDs alternate-pulse while open",
+          "provenance": "reinterpreted",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "system.pairing",
+          "controls": [
+            "volume-minus",
+            "volume-plus"
+          ],
+          "thresholdMs": 2000,
+          "command": "existing Bluetooth pairing gesture (≈2 s hold)",
+          "suppresses": [
+            "master.gain",
+            "fx.overlay"
+          ],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "stock pairing pattern",
+          "provenance": "stock",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "system.volumechord.ambiguous",
+          "controls": [
+            "volume-minus",
+            "volume-plus"
+          ],
+          "thresholdMs": null,
+          "command": "no-op (600–2000 ms band, diagnostics only)",
+          "suppresses": [
+            "master.gain",
+            "fx.overlay"
+          ],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "no change",
+          "provenance": "extension",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "grid.tap.learn",
+          "controls": [
+            "function",
+            "volume-plus"
+          ],
+          "thresholdMs": null,
+          "command": "grid.tapTempo (median-filtered, ≥3 taps, 1500 ms inactivity resets)",
+          "suppresses": [
+            "master.gain"
+          ],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "grid LED flashes on the downbeat once locked",
+          "provenance": "extension",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "grid.quantise.toggle",
+          "controls": [
+            "function",
+            "volume-minus"
+          ],
+          "thresholdMs": null,
+          "command": "grid.toggleQuantise (punch-in/out snaps to the grid)",
+          "suppresses": [
+            "master.gain"
+          ],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "grid LED solid when quantise is on",
+          "provenance": "extension",
+          "family": null,
+          "keys": []
+        },
+        {
+          "id": "export.wav",
+          "controls": [
+            "function",
+            "record"
+          ],
+          "thresholdMs": 900,
+          "command": "export.wav (streamed 16/24-bit WAV, on-device)",
+          "suppresses": [],
+          "supersedes": [],
+          "originalBehaviour": null,
+          "rollback": "none",
+          "led": "export LED animates during assembly",
+          "provenance": "extension",
+          "family": null,
+          "keys": []
+        }
+      ]
+    }
+  ],
+  "rowCount": 67
+}
