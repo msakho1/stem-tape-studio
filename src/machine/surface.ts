@@ -496,7 +496,27 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
           next = { ...next, speed: 1 };
           return fire(emit(next, "rate.set", { rate: 1 }, { rowId: "play.snap", t }), "play.snap", "speed snapped to 1.000×", t);
         }
+        if (fn && g.count === 1) {
+          // ×1 = half-speed toggle. Mutually exclusive with ×2 and ×3, which is
+          // exactly why the gesture engine defers FUNCTION-qualified PLAY for
+          // fnPlayDecisionMs instead of firing this optimistically.
+          const rate = Math.abs(next.speed - 0.5) < 1e-6 ? 1 : 0.5;
+          next = { ...next, speed: rate };
+          return fire(
+            emit(next, "rate.set", { rate }, { rowId: "play.halfSpeed", t }),
+            "play.halfSpeed",
+            `speed ${rate.toFixed(3)}× — glided, all four stems`,
+            t,
+          );
+        }
         if (!fn && g.count === 1) {
+          if (next.globalLoop.latched) {
+            // A latched global loop owns the bare PLAY tap: the first tap
+            // releases the loop and the transport keeps running.
+            next = { ...next, globalLoop: { ...next.globalLoop, active: false, latched: false } };
+            next = emit(next, "loop.global.release", {}, { rowId: "tape.loop.global.release", t });
+            return fire(next, "tape.loop.global.release", "global loop released — song continues", t);
+          }
           next = { ...next, playing: !next.playing };
           next = emit(next, next.playing ? "transport.play" : "transport.stop", {}, { rowId: "play.toggle", t });
           return fire(next, "play.toggle", next.playing ? "play" : "stop", t);
