@@ -2677,8 +2677,14 @@ export class AudioEngine {
     dir: 1 | -1;
     pos: number;
     startPos: number;
-    /** Context time at which `pos` was last integrated — the integral anchor. */
+    /** Context time at which `pos` is exact — the integral anchor (= cursor). */
     posCtxTime: number;
+    /**
+     * Schedule cursor: the context time of the NEXT grain. `pos` is the source
+     * position at exactly this time, so the audible position at any context
+     * time t is `pos + dir·rate·(t − cursor)`.
+     */
+    cursor: number;
     wasPlaying: boolean;
     musicalRate: number;
     timer: ReturnType<typeof setInterval> | null;
