@@ -71,32 +71,38 @@ Rules:
 - Overwrite: a new commit on the same `channel:note` replaces the previous marker in place.
 - Cancel: All Notes Off, device disconnect, song/stem change, or transport stop discards all open captures.
 
-## 5. Cue-playback state machine (sample-accurate)
+## 5. Cue-playback state machine (sample-accurate, fixed 1×)
 
-Playback is allowed in far more states than learning: normal play, global loop running, lane loops running, FX overlay open. It is rejected in Heads mode and while stopped it is a no-op (silence).
+Playback is allowed in every state except Heads: normal play, global loop running, lane loops running, FX overlay open, **and while the transport is stopped**. Only *learning* requires aligned forward playback.
 
 On unqualified Note On for a learned marker, at `at = max(ctx.currentTime + lookahead, ctxTimeOf(ev))` with `lookahead ≥ SEAM_FADE_S`:
 
-1. Determine the affected lanes: all four for a global cue, one for an isolated cue.
-2. For each affected lane: spawn the cue voice with `spawn(t, at, startFrame/sr, true)` `:782`, register it in `cueOwner[lane] = { voice, noteKey, scope, endAt, endFrame }`, and give it the same **identity protection** as `pendingRelease` so no wrap/sweep/relocate can kill it.
-3. Fade the lane's previous voice(s) out with `fadeOutAndStop(t, live, at)` `:845`. The two voices overlap for exactly `SEAM_FADE_S`.
-4. **At the same moment**, schedule the completion seam: `endAt = at + (endFrame - startFrame)/sr / rate`, using the integrated rate curve for a non-unity rate. The rejoin voice for each lane is scheduled then and there (start time and read offset both computed up front), so the seam is sample-accurate. `tick()` only reaps dead nodes and clears `cueOwner`; it never decides the seam. Any varispeed change during a cue recomputes and reschedules the pending completion, the same way seams are invalidated today (`invalidateSeams`).
+1. Affected lanes: all four for a global cue, one for an isolated cue.
+2. For each affected lane: spawn the cue voice with `spawn(t, at, startFrame/sr, true)` `:782`, register `cueOwner[lane] = { voice, noteKey, scope, endAt, runtimeGeneration }`, and give the voice the same **identity protection** as `pendingRelease` so no wrap, sweep, relocate or respawn can fade or stop it.
+3. Fade any previously audible voice on that lane out with `fadeOutAndStop(t, live, at)` `:845`. The two overlap for exactly `SEAM_FADE_S`.
+4. **At the same moment**, schedule the completion seam and the rejoin voice: `endAt = at + (endFrame − startFrame)/sr`. Start time and read offset are both computed up front, so the seam is sample-accurate. `tick()` only reaps dead nodes and clears `cueOwner`; it never decides the seam.
+
+**Fixed 1× for v1.** Learning is only possible during aligned 1× playback, and the key's held duration *is* the passage, so a cue always plays at 1×. A varispeed change during an active cue does **not** reschedule, stretch or re-pitch it; the completion lands at the frame scheduled at trigger time. (Rate-following cues are explicitly out of scope.)
+
+**Stopped transport.** A cue triggered while stopped plays normally — a global cue sounds all four stems, an isolated cue sounds its one stem — through the same lane faders and FX. The shared timeline is **not** anchored or started, and at completion no rejoin voice is scheduled: the lane returns to silence.
+
+Normal-source suppression: **while `cueOwner[lane]` is set, nothing else may create an audible normal source on that lane** — not the wrap/seam scheduler, not `relocateLane` `:1021`, not `respawnLane` `:828`, not `tick()`. Loop windows, hidden pointers and the shared timeline continue to advance mathematically underneath; the correct source is respawned only at cue rejoin.
 
 Performance semantics:
 
-- **One-shot**: Note Off during playback does nothing.
-- **Retrigger**: a new Note On for the same key cancels the pending completion, crossfades to a fresh cue voice at `startFrame`, and reschedules the completion.
+- **One-shot**: Note Off during playback does nothing and never shortens the passage.
+- **Retrigger**: a new Note On for the same key bumps the runtime generation, cancels the pending completion, crossfades to a fresh cue voice at `startFrame`, and reschedules.
 - A second, different note takes ownership per §6.
-- All Notes Off / device disconnect / transport stop ends the cue at the next seam and rejoins normally (or lands silent if stopped).
+- All Notes Off / device disconnect / transport stop ends the cue safely at the next seam and rejoins per §6 (silence when stopped).
 
-Voice invariant (corrected): **one steady-state voice per affected lane; exactly two only during a bounded `SEAM_FADE_S` crossfade; exactly one after it.** Tests assert count ≤ 2 inside the seam window and == 1 outside it.
+Voice invariant (corrected): **one steady-state audible voice per affected lane, temporarily two during the bounded `SEAM_FADE_S` crossfade, exactly one afterwards** — measured as audible sources at an asserted context frame, not as entries in `t.sources` (see §12).
 
 ## 6. Ownership and rejoin
 
 Ownership is per lane, held by `cueOwner[lane]`.
 
-- Isolated cue: owns one lane. The other three are untouched — their voices, loops and hidden pointers keep running.
-- Global cue: **temporarily owns all four lanes**. It does not touch `globalLoop`, lane-loop windows, or the shared timeline; those keep advancing underneath.
+- Isolated cue: owns one lane. The other three are untouched — voices, loops and hidden pointers keep running.
+- Global cue: **temporarily owns all four lanes**. It never mutates `globalLoop`, lane-loop windows or the shared timeline.
 - A global cue starting while an isolated cue plays takes over that lane too; the isolated note ends at the same seam.
 - An isolated note targeting a lane already owned by a global cue is rejected while the global cue runs.
 
@@ -106,10 +112,10 @@ At completion each affected lane **independently returns to its actual underlay*
 | --- | --- |
 | Normal forward play | `timeline.positionAt(endAt)` — the hidden song frame |
 | Global loop running | the global window's phase at `endAt`: `start + ((positionAt(endAt) − start) mod lengthS)` from `globalLoop` `:407` |
-| That lane has its own lane loop | the lane-loop window's phase at `endAt`, the same hidden-pointer math as `scheduleLoopRelease` `:1147-1190` |
-| Transport stopped / stopping | no rejoin voice; the cue voice is faded out and the lane is left silent |
+| That lane has its own lane loop | the lane-loop window's phase at `endAt`, the hidden-pointer math of `scheduleLoopRelease` `:1147-1190` |
+| Transport stopped | no rejoin voice; the cue voice ends on its own fade and the lane is silent |
 
-A global cue can therefore end with four *different* rejoin targets — e.g. two lanes in the global loop phase, one in its own lane loop, one on the normal timeline. Rejoin error target: ≤ 2 frames per lane.
+A global cue can therefore end with four *different* targets — e.g. two lanes in the global-loop phase, one in its own lane loop, one on the normal timeline. Internal engine rejoin tolerance: ≤ 2 frames per lane (an engine measurement, not a hardware claim — see §12).
 
 ## 7. Precedence table
 
@@ -149,13 +155,13 @@ cues?: {
     endFrame: number;
     sampleRate: number;
     /** Content identity of every stem the marker depends on. */
-    sources: { role: string; contentHash: string; sourceGeneration: number }[];
+    sources: { role: string; contentHash: string }[];
     createdAt: number;
   }[];
 }
 ```
 
-- `contentHash` comes from `StoredStem.contentHash` (`store.ts:43`); `sourceGeneration` is a per-role counter bumped whenever a stem is (re)adopted in the session.
+- `contentHash` (from `StoredStem.contentHash` `store.ts:43`) is the **only** persisted source identity. A runtime `sourceGeneration` counter exists in memory only, used for cancelling scheduled cue work and rejecting stale async callbacks; it is never written to disk and never round-tripped.
 - **Invalidation**: on load and on any stem replacement, a marker whose recorded hash/generation no longer matches its stem is marked invalid — retained on disk, but unplayable and shown as "source replaced" in the status strip. A global marker is invalidated if *any* of the four stems changed; an isolated marker only by its own lane.
 - Rate mismatch: frames are converted through seconds using the recorded `sampleRate`; markers past the song duration are clamped and flagged.
 - `SCHEMA_VERSION` stays 2 (purely additive optional field). Absent → `{ version: 1, markers: [] }`.
