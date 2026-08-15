@@ -2017,7 +2017,7 @@ export class AudioEngine {
   }
 
   /** Song change, panic, disposal. */
-  stopAllCues(reason: string) {
+  stopAllCues(reason: string, resumeSong = true) {
     for (let i = 0; i < this.tracks.length; i++) {
       const voice = this.cueVoices[i];
       if (!voice) continue;
@@ -2028,7 +2028,8 @@ export class AudioEngine {
       this.cueTimers[i] = null;
       if (this.ctx) this.applyAudibility(i as TrackId);
     }
-    this.resumeCuePark();
+    if (resumeSong) this.resumeCuePark();
+    else this.cuePark = null;
     for (const a of this.cues.cancelAllCaptures("cancelled")) this.noteCue(a.type, describeCueAction(a));
   }
 
