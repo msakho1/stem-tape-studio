@@ -6,6 +6,7 @@ import { SystemPage } from "@/device/SystemPage";
 import { ControlsGuide, LESSONS } from "@/device/ControlsGuide";
 import { Sp1GuideIllustration } from "@/device/Sp1GuideIllustration";
 import { HeadsStatus } from "@/device/HeadsStatus";
+import { CueStatus } from "@/device/CueStatus";
 import { SupportButton } from "@/components/SupportButton";
 import { KEY_HINTS, useDeviceSurface } from "@/device/useDeviceSurface";
 import { CONTROL_LABELS } from "@/device/geometry";
@@ -248,6 +249,7 @@ function LabPage() {
                 {mounted && status.contextState === "running" ? `audio live · ${status.sampleRate ?? "?"} Hz` : "audio ready"}
               </p>
             </div>
+            <CueStatus />
             <HeadsStatus active={state.headsMode} heads={status.headLanes} source={status.headsSource} notice={headsNotice} />
             <DeviceSurface
               svgRef={svgRef}
