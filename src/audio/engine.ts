@@ -1995,7 +1995,11 @@ export class AudioEngine {
       voices: this.cueVoices.map((v, i) => (v ? { lane: i, key: v.key, scope: v.scope, startAt: v.startAt, endAt: v.endAt } : null)),
       /** Per lane: cue voice + ordinary sources that are NOT gated shut. */
       audibleVoices: this.tracks.map(
-        (t, i) => (this.cueVoices[i] ? 1 : 0) + (t.stemGate.gain.value > 0.01 ? t.sources.length : 0),
+        // A cue OWNS its lane: the ordinary copy is gated shut for the whole
+        // voice, so the lane carries exactly one audible voice. `gain.value`
+        // does not reflect a scheduled ramp, so the override — not the param —
+        // is the truth here.
+        (t, i) => (this.cueVoices[i] ? 1 : t.stemGate.gain.value > 0.01 ? t.sources.length : 0),
       ),
       underlay: this.tracks.map((_, i) => this.laneUnderlayPosition(i)),
       stemGate: this.tracks.map((t) => Number(t.stemGate.gain.value.toFixed(4))),

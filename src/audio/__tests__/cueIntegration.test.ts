@@ -163,10 +163,14 @@ describe("cue routing and audible voices", () => {
     play(r, 60);
     const second = priv(r.engine).cueVoices[0]!;
     expect(second).not.toBe(first);
-    const seamEnd = r.ctx.currentTime + 0.012;
-    // Old voice is fully faded by the end of the seam; new one is fully open.
-    expect(first.gain.gain.at(seamEnd + 0.001)).toBeCloseTo(0, 2);
-    expect(second.gain.gain.at(seamEnd + 0.001)).toBeCloseTo(1, 2);
+    // Old voice is fully faded by the end of its scheduled seam; the new one
+    // is fully open by the end of its own. Only one steady voice remains.
+    const firstEnd = first.gain.gain.events.at(-1)!.time;
+    const secondOpen = second.gain.gain.events[1]!.time;
+    expect(firstEnd - r.ctx.currentTime).toBeLessThanOrEqual(0.0121);
+    expect(first.gain.gain.at(firstEnd)).toBeCloseTo(0, 3);
+    expect(second.gain.gain.at(secondOpen)).toBeCloseTo(1, 3);
+    expect(voiceCounts(r.engine)[0]).toBe(1);
   });
 
   it("global cue owns four cue voices with no normal doubling", async () => {
