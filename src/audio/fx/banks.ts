@@ -37,6 +37,18 @@ export interface AlgorithmGraph {
   setMacro: (value: number, when: number) => void;
   /** Musical timing, re-applied whenever the grid tempo changes. */
   setTempo?: (bpm: number, when: number) => void;
+  /**
+   * Called the moment the stage is released. Kills any internal feedback,
+   * captured material or scheduled automation BEFORE the wet leg has finished
+   * fading, so nothing can keep circulating behind a silent output.
+   */
+  release?: (when: number) => void;
+  /**
+   * True for algorithms that must never be reused across presses (Spectral
+   * Freeze). The stage disposes and forgets the graph after the release fade,
+   * so the next press captures fresh material from a clean state.
+   */
+  resetOnRelease?: boolean;
   dispose: () => void;
 }
 
@@ -96,37 +108,88 @@ function buildFilter(ctx: AudioContext): AlgorithmGraph {
   };
 }
 
-function buildIsolator(ctx: AudioContext): AlgorithmGraph {
-  // Three-band isolator: the macro sweeps which band survives.
+/**
+ * Exciter: adds presence and upper harmonics, NOT another cutoff.
+ *
+ * The dry signal is split; a high-pass band (1.8–5 kHz, following the macro)
+ * is soft-clipped to generate even/odd harmonics above it, band-limited so it
+ * cannot turn into a dog whistle, then summed back UNDER the direct signal.
+ * There is no feedback path anywhere, and the stage output is trimmed by the
+ * energy the harmonic leg adds, so engaging it changes character, not level.
+ */
+function excitationCurve(): Float32Array<ArrayBuffer> {
+  const n = 1024;
+  const curve = new Float32Array(new ArrayBuffer(n * 4));
+  for (let i = 0; i < n; i++) {
+    const x = (i / (n - 1)) * 2 - 1;
+    // Asymmetric soft clip: 2nd + 3rd harmonics, bounded to ±1.
+    curve[i] = Math.tanh(2.2 * x) * 0.82 + 0.18 * Math.tanh(1.6 * x * x * Math.sign(x));
+  }
+  return curve;
+}
+
+function buildExciter(ctx: AudioContext): AlgorithmGraph {
   const input = ctx.createGain();
   const out = ctx.createGain();
-  const low = ctx.createBiquadFilter();
-  low.type = "lowshelf";
-  low.frequency.value = 220;
-  const mid = ctx.createBiquadFilter();
-  mid.type = "peaking";
-  mid.frequency.value = 1000;
-  mid.Q.value = 0.9;
-  const high = ctx.createBiquadFilter();
-  high.type = "highshelf";
-  high.frequency.value = 4200;
-  input.connect(low);
-  low.connect(mid);
-  mid.connect(high);
-  high.connect(out);
+  const direct = ctx.createGain();
+  direct.gain.value = 1;
+
+  const split = ctx.createBiquadFilter();
+  split.type = "highpass";
+  split.frequency.value = 2600;
+  split.Q.value = 0.7;
+  const drive = ctx.createGain();
+  drive.gain.value = 1.6;
+  const shaper = ctx.createWaveShaper();
+  shaper.oversample = "4x";
+  shaper.curve = excitationCurve();
+  // Band-limit the generated harmonics: an exciter must never become piercing.
+  const ceiling = ctx.createBiquadFilter();
+  ceiling.type = "lowpass";
+  ceiling.frequency.value = 11000;
+  ceiling.Q.value = 0.6;
+  const air = ctx.createBiquadFilter();
+  air.type = "highshelf";
+  air.frequency.value = 6000;
+  air.gain.value = 0;
+  const harmonics = ctx.createGain();
+  harmonics.gain.value = 0.35;
+  const tame = ctx.createDynamicsCompressor();
+  tame.threshold.value = -14;
+  tame.ratio.value = 8;
+  tame.attack.value = 0.002;
+  tame.release.value = 0.12;
+
+  input.connect(direct);
+  direct.connect(out);
+  input.connect(split);
+  split.connect(drive);
+  drive.connect(shaper);
+  shaper.connect(ceiling);
+  ceiling.connect(air);
+  air.connect(tame);
+  tame.connect(harmonics);
+  harmonics.connect(out);
+
   return {
     input,
     output: out,
     setMacro: (v, when) => {
       const t = Math.max(when, 0);
-      const depth = 36 * clamp01(v);
-      // v = 0 → flat; v = 1 → mids only (lows and highs cut).
-      low.gain.setValueAtTime(-depth, t);
-      high.gain.setValueAtTime(-depth, t);
-      mid.gain.setValueAtTime(depth * 0.25, t);
+      const m = clamp01(v);
+      // Low macro = a whisper of presence high up; high macro = broader,
+      // louder harmonic content starting lower down. Never a sweep to silence.
+      split.frequency.setValueAtTime(macroToFreq(1 - m, 1800, 5200), t);
+      drive.gain.setValueAtTime(1.2 + 2.2 * m, t);
+      harmonics.gain.setValueAtTime(0.18 + 0.5 * m, t);
+      air.gain.setValueAtTime(1.5 + 3 * m, t);
+      // Output compensation: the harmonic leg only ever ADDS energy, so the
+      // stage is trimmed back by the amount it added.
+      out.gain.setValueAtTime(1 / (1 + 0.55 * m), t);
     },
     dispose: () => {
-      for (const n of [input, low, mid, high, out]) n.disconnect();
+      for (const n of [input, direct, split, drive, shaper, ceiling, air, harmonics, out]) n.disconnect();
+      tame.disconnect();
     },
   };
 }
@@ -589,8 +652,8 @@ export function buildAlgorithm(ctx: AudioContext, id: AlgorithmId): AlgorithmGra
   switch (id) {
     case "filter":
       return buildFilter(ctx);
-    case "isolator":
-      return buildIsolator(ctx);
+    case "exciter":
+      return buildExciter(ctx);
     case "dirt":
       return buildDirt(ctx);
     case "reelFlange":
