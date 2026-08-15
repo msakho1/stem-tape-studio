@@ -1,9 +1,10 @@
 """
-Real-browser pointer proof for PLAY first-claim ownership.
+Real-browser pointer proof for PLAY first-claim ownership (449 / 450 / 700 ms).
 
-Fake timers prove the arbiter's logic; this drives actual PointerEvents on the
-rendered SP-1 hit zones with real wall-clock spacing around the 449 / 450 / 700
-ms boundaries and reads the emitted command stream from window.__stemTape.
+Fake timers prove the arbiter's logic; this drives real PointerEvents on the
+rendered SP-1 hit zones. All scheduling happens INSIDE the page with a
+performance.now() spin so the measured PLAY->Track and overlap deltas are the
+real ones, not Playwright IPC jitter. Commands are read from window.__stemTape.
 """
 
 import asyncio, json, sys
@@ -11,45 +12,42 @@ from playwright.async_api import async_playwright
 
 URL = "http://localhost:8080/"
 
-DOWN = """([sel, id]) => {
-  const el = document.querySelector(`[data-control="${sel}"]`);
-  const r = el.getBoundingClientRect();
-  const o = {pointerId:id, pointerType:'touch', isPrimary:id===1, bubbles:true, cancelable:true,
-             clientX:r.x+r.width/2, clientY:r.y+r.height/2};
-  el.dispatchEvent(new PointerEvent('pointerdown', o));
+RUN = """async ([trackDelay, overlap]) => {
+  const q = (c) => document.querySelector(`[data-control="${c}"]`);
+  const fire = (c, type, id) => {
+    const el = q(c), r = el.getBoundingClientRect();
+    el.dispatchEvent(new PointerEvent(type, {
+      pointerId: id, pointerType: 'touch', isPrimary: id === 1,
+      bubbles: true, cancelable: true,
+      clientX: r.x + r.width / 2, clientY: r.y + r.height / 2,
+    }));
+  };
+  const waitUntil = async (deadline) => {
+    while (performance.now() < deadline - 2) await new Promise(r => setTimeout(r, 1));
+    while (performance.now() < deadline) { /* spin the final 2 ms */ }
+  };
+  window.__stemTape.commands.length = 0;
+
+  const t0 = performance.now();
+  fire('play', 'pointerdown', 1);
+  await waitUntil(t0 + trackDelay);
+  const tTrack = performance.now();
+  fire('track-button-1', 'pointerdown', 2);
+  await waitUntil(tTrack + overlap);
+  const tUp = performance.now();
+  fire('track-button-1', 'pointerup', 2);
+  fire('play', 'pointerup', 1);
+  await new Promise(r => setTimeout(r, 600));
+  return {
+    playToTrackMs: +(tTrack - t0).toFixed(1),
+    overlapMs: +(tUp - tTrack).toFixed(1),
+    commands: window.__stemTape.commands.map(c => c.type),
+  };
 }"""
-
-UP = """([sel, id]) => {
-  const el = document.querySelector(`[data-control="${sel}"]`);
-  const r = el.getBoundingClientRect();
-  const o = {pointerId:id, pointerType:'touch', isPrimary:id===1, bubbles:true, cancelable:true,
-             clientX:r.x+r.width/2, clientY:r.y+r.height/2};
-  el.dispatchEvent(new PointerEvent('pointerup', o));
-}"""
-
-
-async def types(page):
-    return await page.evaluate("() => (window.__stemTape?.commands ?? []).map(c => c.type)")
-
-
-async def clear(page):
-    await page.evaluate("() => { if (window.__stemTape) window.__stemTape.commands.length = 0; }")
-
-
-async def gesture(page, track_delay_ms, hold_ms):
-    await clear(page)
-    await page.evaluate(DOWN, ["play", 1])
-    await asyncio.sleep(track_delay_ms / 1000)
-    await page.evaluate(DOWN, ["track-button-1", 2])
-    await asyncio.sleep(hold_ms / 1000)
-    await page.evaluate(UP, ["track-button-1", 2])
-    await page.evaluate(UP, ["play", 1])
-    await asyncio.sleep(0.6)
-    return await types(page)
 
 
 async def main():
-    results = {}
+    out = {}
     async with async_playwright() as p:
         b = await p.chromium.launch(headless=True)
         ctx = await b.new_context(viewport={"width": 1280, "height": 1800}, has_touch=True)
@@ -58,33 +56,44 @@ async def main():
         await page.wait_for_selector('[data-control="play"]')
         await page.wait_for_function("() => !!window.__stemTape")
 
-        # 1. Track at ~400 ms (inside the 450 ms claim window), released at
-        #    ~250 ms overlap → solo latch, no transport, no global loop.
-        results["claim_400ms_release_250ms"] = await gesture(page, 400, 250)
-
-        # 2. Track at ~520 ms (past the claim window) → PLAY is owned by the
-        #    global-loop hold; no chord may appear.
-        results["late_520ms"] = await gesture(page, 520, 250)
-
-        # 3. Track inside the window but held past 700 ms overlap → link.
-        results["claim_200ms_hold_820ms"] = await gesture(page, 200, 820)
-
+        cases = {
+            "claim_449_release_250": (449, 250),   # inside claim window, short overlap -> solo
+            "late_450_release_250": (450, 250),    # boundary: PLAY owned by hold -> no chord
+            "claim_200_hold_700": (200, 720),      # overlap reaches 700 ms -> link
+        }
+        for name, (d, o) in cases.items():
+            out[name] = await page.evaluate(RUN, [d, o])
+            await asyncio.sleep(0.4)
         await b.close()
-    print(json.dumps(results, indent=2))
 
-    ok = True
-    solo = results["claim_400ms_release_250ms"]
-    if "stem.solo" not in solo or any(t.startswith("transport.") or t.startswith("loop.global") for t in solo):
-        ok = False
-        print("FAIL: claimed chord did not latch solo cleanly", file=sys.stderr)
-    if "stem.solo" in results["late_520ms"] or "stem.link" in results["late_520ms"]:
-        ok = False
-        print("FAIL: late Track press leaked a chord", file=sys.stderr)
-    if "stem.link" not in results["claim_200ms_hold_820ms"]:
-        ok = False
-        print("FAIL: 820 ms overlap did not link", file=sys.stderr)
-    print("PASS" if ok else "FAIL")
-    sys.exit(0 if ok else 1)
+    print(json.dumps(out, indent=2))
+    fails = []
+
+    a = out["claim_449_release_250"]
+    if a["playToTrackMs"] >= 450:
+        fails.append("case 1 missed the claim window (measured %.1f ms)" % a["playToTrackMs"])
+    if "stem.solo" not in a["commands"]:
+        fails.append("case 1: no stem.solo")
+    leak = [t for t in a["commands"] if t.startswith("transport.") or t.startswith("loop.global") or t.startswith("track.")]
+    if leak:
+        fails.append(f"case 1 leaked base commands: {leak}")
+
+    b2 = out["late_450_release_250"]
+    if b2["playToTrackMs"] < 450:
+        fails.append("case 2 landed inside the claim window (%.1f ms)" % b2["playToTrackMs"])
+    if "stem.solo" in b2["commands"] or "stem.link" in b2["commands"]:
+        fails.append(f"case 2 leaked a chord: {b2['commands']}")
+
+    c = out["claim_200_hold_700"]
+    if "stem.link" not in c["commands"]:
+        fails.append(f"case 3: no stem.link ({c['commands']})")
+    if "stem.solo" in c["commands"]:
+        fails.append("case 3 emitted solo as well as link")
+
+    for f in fails:
+        print("FAIL:", f, file=sys.stderr)
+    print("PASS" if not fails else "FAIL")
+    sys.exit(0 if not fails else 1)
 
 
 asyncio.run(main())
