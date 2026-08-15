@@ -94,8 +94,9 @@ export type CueAction =
   | { type: "learn.discard"; key: string; reason: DiscardReason }
   | { type: "learn.reject"; key: string; reason: LearnRejectReason }
   | { type: "cue.play"; key: string; marker: CueMarker }
+  | { type: "cue.release"; key: string; marker: CueMarker }
   | { type: "cue.reject"; key: string; reason: "source-replaced" }
-  | { type: "ignored"; key: string; reason: "unlearned" | "playback-note-off" | "note-off-unmatched" | "all-notes-off" };
+  | { type: "ignored"; key: string; reason: "unlearned" | "note-off-unmatched" | "all-notes-off" };
 
 type Capture = {
   key: string;
