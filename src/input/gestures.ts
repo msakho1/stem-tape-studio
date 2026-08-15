@@ -337,12 +337,16 @@ export class GestureEngine {
     }
 
 
-    // ---- deferred Track arbitration -------------------------------------
-    if (isDeferredControl(control)) {
-      const claim = this.pending.get(control);
+    // ---- deferred arbitration (Track buttons, FN-qualified PLAY) ---------
+    {
+      const claim0 = this.pending.get(control);
+      const qualifiedNow = (claim0?.qualified ?? false) || rec.qualified;
+      const deferMs = deferralMsFor(control, this.timings, qualifiedNow);
+      if (deferMs != null) {
+      const claim = claim0;
       const count = claim ? claim.count : 1;
       const firstReleaseAt = claim ? claim.firstReleaseAt : t;
-      const qualified = (claim?.qualified ?? false) || rec.qualified;
+      const qualified = qualifiedNow;
       if (claim) clearTimeout(claim.timer);
       if (count >= 3) {
         // The third valid release confirms independent latched playback. One
