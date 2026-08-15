@@ -42,6 +42,7 @@ RUN = """async ([trackDelay, overlap]) => {
     playToTrackMs: +(tTrack - t0).toFixed(1),
     overlapMs: +(tUp - tTrack).toFixed(1),
     commands: window.__stemTape.commands.map(c => c.type),
+    arbitration: (window.__stemTape.arbiter?.log ?? []).slice(0, 3).map(r => r.detail),
   };
 }"""
 
