@@ -73,9 +73,12 @@ function ShopPage() {
               <p className="font-mono text-[11px] text-[var(--ink-dim)]">shop · sp-1 interface</p>
             </div>
           </Link>
-          <nav className="ml-auto flex items-center gap-6" aria-label="Shop">
+          <nav className="ml-auto flex items-center gap-6" aria-label="Site">
             <Link to="/" className="st-tab">
               instrument
+            </Link>
+            <Link to="/about" className="st-tab">
+              about
             </Link>
             <span className="st-tab" data-on>
               shop
