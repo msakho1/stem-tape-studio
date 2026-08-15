@@ -399,7 +399,7 @@ function LabPage() {
           </div>
 
           <div className="grid gap-5 lg:grid-cols-2">
-            <section className="st-section">
+            <section className="st-section hidden lg:block">
               <p className="st-section__title">keyboard parity</p>
               <div className="flex flex-wrap gap-x-4 gap-y-1 font-mono text-[11px] text-[var(--ink-dim)]">
                 {KEY_HINTS.map(([key, ctrl]) => (
