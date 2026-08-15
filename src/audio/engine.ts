@@ -2028,6 +2028,7 @@ export class AudioEngine {
       this.cueTimers[i] = null;
       if (this.ctx) this.applyAudibility(i as TrackId);
     }
+    this.resumeCuePark();
     for (const a of this.cues.cancelAllCaptures("cancelled")) this.noteCue(a.type, describeCueAction(a));
   }
 
