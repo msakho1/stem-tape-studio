@@ -35,55 +35,58 @@ Three maps are maintained separately, each row carrying its own evidence field. 
 
 Admissible evidence: TE's own printed/online guide for the SP-1, or a logged test session on a unit that has never been reflashed (control pressed → observed audio/LED result, recorded).
 
-**Source S1 — stock firmware tutorial page** (`user-uploads://IMG_4259.jpeg`, hand-drawn three-column TE guide, "1 BASIC / 2 STEMS / 3 FX-FUN", TE logo bottom right). Documentary only.
+**Source S1 — stock firmware tutorial page** (`user-uploads://IMG_4259.jpeg` / `user-uploads://IMG_4259-2.jpeg`, hand-drawn three-column TE guide, "1 BASIC / 2 STEMS / 3 FX-FUN", TE logo bottom right). **Stock-guide-verified rows** below are read directly from S1; the guide is also publicly archived (URL supplied by user). All other S1/S2-derived details are **physical-verification-required** until tested on an untouched SP-1.
 
-**Source S2 — Jay Gilligan, "Teenage Engineering Stem Player Deep Dive", `https://youtu.be/zynYy35AdE0` (2024-07-14, 1:18:16).** Strongest available stock evidence: the presenter reads aloud, line by line, from the TE-internal printed instruction manual anonymously mailed to him (S2 @18:29–19:29), while operating an unmodified unit on camera. Every row below is *manual text + observed hardware behaviour*, cited by transcript timestamp. Companion community record: `https://llllllll.co/t/te-stem-player/66795`.
+**Source S2 — Jay Gilligan, "Teenage Engineering Stem Player Deep Dive", `https://youtu.be/zynYy35AdE0` (2024-07-14, 1:18:16).** Documentary/observational only: the presenter reads from a TE-internal printed manual and demonstrates an unmodified unit. Use S2 for hypotheses, not for `stock-guide-verified` rows.
 
-**Device model (S2).** Four firmware modes selected by holding FUNCTION then PLAY (function slightly first is more reliable) while stopped; four LEDs flash, `+/−` or the track buttons choose the mode, PLAY confirms (@31:48, @39:18, @1:04:45):
+### STOCK_SP1_MAP — stock-guide-verified from S1
 
-1. basic · 2. advanced · 3. advanced + pocket-operator sync out · 4. advanced + MIDI clock out
+These rows are established by the TE guide itself. Precise timing, release behaviour, FX routing and simultaneous-hold interactions are **physical-verification-required**.
 
-| Stock row | Behaviour | Mode | Evidence |
-|---|---|---|---|
-| power | hold FUNCTION/side button ~2–5 s → ON/OFF, LED sweep | both | S1; S2 @26:32, @28:43 |
-| transport | PLAY tap → play/pause, with an audible **tape start/stop ramp** on both edges | both | S2 @30:56 |
-| volume | `+ / −` | both | S2 @29:44 |
-| track volume | four faders, per stem | both | S2 @33:15 |
-| solo/mute stem | track button solos/mutes; **functions stack** — multiple solos and other actions combine freely | both | S2 @35:28, @36:14 |
-| skip track | rocker FWD/REV = next/previous song (and restart-current) | basic | S1; S2 @33:57 |
-| skip track | FUNCTION + rocker = next/previous song | advanced | S2 @49:59 |
-| slow motion | FUNCTION + PLAY toggles a single fixed slow playback | basic | S2 @34:57 |
-| varispeed | rocker forward = faster, rocker back = **reverse playback**; `+/−` chooses the speed step; LEDs show the step; rocker again exits | advanced | S2 @50:34–@53:12 |
-| loop | **hold PLAY** → one-bar loop, side + front LEDs flash; release ends it | basic | S2 @34:24 |
-| loop | hold PLAY → loop; while held, `+/−` sets the **loop division**, rocker **nudges the loop position** forward/back through the song; release disables; short FUNCTION while held **latches** it; PLAY unlatches | advanced | S2 @47:15–@49:37 |
-| loop divider preset | when not looping, `+/−` presets the loop divider | advanced | S2 @47:47 |
-| track select | short FUNCTION click → track-select (all four LEDs light); press a track button to set the **active stem**; only works while playing; selected stem shows a solid LED, the others show per-stem VU | advanced | S2 @39:18–@41:35 |
-| effects | hold FUNCTION + a track button = apply that button's effect **to the active stem** (not to the button's own stem): 1 Filter · 2 Chorus/Delay · 3 Distortion · 4 Gate | advanced | S1; S2 @42:15–@43:21 |
-| effect variations | while holding the effect button, `+/−` cycles **four variations** per effect; for Chorus/Delay, variations 1–2 chorus, 3–4 delay; LEDs show the variation | advanced | S2 @43:50, @46:42 |
-| effect latch | keep holding the track button, release FUNCTION, click FUNCTION → effect **locked** to the active stem; all four LEDs blink to confirm any latch | advanced | S2 @44:25, @52:27 |
-| effect exclusivity | **one effect per stem** — a second effect overwrites, it does not layer | advanced | S2 @46:12 |
-| effects persistence | latched effects survive song changes | advanced | S2 @49:59 |
-| clear effects | short FUNCTION while holding the latched effect's track button clears that stem; holding **all four** track buttons + FUNCTION clears everything; FUNCTION while soloing one track also clears | advanced | S2 @53:12–@54:12 |
-| latch (general) | short FUNCTION press while holding track / PLAY / rocker latches that state (effect, loop, varispeed) | advanced | S2 @53:12 |
-| LEDs | side LEDs = global VU while playing, **battery level when paused**; front LEDs = per-stem VU, active-stem solid, loop/speed/variation indication, all-four blink = latch confirmed | both | S2 @40:25, @41:35, @54:12 |
-| bluetooth | `+` and `−` pressed together (device on) → BT pairing/search, LED indicates search | both | S2 @1:02:16 |
-| sync out | mode 3 emits PO sync on the 3.5 mm sync jack, tracking the song BPM across track changes; mode 4 emits MIDI clock (untested on camera) | 3 / 4 | S2 @1:04:45, @1:06:13 |
-| idle | auto power-off after a few minutes when not playing | both | S2 @54:42 |
-| content | ships with the *Jesus Is King* stems only; **no user-facing way to load your own audio** on stock | — | S2 @10:47 |
-| I/O | 3.5 mm line/headphone out, PO/MIDI sync jack, USB-C (charging), internal speaker, Bluetooth audio out | — | S2 @21:53, @22:22 |
+| Stock row | Gesture | Source |
+|---|---|---|
+| power | hold FUNCTION side button 5 s → ON/OFF | S1 column 1 |
+| master volume | `− / +` | S1 column 1 |
+| transport | tap PLAY → play/pause | S1 column 1 |
+| skip track | rocker backward/forward → previous/next song | S1 column 1 |
+| stem volume | faders 1–4, per stem | S1 column 2 |
+| solo stem | hold TRACK 1–4 → solo that stem | S1 column 2 |
+| tape effect | FUNCTION + rocker | S1 column 2 |
+| sound effects | FUNCTION + TRACK 1 = Filter, TRACK 2 = Delay/Echo, TRACK 3 = Distortion, TRACK 4 = Gate/Shutter | S1 column 3 |
+| loop | hold PLAY | S1 column 3 |
 
-Still `unknown` after S1+S2 — do not infer:
+### STOCK_SP1_MAP — physical-verification-required (S2 hypotheses)
 
-- whether "sound effects" are per-stem only or ever master (S2 shows per-active-stem in advanced; basic-mode gate is applied per track button, @36:39)
-- heads/multi-playhead behaviour (no evidence it exists; treat as a Stem Tape invention)
-- storage layout, song count, USB data protocol (USB-C is described as charging only)
+The video (S2) suggests a richer model, but it is not the printed guide and must be confirmed on hardware before it is treated as stock fact:
+
+- Four firmware modes: basic / advanced / advanced + PO sync / advanced + MIDI clock, selected by FUNCTION + PLAY while stopped.
+- In advanced mode the rocker becomes varispeed/reverse (not skip); `+/−` sets speed step; LEDs indicate step.
+- Hold PLAY loop: S2 claims `+/−` sets loop division, rocker nudges loop position, short FUNCTION latches, PLAY unlatches.
+- Track select: short FUNCTION click while playing, then a track button sets the active stem for FX.
+- FX routing: hold FUNCTION + track button applies that effect to the **active stem**, with four variations per effect selected by `+/−`; one effect per stem, non-layering.
+- Latch idiom: short FUNCTION while holding a control latches that state; all-four-LED blink confirms.
+- LEDs: side = global VU / battery when paused; front = per-stem VU, active-stem solid, loop/speed/variation state.
+- Bluetooth: `+` and `−` together enters pairing.
+- Sync out / MIDI clock in modes 3 and 4.
+- Auto power-off after idle.
+- Ships with *Jesus Is King* stems; no documented user audio loading.
+
+### Still `unknown` / do not infer
+
+- exact loop length and whether release always ends the loop or latches
+- whether the guide's "solo" is momentary or latching
+- whether FX are per-stem, master, or active-stem-only in advanced mode
+- heads/multi-playhead behaviour (no stock evidence; treat as Stem Tape invention)
+- storage layout, song count, USB data protocol
 - exact power-hold duration (S1 says 5 s, S2 says "a couple of seconds")
-- MIDI-clock mode behaviour (mode 4 never demonstrated)
-- LED brightness/bank semantics beyond the states listed above
+- MIDI-clock mode behaviour
+- LED brightness/bank semantics beyond the guide
 
-Consequences for the port: (a) stock **does** have varispeed *and* reverse on the rocker in advanced mode, so Stem Tape's rocker is closer to stock than S1 alone suggested — the departure is scrub/chop, not speed; (b) stock's latch model (short FUNCTION click while holding a control) is the native idiom for every sticky state and should be preserved rather than replaced by Stem Tape's own latching gestures where they conflict; (c) stock enforces one effect per stem, which the 12-FX bank design breaks — an intentional departure to record; (d) FUNCTION-click track-select with all-LED indication is the stock antecedent of Stem Tape's `lastTargetedTrack`.
+### Consequences for the port
 
-S1/S2 are documentary. Confirm them row by row on the donor unit during Phase 0, **before** the first flash, and fill the unknown list; that observation pass is the only chance to capture it.
+(a) The nine stock-guide-verified rows are the only behaviours that can be claimed as "retained from stock" without hardware proof. (b) S2's advanced-mode varispeed/reverse is a plausible stock antecedent for Stem Tape's rocker, but it is **not** verified by the guide and must be confirmed before the port claims it. (c) The Tape Looper v2.6 rows (37 rows, timing thresholds, multi-taps, Heads, scrubbing, per-stem bar loops, etc.) are **not** established by either the TE guide or the video; they remain Tape Looper / Stem Tape inventions. (d) Stock's apparent "one effect per stem" model conflicts with Stem Tape's 12-FX layering — an intentional departure to record.
+
+Complete the physical-verification pass on the donor unit during Phase 0, **before** the first flash; that observation pass is the only chance to capture it.
 
 
 
@@ -118,7 +121,7 @@ Every entry here is **provisional and unresolvable until STOCK_SP1_MAP is popula
 - **Retains:** the remaining v2.6 rows, marked `provenance: "v2.6"`.
 - **Removes:** live-input recording and PRINT (removed in earlier phases), `track.delete`.
 - **Adds with no v2.6 antecedent:** `provenance: "extension"` rows — four-stem selection/solo/link, FX overlay, grid rows, WAV export.
-- **Against stock, from S1 + S2 (documentary, unconfirmed on the donor unit):** *retains* power hold, volume, PLAY/PAUSE tap with tape start/stop ramp, per-stem fader volume, solo/mute stacking, hold-PLAY one-bar loop with `+/−` division and rocker nudge, rocker varispeed with reverse, FUNCTION-click active-track selection, and a hold-engaged FX set; *replaces* the rocker's scrub/chop overlay (stock rocker = skip in basic, varispeed in advanced — Stem Tape adds scrub and chop), the four-effect model (stock: 4 effects × 4 variations, **one per stem, non-layering** → Stem Tape: 12 FX in four banks that do layer), and the latch idiom (stock latches everything with a short FUNCTION click; Stem Tape uses per-row gestures); *adds with no stock antecedent* Heads mode, per-lane reverse, hidden-timeline loop rejoin, user stem import, WAV export; *removes* the stock mode selector (1–4), PO/MIDI sync out, Bluetooth pairing, and battery-level LED reporting from the web app's scope only — on hardware these must survive the port untouched.
+- **Against stock, from S1 only (stock-guide-verified):** *retains* power hold, volume, PLAY/PAUSE tap, per-stem fader volume, solo-by-hold, rocker skip, FUNCTION + rocker tape effect, FUNCTION + track effects (Filter · Delay/Echo · Distortion · Gate/Shutter), and hold-PLAY loop. *Replaces* nothing provably beyond the additions below, because the guide does not establish varispeed, reverse, active-track select, latch, or any other advanced-mode detail. *Adds with no stock antecedent* the 37 Tape Looper rows, timing thresholds, multi-tap/deferred arbitration, Heads mode, scrubbing, per-stem bar loops, hidden-timeline loop rejoin, 12-FX layering, user stem import, and WAV export. *Removes* the stock mode selector (1–4), PO/MIDI sync out, Bluetooth pairing, and battery-level LED reporting from the web app's scope only — on hardware these must survive the port untouched if present.
 
 ### Stays browser-only (transfer tool)
 
