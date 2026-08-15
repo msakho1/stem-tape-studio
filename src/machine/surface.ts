@@ -525,40 +525,19 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
       }
 
       if (c === "function") {
-        // Tempo tapping is NOT the engine's multi-tap: at 120 BPM the gap is
-        // 500 ms, far outside the 300 ms multi-tap window, so `count` is always
-        // 1 here. We count taps ourselves with an INACTIVITY timeout between
-        // consecutive taps (TEMPO_TAP_IDLE_MS) — not a fixed first-to-fourth
-        // window, so e.g. 104 BPM (576.9 ms gaps, 1730.8 ms total) is accepted.
-        const prev = next.fnTapTimes;
-        const inRhythm = prev.length > 0 && t - prev[prev.length - 1]! <= TEMPO_TAP_IDLE_MS;
-        const times = (inRhythm ? [...prev, t] : [t]).slice(-4);
-        const count = times.length;
-        next = { ...next, fnTapTimes: times, fnTapCount: count };
-        if (count === 4) {
-          const gaps = times.slice(1).map((v, i) => v - times[i]!);
-          const mean = gaps.reduce((a, b) => a + b, 0) / gaps.length;
-          const bpm = 60000 / mean;
-          const farOff = next.grid.bpm != null && Math.abs(bpm - next.grid.bpm) / next.grid.bpm > 0.25;
-          if (farOff) {
-            next = { ...next, grid: { ...next.grid, rejected: true } };
-            return fire(
-              next,
-              "fn.gridReject",
-              `tapped ${bpm.toFixed(1)} vs grid ${next.grid.bpm!.toFixed(1)} — all four blink, nothing moves`,
-              t,
-            );
-          }
-          next = { ...next, grid: { bpm, rejected: false, source: "tapped" } };
-          return fire(next, "fn.tempoGrid", `grid = ${bpm.toFixed(1)} BPM`, t);
+        // Tempo tapping, FN ×4 rounding and beatmatch re-tap are REMOVED: the
+        // grid is detected automatically from the stems. A bare FUNCTION tap is
+        // now CONTEXT-SENSITIVE:
+        //   an operation is running (global loop held) → LATCH it
+        //   otherwise                                  → ARM active-track
+        //                                                selection for
+        //                                                TRACK_SELECT_ARM_MS
+        if (next.globalLoop.active && !next.globalLoop.latched) {
+          next = { ...next, globalLoop: { ...next.globalLoop, latched: true } };
+          return fire(next, "tape.loop.global.latch", "global loop latched — PLAY may be released", t);
         }
-        const held = next.grid.bpm;
-        if (held != null) {
-          next = { ...next, grid: { ...next.grid, source: "beatmatched", rejected: false } };
-          return fire(next, "fn.beatmatch", `re-tap over loops · ${held.toFixed(1)} BPM held`, t);
-        }
-
-        return next;
+        next = { ...next, trackSelectArmedAt: t };
+        return fire(next, "tape.track.arm", "active-track selection armed — tap a Track button", t);
       }
 
 
