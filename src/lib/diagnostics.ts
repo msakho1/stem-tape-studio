@@ -12,6 +12,7 @@ import { getAudioEngine, type AudioEngine } from "@/audio/engine";
 import { controlBus, type ContinuousEvent } from "@/audio/controlBus";
 import { buildAlgorithm } from "@/audio/fx/banks";
 import type { SurfaceState } from "@/machine/surface";
+import type { ChordArbiter } from "@/machine/chordArbiter";
 import type { AudioCommand } from "@/audio/commands";
 
 export interface DiagnosticsBridge {
@@ -26,6 +27,8 @@ export interface DiagnosticsBridge {
   buildAlgorithm: typeof buildAlgorithm;
   /** Measured first-release → committed-tap latency for deferred controls. */
   tapLatencyMs: number[];
+  /** Live chord arbiter, for boundary proofs driven by real pointer events. */
+  arbiter: ChordArbiter | null;
 }
 
 const BUS_LIMIT = 4000;
@@ -46,6 +49,7 @@ function bridge(): DiagnosticsBridge {
       commands: [],
       buildAlgorithm,
       tapLatencyMs: [],
+      arbiter: null,
     };
   }
   return w.__stemTape;
@@ -79,4 +83,10 @@ export function publishSurface(state: SurfaceState) {
 export function publishTapLatency(samples: number[]) {
   if (typeof window === "undefined") return;
   bridge().tapLatencyMs = samples;
+}
+
+/** Publish the live chord arbiter (its log is the arbitration evidence). */
+export function publishArbiter(arbiter: ChordArbiter) {
+  if (typeof window === "undefined") return;
+  bridge().arbiter = arbiter;
 }

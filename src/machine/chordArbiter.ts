@@ -130,8 +130,22 @@ export class ChordArbiter {
   private soloLinkTimers = new Map<Control, ReturnType<typeof setTimeout>>();
   /** Track controls whose link already fired at soloLinkMs — release is inert. */
   private linkFired = new Set<Control>();
+  /**
+   * Controls whose hold gesture has ACTUALLY fired in the gesture engine.
+   * Ownership of PLAY is decided against this, not against a second elapsed-ms
+   * comparison: on real hardware timing the two clocks disagree by a few
+   * milliseconds either side of 450 ms, which is exactly the boundary the
+   * chord has to survive.
+   */
+  private holdFired = new Set<Control>();
 
   constructor(private view: () => ArbiterView) {}
+
+  /** The gesture engine reports a real holdStart here, before dispatch. */
+  noteHoldStart(control: Control): void {
+    this.holdFired.add(control);
+  }
+
 
   onIntent(fn: (i: PerfIntent) => void): () => void {
     this.listeners.add(fn);
@@ -222,6 +236,7 @@ export class ChordArbiter {
     // A claim lives until the control is pressed again: clearing it on release
     // would let the base v2.6 tap (which fires on release) slip through.
     this.claimed.delete(control);
+    this.holdFired.delete(control);
     this.down.set(control, t);
     const { fxOverlay, activeStem, selectedBank } = this.view();
 
@@ -300,7 +315,12 @@ export class ChordArbiter {
     // releasing a claimed chord emits no transport and no loop command.
     if (isTrack(control) && this.down.has("play")) {
       const playHeld = this.heldSince("play", t) ?? Infinity;
-      if (playHeld < this.timings.globalLoopClaimMs) {
+      // Ownership is decided by whether the global-loop hold has ACTUALLY
+      // fired, with the elapsed check as the fallback for headless callers
+      // that never report holdStart. Two independent ms comparisons disagree
+      // around 450 ms on real hardware; one authoritative event does not.
+      const holdOwnsPlay = this.holdFired.has("play") || playHeld >= this.timings.globalLoopClaimMs;
+      if (!holdOwnsPlay) {
         this.claim("play", control);
         this.log.unshift({
           t,
@@ -355,6 +375,7 @@ export class ChordArbiter {
   private onCancel(control: Control) {
     // Precedence 1 — safety. A lost pointer releases every claim on it.
     this.down.delete(control);
+    this.holdFired.delete(control);
     this.clearMacro(control);
     this.clearSoloLink(control);
     const { fxOverlay, activeStem } = this.view();
@@ -378,9 +399,17 @@ export class ChordArbiter {
       for (const [track, _timer] of [...this.soloLinkTimers]) {
         const trackAt = this.down.get(track);
         const overlap = trackAt == null || downAt == null ? 0 : t - Math.max(trackAt, downAt);
-        const linked = this.linkFired.has(track);
+        const timerFired = this.linkFired.has(track);
         this.clearSoloLink(track);
-        if (linked) continue;
+        if (timerFired) continue;
+        if (overlap >= this.timings.soloLinkMs) {
+          this.emit(
+            { type: "stem.link", stem: TRACK_INDEX[track]! as StemIndex, overlapMs: overlap },
+            ["play", track],
+            `link/unlink on PLAY release (overlap ${overlap.toFixed(0)} ms)`,
+          );
+          continue;
+        }
         this.emit(
           { type: "stem.solo", stem: TRACK_INDEX[track]! as StemIndex, overlapMs: overlap },
           ["play", track],
@@ -424,9 +453,20 @@ export class ChordArbiter {
     // falls through to its own deferred group. PLAY + Volume stays retired.
     if (isTrack(control) && this.soloLinkTimers.has(control)) {
       const overlap = downAt == null ? 0 : t - Math.max(downAt, this.down.get("play") ?? downAt);
-      const linked = this.linkFired.has(control);
+      // The 700 ms decision is elapsed-based on release too: a timer that ran
+      // late under load must never downgrade a link into a solo.
+      const linked = this.linkFired.has(control) || overlap >= this.timings.soloLinkMs;
+      const timerFired = this.linkFired.has(control);
       this.clearSoloLink(control);
       if (linked) {
+        if (!timerFired) {
+          this.emit(
+            { type: "stem.link", stem: TRACK_INDEX[control]! as StemIndex, overlapMs: overlap },
+            ["play", control],
+            `link/unlink on release (overlap ${overlap.toFixed(0)} ms >= ${this.timings.soloLinkMs} ms)`,
+          );
+          return;
+        }
         this.log.unshift({
           t,
           controls: ["play", control],

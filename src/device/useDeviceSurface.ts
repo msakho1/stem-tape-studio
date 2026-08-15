@@ -29,7 +29,7 @@ import {
 import { controlBus, type ContinuousChannel } from "@/audio/controlBus";
 import { getAudioEngine } from "@/audio/engine";
 import { FaderSessionManager, type FaderIndex } from "@/input/faderSessions";
-import { installDiagnostics, publishSurface, publishTapLatency } from "@/lib/diagnostics";
+import { installDiagnostics, publishArbiter, publishSurface, publishTapLatency } from "@/lib/diagnostics";
 
 
 
@@ -216,6 +216,7 @@ export function useDeviceSurface() {
 
 
   useEffect(() => {
+    publishArbiter(arbiter);
     const offIntent = arbiter.onIntent((intent) => {
       dispatch({ type: "perf", intent });
       setGestureLog((prev) =>
@@ -231,6 +232,9 @@ export function useDeviceSurface() {
     });
     const offGesture = engine.onGesture((g) => {
       const control = "control" in g ? g.control : null;
+      // The arbiter decides PLAY ownership on the REAL hold event, not on a
+      // second elapsed-ms comparison, so tell it before anything dispatches.
+      if (g.type === "holdStart" && control) arbiter.noteHoldStart(control);
       if (control && arbiter.isClaimed(control)) return; // suppressed before dispatch
       if (g.type === "chordStart" || g.type === "chordRelease") {
         if (g.controls.some((c) => arbiter.isClaimed(c))) return;
