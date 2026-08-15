@@ -14,6 +14,8 @@ import {
   FX_FAMILIES,
   clearLatches,
   cycleBankAlgorithm,
+  fxStateOf,
+  fxTargetOf,
   initialStemPerformance,
   nudgeBankMacro,
   patchSlot,
