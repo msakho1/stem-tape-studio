@@ -4133,8 +4133,10 @@ export class AudioEngine {
           if (this.ctx) {
             // Lifecycle (correction 8): momentary state cleared, DSP history
             // faded out, Beat Repeat rings dropped. Stored FX config survives.
+            this.stopAllCues("song loaded");
             this.flushAllFx();
             this.stopSources();
+
             this.requestedPlaying = false;
             this.timeline.setRate(this.ctx.currentTime, this.timeline.targetRate());
             this.timeline.anchor(this.ctx.currentTime, 0);
