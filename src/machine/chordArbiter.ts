@@ -32,6 +32,12 @@ export interface ArbiterTimings {
   modifierArrivalMs: number;
   /** Play + Track: overlap shorter than this is solo, longer is link/unlink. */
   soloLinkMs: number;
+  /**
+   * FIRST-CLAIM boundary for PLAY. A Track press arriving before this owns
+   * PLAY as a chord; at or after it, the Hold PLAY global loop owns PLAY.
+   * Must equal the gesture engine's holdMs so exactly one owner exists.
+   */
+  globalLoopClaimMs: number;
   /** Vol− + Vol+ both released before this = overlay toggle. */
   overlayShortMs: number;
   /** Vol− + Vol+ held at least this = the existing pairing gesture. */
@@ -45,6 +51,7 @@ export interface ArbiterTimings {
 export const DEFAULT_ARBITER_TIMINGS: ArbiterTimings = {
   modifierArrivalMs: 400,
   soloLinkMs: 700,
+  globalLoopClaimMs: 450,
   overlayShortMs: 600,
   pairingMs: 2000,
   macroHoldMs: 450,
@@ -119,6 +126,10 @@ export class ChordArbiter {
   private macroTimers = new Map<Control, ReturnType<typeof setInterval> | ReturnType<typeof setTimeout>>();
   /** Volume presses that became a macro hold — their release must not cycle. */
   private macroFired = new Set<Control>();
+  /** PLAY + Track: pending solo/link decision timers, per Track control. */
+  private soloLinkTimers = new Map<Control, ReturnType<typeof setTimeout>>();
+  /** Track controls whose link already fired at soloLinkMs — release is inert. */
+  private linkFired = new Set<Control>();
 
   constructor(private view: () => ArbiterView) {}
 
@@ -145,6 +156,7 @@ export class ChordArbiter {
   reset() {
     this.down.clear();
     this.claimed.clear();
+    this.clearSoloLink();
     this.clearMacro();
   }
 
@@ -156,6 +168,16 @@ export class ChordArbiter {
       if (timer != null) clearInterval(timer as ReturnType<typeof setInterval>);
       this.macroTimers.delete(c);
       this.macroFired.delete(c);
+    }
+  }
+
+  private clearSoloLink(control?: Control) {
+    const controls = control ? [control] : [...this.soloLinkTimers.keys()];
+    for (const c of controls) {
+      const timer = this.soloLinkTimers.get(c);
+      if (timer != null) clearTimeout(timer);
+      this.soloLinkTimers.delete(c);
+      this.linkFired.delete(c);
     }
   }
 
@@ -334,6 +356,7 @@ export class ChordArbiter {
     // Precedence 1 — safety. A lost pointer releases every claim on it.
     this.down.delete(control);
     this.clearMacro(control);
+    this.clearSoloLink(control);
     const { fxOverlay, activeStem } = this.view();
     if (fxOverlay && isTrack(control) && this.claimed.has(control)) {
       const bank = bankOfButton(TRACK_INDEX[control]!);
@@ -375,19 +398,40 @@ export class ChordArbiter {
       }
     }
 
-    // ---- precedence 3: PLAY-first chords — RETIRED.
-    // `stem.select` (PLAY + Volume), `stem.solo` and `stem.link` (PLAY + Track)
-    // no longer have hardware gestures. The intents and their reducer handlers
-    // survive only so stored sessions keep parsing. Nothing is emitted here and
-    // nothing is claimed, so PLAY + Track falls through to the deferred Track
-    // group and PLAY + Volume to master volume.
-    if (this.down.has("play") && (isVolume(control) || isTrack(control))) {
+    // ---- precedence 3: PLAY-first chords.
+    // PLAY + Track = solo / link, resolved by FIRST-CLAIM ownership (see
+    // onDown). Only a Track press that actually claimed PLAY resolves here;
+    // a Track pressed after the global loop took PLAY never armed a timer and
+    // falls through to its own deferred group. PLAY + Volume stays retired.
+    if (isTrack(control) && this.soloLinkTimers.has(control)) {
+      const overlap = downAt == null ? 0 : t - Math.max(downAt, this.down.get("play") ?? downAt);
+      const linked = this.linkFired.has(control);
+      this.clearSoloLink(control);
+      if (linked) {
+        this.log.unshift({
+          t,
+          controls: ["play", control],
+          intent: "none",
+          suppressed: ["play", control],
+          detail: `link already fired at ${this.timings.soloLinkMs} ms — release inert`,
+        });
+        if (this.log.length > 60) this.log.length = 60;
+        return;
+      }
+      this.emit(
+        { type: "stem.solo", stem: TRACK_INDEX[control]! as StemIndex, overlapMs: overlap },
+        ["play", control],
+        `latch solo (overlap ${overlap.toFixed(0)} ms < ${this.timings.soloLinkMs} ms)`,
+      );
+      return;
+    }
+    if (this.down.has("play") && isVolume(control)) {
       this.log.unshift({
         t,
         controls: ["play", control],
         intent: "none",
         suppressed: [],
-        detail: "PLAY-first chord retired (stem.select / stem.solo / stem.link) — base gesture runs",
+        detail: "PLAY + Volume retired (stem.select) — base gesture runs",
       });
       if (this.log.length > 60) this.log.length = 60;
     }
