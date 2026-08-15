@@ -1,6 +1,6 @@
 # Stem Instrument Mode — MIDI cue learning, iOS CoreMIDI wrapper, Guide card
 
-Plan only. No code in this response. Revised per the corrections of this turn.
+Plan only. No code in this response. Revised per the corrections of this turn. Final addendum applied.
 
 ## 1. Current-code audit (verified)
 
@@ -78,9 +78,14 @@ Playback is allowed in every state except Heads: normal play, global loop runnin
 
 On unqualified Note On for a learned marker, at `at = max(ctx.currentTime + lookahead, ctxTimeOf(ev))` with `lookahead ≥ SEAM_FADE_S`:
 
-1. Affected lanes: all four for a global cue, one for an isolated cue.
-2. For each affected lane: spawn the cue voice with `spawn(t, at, startFrame/sr, true)` `:782`, register `cueOwner[lane] = { voice, noteKey, scope, endAt, runtimeGeneration }`, and give the voice the same **identity protection** as `pendingRelease` so no wrap, sweep, relocate or respawn can fade or stop it.
-3. Fade any previously audible voice on that lane out with `fadeOutAndStop(t, live, at)` `:845`. The two overlap for exactly `SEAM_FADE_S`.
+1. **Eligibility gate for v1**: reject if any active scrub or reverse conflicts with the cue.
+   - Isolated cue: reject if its target lane is currently scrubbing (`laneFaderScrub` active) or reversed.
+   - Global cue: reject if **any** lane is scrubbing or reversed.
+   - This is a playback rejection, not a state change; the note is reported and ignored.
+2. Affected lanes: all four for a global cue, one for an isolated cue.
+3. For each affected lane: spawn the cue voice with the dedicated `spawnCue({ track, startAt, startFrame, endFrame, reverse: false, window: null, playbackRate: 1 })` path, register `cueOwner[lane] = { voice, noteKey, scope, endAt, runtimeGeneration }`, and give the voice the same **identity protection** as `pendingRelease` so no wrap, sweep, relocate or respawn can fade or stop it.
+4. **Audibility override**: while `cueOwner[lane]` exists, the cue voice must be audible regardless of that lane's mute/solo state. The engine temporarily overrides that lane's input audibility **without mutating** `t.muted`/`t.soloed`. The fader level and FX rack remain active. On completion, normal audibility is restored from the unchanged mixer state.
+5. Fade any previously audible voice on that lane out with `fadeOutAndStop(t, live, at)` `:845`. The two overlap for exactly `SEAM_FADE_S`.
 4. **At the same moment**, schedule the completion seam and the rejoin voice: `endAt = at + (endFrame − startFrame)/sr`. Start time and read offset are both computed up front, so the seam is sample-accurate. `tick()` only reaps dead nodes and clears `cueOwner`; it never decides the seam.
 
 **Fixed 1× for v1.** Learning is only possible during aligned 1× playback, and the key's held duration *is* the passage, so a cue always plays at 1×. A varispeed change during an active cue does **not** reschedule, stretch or re-pitch it; the completion lands at the frame scheduled at trigger time. (Rate-following cues are explicitly out of scope.)
@@ -131,7 +136,8 @@ A global cue can therefore end with four *different* targets — e.g. two lanes 
 | Track hold that already produced `lane.audition` `:3979` | the audition continues and restores normally; only the button's *release* action is suppressed |
 | FX overlay open | learning eligibility unchanged; playback allowed; FX controls untouched |
 | Heads mode | learning and playback both rejected (Heads owns `headsBus` `:1802`) |
-| Scrub / reverse / any loop / off-1× rate | learning rejected; playback allowed and rejoins per §6 |
+| Scrub / reverse | learning rejected; **playback rejected in v1** (isolated: if its lane is scrubbing/reversed; global: if any lane is scrubbing/reversed) |
+| Any loop / off-1× rate | learning rejected; playback allowed and rejoins per §6 |
 | Transport stopped | learning rejected; **playback allowed**, completion returns to silence |
 | Same channel+note relearned | overwrite |
 | Note On while that note plays | retrigger from `startFrame`, one bounded crossfade |
@@ -164,8 +170,8 @@ cues?: {
 }
 ```
 
-- `contentHash` (from `StoredStem.contentHash` `store.ts:43`) is the **only** persisted source identity. A runtime `sourceGeneration` counter exists in memory only, used for cancelling scheduled cue work and rejecting stale async callbacks; it is never written to disk and never round-tripped.
-- **Invalidation**: on load and on any stem replacement, a marker whose recorded hash/generation no longer matches its stem is marked invalid — retained on disk, but unplayable and shown as "source replaced" in the status strip. A global marker is invalidated if *any* of the four stems changed; an isolated marker only by its own lane.
+- `contentHash` (from `StoredStem.contentHash` `store.ts:43`) is the **only** persisted source identity. A marker is invalidated when its recorded `contentHash` no longer matches the current stem's `contentHash`. A global marker is invalidated if any of the four stems changed; an isolated marker only by its own lane.
+- **Invalidation**: on load and on any stem replacement, a marker whose recorded `contentHash` no longer matches its stem is marked invalid — retained on disk, but unplayable and shown as "source replaced" in the status strip. A global marker is invalidated if *any* of the four stems changed; an isolated marker only by its own lane.
 - Rate mismatch: frames are converted through seconds using the recorded `sampleRate`; markers past the song duration are clamped and flagged.
 - `SCHEMA_VERSION` stays 2 (purely additive optional field). Absent → `{ version: 1, markers: [] }`.
 - Privacy: metadata only, asserted by extending `src/audio/__tests__/privacy.test.ts`.
@@ -213,7 +219,7 @@ Web engine
 - `src/audio/midi/webMidi.ts` (new) — Web MIDI adapter (desktop/Android).
 - `src/audio/midi/nativeBridge.ts` (new) — `window.__stemTapeMidi` batched-array queue + bridge-ready handshake.
 - `src/audio/cues.ts` (new) — marker store keyed by `channel:note`, learn/play state machines, eligibility gate, invalidation — all pure over `StemMidiEvent`.
-- `src/audio/engine.ts` — add `cueOwner: (CueOwner|null)[]`; extend the existing identity protection so `fadeOutAndStop` `:845`/`isReleaseTarget` `:849` also spare a cue voice; add **one `cueOwner[lane]` guard** at the small number of places that create an audible normal source (`spawn` call sites in the wrap/seam path `:967-980`, `relocateLane` `:1021`, `respawnLane` `:828`, the `tick()` scheduler) so an owned lane creates none; add handlers `cue.learn.start`, `cue.learn.end`, `cue.play`, `cue.stopAll`, `cue.clear` reusing `spawn` `:782` and `fadeOutAndStop` `:845`; schedule the fixed-1× completion + per-lane rejoin at play time; `tick()` reaps only. **No change** to `releaseGlobalLoop` `:1074`, `scheduleLoopRelease` `:1147`, or `applyAudibility` `:1650`.
+- `src/audio/engine.ts` — add `cueOwner: (CueOwner|null)[]`; add a **dedicated cue spawn path** `spawnCue({ track, startAt, startFrame, endFrame, reverse: false, window: null, playbackRate: 1 })` that reuses the per-voice `fade` gain and connects to `t.stemGate` (`:788`) so fader/FX chains stay intact, but never applies lane reverse, loop wrapping or transport varispeed; extend identity protection so `fadeOutAndStop` `:845`/`isReleaseTarget` `:849` also spare a cue voice; add a **single `cueOwner[lane]` guard** at every place that creates an audible normal source (`spawn` call sites in the wrap/seam path `:967-980`, `relocateLane` `:1021`, `respawnLane` `:828`, the `tick()` scheduler) so an owned lane creates none; add handlers `cue.learn.start`, `cue.learn.end`, `cue.play`, `cue.stopAll`, `cue.clear`; schedule the fixed-1× completion + per-lane rejoin at play time; temporarily override lane audibility for the cue voice without mutating `t.muted`/`t.soloed`; `tick()` reaps only. **No change** to `releaseGlobalLoop` `:1074`, `scheduleLoopRelease` `:1147`.
 - `src/audio/commands.ts` — append the five command types to the union `:14-94`.
 
 Input/qualifiers (smallest claim change)
@@ -272,14 +278,21 @@ Physical device (TestFlight) — reported, not asserted against the engine toler
 6. Global cues: four-lane ownership, per-lane independent underlay return, precedence arbitration.
 7. Persistence + migration + `contentHash` invalidation wired to stem replacement.
 8. Guide: 21st lesson + 81st feature id, coverage test counts updated together.
-9. iOS wrapper: client + input port, batched `callAsyncJavaScript`, `AVAudioSession.playback`, re-anchoring; TestFlight build and the physical-device reporting list.
+9. iOS wrapper: an **Xcode-ready, buildable** iPhone/iPad project using client + input port, batched `callAsyncJavaScript`, `AVAudioSession.playback`, and re-anchoring. Actual signing and TestFlight upload require your Apple Developer account and Xcode and are not claimed as completed inside Lovable's environment.
 
 
 ## 14. Exclusions
 
 No MIDI clock or output, no quantization, no launch modes, no cue editor, no onscreen pads, no fixed note bank, no new FX, no change to global-loop or lane-loop semantics, no Heads redesign, no unrelated UI, no offline bundling in the first iOS delivery, and no implementation in this response.
 
-## 15. Open decisions
+## 16. Final addendum (approved)
 
-None. Every previously open item is now settled: the Guide extends to 21 lessons / 81 feature ids, cues are per project, playback is a fixed-1× one-shot, and initial iOS delivery is the TestFlight WKWebView shell.
+1. **Cue spawn is dedicated, not reused.** `spawnCue({ track, startAt, startFrame, endFrame, reverse: false, window: null, playbackRate: 1 })` keeps the per-voice fade and the `t.stemGate` connection so fader/FX chains stay intact, but never inherits lane reverse, loop wrapping, or transport varispeed.
+2. **Playback rejection during scrub/reverse (v1).** An isolated cue is rejected if its target lane is scrubbing or reversed; a global cue is rejected if any lane is scrubbing or reversed. Playback over global and lane loops remains supported through the underlay-rejoin rules.
+3. **Cue audibility overrides mute/solo.** While `cueOwner[lane]` exists, the cue voice is audible regardless of that lane's mute/solo state, without mutating `t.muted` or `t.soloed`. Fader level and FX remain active; normal audibility restores on completion.
+4. **Invalidation uses `contentHash` only.** No persisted generation field exists.
+5. **Checkpoint 9 is Xcode-ready, not TestFlight-uploaded.** Actual signing and TestFlight upload require your Apple Developer account and Xcode and are outside Lovable's environment.
+
+No code will be written until you separately authorize implementation.
+
 
