@@ -249,7 +249,9 @@ describe("cue eligibility, rejoin and transport", () => {
   it("rejects learning while reversed or scrubbing", async () => {
     const r = await rig();
     startPlaying(r);
-    r.engine.execute(cmd("lane.reverse", { lane: 0 }));
+    // Reverse state is injected directly: this asserts the eligibility gate,
+    // not the reverse scheduler (covered by the tape suite).
+    (r.engine as unknown as { tracks: { loop: { reverse: boolean } }[] }).tracks[0]!.loop.reverse = true;
     expect(r.engine.cueEligibility().reverseActive).toBe(true);
     expect(learn(r, lane(0), 71).on.action.type).toBe("learn.reject");
   });
