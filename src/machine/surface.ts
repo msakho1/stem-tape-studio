@@ -689,15 +689,30 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
         // Stem Tape extension `rocker.chop.play`: chop lives on PLAY + rocker.
         // The arbiter claims PLAY before dispatch, so the transport never fires.
         if (state.pressed.includes("play")) {
-          if (g.count === 2) {
-            next = { ...next, chopDiv: 1, chopWindowOffset: 0, chopGlide: false };
-            for (let i = 0; i < 4; i++) next = emit(next, "loop.chop", { track: i, div: 1, index: 0 }, { rowId: "rocker.chop.play", t });
-            return fire(next, "rocker.chop.play", "chop reset → 1/1 (transport untouched)", t);
-          }
-          const chopDiv = Math.min(16, Math.max(1, dir > 0 ? next.chopDiv * 2 : next.chopDiv / 2));
-          next = { ...next, chopDiv };
-          for (let i = 0; i < 4; i++) next = emit(next, "loop.chop", { track: i, div: chopDiv, index: 0 }, { rowId: "rocker.chop.play", t });
-          return fire(next, "rocker.chop.play", `chop ${dir > 0 ? "double" : "half"} → 1/${chopDiv} (transport untouched)`, t);
+          // PLAY held + rocker MOVES the global loop window by one division.
+          // The chop family is retired: the same physical gesture now nudges
+          // the loop that Hold PLAY just created, which is what the rocker
+          // deflection was always suppressing the transport for.
+          next = emit(
+            next,
+            "loop.global.move",
+            { steps: dir, division: next.globalLoop.division },
+            { rowId: "tape.loop.global.move", t },
+          );
+          return fire(
+            next,
+            "tape.loop.global.move",
+            `global loop moved ${dir > 0 ? "forward" : "back"} 1/${next.globalLoop.division} bar`,
+            t,
+          );
+        }
+        if (!next.playing && !fn) {
+          // Stopped: the rocker is the stock SONG SKIP, not varispeed. Varispeed
+          // on a parked transport is inaudible and loses the cue.
+          const song = Math.max(0, next.song + dir);
+          next = { ...next, song };
+          next = emit(next, "transport.cue", { frame: 0 }, { rowId: "rocker.songSkip", t });
+          return fire(next, "rocker.songSkip", `song ${dir > 0 ? "next" : "previous"} → ${song + 1}, cued at 0:00`, t);
         }
         if (fn) {
           const seconds = dir * SCRUB_STEP_S;
