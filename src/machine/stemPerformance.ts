@@ -278,14 +278,20 @@ export function clearLatches(s: StemPerformanceState, index: number): StemPerfor
   );
 }
 
-/** Strip the never-persisted fields before saving. */
+/**
+ * Strip the never-persisted fields before saving.
+ *
+ * Compatibility: the ORIGINAL stored `soloed` / `linked` values are echoed back
+ * verbatim from `storedSoloed` / `storedLinked` when they exist, so normalising
+ * the runtime state (below) never rewrites an older project's saved values.
+ */
 export function serializePerformance(s: StemPerformanceState) {
   return {
     version: STEM_TAPE_SCHEMA_VERSION,
     activeStem: s.activeStem,
     tracks: s.tracks.map((t) => ({
-      soloed: t.soloed,
-      linked: t.linked,
+      soloed: t.storedSoloed ?? t.soloed,
+      linked: t.storedLinked ?? t.linked,
       fx12: serializeStemFx(t.fx12),
     })),
   };
@@ -298,11 +304,18 @@ type SerializedPerformance = ReturnType<typeof serializePerformance>;
  *  - v4+  : read `fx12` directly.
  *  - v3   : Phase 5C families → bank algorithm 0, latches preserved, retired
  *           `variation` folded into that algorithm's macro amount.
- *  - older: defaults (all stems linked, no solos, no latches, Filter / Tempo
- *           Echo / Reverb / Beat Repeat selected).
+ *  - older: defaults (no solos, no latches, Filter / Tempo Echo / Reverb /
+ *           Beat Repeat selected).
+ *
+ * SOLO / LINK NORMALISER. PLAY + Track is retired, so nothing on the surface
+ * can clear a persistent solo or re-link a lane. Loading a project that stored
+ * either would strand the user in an unreachable state. The stored values are
+ * therefore preserved for compatibility (`storedSoloed` / `storedLinked`, which
+ * `serializePerformance` writes back unchanged) while the RUNTIME state is
+ * forced to: persistent solo OFF, every lane UNLINKED.
  */
 export function deserializePerformance(raw: unknown): StemPerformanceState {
-  const base = initialStemPerformance();
+  const base = normalizeSoloLink(initialStemPerformance());
   if (!raw || typeof raw !== "object") return base;
   const data = raw as Partial<SerializedPerformance> & {
     tracks?: { soloed?: boolean; linked?: boolean; fx?: unknown; fx12?: unknown }[];
@@ -318,11 +331,23 @@ export function deserializePerformance(raw: unknown): StemPerformanceState {
         : migrateLegacyStemFx(saved.fx as Record<string, { latched?: boolean; variation?: number }> | undefined);
     return syncLegacySlots({
       ...t,
-      soloed: Boolean(saved.soloed),
-      linked: saved.linked !== false,
+      // Stored values kept verbatim for round-trip compatibility …
+      storedSoloed: Boolean(saved.soloed),
+      storedLinked: saved.linked !== false,
+      // … runtime state normalised: no unreachable solo, no unreachable link.
+      soloed: false,
+      linked: false,
       fx12,
     });
   }) as StemPerformanceState["tracks"];
   return { ...base, activeStem: (data.activeStem ?? 0) as StemIndex, tracks };
+}
+
+/** Force every lane to solo-off / unlinked without touching the stored echo. */
+export function normalizeSoloLink(s: StemPerformanceState): StemPerformanceState {
+  return {
+    ...s,
+    tracks: s.tracks.map((t) => ({ ...t, soloed: false, linked: false })) as StemPerformanceState["tracks"],
+  };
 }
 
