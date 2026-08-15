@@ -63,7 +63,13 @@ function LabPage() {
   const [mounted, setMounted] = useState(false);
   const [sess, setSess] = useState<SessionState>(() => session.get());
   const [demoBusy, setDemoBusy] = useState(false);
+  const [showRingerNotice, setShowRingerNotice] = useState(false);
   useEffect(() => setMounted(true), []);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const dismissed = window.sessionStorage.getItem("st-ringer-notice") === "1";
+    setShowRingerNotice(!dismissed);
+  }, []);
   useEffect(() => {
     const off = session.subscribe(setSess);
     return () => {
@@ -254,10 +260,24 @@ function LabPage() {
             <CueStatus />
             {/* Touch devices route through the ringer switch on iOS; say so once,
                 where the musician is about to press PLAY. */}
-            <p className="mb-3 border border-[var(--bench-line)] px-2 py-1.5 font-mono text-[10px] leading-relaxed text-[var(--ink-faint)] lg:hidden">
-              On iPhone and iPad, turn the silent switch off and raise the volume — browsers route this audio through
-              the ringer.
-            </p>
+            {showRingerNotice && (
+              <div className="mb-3 flex items-start gap-2 border border-[var(--bench-line)] bg-[var(--bench-raised)] px-2 py-1.5 lg:hidden">
+                <p className="flex-1 font-mono text-[10px] leading-relaxed text-[var(--ink-faint)]">
+                  Ensure your ringer is on to hear sound.
+                </p>
+                <button
+                  type="button"
+                  aria-label="Dismiss ringer notice"
+                  className="shrink-0 font-mono text-[10px] leading-none text-[var(--ink-dim)] hover:text-[var(--ink)]"
+                  onClick={() => {
+                    setShowRingerNotice(false);
+                    if (typeof window !== "undefined") window.sessionStorage.setItem("st-ringer-notice", "1");
+                  }}
+                >
+                  ×
+                </button>
+              </div>
+            )}
             {state.perf.fxOverlay && (
               <p
                 className="mb-3 border border-[var(--signal)] px-2 py-1.5 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--signal)]"
