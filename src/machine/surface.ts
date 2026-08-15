@@ -752,9 +752,17 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
             }
             return fire(next, "loop.resize", notes.join(" · "), t);
           }
-          const chopWindowOffset = clamp01(next.chopWindowOffset + dir * 0.0625);
-          next = { ...next, chopWindowOffset };
-          return fire(next, "volume.chopWindow", `chop window → ${chopWindowOffset.toFixed(3)}`, t);
+          // FUNCTION + Volume with NO Track held ALWAYS sets the global-loop
+          // division — whether the loop is running, held or not yet captured.
+          // The division is remembered, so the next Hold PLAY starts there.
+          const order: (1 | 2 | 4 | 8)[] = [1, 2, 4, 8];
+          const at = order.indexOf(next.globalLoop.division);
+          const division = order[Math.max(0, Math.min(order.length - 1, at + (dir > 0 ? 1 : -1)))]!;
+          next = { ...next, globalLoop: { ...next.globalLoop, division } };
+          if (next.globalLoop.active) {
+            next = emit(next, "loop.global.resize", { division }, { rowId: "tape.loop.global.resize", t });
+          }
+          return fire(next, "tape.loop.global.resize", `global loop division → 1/${division} bar`, t);
         }
         const masterVolume = clamp01(next.masterVolume + dir * 0.0625);
         next = emit({ ...next, masterVolume }, "master.gain", { level: masterVolume }, { rowId: "volume.master", t });
