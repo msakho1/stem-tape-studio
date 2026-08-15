@@ -399,6 +399,13 @@ export class AudioEngine {
    */
   scrubCandidate: (number | null)[] = [null, null, null, null];
 
+  /**
+   * The GLOBAL one-bar loop (Hold PLAY). One window shared by all four stems,
+   * so a move or resize keeps them phase-locked. Null when no global loop is
+   * running; per-lane loops are tracked separately on each track.
+   */
+  globalLoop: { start: number; lengthS: number; division: number } | null = null;
+
   setScrubCandidate(lane: number, seconds: number | null) {
     if (lane < 0 || lane > 3) return;
     this.scrubCandidate[lane] = seconds != null && Number.isFinite(seconds) ? Math.max(0, seconds) : null;
