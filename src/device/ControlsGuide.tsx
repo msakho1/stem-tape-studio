@@ -35,14 +35,17 @@ function Drawer({
     <div className="border border-[var(--bench-line)]">
       <button
         type="button"
-        className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left"
+        className="grid w-full grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1 px-3 py-2 text-left"
         aria-expanded={open}
         data-testid={id}
         onClick={onToggle}
       >
-        <span className="font-mono text-[12px] text-[var(--ink)]">{title}</span>
-        <span className="shrink-0 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--ink-faint)]">
-          {meta} <span aria-hidden>{open ? "⌃" : "⌄"}</span>
+        <span className="min-w-0 font-mono text-[12px] text-[var(--ink)]">{title}</span>
+        <span aria-hidden className="shrink-0 font-mono text-[10px] text-[var(--ink-faint)]">
+          {open ? "⌃" : "⌄"}
+        </span>
+        <span className="col-span-2 min-w-0 break-words font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--ink-faint)] sm:col-span-1 sm:col-start-1">
+          {meta}
         </span>
       </button>
       {open && <div className="border-t border-[var(--bench-line)] px-3 py-3">{children}</div>}
@@ -127,8 +130,10 @@ export function ControlsGuide({
             ))}
           </div>
 
-          <p className="mt-4 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--ink-faint)]">keyboard</p>
-          <div className="mt-2 border border-[var(--bench-line)]" data-testid="guide-keyboard">
+          <p className="mt-4 hidden font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--ink-faint)] lg:block">
+            keyboard
+          </p>
+          <div className="mt-2 hidden border border-[var(--bench-line)] lg:block" data-testid="guide-keyboard">
             <table className="w-full border-collapse font-mono text-[11px]">
               <tbody>
                 {table.map(({ group, rows }) => (
