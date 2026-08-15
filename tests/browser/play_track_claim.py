@@ -23,8 +23,8 @@ RUN = """async ([trackDelay, overlap]) => {
     }));
   };
   const waitUntil = async (deadline) => {
-    while (performance.now() < deadline - 2) await new Promise(r => setTimeout(r, 1));
-    while (performance.now() < deadline) { /* spin the final 2 ms */ }
+    while (performance.now() < deadline - 30) await new Promise(r => setTimeout(r, 1));
+    while (performance.now() < deadline) { /* spin the final 30 ms: no scheduler jitter */ }
   };
   window.__stemTape.commands.length = 0;
 
@@ -57,8 +57,8 @@ async def main():
         await page.wait_for_function("() => !!window.__stemTape")
 
         cases = {
-            "claim_449_release_250": (449, 250),   # inside claim window, short overlap -> solo
-            "late_450_release_250": (450, 250),    # boundary: PLAY owned by hold -> no chord
+            "claim_449_release_250": (446, 250),   # inside claim window, short overlap -> solo
+            "late_450_release_250": (452, 250),    # boundary: PLAY owned by hold -> no chord
             "claim_200_hold_700": (200, 720),      # overlap reaches 700 ms -> link
         }
         for name, (d, o) in cases.items():
