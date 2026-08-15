@@ -4319,12 +4319,15 @@ export class AudioEngine {
         case "fx.macro":
         case "fx.variation":
         case "fx.clearLatches": {
+          // SCOPE ROUTING. `scope: "global"` addresses the one post-sum rack;
+          // anything else addresses the named lane's rack.
+          const global = p["scope"] === "global";
           const id = Number(p["track"]) as TrackId;
-          const t = this.tracks[id];
-          if (!t) return this.ack(cmd, "rejected", `no track ${id}`);
+          const target: TrackId | "global" = global ? "global" : id;
+          if (!global && !this.tracks[id]) return this.ack(cmd, "rejected", `no track ${id}`);
           if (!this.ctx) return this.ack(cmd, "rejected", "audio not unlocked");
           if (cmd.type === "fx.clearLatches") {
-            const res = this.clearBanks(id);
+            const res = this.clearBanks(target);
             return this.ack(cmd, res.ok ? "completed" : "rejected", res.detail);
           }
           const latched = Boolean(p["latched"]);
@@ -4340,18 +4343,22 @@ export class AudioEngine {
           if (!(bank >= 0 && bank <= 3)) return this.ack(cmd, "rejected", `unknown FX bank ${String(p["bank"])}`);
           const algorithm = Number(p["algorithm"] ?? 0) as AlgorithmIndex;
           if (cmd.type === "fx.algorithm.cycle") {
-            const res = this.selectBankAlgorithm(id, bank, algorithm);
+            const res = this.selectBankAlgorithm(target, bank, algorithm);
             return this.ack(cmd, res.ok ? "completed" : "rejected", res.detail);
           }
           if (cmd.type === "fx.macro") {
-            const res = this.setBankMacro(id, bank, algorithm, Number(p["value"]));
+            const res = this.setBankMacro(target, bank, algorithm, Number(p["value"]));
             return this.ack(cmd, res.ok ? "completed" : "rejected", res.detail);
           }
           const active = cmd.type === "fx.latch" ? Boolean(p["on"]) : cmd.type === "fx.momentary.start";
           // Accepted immediately (zero hold latency), completed once the wet
           // ramp is scheduled. Distinct acknowledgements, never merged.
-          const accepted = this.ack(cmd, "accepted", `stem ${id + 1} bank ${bank + 1} ${active ? "engaging" : "releasing"}`);
-          void this.setBankActive(id, bank, algorithm, active, latched).then((res) =>
+          const accepted = this.ack(
+            cmd,
+            "accepted",
+            `${global ? "global mix" : `stem ${id + 1}`} bank ${bank + 1} ${active ? "engaging" : "releasing"}`,
+          );
+          void this.setBankActive(target, bank, algorithm, active, latched).then((res) =>
             this.ack(cmd, res.ok ? "completed" : "rejected", res.detail),
           );
           return accepted;
