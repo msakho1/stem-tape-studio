@@ -2,42 +2,43 @@
 
 Provenance: **S1** = TE guide image (stock-guide-verified). **S2** = stock walkthrough video (documentary; physical-verification-required). `v26map.ts` / `stemTapeV1Map.ts` = Tape Looper + Stem Tape contracts, never evidence of stock.
 
-## 1. Gesture grammars (two, mutually exclusive)
+## 1. Gesture grammars
 
-**G1 modifier-first** — FUNCTION goes **down before** the target control and is **still down** when the target acts. Arrival budget `modifierArrivalMs = 400` (`chordArbiter.ts:46`). FUNCTION's own tap action is cancelled the instant a target arrives while it is down.
+**G1 modifier-first** — FUNCTION goes down **before** the target and is still down when the target acts. Arrival budget `modifierArrivalMs = 400` (`chordArbiter.ts:46`). FUNCTION's own tap action is cancelled the moment a target arrives while it is down.
 
-**G2 latch-after** — the operation is **already running** (its control still down), then FUNCTION is **tapped and released** while it runs. FUNCTION down is a no-op on its own; the latch fires on FUNCTION **up** only if an operation is active.
+**G2 release-order latching** — no separate "tap FUNCTION" grammar. A G1 operation still running when both controls come up is resolved by **which control is released first**.
 
-Disambiguation rule: FUNCTION down with **nothing else down** → arm G1 and start a *pending select*; if FUNCTION is released with no target and no active operation, the pending select resolves as "FN armed, awaiting Track 1–4" for `TRACK_SELECT_WINDOW = 1200 ms`. A Track tap inside that window is active-track select; after it, the arm expires.
-
-### Global scrub latch — exact sequence, with proof of no stray command
+### Global scrub — exact down/up sequence
 
 | # | Event | Guard | Emitted |
 |---|---|---|---|
-| 1 | `function` down (nothing else down) | arms G1; **no** command | — |
-| 2 | `rocker-fwd` down ≤400 ms later | `fn` held → arbiter claims `function` **and** `rocker-fwd` before dispatch | `transport.scrub.start{dir}` |
-| 3 | rocker held | scrub integrates | `transport.scrub.rate` |
-| 4 | `function` up (rocker still down) | active op present → G2 | `transport.scrub.latch` |
-| 5 | `rocker-fwd` up | latched → no end | — (scrub continues) |
-| 6 | `rocker-fwd` down again | latch active | `transport.scrub.end` (existing ≤2-frame handoff, `engine.ts` `integrateScrubTo`) |
+| 1 | `function` down, nothing else down | arms G1 | — (no `fn.*`) |
+| 2 | `rocker-fwd` down ≤400 ms | arbiter claims `function` **and** the rocker before dispatch | `transport.scrub.start{dir}` |
+| 3 | rocker held | integrates | `transport.scrub.rate` |
+| 4a | **rocker up first** (FUNCTION still down) | normal end | `transport.scrub.end` (≤2-frame handoff, `engine.ts` `integrateScrubTo`) |
+| 4b | **`function` up first**, rocker still down | latch | `transport.scrub.latch` |
+| 5 | rocker up after 4b | latched | — |
+| 6 | rocker re-press | latch active | `transport.scrub.end` |
 
-Non-firing proof obligations (unit-asserted): between #1 and #6 the command stream contains **no** `rate.set` (rocker varispeed is suppressed whenever `fn` is held — `surface.ts:790`), **no** `transport.play` / `transport.stop` / `transport.cue`, **no** `fn.tempoGrid`, **no** `song.next/prev`. Step 4 must not emit a bare FUNCTION action because the arbiter marked `function` claimed at step 2 and claims survive until that control's **next down** (`chordArbiter.ts:200-203`).
+Non-firing obligations, asserted across the whole stream from #1 to #6: no `rate.set` (rocker varispeed is suppressed while `fn` is held, `surface.ts:790`), no `transport.play/stop/cue`, no `fn.tempoGrid` or any bare FUNCTION action (the claim set at #2 survives until that control's next **down**, `chordArbiter.ts:200-203`), no `song.next/prev`.
 
-The same 6-step shape defines: **global loop latch** (op = hold PLAY loop, FN tap latches, PLAY tap releases), **lane scrub park** (op = FN+fader; release parks — no latch), **FX latch** (op = held bank button, FN tap latches — already implemented, `chordArbiter.ts:210-215, 268-284`).
+The same release-order rule defines the **global-loop latch**: PLAY held with the loop running, FUNCTION down/up → latch; PLAY released first → normal loop end; PLAY tap while latched → release latch, transport keeps playing. **FX latch** already works this way (`chordArbiter.ts:210-215, 268-284`). **FN + fader** has no latch: release parks.
 
-## 2. Authoritative timing model
+**Active-track selection, with visible behaviour:** FUNCTION tap with nothing else down **arms** selection for `TRACK_SELECT_WINDOW = 1200 ms`; the four top LEDs **pulse** while armed; a Track tap inside the window selects that track, its LED goes **solid** and stays solid, the arm expires, and that track becomes the **FX target** (`activeStem` for every FX intent). FUNCTION tap while an operation is running is a latch, never a select.
 
-One model, no per-family exceptions:
+## 2. Timing model
 
-| Constant | Value | Meaning |
-|---|---|---|
-| `multiTapGapMs` | **300** | max gap between consecutive taps of one multi-tap; opens/extends the group |
-| `tapDecisionMs` | **300** | time after the **last** tap-up before the group is dispatched (renames `trackDecisionMs: 200`, `gestures.ts:78`) |
-| `holdMs` | 450 | tap → hold |
-| `modifierArrivalMs` | 400 | G1 arrival budget |
-| `powerHoldMs` / `longHoldMs` | 1200 / 5000 | unchanged |
+Latency is per family — not a universal 300 ms.
 
-The 200/300 contradiction is resolved by making the deferred-arbitration window **equal** to the multi-tap gap (300 ms): a 200 ms commit could dispatch a single tap while a legal second tap was still inside its 300 ms gap. Measured worst-case action latency after the final finger-up: single **300 ms**, double **300 ms**, triple **300 ms** (total gesture wall time: single 300, double ≤600+, triple ≤900+). Test asserts `decisionLatencyMs` (`gestures.ts:163`) ≤330 ms for all three and that no intermediate mute/loop command precedes a double or triple.
+| Family | Constant | Value | Commit latency after last finger-up |
+|---|---|---|---|
+| Track buttons (tap / double / triple / hold) | `trackDecisionMs` — one shared gap **and** decision window | **200 ms** (tunable 200–220) | ≤220 ms for all counts |
+| FN + PLAY multi-tap | `fnPlayDecisionMs` (own longer window) | **420 ms** | ≤440 ms |
+| Bare PLAY, Volume, rocker, faders, FX momentary | none | immediate | ≤1 audio frame (FX momentary fires on pointer-**down**, `chordArbiter.ts:217-226`) |
+| tap → hold | `holdMs` | 450 ms | — |
+| G1 arrival | `modifierArrivalMs` | 400 ms | — |
+
+The 200/300 conflict is resolved by deleting the separate `multiTapGapMs` for Track buttons: one constant is both the inter-tap gap and the decision delay, so a legal second tap can never arrive after dispatch. `multiTapGapMs = 300` survives only for controls with no deferred arbitration.
 
 ## 3. Revised final mapping
 
@@ -45,50 +46,43 @@ The 200/300 contradiction is resolved by making the deferred-arbitration window 
 |---|---|---|---|---|
 | Hold PLAY (playing) | bare | `transport.cue` frame 0 unconditional — `surface.ts:745-752` | **global one-bar loop** while held | stock (S1 LOOP) |
 | Hold PLAY (stopped) | bare | same | cue to frame 0 | extension |
-| FN + Vol −/+ | G1 | `volume.chopWindow` glide — `surface.ts:797` | **global-loop division** (only job; sets the pending division when no loop runs) | S2 |
-| PLAY + Vol −/+ | — | `stem.select` — `chordArbiter.ts:335-342` | **removed** | obsolete |
-| PLAY held + rocker | — | `rocker.chop.play` — `surface.ts:656-667, 790` | **move the global loop** ±1 division; chop removed | S2 |
-| FN tap while PLAY held | G2 | none | latch global loop | S2 |
-| PLAY tap while loop latched | bare | toggles transport — `surface.ts:485-487` | release latch, transport keeps playing; **transport toggle suppressed** | S2 |
-| Short FN → Track 1–4 | G1 arm | FN tap = tempo tap — `surface.ts:492-518` | **active-track select** | stock (S2) |
-| FN ×4 grid rounding | — | `surface.ts:828-836` | **removed**; manual grid correction moves to Projects UI | obsolete |
-| Track tap | bare | mute toggle | mute toggle, or release that lane's loop if one is running | extension |
-| Track hold (1–3 together) | bare | momentary audition chord — `surface.ts:756-782` | unchanged | stock solo + extension |
-| Track double-tap | bare | one-bar lane loop — `stemTapeV1Map.ts:223` | unchanged | extension |
-| FN + Track double-tap | G1 | lane reverse | unchanged | extension |
-| FN + Track + Vol ± | G1 | lane loop resize — `surface.ts:684-700` | unchanged (Track held disambiguates from global division) | extension |
-| FN + Fader n | G1 | lane scrub/park — `scrub.ts`, `engine.ts` laneFaderScrub | unchanged | extension |
-| FN + Rocker | G1 + G2 | global scrub — `stemTapeV1Map.ts:139-141` | + Vol ± sets scrub speed, FN tap latches, rocker re-press releases | extension |
-| Rocker, stopped | bare | varispeed | **prev/next song** | stock (S1) |
-| Rocker, playing | bare | varispeed / glide / semitone | unchanged | S2 |
-| FN + PLAY ×1 / ×2 / ×3 | G1 | ×2 snap 1×, ×3 Heads — `surface.ts:468-484` | ×1 half-speed toggle, ×2 snap 1×, ×3 Heads | ×1 S2, rest extension |
-| Vol− + Vol+ short | bare | FX overlay | unchanged | extension |
-| Vol− + Vol+ ≥2 s | bare | `system.pairing` | **hardware-only**, non-functional note | hardware |
+| FN + Vol −/+ (no Track held) | G1 | `volume.chopWindow` — `surface.ts:797` | **global-loop division** — its only job, in **every** mode including FX; sets the pending division when no loop runs | S2 |
+| PLAY + Vol −/+ | — | `stem.select` — `chordArbiter.ts:335-342` | **retired** with `supersedes: ["stem.select"]` + `originalBehaviour`; superseded by FN-arm + Track select | obsolete |
+| **PLAY + Track, overlap <700 ms** | chord | `stem.solo` — `chordArbiter.ts:344-351` | **retained** (latching solo). Precedence below the global loop: it can only fire while PLAY has not crossed `holdMs`; the arbiter cancels a pending solo the instant the loop starts | extension, kept |
+| **PLAY + Track, overlap ≥700 ms** | chord | `stem.link` — `chordArbiter.ts:352-353` | **retained** (link/unlink), same precedence rule | extension, kept |
+| PLAY held + rocker | — | `rocker.chop.play` — `surface.ts:656-667, 790` | **move the global loop** ±1 division; chop retired with `supersedes` | S2 |
+| Short FN → Track 1–4 | G1 arm | FN tap = tempo tap — `surface.ts:492-518` | **active-track select** with LED arm/solid | stock (S2) |
+| FN ×4 grid rounding | — | `surface.ts:828-836` | **removed**; manual correction moves to Projects | obsolete |
+| Track tap (Tape) | bare | mute toggle | releases that lane's loop if one is active, otherwise mutes | extension |
+| Track hold, any 1–4 group | bare | audition chord — `surface.ts:756-782` | unchanged | stock solo + extension |
+| Track double · FN+Track double · FN+Track+Vol · FN+fader | bare / G1 | lane loop, reverse, resize, scrub | unchanged, and **reachable inside FX Overlay** | extension |
+| FN + Rocker | G1 + release-order | global scrub | + Vol ± sets scrub speed; latch per §1 | extension |
+| Rocker, stopped / playing | bare | varispeed always | **prev/next song** when stopped; varispeed unchanged when playing | stock (S1) / S2 |
+| FN + PLAY ×1 / ×2 / ×3 | G1 | ×2 snap, ×3 Heads — `surface.ts:468-484` | ×1 half-speed, ×2 snap 1×, ×3 Heads | ×1 S2, rest extension |
+| Vol− + Vol+ short / ≥2 s | bare | FX overlay / `system.pairing` | overlay unchanged; pairing **hardware-only**, non-interactive | extension / hardware |
 
-**Global-loop release is physical-verification-required.** S1/S2 show only that hold-PLAY loops and release ends it; neither establishes whether stock rejoins a hidden timeline or resumes from the loop start. Plan of record: implement release using Stem Tape's existing hidden-timeline rejoin (`engine.ts` `scheduleLoopRelease`, proven in `loopRejoin.test.ts`) and label the row **PVR — Stem Tape choice, not stock-verified** in the map and Guide.
+**Global-loop release is physical-verification-required.** S1/S2 establish only that hold-PLAY loops and that release ends it. Plan of record: reuse Stem Tape's hidden-timeline rejoin (`engine.ts` `scheduleLoopRelease`, `loopRejoin.test.ts`), flagged **PVR — Stem Tape choice, not stock-verified** in the map and the Guide card.
 
-## 4. Precedence matrix
+## 4. Precedence and coexistence
 
-Highest first, per mode.
+**TAPE**, highest first: 1 cancel/lost pointer · 2 Vol−+Vol+ ≥2 s (hardware note) · 3 global loop (PLAY held or latched) · 4 global scrub · 5 PLAY+Track solo/link · 6 FN-qualified lane ops · 7 Track deferred group · 8 bare transport, varispeed or song skip, master volume.
+Suppressed by 3: `transport.play/stop/cue`, `rate.set`, `loop.chop`, `song.*`, and any pending PLAY+Track chord. Suppressed by 4: `rate.set`, `song.*`, `transport.play/stop`.
 
-**TAPE**
-1. cancel / lost pointer.
-2. Vol−+Vol+ ≥2 s (hardware note).
-3. Global loop (PLAY held or latched): owns Vol ± (division), rocker (move), FN tap (latch); **suppresses** `transport.play/stop/cue`, `rate.set`, `stem.select`, `loop.chop`, song skip.
-4. Global scrub (FN + rocker, held or latched): **suppresses** `rate.set`, song skip, `transport.play/stop`.
-5. Lane operations (FN + fader scrub, FN + Track dbl reverse, FN + Track + Vol resize).
-6. Track deferred group (tap / double / hold).
-7. Bare transport, rocker varispeed or song skip, master volume.
+**FX OVERLAY**: 1 cancel · 2 Vol−+Vol+ closes · 3 FN + bank = latch, all four + FN = clear latches · 4 FN-qualified **lane** gestures — FN+fader scrub, FN+Track double-tap reverse, FN+Track+Vol resize — all remain reachable · 5 FN+Vol with **no** Track held = global-loop division, never disabled here · 6 bare Track = bank select + momentary on pointer-down (**FX owns bare Track**: mute, lane loop and audition suppressed) · 7 Vol ± with a bank selected = macro (hold) or algorithm cycle (tap). Transport, global loop and global scrub stay reachable.
 
-Global loop vs existing stem loops: they **coexist**. Global loop bounds the shared transport; lane loops keep their own bar windows inside it and are released independently by their Track tap. A global loop release re-anchors lanes at the hidden-timeline frame; a lane loop release does not disturb the global loop.
+**HEADS**: 1 cancel · 2 FN+PLAY ×3 exit · 3 Track n = head n — tap **releases that head's loop if one is active, otherwise mutes**; holding **any 1–4 group** auditions exactly those heads **including while the transport is paused**, and release restores the prior state exactly; triple-tap latches independent head playback; double-tap captures a one-bar head loop; FN + double-tap reverses that head; FN + Track + Vol resizes its loop · 4 fader n = head n gain, FN + fader n = head n scrub/park · 5 **FX remains available and audible** — the rack sits on the heads bus, so overlay, banks, latches and macros all function · 6 bare transport still advances the hidden song clock.
+Suppressed in Heads: normal-bus stem mute/solo/lane-loop/lane-reverse, the global one-bar loop, `stem.select`, PLAY+Track solo/link. The normal bus is gated to exactly 0 (`engine.ts` `crossfadeBuses`, `busIsolation.test.ts`) while its stems advance silently. On exit every heads-only loop, reverse, latch and mute is **discarded**, the `headsEntrySnapshot` is restored bit-identically over a 40 ms crossfade, and the normal lanes resume at the **advancing hidden-timeline frame**, never at a head position.
 
-**FX OVERLAY**
-1. cancel. 2. Vol−+Vol+ (closes overlay). 3. FN + bank button = latch (`chordArbiter.ts:210-215`). 4. all four + FN = clear latches. 5. bare bank button = select + momentary on pointer-down. 6. Vol ± with a bank selected = macro (hold ≥450 ms) or algorithm cycle (tap).
-Track buttons are **owned by FX** here: mute, lane loop, audition and reverse are all **suppressed**. FN + Vol does **not** set loop division in FX. Transport, global loop and global scrub remain reachable (PLAY and rocker are not claimed by FX).
+### Global-loop × lane-loop transition table
 
-**HEADS**
-1. cancel. 2. FN + PLAY ×3 = exit. 3. Track n = head n (tap mute, hold momentary solo, triple-tap latch playback, double-tap capture one-bar head loop, FN + double-tap head reverse, FN + Track + Vol resize head loop). 4. Fader n = head n gain; FN + fader n = head n scrub/park. 5. bare transport still drives the hidden song clock.
-Suppressed in Heads: stem mute/solo/lane-loop/lane-reverse on the normal bus, global one-bar loop, `stem.select`, FX overlay entry. The normal four-stem bus is gated to exactly 0 (`engine.ts` `crossfadeBuses`, `busIsolation.test.ts`) while its stems advance silently. Exit crossfades back over 40 ms and restores the `headsEntrySnapshot` bit-identically; the transport rejoins at the hidden-timeline frame, not at any head position.
+"Audible pointer" = the frame the listener hears; "hidden target" = the frame that lane's silent song clock holds for rejoin. All boundaries are the next shared bar; all landings ≤2 frames.
+
+| Case | Audible pointer | Hidden target |
+|---|---|---|
+| **A. Lane loop already active when the global loop starts** | that lane keeps cycling its own captured bar, unrestarted and unrecaptured; the other three cycle the global bar. Both cycles are phase-locked to the same detected grid | every lane's hidden clock keeps advancing at song rate, unaffected by either loop |
+| **B. Lane loop captured during a global loop** | the capture window is the bar the **global loop** is currently sounding, starting at its bar-start frame; that lane then leaves the global cycle and repeats the captured bar | that lane's hidden clock continues advancing from the frame it held at capture |
+| **C. Lane loop released during a global loop** | at the next bar boundary that lane resumes at the **global loop's current bar-start frame**, not at its hidden frame, so it re-locks with the other three | the hidden clock keeps advancing and stays unused until the global loop ends |
+| **D. Global loop released while lane loops remain active** | non-looping lanes resume at their **hidden-timeline frame** on the next bar boundary (`scheduleLoopRelease`; PVR flag applies). Lanes still holding a loop keep cycling untouched and each rejoins its own hidden frame only when its loop is later released | every lane's hidden clock has advanced throughout and is the authoritative rejoin frame |
 
 ## 5. FX: what actually changes
 
