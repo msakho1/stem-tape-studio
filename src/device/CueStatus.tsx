@@ -28,6 +28,7 @@ export function CueStatus() {
   const [cue, setCue] = useState<{ learned: number; invalid: number; open: number; owned: string; detail: string | null }>(
     { learned: 0, invalid: 0, open: 0, owned: "0000", detail: null },
   );
+  const [open, setOpen] = useState(false);
   const mounted = useRef(false);
 
   useEffect(() => {
@@ -88,9 +89,11 @@ export function CueStatus() {
     : web.devices[0]?.name ?? "—";
   const stale = last ? isStale(last, nowMs) : false;
 
+  const connected = transport !== "none";
+
   return (
     <div
-      className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 border border-[var(--bench-line)] px-2 py-1.5"
+      className="mb-3 border border-[var(--bench-line)]"
       data-testid="cue-status"
       data-midi-transport={transport}
       data-midi-device={deviceName}
@@ -104,9 +107,28 @@ export function CueStatus() {
       data-cue-detail={cue.detail ?? ""}
       role="status"
     >
-      <span className="font-mono text-[10px] uppercase tracking-[0.28em] text-[var(--signal)]">
-        midi · {transport === "coremidi-bridge" ? "native" : transport === "webmidi" ? "web midi" : "none"}
-      </span>
+      {/* Collapsed by default: one compact row. Everything below only exists
+          once the musician asks for it. */}
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        data-testid="cue-status-toggle"
+        className="grid w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 px-2 py-1.5 text-left"
+      >
+        <span className="font-mono text-[10px] uppercase tracking-[0.28em] text-[var(--signal)]">
+          midi{connected ? " ·" : ""}{" "}
+          {transport === "coremidi-bridge" ? "native" : transport === "webmidi" ? "connected" : ""}
+        </span>
+        <span className="min-w-0 truncate font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--ink-dim)]">
+          {connected ? deviceName : "not connected"}
+        </span>
+        <span aria-hidden className="shrink-0 font-mono text-[10px] text-[var(--ink-faint)]">
+          {open ? "▾" : "▸"}
+        </span>
+      </button>
+      {open && (
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-[var(--bench-line)] px-2 py-1.5">
       <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--ink-dim)]">
         {deviceName}
       </span>
@@ -143,6 +165,8 @@ export function CueStatus() {
       )}
       {web.error && (
         <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--signal)]">{web.error}</span>
+      )}
+      </div>
       )}
     </div>
   );
