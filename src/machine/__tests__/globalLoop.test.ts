@@ -147,7 +147,7 @@ describe("FUNCTION tap · armed active-track selection", () => {
     const emitted = s.commands.slice(before).map((c) => c.type);
     expect(emitted).toEqual(["stem.select"]);
     expect(s.activeTrack).toBe(2);
-    expect(s.tracks[2]!.muted).toBe(false);
+    expect(s.tracks[2]!.content).toBe(initialSurfaceState().tracks[2]!.content);
     expect(s.trackSelectArmedAt).toBeNull();
   });
 
