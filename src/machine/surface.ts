@@ -824,18 +824,11 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
 
 
     case "tapThenHold": {
-      if (g.control === "function") {
-        // This hold belongs to the grid rows, not to power.
-        next = { ...next, fnModifierUsed: true };
-        if (state.fnTapCount >= 4 && state.grid.bpm != null) {
-          const bpm = Math.round(state.grid.bpm);
-          next = { ...next, grid: { bpm, rejected: false, source: "rounded" } };
-          return fire(next, "fn.roundBpm", `rounded to ${bpm} BPM`, t);
-        }
-        next = { ...next, grid: { bpm: null, rejected: false, source: "none" }, fnTapTimes: [] };
-        return fire(next, "fn.clearGrid", "grid cleared", t);
-      }
-
+      // FUNCTION tap-then-hold used to round / clear the tapped tempo grid.
+      // Tempo tapping and FN ×4 rounding are REMOVED: the grid is detected
+      // automatically (local, deterministic, non-AI) and manual correction
+      // lives in Projects. FUNCTION is a pure modifier + selection arm now.
+      if (g.control === "function") return { ...next, fnModifierUsed: true };
       return next;
     }
 
