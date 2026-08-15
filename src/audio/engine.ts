@@ -4230,7 +4230,7 @@ export class AudioEngine {
           if (this.ctx) {
             // Lifecycle (correction 8): momentary state cleared, DSP history
             // faded out, Beat Repeat rings dropped. Stored FX config survives.
-            this.stopAllCues("song loaded");
+            this.stopAllCues("song loaded", false);
             this.flushAllFx();
             this.stopSources();
 
@@ -4656,7 +4656,7 @@ export class AudioEngine {
   }
 
   dispose() {
-    this.stopAllCues("engine disposed");
+    this.stopAllCues("engine disposed", false);
     for (const t of this.tracks) {
       t.fxRack?.dispose();
       t.fxRack = null;
