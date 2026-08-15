@@ -46,42 +46,32 @@ function harness(overlay = false, activeStem: 0 | 1 | 2 | 3 = 0) {
 }
 
 describe("ordered chord arbitration (correction 1)", () => {
-  it("Play + Vol+ selects the next stem and CLAIMS play before dispatch", () => {
+  // PLAY-first chords are RETIRED. Hold PLAY is exclusively the global one-bar
+  // loop, so PLAY + Volume and PLAY + Track must claim nothing and emit
+  // nothing: the base gestures (master volume, deferred Track group) run.
+  it("PLAY + Volume no longer selects a stem and claims neither control", () => {
     const { arb, intents, ev } = harness();
     ev("play", "down", 0);
     ev("volume-plus", "down", 40);
     ev("volume-plus", "up", 120);
-    expect(intents).toEqual([{ type: "stem.select", dir: 1 }]);
-    // Both members are claimed, so neither transport.play nor master.gain
-    // reaches the v2.6 dispatch: nothing is emitted and then rolled back.
-    expect(arb.isClaimed("play")).toBe(true);
-    expect(arb.isClaimed("volume-plus")).toBe(true);
-    ev("play", "up", 200);
-    expect(arb.isClaimed("play")).toBe(true);
+    expect(intents).toEqual([]);
+    expect(arb.isClaimed("play")).toBe(false);
+    expect(arb.isClaimed("volume-plus")).toBe(false);
   });
 
-  it("Vol− selects the previous stem", () => {
-    const { intents, ev } = harness();
-    ev("play", "down", 0);
-    ev("volume-minus", "down", 10);
-    ev("volume-minus", "up", 60);
-    expect(intents[0]).toEqual({ type: "stem.select", dir: -1 });
-  });
-
-  it("Play + Track measures the OVERLAP, not the time since the Play press", () => {
-    // Play pressed 600 ms early; track overlap is only 200 ms → solo, not link.
+  it("PLAY + Track emits no solo and no link at any overlap", () => {
     const a = harness();
     a.ev("play", "down", 0);
     a.ev("track-button-2", "down", 300);
     a.ev("track-button-2", "up", 500);
-    expect(a.intents[0]).toMatchObject({ type: "stem.solo", stem: 1 });
-    expect((a.intents[0] as { overlapMs: number }).overlapMs).toBeCloseTo(200, 9);
+    expect(a.intents).toEqual([]);
+    expect(a.arb.isClaimed("track-button-2")).toBe(false);
 
     const b = harness();
     b.ev("play", "down", 0);
     b.ev("track-button-3", "down", 100);
     b.ev("track-button-3", "up", 100 + DEFAULT_ARBITER_TIMINGS.soloLinkMs + 1);
-    expect(b.intents[0]).toMatchObject({ type: "stem.link", stem: 2 });
+    expect(b.intents).toEqual([]);
   });
 
   it("volume chord: short = overlay, ~2 s = pairing, 600–2000 ms = no-op", () => {
