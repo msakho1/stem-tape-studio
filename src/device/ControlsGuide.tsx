@@ -75,15 +75,15 @@ export function ControlsGuide({
 
   return (
     <div className="mt-4 border-t border-[var(--bench-line)] pt-3" data-testid="controls-guide">
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="grid grid-cols-[auto_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)] items-center gap-2">
         <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--ink-faint)]">controls</p>
-        <button type="button" className="st-toggle" data-on={details} onClick={() => setDetails((v) => !v)}>
+        <button type="button" className="st-toggle truncate" data-on={details} onClick={() => setDetails((v) => !v)}>
           {details ? "hide details" : "show details"}
         </button>
-        <button type="button" className="st-toggle" data-on={showHitZones} onClick={onToggleHitZones}>
+        <button type="button" className="st-toggle truncate" data-on={showHitZones} onClick={onToggleHitZones}>
           {showHitZones ? "hide hit zones" : "show hit zones"}
         </button>
-        <button type="button" className="st-toggle" data-on={midiOpen} onClick={() => setMidiOpen((v) => !v)}>
+        <button type="button" className="st-toggle truncate" data-on={midiOpen} onClick={() => setMidiOpen((v) => !v)}>
           {midiOpen ? "hide midi" : "show midi"}
         </button>
       </div>
