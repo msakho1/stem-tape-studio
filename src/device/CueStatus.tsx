@@ -70,8 +70,9 @@ export function CueStatus() {
   const connect = useCallback(() => {
     void (async () => {
       const engine = getAudioEngine();
+      // unlock() re-anchors midiClock with a context time sampled alongside
+      // performance.now(); anchoring here separately would break the pair.
       await engine.unlock();
-      midiClock.anchor(performance.now(), engine.status().contextTime ?? 0);
       await webMidi.connect();
     })();
   }, []);
