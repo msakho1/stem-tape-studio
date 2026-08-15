@@ -60,12 +60,12 @@ export function normalizeMidiBytes(
   origin: MidiOrigin,
 ): StemMidiEvent | null {
   if (bytes.length < 1) return null;
-  const status = bytes[0] & 0xff;
+  const status = (bytes[0] ?? 0) & 0xff;
   if (status < 0x80 || status >= 0xf0) return null; // system / running status: ignored
   const type = status & 0xf0;
   const channel = status & 0x0f;
-  const d1 = bytes.length > 1 ? clamp7(bytes[1]) : 0;
-  const d2 = bytes.length > 2 ? clamp7(bytes[2]) : 0;
+  const d1 = clamp7(bytes[1] ?? 0);
+  const d2 = clamp7(bytes[2] ?? 0);
 
   const base = {
     channel,
@@ -114,26 +114,26 @@ const KINDS = new Set(["noteOn", "noteOff", "allNotesOff"]);
 export function normalizeNativeEvent(raw: unknown): StemMidiEvent | null {
   if (!raw || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
-  const timestampMs = typeof r.timestampMs === "number" && Number.isFinite(r.timestampMs)
-    ? r.timestampMs
+  const timestampMs = typeof r['timestampMs'] === "number" && Number.isFinite(r['timestampMs'])
+    ? r['timestampMs']
     : NaN;
   if (!Number.isFinite(timestampMs)) return null;
   const origin: MidiOrigin = {
     timestampMs,
     source: "coremidi-bridge",
-    deviceId: typeof r.deviceId === "string" ? r.deviceId : "coremidi",
-    deviceName: typeof r.deviceName === "string" ? r.deviceName : "CoreMIDI device",
+    deviceId: typeof r['deviceId'] === "string" ? r['deviceId'] : "coremidi",
+    deviceName: typeof r['deviceName'] === "string" ? r['deviceName'] : "CoreMIDI device",
   };
 
-  if (Array.isArray(r.bytes)) {
-    return normalizeMidiBytes(r.bytes.map((b) => Number(b) | 0), origin);
+  if (Array.isArray(r['bytes'])) {
+    return normalizeMidiBytes(r['bytes'].map((b) => Number(b) | 0), origin);
   }
 
-  const kind = typeof r.kind === "string" ? r.kind : "";
+  const kind = typeof r['kind'] === "string" ? r['kind'] : "";
   if (!KINDS.has(kind)) return null;
-  const note = clamp7(Number(r.note ?? 0));
-  const velocity = clamp7(Number(r.velocity ?? 0));
-  const channel = Math.max(0, Math.min(15, Number(r.channel ?? 0) | 0));
+  const note = clamp7(Number(r['note'] ?? 0));
+  const velocity = clamp7(Number(r['velocity'] ?? 0));
+  const channel = Math.max(0, Math.min(15, Number(r['channel'] ?? 0) | 0));
   if (kind === "allNotesOff") return allNotesOffEvent(origin, channel);
   if (kind === "noteOn" && velocity === 0) {
     return { kind: "noteOff", note, velocity: 0, channel, ...origin };
