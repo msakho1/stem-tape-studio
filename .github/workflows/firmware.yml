@@ -40,7 +40,8 @@ jobs:
       - name: Set up Zephyr v4.3.1 + SDK 0.17.4 (arm-zephyr-eabi only)
         uses: zephyrproject-rtos/action-zephyr-setup@v1
         with:
-          app-path: project/firmware
+          base-path: project
+          app-path: firmware
           toolchains: arm-zephyr-eabi
           sdk-version: 0.17.4
 
