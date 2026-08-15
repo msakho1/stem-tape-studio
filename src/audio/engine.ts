@@ -130,6 +130,20 @@ export const SCRUB_HANDOFF_FADE_S = 0.004;
 
 export type TrackId = 0 | 1 | 2 | 3;
 
+/** A one-shot cue voice. Deliberately NOT a LiveSource: nothing that walks
+ *  `t.sources` — seams, wraps, respawns, relocations — can ever reach it. */
+interface CueVoice {
+  key: string;
+  scope: "global" | "lane";
+  lane: number;
+  node: AudioBufferSourceNode;
+  gain: GainNode;
+  startAt: number;
+  endAt: number;
+  startPos: number;
+  underlayAtStart: number | null;
+}
+
 interface LiveSource {
   node: AudioBufferSourceNode;
   /** Per-source fade gain: seams live here, never on the physical trackGain. */
