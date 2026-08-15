@@ -1994,6 +1994,8 @@ export class AudioEngine {
       /* already torn down */
     }
     if (this.ctx) this.applyAudibility(lane as TrackId);
+    // Passage ended before the pad was released: return automatically.
+    this.resumeCuePark();
     this.noteCue("cue.release", `lane ${lane + 1} rejoined its underlay — ${reason}`);
   }
 
