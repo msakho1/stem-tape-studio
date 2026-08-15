@@ -128,11 +128,11 @@ Every entry is one card carrying all seven fields: purpose · exact down/up gest
 - `globalLoop.test.ts` — division, move, latch, PLAY-tap release without stopping.
 - `loopCoexistence.test.ts` — all four transition-table rows; asserts the audible pointer and the hidden rejoin frame per row, ≤2 frames.
 - `latchOrder.test.ts` — the six-step release-order scrub table plus non-firing assertions (`rate.set`, `transport.*`, `fn.*`, `song.*`).
-- `tapTiming.test.ts` — Track single/double/triple commit ≤220 ms; FN+PLAY ×3 ≤440 ms; bare PLAY / Volume / rocker / fader / FX momentary commit ≤1 frame.
-- `fnContext.test.ts` — FN+Volume is division in Tape **and** in FX; FN-arm → Track select; LED arm-pulse → solid.
+- `tapTiming.test.ts` — Track single/double/triple commit ≤220 ms; FN+PLAY ×1/×2/×3 commit ≤330 ms; bare PLAY / Volume / rocker / fader / FX momentary assert **no arbitration timer** and synchronous emission inside the same input-event turn (engine acknowledgement measured in a separate audio assertion).
+- `fnContext.test.ts` — FN+Volume is division in Tape **and** in FX; FN-arm → Track select; all four LEDs pulse while armed, selected LED solid, other three back to live meters, `activeStem` becomes the Tape/FX target.
 - `fxLaneAccess.test.ts` — FN+fader, FN+Track double-tap, FN+Track+Volume all reachable in FX; bare Track is FX-owned.
-- `headsBehaviour.test.ts` — tap releases head loop else mutes; audition of any 1–4 group while paused and restore; triple-tap latch; FX audible in Heads; discard-on-exit with lanes rejoining the advancing hidden timeline.
-- `playTrackSolo.test.ts` — PLAY+Track solo/link still fires and never collides with the global loop.
+- `headsBehaviour.test.ts` — tap releases head loop else mutes; audition of any 1–4 group while paused and restore; triple-tap latch; **FX processes the whole heads bus, not `activeStem`**; discard-on-exit restores mute/solo/gains/direction/loops/FX exactly, **excludes transport position** from the comparison, and lanes rejoin the advancing hidden-timeline frame.
+- **Delete `playTrackSolo.test.ts`.** Replace with `playTrackRetired.test.ts` — PLAY+Track emits **no** `stem.solo` / `stem.link` command at any overlap (0–1500 ms), Hold PLAY remains the sole producer of the global loop, and the retired rows carry `supersedes` + `originalBehaviour` while saved solo/link state still deserialises.
 - `precedence.test.ts` — per-mode suppression lists.
 - `fxAlias.test.ts` — alias↔id stability, legacy `beatRepeat` migration intact.
 - `guideCoverage.test.ts` — bidirectional featureId coverage, seven required fields per card, hardware block excluded from tutorials, counts 21/8/9/21/1/7/4/2/3/4.
