@@ -72,7 +72,7 @@ const PERFORMANCE: [string, string][] = [
   ["transport.cue.stopped", "Cue every stem to the top while parked"],
   ["instrument.learn.global", "Learn a whole-song cue onto a MIDI key"],
   ["instrument.learn.isolated", "Learn a single-stem cue onto a MIDI key"],
-  ["instrument.play", "Fire a learned cue as a one-shot"],
+  ["instrument.play", "Hold a learned cue to play it, release to return"],
   ["instrument.rejoin", "Rejoin the underlying tape when a cue ends"],
   ["song.skip.stopped", "Skip songs with the bare rocker while stopped"],
   ["heads.enter", "Enter Heads mode"],
