@@ -105,6 +105,19 @@ export interface SurfaceState {
   headsMode: boolean;
   /** Track the four heads are reading while heads mode is active. */
   headsSource: number | null;
+  /**
+   * GLOBAL one-bar loop — all four stems, bar-locked. Distinct from the per
+   * lane loops: `active` while PLAY is physically held, `latched` once a
+   * FUNCTION tap during the hold makes it survive the release. `division` is
+   * the bar fraction set by FUNCTION + Volume ±.
+   */
+  globalLoop: { active: boolean; latched: boolean; division: 1 | 2 | 4 | 8 };
+  /**
+   * `performance.now()` of the FUNCTION tap that armed active-track selection,
+   * or null. While armed, a Track gesture emits ONLY `stem.select` — no mute,
+   * loop, audition or FX action may leak out of the selection.
+   */
+  trackSelectArmedAt: number | null;
 
   lights: "full" | "dim";
   song: number;
