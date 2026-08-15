@@ -143,7 +143,7 @@ Every entry is one card carrying all seven fields: purpose · exact down/up gest
 ## 9. Implementation order
 
 1. Timings + grammars + release-order latching (`gestures.ts`, `chordArbiter.ts`).
-2. Map rows and `surface.ts` state, including removals and PLAY+Track retention.
+2. Map rows and `surface.ts` state, including removals and **PLAY+Track retirement**, plus the session-migration normaliser below.
 3. Audio: global loop and coexistence table, scrub speed, half-speed, Heads corrections, FX-in-Heads.
 4. Keyboard map, `useDeviceSurface.ts`, Keyboard Controls panel.
 5. Projects grid correction + FX alias table.
