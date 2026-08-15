@@ -24,7 +24,7 @@ Non-firing obligations, asserted across the whole stream from #1 to #6: no `rate
 
 The same release-order rule defines the **global-loop latch**: PLAY held with the loop running, FUNCTION down/up → latch; PLAY released first → normal loop end; PLAY tap while latched → release latch, transport keeps playing. **FX latch** already works this way (`chordArbiter.ts:210-215, 268-284`). **FN + fader** has no latch: release parks.
 
-**Active-track selection, with visible behaviour:** FUNCTION tap with nothing else down **arms** selection for `TRACK_SELECT_WINDOW = 1200 ms`; the four top LEDs **pulse** while armed; a Track tap inside the window selects that track, its LED goes **solid** and stays solid, the arm expires, and that track becomes the **FX target** (`activeStem` for every FX intent). FUNCTION tap while an operation is running is a latch, never a select.
+**Active-track selection, with visible behaviour:** FUNCTION tap with nothing else down **arms** selection for `TRACK_SELECT_WINDOW = 1200 ms`; **all four** top LEDs pulse while armed. A Track tap inside the window selects that track: its LED goes **solid** and stays solid, the other three **resume live meter activity**, the arm expires, and that track becomes the **Tape and FX target** (`activeStem`). FUNCTION tap while an operation is running is a latch, never a select.
 
 ## 2. Timing model
 
@@ -33,8 +33,8 @@ Latency is per family — not a universal 300 ms.
 | Family | Constant | Value | Commit latency after last finger-up |
 |---|---|---|---|
 | Track buttons (tap / double / triple / hold) | `trackDecisionMs` — one shared gap **and** decision window | **200 ms** (tunable 200–220) | ≤220 ms for all counts |
-| FN + PLAY multi-tap | `fnPlayDecisionMs` (own longer window) | **420 ms** | ≤440 ms |
-| Bare PLAY, Volume, rocker, faders, FX momentary | none | immediate | ≤1 audio frame (FX momentary fires on pointer-**down**, `chordArbiter.ts:217-226`) |
+| FN + PLAY multi-tap | `fnPlayDecisionMs` | **300 ms** | ≤330 ms (single-tap half-speed must not feel sluggish) |
+| Bare PLAY, Volume, rocker, faders, FX momentary | none | **no intentional arbitration timer** — the command is emitted **synchronously in the same input-event turn** (FX momentary on pointer-**down**, `chordArbiter.ts:217-226`) | engine/audio acknowledgement is measured **separately**, never conflated with input latency |
 | tap → hold | `holdMs` | 450 ms | — |
 | G1 arrival | `modifierArrivalMs` | 400 ms | — |
 
@@ -48,8 +48,7 @@ The 200/300 conflict is resolved by deleting the separate `multiTapGapMs` for Tr
 | Hold PLAY (stopped) | bare | same | cue to frame 0 | extension |
 | FN + Vol −/+ (no Track held) | G1 | `volume.chopWindow` — `surface.ts:797` | **global-loop division** — its only job, in **every** mode including FX; sets the pending division when no loop runs | S2 |
 | PLAY + Vol −/+ | — | `stem.select` — `chordArbiter.ts:335-342` | **retired** with `supersedes: ["stem.select"]` + `originalBehaviour`; superseded by FN-arm + Track select | obsolete |
-| **PLAY + Track, overlap <700 ms** | chord | `stem.solo` — `chordArbiter.ts:344-351` | **retained** (latching solo). Precedence below the global loop: it can only fire while PLAY has not crossed `holdMs`; the arbiter cancels a pending solo the instant the loop starts | extension, kept |
-| **PLAY + Track, overlap ≥700 ms** | chord | `stem.link` — `chordArbiter.ts:352-353` | **retained** (link/unlink), same precedence rule | extension, kept |
+| **PLAY + Track (solo, <700 ms; link/unlink, ≥700 ms)** | chord | `stem.solo` / `stem.link` — `chordArbiter.ts:344-353` | **RETIRED — structurally unreachable.** The global loop begins at `holdMs = 450`, so a ≥700 ms link overlap can never complete and a solo can be cancelled mid-gesture. Track hold already gives 1–4-stem momentary/group solo. Remove the **hardware mappings** only, each with `supersedes` + `originalBehaviour`; the underlying `stem.solo` / `stem.link` engine commands and any saved per-stem solo/link state stay intact and loadable | obsolete |
 | PLAY held + rocker | — | `rocker.chop.play` — `surface.ts:656-667, 790` | **move the global loop** ±1 division; chop retired with `supersedes` | S2 |
 | Short FN → Track 1–4 | G1 arm | FN tap = tempo tap — `surface.ts:492-518` | **active-track select** with LED arm/solid | stock (S2) |
 | FN ×4 grid rounding | — | `surface.ts:828-836` | **removed**; manual correction moves to Projects | obsolete |
@@ -65,13 +64,13 @@ The 200/300 conflict is resolved by deleting the separate `multiTapGapMs` for Tr
 
 ## 4. Precedence and coexistence
 
-**TAPE**, highest first: 1 cancel/lost pointer · 2 Vol−+Vol+ ≥2 s (hardware note) · 3 global loop (PLAY held or latched) · 4 global scrub · 5 PLAY+Track solo/link · 6 FN-qualified lane ops · 7 Track deferred group · 8 bare transport, varispeed or song skip, master volume.
-Suppressed by 3: `transport.play/stop/cue`, `rate.set`, `loop.chop`, `song.*`, and any pending PLAY+Track chord. Suppressed by 4: `rate.set`, `song.*`, `transport.play/stop`.
+**TAPE**, highest first: 1 cancel/lost pointer · 2 Vol−+Vol+ ≥2 s (hardware note) · 3 global loop (PLAY held or latched) · 4 global scrub · 5 FN-qualified lane ops · 6 Track deferred group · 7 bare transport, varispeed or song skip, master volume. **Hold PLAY is exclusively responsible for the global loop**; no PLAY+Track chord tier exists.
+Suppressed by 3: `transport.play/stop/cue`, `rate.set`, `loop.chop`, `song.*`. Suppressed by 4: `rate.set`, `song.*`, `transport.play/stop`. Retired everywhere: `stem.solo` / `stem.link` as **gestures**.
 
 **FX OVERLAY**: 1 cancel · 2 Vol−+Vol+ closes · 3 FN + bank = latch, all four + FN = clear latches · 4 FN-qualified **lane** gestures — FN+fader scrub, FN+Track double-tap reverse, FN+Track+Vol resize — all remain reachable · 5 FN+Vol with **no** Track held = global-loop division, never disabled here · 6 bare Track = bank select + momentary on pointer-down (**FX owns bare Track**: mute, lane loop and audition suppressed) · 7 Vol ± with a bank selected = macro (hold) or algorithm cycle (tap). Transport, global loop and global scrub stay reachable.
 
-**HEADS**: 1 cancel · 2 FN+PLAY ×3 exit · 3 Track n = head n — tap **releases that head's loop if one is active, otherwise mutes**; holding **any 1–4 group** auditions exactly those heads **including while the transport is paused**, and release restores the prior state exactly; triple-tap latches independent head playback; double-tap captures a one-bar head loop; FN + double-tap reverses that head; FN + Track + Vol resizes its loop · 4 fader n = head n gain, FN + fader n = head n scrub/park · 5 **FX remains available and audible** — the rack sits on the heads bus, so overlay, banks, latches and macros all function · 6 bare transport still advances the hidden song clock.
-Suppressed in Heads: normal-bus stem mute/solo/lane-loop/lane-reverse, the global one-bar loop, `stem.select`, PLAY+Track solo/link. The normal bus is gated to exactly 0 (`engine.ts` `crossfadeBuses`, `busIsolation.test.ts`) while its stems advance silently. On exit every heads-only loop, reverse, latch and mute is **discarded**, the `headsEntrySnapshot` is restored bit-identically over a 40 ms crossfade, and the normal lanes resume at the **advancing hidden-timeline frame**, never at a head position.
+**HEADS**: 1 cancel · 2 FN+PLAY ×3 exit · 3 Track n = head n — tap **releases that head's loop if one is active, otherwise mutes**; holding **any 1–4 group** auditions exactly those heads **including while the transport is paused**, and release restores the prior state exactly; triple-tap latches independent head playback; double-tap captures a one-bar head loop; FN + double-tap reverses that head; FN + Track + Vol resizes its loop · 4 fader n = head n gain, FN + fader n = head n scrub/park · 5 **FX processes the entire Heads bus** — the rack is inserted on the heads bus as a whole and does **not** target the hidden normal-bus `activeStem`; overlay, banks, latches and macros all function and are audible · 6 bare transport still advances the hidden song clock.
+Suppressed in Heads: normal-bus stem mute/solo/lane-loop/lane-reverse, the global one-bar loop, `stem.select`. The normal bus is gated to exactly 0 (`engine.ts` `crossfadeBuses`, `busIsolation.test.ts`) while its stems advance silently. On exit every heads-only loop, reverse, latch and mute is **discarded** and the `headsEntrySnapshot` is restored over a 40 ms crossfade: **mixer and control state — mute, solo, gains, direction, loops and FX state — restores exactly**; **transport position is excluded from the snapshot comparison**, because the normal stems rejoin the **current advancing hidden-timeline frame**, never a head position.
 
 ### Global-loop × lane-loop transition table
 
@@ -113,8 +112,8 @@ Every entry is one card carrying all seven fields: purpose · exact down/up gest
 
 ## 7. Smallest file changes
 
-- `src/input/gestures.ts` — `trackDecisionMs` stays 200 and becomes the single shared Track gap+decision constant; add `fnPlayDecisionMs = 420`; leave every other path immediate.
-- `src/machine/chordArbiter.ts` — retire `stem.select`; retain PLAY+Track solo/link at its new precedence; global-loop tier; release-order scrub latch on FUNCTION up while rocker down; FX Track-ownership list that explicitly **excludes** FN-qualified lane gestures and FN+Volume.
+- `src/input/gestures.ts` — `trackDecisionMs` stays 200 as the single shared Track gap+decision constant; add `fnPlayDecisionMs = 300`; every other path keeps **no arbitration timer** and emits in the same event turn.
+- `src/machine/chordArbiter.ts` — retire the `stem.select`, `stem.solo` and `stem.link` **gesture tiers** (`chordArbiter.ts:332-357`), keeping the `PerfIntent` types and reducer handlers so saved solo/link state still loads; global-loop tier; release-order scrub latch on FUNCTION up while rocker down; FX Track-ownership list that explicitly **excludes** FN-qualified lane gestures and FN+Volume.
 - `src/machine/surface.ts` — hold-PLAY by transport state; global-loop state + division/move/latch/release with the transition table; FN arm + LED pulse + active-track select; delete tempo-tap, FN×4, chop, `play.loopMode`; rocker-stopped song skip; Heads Track tap loop-release-else-mute; paused-transport head audition.
 - `src/machine/stemTapeV1Map.ts`, `src/machine/v26map.ts` — row edits; every deletion carries `supersedes` + `originalBehaviour`.
 - `src/audio/engine.ts` — global loop via `scheduleLoopRelease`; per-case audible-pointer / hidden-rejoin handling; scrub-speed steps; half-speed; keep FX rack live on the heads bus.
@@ -129,11 +128,11 @@ Every entry is one card carrying all seven fields: purpose · exact down/up gest
 - `globalLoop.test.ts` — division, move, latch, PLAY-tap release without stopping.
 - `loopCoexistence.test.ts` — all four transition-table rows; asserts the audible pointer and the hidden rejoin frame per row, ≤2 frames.
 - `latchOrder.test.ts` — the six-step release-order scrub table plus non-firing assertions (`rate.set`, `transport.*`, `fn.*`, `song.*`).
-- `tapTiming.test.ts` — Track single/double/triple commit ≤220 ms; FN+PLAY ×3 ≤440 ms; bare PLAY / Volume / rocker / fader / FX momentary commit ≤1 frame.
-- `fnContext.test.ts` — FN+Volume is division in Tape **and** in FX; FN-arm → Track select; LED arm-pulse → solid.
+- `tapTiming.test.ts` — Track single/double/triple commit ≤220 ms; FN+PLAY ×1/×2/×3 commit ≤330 ms; bare PLAY / Volume / rocker / fader / FX momentary assert **no arbitration timer** and synchronous emission inside the same input-event turn (engine acknowledgement measured in a separate audio assertion).
+- `fnContext.test.ts` — FN+Volume is division in Tape **and** in FX; FN-arm → Track select; all four LEDs pulse while armed, selected LED solid, other three back to live meters, `activeStem` becomes the Tape/FX target.
 - `fxLaneAccess.test.ts` — FN+fader, FN+Track double-tap, FN+Track+Volume all reachable in FX; bare Track is FX-owned.
-- `headsBehaviour.test.ts` — tap releases head loop else mutes; audition of any 1–4 group while paused and restore; triple-tap latch; FX audible in Heads; discard-on-exit with lanes rejoining the advancing hidden timeline.
-- `playTrackSolo.test.ts` — PLAY+Track solo/link still fires and never collides with the global loop.
+- `headsBehaviour.test.ts` — tap releases head loop else mutes; audition of any 1–4 group while paused and restore; triple-tap latch; **FX processes the whole heads bus, not `activeStem`**; discard-on-exit restores mute/solo/gains/direction/loops/FX exactly, **excludes transport position** from the comparison, and lanes rejoin the advancing hidden-timeline frame.
+- **Delete `playTrackSolo.test.ts`.** Replace with `playTrackRetired.test.ts` — PLAY+Track emits **no** `stem.solo` / `stem.link` command at any overlap (0–1500 ms), Hold PLAY remains the sole producer of the global loop, and the retired rows carry `supersedes` + `originalBehaviour` while saved solo/link state still deserialises.
 - `precedence.test.ts` — per-mode suppression lists.
 - `fxAlias.test.ts` — alias↔id stability, legacy `beatRepeat` migration intact.
 - `guideCoverage.test.ts` — bidirectional featureId coverage, seven required fields per card, hardware block excluded from tutorials, counts 21/8/9/21/1/7/4/2/3/4.
