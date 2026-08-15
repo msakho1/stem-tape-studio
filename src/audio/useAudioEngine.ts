@@ -96,7 +96,14 @@ export function useAudioEngine(commands: AudioCommand[]) {
         log: engine.headLanes.log.slice(-40),
       };
     };
+    /**
+     * Stem Instrument Mode truth: learned markers, open captures, which lanes
+     * a cue currently owns, the per-lane audible voice count, the gate values
+     * and the underlay position each finished cue rejoins. Read-only.
+     */
+    (w as unknown as { __stemTapeCues?: () => unknown }).__stemTapeCues = () => engine.cueSnapshot();
     return () => {
+      delete (w as unknown as { __stemTapeCues?: () => unknown }).__stemTapeCues;
       delete w.__stemTapeScrub;
       delete w.__stemTapeTransport;
       delete (w as unknown as { __stemTapeHeads?: () => unknown }).__stemTapeHeads;
@@ -122,7 +129,8 @@ export function useAudioEngine(commands: AudioCommand[]) {
           cmd.type.startsWith("stem.") ||
           cmd.type.startsWith("tape.") ||
           cmd.type.startsWith("fx.") ||
-          cmd.type.startsWith("heads.");
+          cmd.type.startsWith("heads.") ||
+          cmd.type.startsWith("cue.");
         if (needsAudio && !engine.ready) {
           const result = await engine.unlock();
           setUnlockNote(result.detail);
