@@ -126,10 +126,12 @@ A global cue can therefore end with four *different* targets — e.g. two lanes 
 | Two or more Tracks held + Note On | **rejected explicitly**, reason shown |
 | No qualifier + learned note | one-shot playback |
 | No qualifier + unlearned note | no-op, reported |
-| Track hold that already produced `lane.audition` `:3979` | audition unaffected; the note adds only learning |
+| Learning Note On (either scope) | the qualifier is **claimed** via `chordArbiter.claimExternal` — FUNCTION release arms no selection, Track release emits no mute/loop/tap |
+| Track hold that already produced `lane.audition` `:3979` | the audition continues and restores normally; only the button's *release* action is suppressed |
 | FX overlay open | learning eligibility unchanged; playback allowed; FX controls untouched |
 | Heads mode | learning and playback both rejected (Heads owns `headsBus` `:1802`) |
-| Scrub / reverse / any loop active | learning rejected; playback allowed and rejoins per §6 |
+| Scrub / reverse / any loop / off-1× rate | learning rejected; playback allowed and rejoins per §6 |
+| Transport stopped | learning rejected; **playback allowed**, completion returns to silence |
 | Same channel+note relearned | overwrite |
 | Note On while that note plays | retrigger from `startFrame`, one bounded crossfade |
 | Two global notes overlapping | last wins; the earlier ends at that seam |
