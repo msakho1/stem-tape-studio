@@ -3673,7 +3673,34 @@ export class AudioEngine {
     }
     try {
       switch (cmd.type) {
+        // ---- Stem Instrument Mode ------------------------------------------
+        case "cue.event":
+        case "cue.panic": {
+          if (!this.ctx) return this.ack(cmd, "rejected", "audio not unlocked — connect MIDI to unlock, then repeat");
+          const mask = String(p["tracksHeld"] ?? "");
+          const ev: StemMidiEvent = {
+            kind:
+              cmd.type === "cue.panic"
+                ? "allNotesOff"
+                : ((String(p["kind"] ?? "noteOn") === "noteOff" ? "noteOff" : "noteOn") as StemMidiEvent["kind"]),
+            note: Number(p["note"] ?? 0),
+            velocity: Number(p["velocity"] ?? 0),
+            channel: Number(p["channel"] ?? 0),
+            timestampMs: Number(p["timestampMs"] ?? cmd.t),
+            source: String(p["source"] ?? "test") as MidiTransport,
+            deviceId: String(p["deviceId"] ?? ""),
+            deviceName: String(p["deviceName"] ?? ""),
+          };
+          const qualifiers: QualifierSnapshot = {
+            functionHeld: Boolean(p["functionHeld"]),
+            tracksHeld: [0, 1, 2, 3].filter((i) => mask[i] === "1") as CueLane[],
+          };
+          const { action, detail } = this.handleMidiCue(ev, qualifiers);
+          const bad = action.type === "learn.reject" || action.type === "cue.reject" || action.type === "learn.discard";
+          return this.ack(cmd, bad ? "rejected" : "completed", detail);
+        }
         case "transport.play": {
+
           if (!this.ctx) return this.ack(cmd, "rejected", "audio not unlocked — press Play again after enabling audio");
           if (this.ctx.state !== "running") return this.ack(cmd, "rejected", `AudioContext is ${this.ctx.state}`);
           if (this.duration === 0) return this.ack(cmd, "rejected", "no stems decoded");
