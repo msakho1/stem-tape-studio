@@ -35,35 +35,56 @@ Three maps are maintained separately, each row carrying its own evidence field. 
 
 Admissible evidence: TE's own printed/online guide for the SP-1, or a logged test session on a unit that has never been reflashed (control pressed → observed audio/LED result, recorded).
 
-**Source S1 — stock firmware tutorial page** (`user-uploads://IMG_4259.jpeg`, hand-drawn three-column TE guide, "1 BASIC / 2 STEMS / 3 FX-FUN", TE logo bottom right). Transcribed rows, documentary evidence only — none yet confirmed on hardware:
+**Source S1 — stock firmware tutorial page** (`user-uploads://IMG_4259.jpeg`, hand-drawn three-column TE guide, "1 BASIC / 2 STEMS / 3 FX-FUN", TE logo bottom right). Documentary only.
 
-| Stock row | Gesture per S1 | Confidence |
-|---|---|---|
-| power | hold side button 5 s → ON/OFF | documented |
-| volume | volume + / − | documented |
-| transport | press → PLAY / PAUSE | documented |
-| skip track | rocker FWD / REV | documented |
-| solo track | hold (a button) + press a track control → SOLO TRACK | documented, held control not legible |
-| track volume | fader up / down, per track | documented |
-| tape effect | hold + move rocker | documented, held control not legible |
-| sound effects | four top buttons: **Filter · Delay/Echo · Distortion · Gate/Stutter**, engaged by hold | documented |
-| loop | hold (a control on the right side) → LOOP | documented, exact control not legible |
+**Source S2 — Jay Gilligan, "Teenage Engineering Stem Player Deep Dive", `https://youtu.be/zynYy35AdE0` (2024-07-14, 1:18:16).** Strongest available stock evidence: the presenter reads aloud, line by line, from the TE-internal printed instruction manual anonymously mailed to him (S2 @18:29–19:29), while operating an unmodified unit on camera. Every row below is *manual text + observed hardware behaviour*, cited by transcript timestamp. Companion community record: `https://llllllll.co/t/te-stem-player/66795`.
 
-Still `unknown` after S1 — no evidence in the guide, do not infer:
+**Device model (S2).** Four firmware modes selected by holding FUNCTION then PLAY (function slightly first is more reliable) while stopped; four LEDs flash, `+/−` or the track buttons choose the mode, PLAY confirms (@31:48, @39:18, @1:04:45):
 
-- PLAY hold behaviour distinct from tap
-- FUNCTION button existence and any FUNCTION-qualified gestures
-- heads mode existence
-- LED semantics (dark / faint / pulse / bank)
-- song/bank model, number of songs, storage limits
-- USB and transfer behaviour
-- varispeed vs. track-skip on the rocker (S1 shows skip; pitch/speed is unattested)
-- multi-control chords beyond the two-control holds shown
-- whether the four FX are per-stem or master
+1. basic · 2. advanced · 3. advanced + pocket-operator sync out · 4. advanced + MIDI clock out
 
-Two consequences: (a) the stock rocker is a **track skipper**, not a varispeed control, per S1 — Stem Tape's rocker semantics are a Tape Looper inheritance, not a stock one; (b) stock already ships four named effects, which is the closest antecedent to the FX overlay. Both remain documentary until confirmed on an untouched unit.
+| Stock row | Behaviour | Mode | Evidence |
+|---|---|---|---|
+| power | hold FUNCTION/side button ~2–5 s → ON/OFF, LED sweep | both | S1; S2 @26:32, @28:43 |
+| transport | PLAY tap → play/pause, with an audible **tape start/stop ramp** on both edges | both | S2 @30:56 |
+| volume | `+ / −` | both | S2 @29:44 |
+| track volume | four faders, per stem | both | S2 @33:15 |
+| solo/mute stem | track button solos/mutes; **functions stack** — multiple solos and other actions combine freely | both | S2 @35:28, @36:14 |
+| skip track | rocker FWD/REV = next/previous song (and restart-current) | basic | S1; S2 @33:57 |
+| skip track | FUNCTION + rocker = next/previous song | advanced | S2 @49:59 |
+| slow motion | FUNCTION + PLAY toggles a single fixed slow playback | basic | S2 @34:57 |
+| varispeed | rocker forward = faster, rocker back = **reverse playback**; `+/−` chooses the speed step; LEDs show the step; rocker again exits | advanced | S2 @50:34–@53:12 |
+| loop | **hold PLAY** → one-bar loop, side + front LEDs flash; release ends it | basic | S2 @34:24 |
+| loop | hold PLAY → loop; while held, `+/−` sets the **loop division**, rocker **nudges the loop position** forward/back through the song; release disables; short FUNCTION while held **latches** it; PLAY unlatches | advanced | S2 @47:15–@49:37 |
+| loop divider preset | when not looping, `+/−` presets the loop divider | advanced | S2 @47:47 |
+| track select | short FUNCTION click → track-select (all four LEDs light); press a track button to set the **active stem**; only works while playing; selected stem shows a solid LED, the others show per-stem VU | advanced | S2 @39:18–@41:35 |
+| effects | hold FUNCTION + a track button = apply that button's effect **to the active stem** (not to the button's own stem): 1 Filter · 2 Chorus/Delay · 3 Distortion · 4 Gate | advanced | S1; S2 @42:15–@43:21 |
+| effect variations | while holding the effect button, `+/−` cycles **four variations** per effect; for Chorus/Delay, variations 1–2 chorus, 3–4 delay; LEDs show the variation | advanced | S2 @43:50, @46:42 |
+| effect latch | keep holding the track button, release FUNCTION, click FUNCTION → effect **locked** to the active stem; all four LEDs blink to confirm any latch | advanced | S2 @44:25, @52:27 |
+| effect exclusivity | **one effect per stem** — a second effect overwrites, it does not layer | advanced | S2 @46:12 |
+| effects persistence | latched effects survive song changes | advanced | S2 @49:59 |
+| clear effects | short FUNCTION while holding the latched effect's track button clears that stem; holding **all four** track buttons + FUNCTION clears everything; FUNCTION while soloing one track also clears | advanced | S2 @53:12–@54:12 |
+| latch (general) | short FUNCTION press while holding track / PLAY / rocker latches that state (effect, loop, varispeed) | advanced | S2 @53:12 |
+| LEDs | side LEDs = global VU while playing, **battery level when paused**; front LEDs = per-stem VU, active-stem solid, loop/speed/variation indication, all-four blink = latch confirmed | both | S2 @40:25, @41:35, @54:12 |
+| bluetooth | `+` and `−` pressed together (device on) → BT pairing/search, LED indicates search | both | S2 @1:02:16 |
+| sync out | mode 3 emits PO sync on the 3.5 mm sync jack, tracking the song BPM across track changes; mode 4 emits MIDI clock (untested on camera) | 3 / 4 | S2 @1:04:45, @1:06:13 |
+| idle | auto power-off after a few minutes when not playing | both | S2 @54:42 |
+| content | ships with the *Jesus Is King* stems only; **no user-facing way to load your own audio** on stock | — | S2 @10:47 |
+| I/O | 3.5 mm line/headphone out, PO/MIDI sync jack, USB-C (charging), internal speaker, Bluetooth audio out | — | S2 @21:53, @22:22 |
 
-Complete this map during Phase 0, **before** the first flash, while the donor unit is still on stock firmware: work S1 row by row on hardware, mark each confirmed or contradicted, and fill the unknown list. That observation pass is the only chance to capture it.
+Still `unknown` after S1+S2 — do not infer:
+
+- whether "sound effects" are per-stem only or ever master (S2 shows per-active-stem in advanced; basic-mode gate is applied per track button, @36:39)
+- heads/multi-playhead behaviour (no evidence it exists; treat as a Stem Tape invention)
+- storage layout, song count, USB data protocol (USB-C is described as charging only)
+- exact power-hold duration (S1 says 5 s, S2 says "a couple of seconds")
+- MIDI-clock mode behaviour (mode 4 never demonstrated)
+- LED brightness/bank semantics beyond the states listed above
+
+Consequences for the port: (a) stock **does** have varispeed *and* reverse on the rocker in advanced mode, so Stem Tape's rocker is closer to stock than S1 alone suggested — the departure is scrub/chop, not speed; (b) stock's latch model (short FUNCTION click while holding a control) is the native idiom for every sticky state and should be preserved rather than replaced by Stem Tape's own latching gestures where they conflict; (c) stock enforces one effect per stem, which the 12-FX bank design breaks — an intentional departure to record; (d) FUNCTION-click track-select with all-LED indication is the stock antecedent of Stem Tape's `lastTargetedTrack`.
+
+S1/S2 are documentary. Confirm them row by row on the donor unit during Phase 0, **before** the first flash, and fill the unknown list; that observation pass is the only chance to capture it.
+
 
 
 ### TAPE_LOOPER_MAP — evidence: named tag, file and line in `chattock/sp1-tape-looper`
