@@ -4700,6 +4700,8 @@ export class AudioEngine {
       t.worklet = null;
       t.engineMode = "node";
     }
+    this.globalRack?.dispose();
+    this.globalRack = null;
     if (this.schedulerTimer) clearInterval(this.schedulerTimer);
     this.schedulerTimer = null;
     this.stopSources();
