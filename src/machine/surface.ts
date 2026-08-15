@@ -1382,7 +1382,9 @@ export function deriveLeds(state: SurfaceState): LedFrame {
       // Side LEDs 1–4 = the four BANKS (physical order) for the ACTIVE stem,
       // read from the authoritative twelve-FX state, not the legacy families.
       const bankIndex = bankOfButton(i);
-      const bank = state.perf.tracks[state.perf.activeStem]!.fx12.banks[bankIndex]!;
+      // …and from the GLOBAL rack instead when the overlay was opened in
+      // global scope, so the LEDs always describe the rack being played.
+      const bank = fxStateOf(state.perf, fxTargetOf(state.perf)).banks[bankIndex]!;
       const def = algorithmDef(bankIndex, bank.selectedAlgorithm);
       const alg = bank.algorithms[bank.selectedAlgorithm]!;
       if (alg.rejected)
