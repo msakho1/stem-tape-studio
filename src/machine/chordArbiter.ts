@@ -165,7 +165,7 @@ export class ChordArbiter {
       taken.push(c);
     }
     if (taken.length > 0) {
-      this.log.unshift({ t: Date.now(), controls: taken, intent: "external", suppressed: [...taken], detail });
+      this.log.unshift({ t: Date.now(), controls: taken, intent: "none", suppressed: [...taken], detail });
       if (this.log.length > 60) this.log.length = 60;
     }
     return taken;
