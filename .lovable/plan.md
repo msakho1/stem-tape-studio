@@ -277,7 +277,7 @@ Physical device (TestFlight) — reported, not asserted against the engine toler
 6. Global cues: four-lane ownership, per-lane independent underlay return, precedence arbitration.
 7. Persistence + migration + `contentHash` invalidation wired to stem replacement.
 8. Guide: 21st lesson + 81st feature id, coverage test counts updated together.
-9. iOS wrapper: client + input port, batched `callAsyncJavaScript`, `AVAudioSession.playback`, re-anchoring; TestFlight build and the physical-device reporting list.
+9. iOS wrapper: an **Xcode-ready, buildable** iPhone/iPad project using client + input port, batched `callAsyncJavaScript`, `AVAudioSession.playback`, and re-anchoring. Actual signing and TestFlight upload require your Apple Developer account and Xcode and are not claimed as completed inside Lovable's environment.
 
 
 ## 14. Exclusions
