@@ -17,6 +17,7 @@ import {
   applyGesture,
   applyGlobalScrub,
   applyHeadsFeedback,
+  applyMidiEvent,
   applyPerfIntent,
   deriveLeds,
   initialSurfaceState,
@@ -28,6 +29,9 @@ import {
 } from "@/machine/surface";
 import { controlBus, type ContinuousChannel } from "@/audio/controlBus";
 import { getAudioEngine } from "@/audio/engine";
+import { webMidi } from "@/audio/midi/webMidi";
+import { nativeMidiBridge } from "@/audio/midi/nativeBridge";
+import type { StemMidiEvent } from "@/audio/midi/contract";
 import { FaderSessionManager, type FaderIndex } from "@/input/faderSessions";
 import { installDiagnostics, publishArbiter, publishSurface, publishTapLatency } from "@/lib/diagnostics";
 
@@ -78,7 +82,8 @@ type Action =
   | { type: "perf"; intent: PerfIntent }
   | { type: "globalScrub"; dir: 1 | -1 | null }
   | { type: "headsFeedback"; patch: { active?: boolean; source?: number | null } }
-  | { type: "faderCommit"; index: number; value: number; claimed?: ContinuousChannel };
+  | { type: "faderCommit"; index: number; value: number; claimed?: ContinuousChannel }
+  | { type: "midi"; event: StemMidiEvent };
 
 
 function reducer(state: SurfaceState, action: Action): SurfaceState {
@@ -102,6 +107,9 @@ function reducer(state: SurfaceState, action: Action): SurfaceState {
       return applyHeadsFeedback(state, action.patch);
     case "faderCommit":
       return applyFader(state, action.index, action.value, action.claimed);
+    case "midi":
+      // Stem Instrument Mode: one ordered command per normalized MIDI event.
+      return applyMidiEvent(state, action.event);
   }
 }
 
@@ -244,10 +252,48 @@ export function useDeviceSurface() {
         [{ id: ++gestureId.current, text: describeGesture(g), t: g.t }, ...prev].slice(0, LOG_LIMIT),
       );
     });
+    /**
+     * Stem Instrument Mode.
+     *
+     * Both transports (Web MIDI and the native CoreMIDI bridge) land here, in
+     * the SAME reducer, so a MIDI cue is ordered against the surface gestures
+     * instead of racing them. The qualifiers are read from the live reducer
+     * state at the instant the event arrives, and any qualifier that has not
+     * already produced a gesture is claimed so it cannot ALSO arm selection or
+     * toggle a mute when the musician lifts their finger.
+     */
+    const onMidi = (ev: StemMidiEvent) => {
+      const s = stateRef.current;
+      if (ev.kind === "noteOn") {
+        const qualifiers: Control[] = [];
+        if (s.functionHeld) qualifiers.push("function");
+        for (let i = 0; i < 4; i++) {
+          const c = `track-button-${i + 1}` as Control;
+          if (s.pressed.includes(c)) qualifiers.push(c);
+        }
+        if (qualifiers.length > 0) arbiter.claimExternal(qualifiers);
+      }
+      dispatch({ type: "midi", event: ev });
+      setGestureLog((prev) =>
+        [
+          {
+            id: ++gestureId.current,
+            text: `midi ${ev.kind} ${ev.note} ch${ev.channel + 1}`,
+            t: ev.timestampMs,
+          },
+          ...prev,
+        ].slice(0, LOG_LIMIT),
+      );
+    };
+    const offWebMidi = webMidi.subscribe(onMidi);
+    const offNativeMidi = nativeMidiBridge.subscribe(onMidi);
+
     return () => {
       offRaw();
       offGesture();
       offIntent();
+      offWebMidi();
+      offNativeMidi();
     };
   }, [engine, arbiter]);
 

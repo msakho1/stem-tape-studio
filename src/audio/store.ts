@@ -7,6 +7,7 @@
  */
 
 import type { StemRole } from "./format";
+import type { CueMarker } from "./cues";
 
 export const SCHEMA_VERSION = 2;
 export const DERIVED_SCHEMA_VERSION = 1;
@@ -92,6 +93,12 @@ export interface StoredProject {
       sourceHashes: string[];
     } | null;
     song: number;
+    /**
+     * Stem Instrument Mode markers. METADATA ONLY — frames and the content
+     * hashes they were learned against. No audio is stored, and a marker whose
+     * lane hash no longer matches is retained but flagged unplayable on load.
+     */
+    cues?: CueMarker[];
   };
   blobBackend: "opfs" | "indexeddb";
   highMemoryMode?: boolean;

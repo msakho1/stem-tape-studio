@@ -309,3 +309,29 @@ export class CueStore {
     return { invalidated, restored };
   }
 }
+
+/**
+ * Human-readable one-liner for an action. Pure — the engine uses it verbatim
+ * in the ack detail and the CueStatus strip, so the musician never reads an
+ * internal identifier.
+ */
+export function describeCueAction(a: CueAction): string {
+  switch (a.type) {
+    case "learn.start":
+      return `learning ${a.scope === "global" ? "global" : `lane ${(a.lane ?? 0) + 1}`} cue on ${a.key} from frame ${a.startFrame}`;
+    case "learn.commit":
+      return `learned ${a.marker.scope === "global" ? "global" : `lane ${(a.marker.lane ?? 0) + 1}`} cue ${a.key} · ${a.marker.endFrame - a.marker.startFrame} frames`;
+    case "learn.discard":
+      return `capture discarded on ${a.key} — ${describeReason(a.reason)}`;
+    case "learn.reject":
+      return `cannot learn ${a.key} — ${describeReason(a.reason)}`;
+    case "cue.play":
+      return `cue ${a.key} triggered`;
+    case "cue.reject":
+      return `cue ${a.key} unplayable — ${describeReason(a.reason)}`;
+    case "ignored":
+      return a.reason === "playback-note-off"
+        ? `note off ignored — ${a.key} is a one-shot`
+        : `ignored ${a.key} — ${a.reason}`;
+  }
+}

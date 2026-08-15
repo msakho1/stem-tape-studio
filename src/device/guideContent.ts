@@ -38,7 +38,7 @@ export interface Feature {
 }
 
 /* ------------------------------------------------------------------ */
-/* Performance features (37) — covered by the 20 animated lessons.     */
+/* Performance features (41) — covered by the 21 animated lessons.     */
 /* ------------------------------------------------------------------ */
 
 const PERFORMANCE: [string, string][] = [
@@ -70,6 +70,10 @@ const PERFORMANCE: [string, string][] = [
   ["speed.half", "Fall to half speed"],
   ["speed.snap", "Snap the speed exactly to 1.000x"],
   ["transport.cue.stopped", "Cue every stem to the top while parked"],
+  ["instrument.learn.global", "Learn a whole-song cue onto a MIDI key"],
+  ["instrument.learn.isolated", "Learn a single-stem cue onto a MIDI key"],
+  ["instrument.play", "Fire a learned cue as a one-shot"],
+  ["instrument.rejoin", "Rejoin the underlying tape when a cue ends"],
   ["song.skip.stopped", "Skip songs with the bare rocker while stopped"],
   ["heads.enter", "Enter Heads mode"],
   ["heads.source", "Four heads read the last selected stem"],
@@ -447,6 +451,22 @@ export const LESSONS: Lesson[] = [
     highlight: ["play", "rocker-fwd", "rocker-rwd"],
     motion: "sequence",
     features: ["transport.cue.stopped", "song.skip.stopped"],
+  },
+  {
+    id: "instrument",
+    title: "How to play the tape from a MIDI keyboard",
+    gesture: "FUNCTION + key · Track + key · key",
+    body:
+      "Connect MIDI, then hold FUNCTION and press a key: the tape from that instant is learned onto the key as a whole-song cue, and the key is armed the moment you release it. Hold a Track button instead and only that stem is learned — the other three keep playing underneath. Press a learned key on its own and the cue fires once, over the top of the song; when it ends the tape is already exactly where it would have been, so it rejoins in phase. Releasing a playing key does nothing — a cue is a one-shot, not a sustain. Cues are saved with the project, and a marker is retired automatically if you replace the stem it was learned from.",
+    highlight: ["function", "track-button-1"],
+    motion: "sequence",
+    held: ["function"],
+    features: [
+      "instrument.learn.global",
+      "instrument.learn.isolated",
+      "instrument.play",
+      "instrument.rejoin",
+    ],
   },
   {
     id: "heads",
