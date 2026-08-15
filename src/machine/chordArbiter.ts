@@ -332,31 +332,21 @@ export class ChordArbiter {
       }
     }
 
-    // ---- precedence 3: Play-first
-    const playAt = this.down.get("play");
-    if (playAt != null && downAt != null && Math.abs(downAt - playAt) <= this.timings.modifierArrivalMs) {
-      if (isVolume(control)) {
-        this.claim("play", control);
-        this.emit(
-          { type: "stem.select", dir: control === "volume-plus" ? 1 : -1 },
-          ["play", control],
-          `stem select ${control === "volume-plus" ? "+1" : "−1"}`,
-        );
-        return;
-      }
-      if (isTrack(control)) {
-        // Correction 1: duration is the OVERLAP of the two controls, not the
-        // time since the initial Play press.
-        const overlap = t - Math.max(playAt, downAt);
-        const stem = TRACK_INDEX[control]! as StemIndex;
-        this.claim("play", control);
-        if (overlap < this.timings.soloLinkMs) {
-          this.emit({ type: "stem.solo", stem, overlapMs: overlap }, ["play", control], `solo (overlap ${overlap.toFixed(0)} ms)`);
-        } else {
-          this.emit({ type: "stem.link", stem, overlapMs: overlap }, ["play", control], `link/unlink (overlap ${overlap.toFixed(0)} ms)`);
-        }
-        return;
-      }
+    // ---- precedence 3: PLAY-first chords — RETIRED.
+    // `stem.select` (PLAY + Volume), `stem.solo` and `stem.link` (PLAY + Track)
+    // no longer have hardware gestures. The intents and their reducer handlers
+    // survive only so stored sessions keep parsing. Nothing is emitted here and
+    // nothing is claimed, so PLAY + Track falls through to the deferred Track
+    // group and PLAY + Volume to master volume.
+    if (this.down.has("play") && (isVolume(control) || isTrack(control))) {
+      this.log.unshift({
+        t,
+        controls: ["play", control],
+        intent: "none",
+        suppressed: [],
+        detail: "PLAY-first chord retired (stem.select / stem.solo / stem.link) — base gesture runs",
+      });
+      if (this.log.length > 60) this.log.length = 60;
     }
 
     // ---- precedence 4: FX chords already resolved on press; releases only end
