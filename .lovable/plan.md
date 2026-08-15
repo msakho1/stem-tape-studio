@@ -113,7 +113,8 @@ Every entry is one card carrying all seven fields: purpose · exact down/up gest
 ## 7. Smallest file changes
 
 - `src/input/gestures.ts` — `trackDecisionMs` stays 200 as the single shared Track gap+decision constant; add `fnPlayDecisionMs = 300`; every other path keeps **no arbitration timer** and emits in the same event turn.
-- `src/machine/chordArbiter.ts` — retire the `stem.select`, `stem.solo` and `stem.link` **gesture tiers** (`chordArbiter.ts:332-357`), keeping the `PerfIntent` types and reducer handlers so saved solo/link state still loads; global-loop tier; release-order scrub latch on FUNCTION up while rocker down; FX Track-ownership list that explicitly **excludes** FN-qualified lane gestures and FN+Volume.
+- `src/machine/chordArbiter.ts` — retire the `stem.select`, `stem.solo` and `stem.link` **gesture tiers** (`chordArbiter.ts:332-357`), keeping the `PerfIntent` types and reducer handlers only so stored sessions still parse; global-loop tier; release-order scrub latch on FUNCTION up while rocker down; FX Track-ownership list that explicitly **excludes** FN-qualified lane gestures and FN+Volume. Strict order handling: whichever of Track / FUNCTION goes down **first** fixes the interpretation for that press pair — Track-first + FUNCTION = FX latch, FUNCTION-first + Track double-tap = `lane.reverse` — and the losing branch is claimed so it can never also emit.
+- `src/audio/session.ts` — solo/link **migration normaliser** on load: the stored `soloLatched` and lane-link fields are read and re-persisted unchanged for forward/backward compatibility, but the runtime state they produce is forced to persistent-solo **off** and all lanes **unlinked**, since no gesture can clear them any more. Applied to restored sessions and imported `.stemtape` files alike.
 - `src/machine/surface.ts` — hold-PLAY by transport state; global-loop state + division/move/latch/release with the transition table; FN arm + LED pulse + active-track select; delete tempo-tap, FN×4, chop, `play.loopMode`; rocker-stopped song skip; Heads Track tap loop-release-else-mute; paused-transport head audition.
 - `src/machine/stemTapeV1Map.ts`, `src/machine/v26map.ts` — row edits; every deletion carries `supersedes` + `originalBehaviour`.
 - `src/audio/engine.ts` — global loop via `scheduleLoopRelease`; per-case audible-pointer / hidden-rejoin handling; scrub-speed steps; half-speed; keep FX rack live on the heads bus.
@@ -130,9 +131,11 @@ Every entry is one card carrying all seven fields: purpose · exact down/up gest
 - `latchOrder.test.ts` — the six-step release-order scrub table plus non-firing assertions (`rate.set`, `transport.*`, `fn.*`, `song.*`).
 - `tapTiming.test.ts` — Track single/double/triple commit ≤220 ms; FN+PLAY ×1/×2/×3 commit ≤330 ms; bare PLAY / Volume / rocker / fader / FX momentary assert **no arbitration timer** and synchronous emission inside the same input-event turn (engine acknowledgement measured in a separate audio assertion).
 - `fnContext.test.ts` — FN+Volume is division in Tape **and** in FX; FN-arm → Track select; all four LEDs pulse while armed, selected LED solid, other three back to live meters, `activeStem` becomes the Tape/FX target.
-- `fxLaneAccess.test.ts` — FN+fader, FN+Track double-tap, FN+Track+Volume all reachable in FX; bare Track is FX-owned.
+- `fxLaneAccess.test.ts` — FN+fader, FN+Track double-tap, FN+Track+Volume all reachable in FX; bare Track is FX-owned. **Order assertion:** Track-down-then-FUNCTION emits `fx.latch` only (no `lane.reverse`, no bare-Track mute/loop); FUNCTION-down-then-Track double-tap emits `lane.reverse` only (no `fx.latch`, no `fx.bank.select`, no `fx.momentary.*`). Neither order may leak the other command.
+- `fnContext.test.ts` (armed-selection assertion) — while the FN-arm selection window is open, a Track press/tap/double-tap emits **exactly** `stem.select` and nothing else: no `lane.mute`, `loop.capture`, `loop.release`, `lane.audition`, `lane.reverse`, `fx.bank.select`, `fx.momentary.*` or `fx.latch`, in Tape **and** in FX overlay.
 - `headsBehaviour.test.ts` — tap releases head loop else mutes; audition of any 1–4 group while paused and restore; triple-tap latch; **FX processes the whole heads bus, not `activeStem`**; discard-on-exit restores mute/solo/gains/direction/loops/FX exactly, **excludes transport position** from the comparison, and lanes rejoin the advancing hidden-timeline frame.
-- **Delete `playTrackSolo.test.ts`.** Replace with `playTrackRetired.test.ts` — PLAY+Track emits **no** `stem.solo` / `stem.link` command at any overlap (0–1500 ms), Hold PLAY remains the sole producer of the global loop, and the retired rows carry `supersedes` + `originalBehaviour` while saved solo/link state still deserialises.
+- **Delete `playTrackSolo.test.ts`.** Replace with `playTrackRetired.test.ts` — PLAY+Track emits **no** `stem.solo` / `stem.link` command at any overlap (0–1500 ms), Hold PLAY remains the sole producer of the global loop, and the retired rows carry `supersedes` + `originalBehaviour`.
+- `soloLinkMigration.test.ts` — a stored session with `soloLatched: true` and linked lanes **round-trips its stored values unchanged** (compatibility preserved on disk) but **loads with runtime state normalised**: persistent solo off on every lane, all lanes unlinked, no `stem.solo` / `stem.link` command in the restore stream. Guarantees no project can load into an unreachable solo or link state now that the gestures are retired.
 - `precedence.test.ts` — per-mode suppression lists.
 - `fxAlias.test.ts` — alias↔id stability, legacy `beatRepeat` migration intact.
 - `guideCoverage.test.ts` — bidirectional featureId coverage, seven required fields per card, hardware block excluded from tutorials, counts 21/8/9/21/1/7/4/2/3/4.
@@ -143,7 +146,7 @@ Every entry is one card carrying all seven fields: purpose · exact down/up gest
 ## 9. Implementation order
 
 1. Timings + grammars + release-order latching (`gestures.ts`, `chordArbiter.ts`).
-2. Map rows and `surface.ts` state, including removals and PLAY+Track retention.
+2. Map rows and `surface.ts` state, including removals and **PLAY+Track retirement**, plus the session-migration normaliser below.
 3. Audio: global loop and coexistence table, scrub speed, half-speed, Heads corrections, FX-in-Heads.
 4. Keyboard map, `useDeviceSurface.ts`, Keyboard Controls panel.
 5. Projects grid correction + FX alias table.
