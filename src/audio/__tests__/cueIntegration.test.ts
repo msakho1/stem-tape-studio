@@ -300,3 +300,51 @@ describe("persistence and invalidation", () => {
     expect(r.engine.cueSnapshot().learned).toBe(2);
   });
 });
+
+describe("held cue semantics", () => {
+  it("a held global cue freezes the song and resumes at the saved frame on release", async () => {
+    const r = await rig();
+    startPlaying(r);
+    learn(r, GLOBAL, 80, 1.5);
+    r.advance(0.5);
+    const saved = r.engine.status().position;
+    play(r, 80);
+    // The whole normal timeline is parked while the pad is held.
+    r.advance(0.4);
+    expect(r.engine.status().position).toBeCloseTo(saved, 3);
+    r.advance(0.4);
+    expect(r.engine.status().position).toBeCloseTo(saved, 3);
+    expect(r.engine.cueSnapshot().owned).toEqual([true, true, true, true]);
+
+    r.engine.handleMidiCue(r.ev("noteOff", 80), NONE);
+    expect(r.engine.cueSnapshot().owned).toEqual([false, false, false, false]);
+    // Resumes from the exact saved frame, then advances normally again.
+    expect(r.engine.status().position).toBeCloseTo(saved, 3);
+    r.advance(0.5);
+    expect(r.engine.status().position).toBeCloseTo(saved + 0.5, 2);
+  });
+
+  it("a held isolated cue leaves three lanes advancing and rejoins the fourth", async () => {
+    const r = await rig();
+    startPlaying(r);
+    learn(r, lane(0), 81, 1.5);
+    r.advance(0.3);
+    const posBefore = r.engine.status().position;
+    const others = r.engine.cueSnapshot().underlay.slice(1) as number[];
+    play(r, 81);
+    r.advance(0.6);
+
+    // Main timeline and the other three lanes keep running.
+    expect(r.engine.status().position).toBeCloseTo(posBefore + 0.6, 2);
+    const othersNow = r.engine.cueSnapshot().underlay.slice(1) as number[];
+    othersNow.forEach((p, i) => expect(p - others[i]!).toBeCloseTo(0.6, 2));
+    expect(r.engine.cueSnapshot().owned).toEqual([true, false, false, false]);
+
+    r.engine.handleMidiCue(r.ev("noteOff", 81), NONE);
+    expect(r.engine.cueSnapshot().owned).toEqual([false, false, false, false]);
+    const snap = r.engine.cueSnapshot();
+    // The released lane rejoins at the other stems' current position.
+    expect(Math.abs(snap.underlay[0]! - snap.underlay[1]!)).toBeLessThan(2 / SR);
+    expect(voiceCounts(r.engine)).toEqual([1, 1, 1, 1]);
+  });
+});
