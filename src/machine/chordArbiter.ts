@@ -371,6 +371,25 @@ export class ChordArbiter {
     const { fxOverlay, activeStem } = this.view();
     const heldMs = downAt == null ? 0 : t - downAt;
 
+    // PLAY released while a claimed PLAY + Track chord is still pending: the
+    // chord ends now, so it resolves as a solo latch at the real overlap. The
+    // Track keeps its own claim, so its base gesture still never fires.
+    if (control === "play" && this.soloLinkTimers.size > 0) {
+      for (const [track, _timer] of [...this.soloLinkTimers]) {
+        const trackAt = this.down.get(track);
+        const overlap = trackAt == null || downAt == null ? 0 : t - Math.max(trackAt, downAt);
+        const linked = this.linkFired.has(track);
+        this.clearSoloLink(track);
+        if (linked) continue;
+        this.emit(
+          { type: "stem.solo", stem: TRACK_INDEX[track]! as StemIndex, overlapMs: overlap },
+          ["play", track],
+          `latch solo on PLAY release (overlap ${overlap.toFixed(0)} ms)`,
+        );
+      }
+      return;
+    }
+
     // ---- precedence 2: long system chord (Vol− + Vol+)
     if (isVolume(control)) {
       const other: Control = control === "volume-minus" ? "volume-plus" : "volume-minus";
