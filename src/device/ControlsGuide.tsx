@@ -66,7 +66,7 @@ export function ControlsGuide({
   const [details, setDetails] = useState(true);
   const table = keyboardTable();
 
-  const toggle = (id: string) => { (window as any).__toggleSeen = id; setOpen((cur) => (cur === id ? null : id)); };
+  const toggle = (id: string) => setOpen((cur) => (cur === id ? null : id));
 
   return (
     <div className="mt-4 border-t border-[var(--bench-line)] pt-3" data-testid="controls-guide">
