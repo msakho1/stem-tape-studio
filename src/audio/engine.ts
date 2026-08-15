@@ -4084,15 +4084,10 @@ export class AudioEngine {
         }
         case "loop.global.release": {
           this.globalLoop = null;
-          const details: string[] = [];
-          for (let i = 0 as TrackId; i < 4; i = (i + 1) as TrackId) {
-            const t = this.tracks[i];
-            if (!t || !t.loop.enabled) continue;
-            const r = this.scheduleLoopRelease(i, t);
-            details.push(`lane ${i + 1} ${r.ok ? "released" : `rejected (${r.detail})`}`);
-          }
-          return this.ack(cmd, "completed", details.length ? details.join(", ") : "no global loop was running");
+          const r = this.releaseGlobalLoop();
+          return this.ack(cmd, r.ok ? "completed" : "rejected", r.detail);
         }
+
 
 
         default:
