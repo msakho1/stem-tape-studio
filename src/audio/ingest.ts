@@ -84,17 +84,20 @@ export async function ingestStem(
 
   // Stage 2: exact verdict against the real buffer. Rejected buffers are never
   // installed and go out of scope here.
+  // Hashed BEFORE adoption: the engine keys cue markers to stem identity and
+  // must receive it in the same tick the buffer becomes audible.
+  const hash = await contentHash(file);
   const adopted = engine.adoptBuffer(trackId, probe.buffer, {
     name: file.name,
     provenance,
     decodeMs: probe.decodeMs,
     reused: true,
+    contentHash: hash,
   });
   if (!adopted.ok) {
     return { ok: false, role, detail: adopted.detail, estimate: probe.estimate, refusedAt: "post-decode" };
   }
 
-  const hash = await contentHash(file);
   const blobKey = `${session.get().projectId}--${role}--${hash}`;
   let stored = false;
   try {
@@ -218,6 +221,7 @@ export function installRedecode(engine: AudioEngine): void {
         provenance: stem.provenance,
         decodeMs: performance.now() - started,
         reused: false,
+        contentHash: stem.contentHash,
       });
       return adopted.ok ? buffer : null;
     } catch {

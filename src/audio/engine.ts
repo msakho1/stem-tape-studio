@@ -728,6 +728,10 @@ export class AudioEngine {
     track.decodeMs = meta.decodeMs ?? null;
     track.bufferReused = meta.reused ?? true;
     this.lastDecodeMs = meta.decodeMs ?? this.lastDecodeMs;
+    // Stem identity, recorded synchronously with the buffer. A lane whose hash
+    // actually changed retires its markers here and nowhere else.
+    this.contentHashes[id] = meta.contentHash ?? "";
+    this.cues.revalidate(this.contentHashes);
     return {
       ok: true,
       detail: `adopted ${buffer.duration.toFixed(2)}s · ${buffer.numberOfChannels}ch @ ${buffer.sampleRate} Hz · ${(
