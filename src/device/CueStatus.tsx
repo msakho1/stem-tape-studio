@@ -17,8 +17,11 @@ import { webMidi, type WebMidiState } from "@/audio/midi/webMidi";
 import { getAudioEngine } from "@/audio/engine";
 
 export function CueStatus() {
-  const [web, setWeb] = useState<WebMidiState>(() => webMidi.snapshot());
-  const [native, setNative] = useState<NativeBridgeState>(() => nativeMidiBridge.snapshot());
+  // Both snapshots read browser capabilities that the server cannot know
+  // (requestMIDIAccess, an installed native bridge), so they are adopted after
+  // hydration instead of during the first render.
+  const [web, setWeb] = useState<WebMidiState>(() => ({ ...webMidi.snapshot(), supported: false }));
+  const [native, setNative] = useState<NativeBridgeState>(() => ({ present: false, deviceName: null, ready: false }));
   const [last, setLast] = useState<StemMidiEvent | null>(null);
   const [count, setCount] = useState(0);
   const [nowMs, setNowMs] = useState(() => (typeof performance !== "undefined" ? performance.now() : 0));
@@ -29,6 +32,8 @@ export function CueStatus() {
 
   useEffect(() => {
     mounted.current = true;
+    setWeb(webMidi.snapshot());
+    setNative(nativeMidiBridge.snapshot());
     const onEvent = (ev: StemMidiEvent) => {
       setLast(ev);
       setCount((c) => c + 1);
