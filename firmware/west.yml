@@ -1,0 +1,20 @@
+# Minimal west manifest used only by CI (.github/workflows/firmware.yml) to
+# pull the documented upstream Zephyr revision. No firmware source is changed.
+manifest:
+  self:
+    path: firmware
+
+  remotes:
+    - name: zephyrproject-rtos
+      url-base: https://github.com/zephyrproject-rtos
+
+  projects:
+    - name: zephyr
+      remote: zephyrproject-rtos
+      revision: v4.3.1
+      import:
+        name-allowlist:
+          - cmsis
+          - cmsis_6
+          - hal_nordic
+          - segger
