@@ -1184,8 +1184,21 @@ export function applyPerfIntent(state: SurfaceState, intent: PerfIntent): Surfac
       return fire(next, "stem.link", `stem ${intent.stem + 1} ${linked ? "linked" : "unlinked"} (overlap ${intent.overlapMs.toFixed(0)} ms)`, t);
     }
     case "fx.overlay": {
-      next = emit({ ...next, perf: { ...perf, fxOverlay: intent.on } }, "fx.overlay", { on: intent.on }, { rowId: "fx.overlay.toggle", t });
-      return fire(next, "fx.overlay.toggle", `FX overlay ${intent.on ? "open" : "closed"} — tape audio continues`, t);
+      // Opening sets the scope; closing keeps the scope it was opened with so
+      // the engine can address the right rack while the release fades.
+      const scope = intent.on ? intent.scope : perf.fxScope;
+      next = emit(
+        { ...next, perf: { ...perf, fxOverlay: intent.on, fxScope: scope } },
+        "fx.overlay",
+        { on: intent.on, scope },
+        { rowId: "fx.overlay.toggle", t },
+      );
+      return fire(
+        next,
+        "fx.overlay.toggle",
+        `FX overlay ${intent.on ? `open — ${scope.toUpperCase()} scope` : "closed"} — tape audio continues`,
+        t,
+      );
     }
     case "system.pairing":
       return fire(next, "system.pairing", "Bluetooth pairing gesture (stock)", t);

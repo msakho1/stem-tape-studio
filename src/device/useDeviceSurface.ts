@@ -12,6 +12,7 @@ import {
   type RawInputEvent,
 } from "@/input/gestures";
 import { ChordArbiter, type PerfIntent } from "@/machine/chordArbiter";
+import { fxStateOf, fxTargetOf } from "@/machine/stemPerformance";
 import {
   applyFader,
   applyGesture,
@@ -187,7 +188,10 @@ export function useDeviceSurface() {
         return {
           activeStem: perf.activeStem,
           fxOverlay: perf.fxOverlay,
-          selectedBank: perf.tracks[perf.activeStem]!.fx12.selectedBank,
+          fxScope: perf.fxScope,
+          // The selected bank comes from whichever rack the overlay drives, so
+          // Volume ± always cycles the algorithm the musician can see.
+          selectedBank: fxStateOf(perf, fxTargetOf(perf)).selectedBank,
         };
       }),
     [],
