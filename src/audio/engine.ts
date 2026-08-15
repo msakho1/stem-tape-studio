@@ -1061,6 +1061,89 @@ export class AudioEngine {
   /** Frames the lane will actually start reading at, per scheduled release. */
   lastReleasePlan: { lane: number; boundaryPos: number; sourceFrame: number; at: number }[] = [];
 
+  /** Where the last global-loop release landed the SHARED timeline. */
+  lastGlobalRelease: { at: number; position: number; lanes: number } | null = null;
+
+  /**
+   * GLOBAL loop release — the whole SONG was looping, so there is no hidden
+   * timeline to rejoin. The shared audible frame at release becomes the song
+   * position: it is captured, every lane crossfades to it click-free, the
+   * shared timeline is re-anchored there and all four stems continue forward
+   * from exactly that frame with one playback path each.
+   */
+  private releaseGlobalLoop(): { ok: boolean; detail: string } {
+    const ctx = this.ctx;
+    const dur = this.duration;
+    if (!ctx || !this.requestedPlaying) {
+      // Stopped: just drop the windows; the next start reads the song position.
+      let n = 0;
+      for (const t of this.tracks) {
+        if (t.loop.enabled) {
+          t.loop = { ...t.loop, enabled: false };
+          n++;
+        }
+      }
+      this.invalidateSeams();
+      return { ok: true, detail: n ? `global loop released while stopped (${n} lanes)` : "no global loop was running" };
+    }
+
+    // The audible frame of the looping song: any lane reads the same window, so
+    // lane read position = its source start offset + integrated distance since.
+    const now = ctx.currentTime;
+    const at = now + 0.01;
+    const advance = this.timeline.positionAt(at) - this.timeline.positionAt(now);
+    let audible: number | null = null;
+    for (let i = 0; i < this.tracks.length; i++) {
+      const t = this.tracks[i]!;
+      if (!t.loop.enabled) continue;
+      const live = t.sources[t.sources.length - 1];
+      if (!live) continue;
+      audible = live.startPos + (this.timeline.positionAt(now) - this.timeline.positionAt(live.startAt));
+      break;
+    }
+    if (audible == null) {
+      for (const t of this.tracks) t.loop = { ...t.loop, enabled: false };
+      this.invalidateSeams();
+      return { ok: true, detail: "no global loop was running" };
+    }
+    const landing = Math.max(0, dur ? Math.min(dur - 1e-3, audible + advance) : audible + advance);
+
+    let lanes = 0;
+    for (let i = 0 as TrackId; i < 4; i = (i + 1) as TrackId) {
+      const t = this.tracks[i];
+      if (!t) continue;
+      const wasLooping = t.loop.enabled;
+      // Close the window BEFORE spawning so the replacement is a straight
+      // source, then fade every existing voice out across the same seam.
+      t.loop = { ...t.loop, enabled: false };
+      this.pendingRelease[i] = null;
+      if (!wasLooping || !t.buffer) continue;
+      const outgoing = [...t.sources];
+      const live = this.spawn(t, at, landing, true);
+      if (!live) continue;
+      for (const s of outgoing) this.fadeOutAndStop(t, s, at);
+      t.committedSeamAt = null;
+      lanes++;
+      if (t.engineMode === "worklet" && t.worklet) {
+        void t.worklet.post({
+          type: "releaseLoop",
+          targetSourceFrame: Math.round(landing * ctx.sampleRate),
+          fadeFrames: Math.round(SEAM_FADE_S * ctx.sampleRate),
+          applyAtContextFrame: Math.round(at * ctx.sampleRate),
+        });
+      }
+    }
+    // The SONG itself was looping: the shared clock follows the audible frame.
+    this.timeline.anchor(at, landing);
+    this.invalidateSeams();
+    this.lastGlobalRelease = { at, position: landing, lanes };
+    return {
+      ok: true,
+      detail: `global loop released at the audible frame ${landing.toFixed(3)}s — ${lanes} lanes continue forward from there`,
+    };
+  }
+
+
   private scheduleLoopRelease(id: TrackId, t: TrackRuntime): { ok: boolean; detail: string } {
     const ctx = this.ctx;
     if (!ctx) return { ok: false, detail: "audio not unlocked" };
