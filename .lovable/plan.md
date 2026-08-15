@@ -66,6 +66,7 @@ States per key: `idle → capturing(scope, startFrame) → committed | discarded
 Rules:
 
 - Qualifier is read at the Note On instant: FUNCTION held → global. Exactly one Track held → that lane. **Two or more Track buttons held → explicit rejection** ("hold one Track button to learn an isolated cue"); no lane is chosen silently.
+- **The qualifier is claimed, not merely observed.** Reading `functionHeld`/held Tracks inside `useDeviceSurface` is not enough: the button will still fire its own release action later. At the instant learning begins the dispatcher calls `chordArbiter.claimExternal([...])` (§11), so FUNCTION's release cannot arm active-track selection and the Track's release cannot emit mute, loop or any other tap action. A Track-hold audition that was already running when the note arrived continues untouched and restores normally on release — only the release *action* is suppressed. The claim clears on that control's own release through the arbiter's existing path (`chordArbiter.ts:236-238`).
 - If an eligibility condition becomes true *during* a capture (loop captured, reverse engaged, Heads entered, scrub started), the capture is **discarded** and reported. Learning stays contiguous by construction.
 - Commit requires `endFrame - startFrame >= minCueFrames` (proposed 1024 frames); otherwise discarded with a reason.
 - Overwrite: a new commit on the same `channel:note` replaces the previous marker in place.
