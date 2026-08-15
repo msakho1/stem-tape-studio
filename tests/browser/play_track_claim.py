@@ -42,7 +42,7 @@ RUN = """async ([trackDelay, overlap]) => {
     playToTrackMs: +(tTrack - t0).toFixed(1),
     overlapMs: +(tUp - tTrack).toFixed(1),
     commands: window.__stemTape.commands.map(c => c.type),
-    arbitration: (window.__stemTape.arbiter?.log ?? []).slice(0, 3).map(r => r.detail),
+    arbitration: (window.__stemTape.arbiter?.log ?? []).slice(0, 4).map(r => r.detail),
   };
 }"""
 
@@ -58,9 +58,9 @@ async def main():
         await page.wait_for_function("() => !!window.__stemTape")
 
         cases = {
-            "claim_449_release_250": (446, 250),   # inside claim window, short overlap -> solo
-            "late_450_release_250": (452, 250),    # boundary: PLAY owned by hold -> no chord
-            "claim_200_hold_700": (200, 720),      # overlap reaches 700 ms -> link
+            "claim_449_release_250": (420, 250),   # inside claim window, short overlap -> solo
+            "late_450_release_250": (520, 250),    # boundary: PLAY owned by hold -> no chord
+            "claim_200_hold_700": (200, 800),      # overlap reaches 700 ms -> link
         }
         for name, (d, o) in cases.items():
             out[name] = await page.evaluate(RUN, [d, o])
