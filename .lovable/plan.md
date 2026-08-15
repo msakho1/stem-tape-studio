@@ -78,9 +78,14 @@ Playback is allowed in every state except Heads: normal play, global loop runnin
 
 On unqualified Note On for a learned marker, at `at = max(ctx.currentTime + lookahead, ctxTimeOf(ev))` with `lookahead ≥ SEAM_FADE_S`:
 
-1. Affected lanes: all four for a global cue, one for an isolated cue.
-2. For each affected lane: spawn the cue voice with `spawn(t, at, startFrame/sr, true)` `:782`, register `cueOwner[lane] = { voice, noteKey, scope, endAt, runtimeGeneration }`, and give the voice the same **identity protection** as `pendingRelease` so no wrap, sweep, relocate or respawn can fade or stop it.
-3. Fade any previously audible voice on that lane out with `fadeOutAndStop(t, live, at)` `:845`. The two overlap for exactly `SEAM_FADE_S`.
+1. **Eligibility gate for v1**: reject if any active scrub or reverse conflicts with the cue.
+   - Isolated cue: reject if its target lane is currently scrubbing (`laneFaderScrub` active) or reversed.
+   - Global cue: reject if **any** lane is scrubbing or reversed.
+   - This is a playback rejection, not a state change; the note is reported and ignored.
+2. Affected lanes: all four for a global cue, one for an isolated cue.
+3. For each affected lane: spawn the cue voice with the dedicated `spawnCue({ track, startAt, startFrame, endFrame, reverse: false, window: null, playbackRate: 1 })` path, register `cueOwner[lane] = { voice, noteKey, scope, endAt, runtimeGeneration }`, and give the voice the same **identity protection** as `pendingRelease` so no wrap, sweep, relocate or respawn can fade or stop it.
+4. **Audibility override**: while `cueOwner[lane]` exists, the cue voice must be audible regardless of that lane's mute/solo state. The engine temporarily overrides that lane's input audibility **without mutating** `t.muted`/`t.soloed`. The fader level and FX rack remain active. On completion, normal audibility is restored from the unchanged mixer state.
+5. Fade any previously audible voice on that lane out with `fadeOutAndStop(t, live, at)` `:845`. The two overlap for exactly `SEAM_FADE_S`.
 4. **At the same moment**, schedule the completion seam and the rejoin voice: `endAt = at + (endFrame − startFrame)/sr`. Start time and read offset are both computed up front, so the seam is sample-accurate. `tick()` only reaps dead nodes and clears `cueOwner`; it never decides the seam.
 
 **Fixed 1× for v1.** Learning is only possible during aligned 1× playback, and the key's held duration *is* the passage, so a cue always plays at 1×. A varispeed change during an active cue does **not** reschedule, stretch or re-pitch it; the completion lands at the frame scheduled at trigger time. (Rate-following cues are explicitly out of scope.)
