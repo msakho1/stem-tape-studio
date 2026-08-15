@@ -1,6 +1,6 @@
 # Stem Instrument Mode — MIDI cue learning, iOS CoreMIDI wrapper, Guide card
 
-Plan only. No code in this response. Revised per the corrections of this turn.
+Plan only. No code in this response. Revised per the corrections of this turn. Final addendum applied.
 
 ## 1. Current-code audit (verified)
 
