@@ -261,11 +261,54 @@ export class ChordArbiter {
       if (this.log.length > 60) this.log.length = 60;
     }
 
-    // PLAY-first chords are RETIRED (PLAY + Volume = stem.select, PLAY + Track
-    // = solo/link). Hold PLAY is exclusively the global one-bar loop, which
-    // begins at holdMs = 450 — a >=700 ms link overlap could never complete and
-    // a solo could be cancelled mid-gesture. Nothing is claimed here any more,
-    // so Volume stays master volume and Track keeps its own deferred group.
+    // ---- FIRST-CLAIM OWNERSHIP of PLAY (restores PLAY + Track solo/link).
+    //
+    // PLAY down starts the global-loop hold timer (holdMs = 450, owned by the
+    // gesture engine). Whichever gesture reaches PLAY first owns it:
+    //
+    //   Track arrives  < globalLoopClaimMs → the chord claims PLAY, so the
+    //     holdStart that would have started the global loop is dropped before
+    //     dispatch. Release < soloLinkMs = latch solo; reaching soloLinkMs
+    //     while still held = link/unlink.
+    //   No Track by globalLoopClaimMs → Hold PLAY owns PLAY. Later Track
+    //     presses are ordinary Track gestures and can never form a chord,
+    //     because the elapsed check below fails.
+    //
+    // Either way the claim suppresses PLAY's own transport gesture, so
+    // releasing a claimed chord emits no transport and no loop command.
+    if (isTrack(control) && this.down.has("play")) {
+      const playHeld = this.heldSince("play", t) ?? Infinity;
+      if (playHeld < this.timings.globalLoopClaimMs) {
+        this.claim("play", control);
+        this.log.unshift({
+          t,
+          controls: ["play", control],
+          intent: "none",
+          suppressed: ["play", control],
+          detail: `PLAY+Track claimed PLAY at ${playHeld.toFixed(0)} ms — global-loop hold cancelled`,
+        });
+        if (this.log.length > 60) this.log.length = 60;
+        const stem = TRACK_INDEX[control]! as StemIndex;
+        const timer = setTimeout(() => {
+          this.linkFired.add(control);
+          this.emit(
+            { type: "stem.link", stem, overlapMs: this.timings.soloLinkMs },
+            ["play", control],
+            `link/unlink at ${this.timings.soloLinkMs} ms overlap`,
+          );
+        }, this.timings.soloLinkMs);
+        this.soloLinkTimers.set(control, timer);
+      } else {
+        this.log.unshift({
+          t,
+          controls: ["play", control],
+          intent: "none",
+          suppressed: [],
+          detail: `PLAY already owned by the global-loop hold (${playHeld.toFixed(0)} ms) — Track runs normally`,
+        });
+        if (this.log.length > 60) this.log.length = 60;
+      }
+    }
     void this.modifierFresh;
 
     if (control === "function" && fxOverlay) {
