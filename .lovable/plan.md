@@ -53,8 +53,19 @@ Build: Zephyr **v4.3.1**, SDK **0.17.4**, apply the UAC2 patch, `west build -p -
 
 ## 5. Phased bring-up (each step a reversible checkpoint = archived `.bin` + tag)
 
-0. **Backup/recovery first.** Dump stock firmware and eMMC; open one donor unit, wire SWD, prove a JTAG/SWD reflash works. Do nothing else until an unbrick is demonstrated twice.
-1. Build **unmodified** `v2.7.1-official` from source, flash, verify byte-behaviour against the released `.bin`.
+No step opens the enclosure. No SWD, no JTAG, no soldering. Every flash and every recovery goes through the Solderless WebSerial updater (power off → hold Track 1 + Track 4 while plugging USB-C → hold until the Track 1 LED lights → Connect, desktop Chrome/Edge only).
+
+0. **Phase 0 — WebSerial-only recovery proof.**
+   - **0a. Establish what the updater can actually do.** Open solderless.engineering in Chrome, connect a donor unit in firmware mode, and enumerate every control the page exposes. Record whether a read/export/dump path exists at all. *Current status: no evidence found that the tool can export installed firmware — the only documented flow is writing a supplied `.bin`. Until 0a proves otherwise, treat it as **flash-only** and never call it a firmware backup.*
+   - **0b. Back up user data first.** Export all stems, loops and settings off the device via the existing transfer tool (chattock.github.io/sp1-tape-looper) and archive them with hashes. This is a data backup, not a firmware backup.
+   - **0c. Obtain a verified stock image.** Source a stock TE SP-1 firmware `.bin`, record its sha256, and corroborate the same hash from at least two independent community sources. *No publicly distributed stock image with a published hash was found in research — see the accepted risk below.*
+   - **0d. Flash unmodified Tape Looper `v2.7.1-official`** (`sp1_looper.bin`, 109,240 B, sha256 e1a9152b…) via Solderless.
+   - **0e. Re-enter firmware mode and restore stock** through Solderless using the 0c image.
+   - **0f. Repeat 0d–0e a second time.** After each of the four flashes, verify: audio out (UAC2 enumeration + audible playback on both channels), all 11 controls via ADC response, every LED including the battery gauge, and USB re-enumeration as both audio device and serial port.
+   - **Exit criterion:** two complete Tape-Looper → stock round trips with all four subsystems green after every flash.
+   - **Accepted risk, explicit:** (i) if 0c cannot produce a hash-verified stock image, the round trip cannot be closed and the only reversion target is Tape Looper itself — the device would be permanently off stock firmware; (ii) if a flash fails mid-write and the bootloader does not survive it, there is no WebSerial recovery and, with the enclosure closed, no recovery at all. Community reports confirm the bootloader is normally reachable over USB, but nothing found confirms it survives a corrupted application write. Both risks are accepted knowingly or Phase 0 is a no-go.
+1. Build **unmodified** `v2.7.1-official` from source, flash it over WebSerial, and verify behaviour matches the released `.bin`.
+
 2. Donor hardware verification: ADC scan of all 11 controls, LED sweep, UAC2 enumeration, eMMC read/write, battery gauge.
 3. Instrumentation only: emit a serial command stream mirroring Stem Tape's ordered commands. No behaviour change.
 4. Gesture arbiter + generated map table (C-group 2/3).
