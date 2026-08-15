@@ -208,10 +208,11 @@ export class ChordArbiter {
       const functionHeld = this.down.has("function");
       const otherModifier = this.down.has("play") || this.down.has("volume-minus") || this.down.has("volume-plus");
       if (functionHeld) {
-        // FUNCTION + bank claims the gesture and toggles the latch. No momentary.
-        this.claim(control, "function");
-        this.emit({ type: "fx.bank.select", stem: activeStem, bank }, [control], `bank ${bank + 1} selected`);
-        this.emit({ type: "fx.latch", stem: activeStem, bank }, [control, "function"], `latch toggle bank ${bank + 1}`);
+        // ORDER IS THE DISCRIMINATOR. FUNCTION went down FIRST, so this press
+        // belongs to the universal lane layer (FN + Track double-tap =
+        // lane.reverse, FN + Track held + Volume = loop.resize). The arbiter
+        // must NOT claim it and must NOT emit any FX intent: latching is
+        // Track-first-then-FUNCTION only, resolved in onDown("function").
         return;
       }
       if (!otherModifier) {
