@@ -1,0 +1,24 @@
+name: StemTape
+options:
+  bundleIdPrefix: app.stemtape
+  deploymentTarget:
+    iOS: "16.0"
+configFiles:
+  Debug: Config.xcconfig
+  Release: Config.xcconfig
+targets:
+  StemTape:
+    type: application
+    platform: iOS
+    sources:
+      - path: .
+        includes:
+          - "*.swift"
+    info:
+      path: Info.plist
+    settings:
+      base:
+        INFOPLIST_FILE: Info.plist
+        CODE_SIGNING_REQUIRED: "NO"
+        CODE_SIGNING_ALLOWED: "NO"
+        CODE_SIGN_IDENTITY: ""

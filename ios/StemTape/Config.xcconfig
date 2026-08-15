@@ -1,0 +1,13 @@
+// Address of the Stem Tape web app. No domain is hardcoded in Swift.
+// Note: xcconfig treats "//" as a comment, so the scheme separator is escaped.
+STEM_TAPE_SCHEME_SEP = //
+STEM_TAPE_WEB_URL = https:$(STEM_TAPE_SCHEME_SEP)example.invalid
+
+PRODUCT_BUNDLE_IDENTIFIER = app.stemtape.ios
+PRODUCT_NAME = StemTape
+IPHONEOS_DEPLOYMENT_TARGET = 16.0
+SWIFT_VERSION = 5.0
+TARGETED_DEVICE_FAMILY = 1,2
+CODE_SIGNING_REQUIRED = NO
+CODE_SIGNING_ALLOWED = NO
+CODE_SIGN_IDENTITY =
