@@ -59,20 +59,27 @@ describe("ordered chord arbitration (correction 1)", () => {
     expect(arb.isClaimed("volume-plus")).toBe(false);
   });
 
-  it("PLAY + Track emits no solo and no link at any overlap", () => {
+  it("PLAY + Track resolves by first claim: solo inside the window, nothing outside it", () => {
+    // Track at 300 ms is inside the 450 ms claim window → the chord owns PLAY
+    // and a 200 ms overlap latches solo. Boundary coverage lives in
+    // src/machine/__tests__/playTrackClaim.test.ts.
     const a = harness();
     a.ev("play", "down", 0);
     a.ev("track-button-2", "down", 300);
     a.ev("track-button-2", "up", 500);
-    expect(a.intents).toEqual([]);
-    expect(a.arb.isClaimed("track-button-2")).toBe(false);
+    expect(a.intents).toEqual([{ type: "stem.solo", stem: 1, overlapMs: 200 }]);
+    expect(a.arb.isClaimed("track-button-2")).toBe(true);
+    expect(a.arb.isClaimed("play")).toBe(true); // transport suppressed
 
+    // Track after the claim window → the global-loop hold already owns PLAY.
     const b = harness();
     b.ev("play", "down", 0);
-    b.ev("track-button-3", "down", 100);
-    b.ev("track-button-3", "up", 100 + DEFAULT_ARBITER_TIMINGS.soloLinkMs + 1);
+    b.ev("track-button-3", "down", DEFAULT_ARBITER_TIMINGS.globalLoopClaimMs + 50);
+    b.ev("track-button-3", "up", DEFAULT_ARBITER_TIMINGS.globalLoopClaimMs + 250);
     expect(b.intents).toEqual([]);
+    expect(b.arb.isClaimed("track-button-3")).toBe(false);
   });
+
 
   it("volume chord: short = overlay, ~2 s = pairing, 600–2000 ms = no-op", () => {
     const short = harness();
