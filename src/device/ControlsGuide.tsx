@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { Sp1GuideIllustration, type MiniMotion } from "@/device/Sp1GuideIllustration";
 import {
   FX_BANK_CARDS,
@@ -132,8 +132,8 @@ export function ControlsGuide({
             <table className="w-full border-collapse font-mono text-[11px]">
               <tbody>
                 {table.map(({ group, rows }) => (
-                  <>
-                    <tr key={group.feature} data-testid={`kbd-group-${group.feature}`}>
+                  <Fragment key={group.feature}>
+                    <tr data-testid={`kbd-group-${group.feature}`}>
                       <th
                         colSpan={2}
                         className="border-b border-[var(--bench-line)] px-3 py-1 text-left text-[10px] uppercase tracking-[0.14em] text-[var(--ink-faint)]"
@@ -147,7 +147,7 @@ export function ControlsGuide({
                         <td className="px-3 py-1 text-[var(--ink-dim)]">{r.detail}</td>
                       </tr>
                     ))}
-                  </>
+                  </Fragment>
                 ))}
               </tbody>
             </table>
