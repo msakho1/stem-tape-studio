@@ -43,6 +43,19 @@ import { preflightWorklet, WorkletTrack, type MigrationStatus, type PreflightRes
 import { FxRack, type FxRackSnapshot } from "./fx/rack";
 import { BankRack, type BankStageSnapshot } from "./fx/banks";
 import type { AlgorithmIndex, BankIndex } from "@/machine/fx12";
+import { midiClock } from "./midi/clock";
+import type { MidiTransport, StemMidiEvent } from "./midi/contract";
+import {
+  CueStore,
+  describeCueAction,
+  type CueAction,
+  type CueEventContext,
+  type CueLane,
+  type CueMarker,
+  type EligibilitySnapshot,
+  type QualifierSnapshot,
+} from "./cues";
+
 import { algorithmDef } from "@/machine/fx12";
 import { FX_FAMILIES, type FxFamily } from "@/machine/stemPerformance";
 
