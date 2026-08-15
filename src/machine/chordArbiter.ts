@@ -261,10 +261,12 @@ export class ChordArbiter {
       if (this.log.length > 60) this.log.length = 60;
     }
 
-    // Play-first chords are resolved on RELEASE (they need a duration), but the
-    // modifier is claimed as soon as the partner arrives.
-    if (isVolume(control) && this.modifierFresh("play", t)) this.claim("play");
-    if (isTrack(control) && this.modifierFresh("play", t)) this.claim("play");
+    // PLAY-first chords are RETIRED (PLAY + Volume = stem.select, PLAY + Track
+    // = solo/link). Hold PLAY is exclusively the global one-bar loop, which
+    // begins at holdMs = 450 — a >=700 ms link overlap could never complete and
+    // a solo could be cancelled mid-gesture. Nothing is claimed here any more,
+    // so Volume stays master volume and Track keeps its own deferred group.
+    void this.modifierFresh;
 
     if (control === "function" && fxOverlay) {
       const heldTrack = this.activeFxTrackHeld();
