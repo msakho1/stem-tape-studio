@@ -182,14 +182,14 @@ describe("cue routing and audible voices", () => {
     const r = await rig();
     r.engine.execute(cmd("track.mute", { id: 1, on: true }));
     startPlaying(r);
-    const mixBefore = r.engine.status().tracks.map((t) => ({ muted: t.muted, soloed: t.soloed }));
+    const mixBefore = r.engine.status().tracks.map((t) => ({ muted: t.muted, gain: t.gain }));
     learn(r, GLOBAL, 65, 0.3);
     play(r, 65);
-    expect(r.engine.status().tracks.map((t) => ({ muted: t.muted, soloed: t.soloed }))).toEqual(mixBefore);
+    expect(r.engine.status().tracks.map((t) => ({ muted: t.muted, gain: t.gain }))).toEqual(mixBefore);
     r.advance(1.0);
     (r.engine as unknown as { stopAllCues: (s: string) => void }).stopAllCues("test");
     expect(r.engine.cueSnapshot().owned).toEqual([false, false, false, false]);
-    expect(r.engine.status().tracks.map((t) => ({ muted: t.muted, soloed: t.soloed }))).toEqual(mixBefore);
+    expect(r.engine.status().tracks.map((t) => ({ muted: t.muted, gain: t.gain }))).toEqual(mixBefore);
   });
 });
 
