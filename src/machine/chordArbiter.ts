@@ -130,8 +130,22 @@ export class ChordArbiter {
   private soloLinkTimers = new Map<Control, ReturnType<typeof setTimeout>>();
   /** Track controls whose link already fired at soloLinkMs — release is inert. */
   private linkFired = new Set<Control>();
+  /**
+   * Controls whose hold gesture has ACTUALLY fired in the gesture engine.
+   * Ownership of PLAY is decided against this, not against a second elapsed-ms
+   * comparison: on real hardware timing the two clocks disagree by a few
+   * milliseconds either side of 450 ms, which is exactly the boundary the
+   * chord has to survive.
+   */
+  private holdFired = new Set<Control>();
 
   constructor(private view: () => ArbiterView) {}
+
+  /** The gesture engine reports a real holdStart here, before dispatch. */
+  noteHoldStart(control: Control): void {
+    this.holdFired.add(control);
+  }
+
 
   onIntent(fn: (i: PerfIntent) => void): () => void {
     this.listeners.add(fn);
