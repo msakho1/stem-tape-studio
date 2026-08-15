@@ -5,7 +5,6 @@ import { KeyboardPanel } from "@/device/KeyboardPanel";
 import { ControlsGuide, LESSONS } from "@/device/ControlsGuide";
 import { Sp1GuideIllustration } from "@/device/Sp1GuideIllustration";
 import { HeadsStatus } from "@/device/HeadsStatus";
-import { CueStatus } from "@/device/CueStatus";
 import { SupportButton } from "@/components/SupportButton";
 import { KEY_HINTS, useDeviceSurface } from "@/device/useDeviceSurface";
 import { CONTROL_LABELS } from "@/device/geometry";
@@ -255,7 +254,6 @@ function LabPage() {
                 {mounted && status.contextState === "running" ? `audio live · ${status.sampleRate ?? "?"} Hz` : "audio ready"}
               </p>
             </div>
-            <CueStatus />
             {/* Touch devices route through the ringer switch on iOS; say so once,
                 where the musician is about to press PLAY. */}
             {showRingerNotice && (
