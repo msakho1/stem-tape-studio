@@ -346,11 +346,11 @@ export function describeCueAction(a: CueAction): string {
       return `cannot learn ${a.key} — ${describeReason(a.reason)}`;
     case "cue.play":
       return `cue ${a.key} triggered`;
+    case "cue.release":
+      return `cue ${a.key} released`;
     case "cue.reject":
       return `cue ${a.key} unplayable — ${describeReason(a.reason)}`;
     case "ignored":
-      return a.reason === "playback-note-off"
-        ? `note off ignored — ${a.key} is a one-shot`
-        : `ignored ${a.key} — ${a.reason}`;
+      return `ignored ${a.key} — ${a.reason}`;
   }
 }
