@@ -1824,10 +1824,62 @@ export class AudioEngine {
       const r = this.playCue(action.marker);
       detail = r.detail;
     }
+    if (action.type === "cue.release") {
+      detail = this.releaseCueByKey(action.key).detail;
+    }
     if (ev.kind === "allNotesOff") this.stopAllCues("all notes off");
     this.noteCue(action.type, detail);
     return { action, detail };
   }
+
+  /**
+   * Held-pad release, keyed by channel:note. Every cue voice carrying that key
+   * fades out across the seam; a global cue also unparks the song timeline and
+   * resumes all four stems from the exact frame the Note On froze.
+   */
+  private releaseCueByKey(key: string): { ok: boolean; detail: string } {
+    let released = 0;
+    for (let lane = 0; lane < this.cueVoices.length; lane++) {
+      const voice = this.cueVoices[lane];
+      if (!voice || voice.key !== key) continue;
+      this.stopCueVoice(lane, "released");
+      const timer = this.cueTimers[lane];
+      if (timer) clearTimeout(timer);
+      this.cueTimers[lane] = null;
+      this.cueOverride[lane] = false;
+      if (this.ctx) this.applyAudibility(lane as TrackId);
+      released++;
+    }
+    if (released === 0) return { ok: false, detail: `cue ${key} was not sounding` };
+    const resumed = this.resumeCuePark();
+    return {
+      ok: true,
+      detail: `cue ${key} released — ${released} lane${released === 1 ? "" : "s"} rejoined${resumed ? ` · song resumed at ${resumed.toFixed(3)}s` : ""}`,
+    };
+  }
+
+  /**
+   * Unpark the song after the last global cue voice goes away. The tape restarts
+   * from the frame the cue froze — transport, loop, mixer and FX untouched.
+   */
+  private resumeCuePark(): number | null {
+    const park = this.cuePark;
+    if (!park || !this.ctx) return null;
+    if (this.cueVoices.some((v) => v && v.scope === "global")) return null;
+    this.cuePark = null;
+    const now = this.ctx.currentTime;
+    this.timeline.anchor(now, park.pos);
+    this.timelineFrozenAt = now;
+    if (park.wasPlaying) {
+      this.stopSources();
+      this.requestedPlaying = true;
+      this.transportPhase = park.phase;
+      this.startAll(park.pos);
+      this.invalidateSeams();
+    }
+    return park.pos;
+  }
+
 
   /** Schedule one marker. Global markers hit all four lanes at the SAME time. */
   private playCue(marker: CueMarker): { ok: boolean; detail: string } {
