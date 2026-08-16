@@ -9,15 +9,16 @@ import { STEM_TAPE_V1_MAP, exportMapJson } from "@/machine/stemTapeV1Map";
 import type { ChordArbiter } from "@/machine/chordArbiter";
 import type { EngineStatus } from "@/audio/engine";
 
+/** The eight physical SP-1 LEDs: 4 Track + 4 side/status. */
 const LED_ORDER: LedId[] = [
   "track-led-1",
   "track-led-2",
   "track-led-3",
   "track-led-4",
-  "play-indicator",
   "side-led-1",
-  "function-led-1",
-  "function-led-2",
+  "side-led-2",
+  "side-led-3",
+  "side-led-4",
 ];
 
 interface Props {

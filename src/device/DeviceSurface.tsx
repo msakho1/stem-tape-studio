@@ -200,11 +200,14 @@ export function DeviceSurface({
           </g>
         ))}
 
-        {/* Rail: play indicator, side LED song row, function indicators */}
-        <g data-led="play-indicator" className={`st-led st-led--${leds["play-indicator"].pattern} st-led--signal`}>
-          <path className="st-led__halo" d="M589.2 213l21 33h-42z" fill="#ff5d63" />
-          <path className="st-led__core" d="M589.2 219l18 27h-36z" fill="#ff5d63" />
-        </g>
+        {/* Rail: STATIC printed PLAY triangle (artwork, not an LED), then the
+            four-LED side/status row. The SP-1 has no separate play LED. */}
+        <path
+          data-static-marking="play-triangle"
+          d="M589.2 219l18 27h-36z"
+          fill="#b8474c"
+          opacity={0.85}
+        />
 
         {[0, 1, 2, 3].map((i) => {
           const id = `side-led-${i + 1}` as LedId;
@@ -216,15 +219,18 @@ export function DeviceSurface({
           );
         })}
 
-        {[0, 1].map((i) => {
-          const id = `function-led-${i + 1}` as LedId;
-          return (
-            <g key={id} data-led={id} className={`${ledClass(leds, id)} st-led--signal`}>
-              <circle className="st-led__halo" cx={589.2} cy={664 + i * 20} r={12} fill="#ff5d63" />
-              <circle className="st-led__core" cx={589.2} cy={664 + i * 20} r={6.5} fill="#ff5d63" />
-            </g>
-          );
-        })}
+        {/* STATIC printed `••` marks on the FUNCTION button — not LEDs. */}
+        {[0, 1].map((i) => (
+          <circle
+            key={`fn-mark-${i}`}
+            data-static-marking={`function-dot-${i + 1}`}
+            cx={589.2}
+            cy={664 + i * 20}
+            r={5}
+            fill="#b8474c"
+            opacity={0.8}
+          />
+        ))}
       </g>
 
       {/* ---- invisible hit zones: these own every pointer event ---- */}
