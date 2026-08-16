@@ -1770,9 +1770,18 @@ export class AudioEngine {
     // very same stored mute/solo verdict through `headsInject`.
     const headsOwn = this.heads.active && id === VOCAL_LANE;
     t.fxRack?.setInputOpen(stemAudible || cued || headsOwn);
-    this.setGain(t.stemGate.gain, headsOwn ? 0 : stemAudible ? 1 : 0);
+    // While a Vocal<->Heads handoff is in flight the crossfade OWNS these two
+    // params; stomping them here would drop the dry Vocal before the Head sum
+    // has opened. Mute/solo changes made during the fade are picked up by the
+    // next audibility pass after it lands.
+    const handing = this.ctx != null && this.ctx.currentTime < this.headsHandoffUntil;
+    if (!handing) {
+      this.setGain(t.stemGate.gain, headsOwn ? 0 : stemAudible ? 1 : 0);
+      if (headsOwn && this.headsInject) this.setGain(this.headsInject.gain, stemAudible ? 1 : 0);
+      if (!this.heads.active && id === VOCAL_LANE && this.headsInject) this.setGain(this.headsInject.gain, 0);
+    }
     this.setGain(t.soloGain.gain, cued || audibleBySolo ? 1 : 0);
-    if (headsOwn && this.headsInject) this.setGain(this.headsInject.gain, stemAudible ? 1 : 0);
+
   }
 
 
@@ -2626,11 +2635,12 @@ export class AudioEngine {
       enteredAtFrame: Math.round(this.ctx.currentTime * this.ctx.sampleRate),
     };
     this.preHeadsMutes = null;
-    this.applyAudibilityAll();
     // Equal-power handoff INSIDE the Vocal lane: the dry Vocal copy closes as
     // the Head sum opens. Drums, Bass and Instrument are untouched, the
     // transport is untouched, and nothing is stacked on top of anything.
+    // Scheduled FIRST so the audibility pass below cannot stomp the fade.
     this.crossfadeVocalToHeads(true);
+    this.applyAudibilityAll();
     return {
       ok: true,
       detail: `heads on — 4 heads over ${sourceName} at frames ${frames.map((f) => f.toFixed(0)).join(" / ")} (cycle ${cycleFrames.toFixed(0)} frames from ${cycleStartFrame.toFixed(0)}) — head 1 audible, heads 2-4 muted`,
@@ -2641,8 +2651,20 @@ export class AudioEngine {
   headsRejectFlashAt: number | null = null;
 
   /**
+   * Context time until which the Vocal handoff owns `stemGate` / `headsInject`.
+   * `applyAudibility` must not stomp a fade that is already scheduled, or the
+   * dry Vocal would jump to zero ahead of the Head sum opening.
+   */
+  private headsHandoffUntil = 0;
+
+  /**
    * Equal-power Vocal <-> Heads handoff at the lane's own routing point.
-   * The normal four-stem bus is NEVER gated: only the Vocal stem copy is.
+   *
+   * PURE AudioContext automation: one `setValueCurveAtTime` per param plus a
+   * terminal `setValueAtTime` scheduled at the end of the curve. No React
+   * state, no `setTimeout`, no rounded restart. The normal four-stem bus is
+   * NEVER gated — only the ordinary Vocal copy is, and it reaches EXACTLY zero
+   * so the dry Vocal and the Head sum are never left summed together.
    */
   private crossfadeVocalToHeads(toHeads: boolean, seconds = HEADS_HANDOFF_S) {
     const ctx = this.ctx;
@@ -2650,39 +2672,37 @@ export class AudioEngine {
     const stem = this.tracks[VOCAL_LANE]?.stemGate;
     if (!ctx || !inject || !stem) return;
     const at = ctx.currentTime;
+    const audible = this.vocalAudible();
+    // Terminal values: after the fade the losing side is EXACTLY 0.
+    const injectEnd = toHeads && audible ? 1 : 0;
+    const stemEnd = toHeads ? 0 : audible ? 1 : 0;
     const N = 64;
-    const up = new Float32Array(N);
-    const down = new Float32Array(N);
-    for (let i = 0; i < N; i++) {
-      const x = (i / (N - 1)) * (Math.PI / 2);
-      up[i] = Math.sin(x);
-      down[i] = Math.cos(x);
-    }
-    const apply = (prm: AudioParam, curve: Float32Array) => {
+    const curve = (from: number, to: number) => {
+      const c = new Float32Array(N);
+      for (let i = 0; i < N; i++) {
+        const x = (i / (N - 1)) * (Math.PI / 2);
+        // Equal power: the rising side is sin, the falling side cos.
+        c[i] = to > from ? from + (to - from) * Math.sin(x) : to + (from - to) * Math.cos(x);
+      }
+      c[N - 1] = to;
+      return c;
+    };
+    const apply = (prm: AudioParam, to: number) => {
+      const from = prm.value;
       try {
         prm.cancelScheduledValues(at);
-        prm.setValueAtTime(prm.value, at);
-        prm.setValueCurveAtTime(curve, at, seconds);
+        prm.setValueAtTime(from, at);
+        prm.setValueCurveAtTime(curve(from, to), at, seconds);
+        prm.setValueAtTime(to, at + seconds);
       } catch {
-        prm.value = curve[curve.length - 1]!;
+        prm.value = to;
       }
     };
-    const audible = this.vocalAudible();
-    apply(inject.gain, toHeads ? up : down);
-    apply(stem.gain, toHeads ? down : up);
-    setTimeout(() => {
-      if (this.ctx !== ctx) return;
-      try {
-        const now = ctx.currentTime;
-        inject.gain.cancelScheduledValues(now);
-        inject.gain.setValueAtTime(toHeads && audible ? 1 : 0, now);
-        stem.gain.cancelScheduledValues(now);
-        stem.gain.setValueAtTime(toHeads ? 0 : audible ? 1 : 0, now);
-      } catch {
-        /* noop */
-      }
-    }, Math.ceil(seconds * 1000) + 20);
+    apply(inject.gain, injectEnd);
+    apply(stem.gain, stemEnd);
+    this.headsHandoffUntil = at + seconds;
   }
+
 
   /** Stored mute/solo verdict for the Vocal lane, Heads or not. */
   private vocalAudible(): boolean {
@@ -2726,9 +2746,11 @@ export class AudioEngine {
         if (this.ctx) this.setGain(t.gain.gain, sn.level);
       }
     }
-    this.applyAudibilityAll();
     // Hand the Vocal lane back to its ordinary source at the shared frame.
+    // The ordinary Vocal voice was never stopped — only gated — so it is
+    // already AT that frame and nothing is restarted or relocated.
     this.crossfadeVocalToHeads(false);
+    this.applyAudibilityAll();
     return { ok: r.ok, detail: `${r.detail} — dry vocal resumed at shared frame ${sharedFrame.toFixed(0)}` };
   }
 
@@ -5093,5 +5115,11 @@ let singleton: AudioEngine | null = null;
 /** One context per app, never one per track. */
 export function getAudioEngine(): AudioEngine {
   if (!singleton) singleton = new AudioEngine();
+  // Dev-only debug handle: lets an automated audio smoke check read the real
+  // graph (gate values, bus RMS) instead of guessing from the UI. Never
+  // attached in a production build.
+  if (import.meta.env?.DEV && typeof globalThis !== "undefined") {
+    (globalThis as unknown as { __stemTapeEngine?: AudioEngine }).__stemTapeEngine = singleton;
+  }
   return singleton;
 }

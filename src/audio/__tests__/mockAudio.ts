@@ -13,6 +13,9 @@ interface AutoEvent {
   time: number;
   value: number;
   end?: number;
+  /** `curve` events keep the real sample data so shapes can be asserted. */
+  curve?: Float32Array;
+  dur?: number;
 }
 
 export class MockParam {
@@ -35,8 +38,10 @@ export class MockParam {
     return this;
   }
   setValueCurveAtTime(curve: Float32Array, t: number, dur: number) {
-    this.events.push({ kind: "set", time: t, value: curve[0] ?? 0 });
-    this.events.push({ kind: "linear", time: t + dur, value: curve[curve.length - 1] ?? 0 });
+    // Keep the actual curve: a linearised stand-in would make an equal-power
+    // fade indistinguishable from a linear one.
+    this.events.push({ kind: "curve", time: t, value: curve[0] ?? 0, curve: new Float32Array(curve), dur });
+    this.events.push({ kind: "set", time: t + dur, value: curve[curve.length - 1] ?? 0 });
     return this;
   }
   cancelScheduledValues(t: number) {
@@ -51,6 +56,14 @@ export class MockParam {
     let curT = -Infinity;
     for (let i = 0; i < evs.length; i++) {
       const e = evs[i]!;
+      if (e.kind === "curve" && e.curve && e.dur != null && t >= e.time && t < e.time + e.dur) {
+        // Sample the stored curve with linear interpolation between points.
+        const c = e.curve;
+        const x = ((t - e.time) / e.dur) * (c.length - 1);
+        const i0 = Math.floor(x);
+        const i1 = Math.min(c.length - 1, i0 + 1);
+        return c[i0]! + (c[i1]! - c[i0]!) * (x - i0);
+      }
       if (e.time <= t) {
         cur = e.value;
         curT = e.time;
