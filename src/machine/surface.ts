@@ -1370,7 +1370,9 @@ export function applyPerfIntent(state: SurfaceState, intent: PerfIntent): Surfac
       const p = toggleBankLatch(perf, target, intent.bank);
       const bank = fxStateOf(p, target).banks[intent.bank]!;
       next = emit(
-        { ...next, perf: p },
+        // Addendum §5: every latch toggle stamps the confirmation flash so the
+        // surface answers the gesture even when the effect itself is subtle.
+        { ...next, perf: p, fxFlashAt: t },
         "fx.latch",
         { track: intent.stem, bank: intent.bank, on: bank.latched, algorithm: bank.selectedAlgorithm, latched: bank.latched, scope: perf.fxScope },
         { rowId: `fx.${BANKS[intent.bank]!.id}.latch`, t },
