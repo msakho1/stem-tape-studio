@@ -120,8 +120,43 @@ jobs:
           test -f firmware/stemtape/CMakeLists.txt
           test -f firmware/stemtape/src/main.c
           test -f firmware/stemtape/app.overlay
+          test -f firmware/west.yml
           test -d firmware/boards/teenageengineering/stem_player
           west topdir
+
+      - name: Provenance preflight (clean tree, frozen manifest, toolchain versions)
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          mkdir -p audit
+          # FAIL CLOSED: no untracked-or-modified tracked file may enter a build
+          # whose artifact is used for approval decisions.
+          git status --porcelain=v1 --untracked-files=no > audit/git-status.txt
+          if [ -s audit/git-status.txt ]; then
+            echo "tracked Git tree is dirty:" >&2
+            cat audit/git-status.txt >&2
+            exit 1
+          fi
+          git rev-parse HEAD                > audit/git-commit.txt
+          git log -1 --stat                 > audit/git-log-head.txt
+          west manifest --freeze            > audit/west-manifest-freeze.yml
+          cp firmware/west.yml                audit/west.yml
+          ( cd zephyr && git rev-parse HEAD && cat VERSION ) > audit/zephyr-revision.txt
+          west list -f '{name} {path} {revision} {url}' > audit/west-modules.txt
+          {
+            echo "runner: $RUNNER_OS $RUNNER_ARCH"
+            echo "python: $(python3 --version)"
+            echo "west:   $(west --version)"
+            echo "ZEPHYR_SDK_INSTALL_DIR=${ZEPHYR_SDK_INSTALL_DIR:-unset}"
+            echo "sdk-version (workflow input): 0.17.4"
+            echo "actions:"
+            echo "  actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1"
+            echo "  actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0"
+            echo "  actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1"
+            echo "  zephyrproject-rtos/action-zephyr-setup@be8136a8bba01580485d98b7ad2d32477c36a49a  # v1.0.15"
+          } > audit/provenance.txt
+          cat audit/provenance.txt audit/zephyr-revision.txt
+
 
       - name: Build (west build -p always -b stem_player firmware/stemtape)
         working-directory: ${{ github.workspace }}/project
