@@ -181,6 +181,7 @@ jobs:
           SIZE="$(cmv CMAKE_SIZE_UTIL)"
           NM="$(cmv CMAKE_NM)"
           READELF="$(cmv CMAKE_READELF)"
+          OBJCOPY="$(cmv CMAKE_OBJCOPY)"
 
           if [ -z "$OBJDUMP" ]; then
             echo "CMAKE_OBJDUMP missing from $CACHE" >&2
@@ -192,8 +193,9 @@ jobs:
           [ -n "$SIZE" ]    || SIZE="$BINDIR/${PREFIX}size"
           [ -n "$NM" ]      || NM="$BINDIR/${PREFIX}nm"
           [ -n "$READELF" ] || READELF="$BINDIR/${PREFIX}readelf"
+          [ -n "$OBJCOPY" ] || OBJCOPY="$BINDIR/${PREFIX}objcopy"
 
-          for t in "$SIZE" "$OBJDUMP" "$NM" "$READELF"; do
+          for t in "$SIZE" "$OBJDUMP" "$NM" "$READELF" "$OBJCOPY"; do
             if [ ! -x "$t" ]; then
               echo "resolved binutils executable not found or not executable: $t" >&2
               exit 1
@@ -205,6 +207,8 @@ jobs:
             echo "CMAKE_OBJDUMP   = $OBJDUMP"
             echo "CMAKE_NM        = $NM"
             echo "CMAKE_READELF   = $READELF"
+            echo "CMAKE_OBJCOPY   = $OBJCOPY"
+            echo "compiler        = $("$(cmv CMAKE_C_COMPILER)" --version | head -n1)"
           } | tee audit/tool-paths.txt
           {
             echo '### M0 resolved binutils paths'
