@@ -524,6 +524,50 @@ export function useDeviceSurface() {
   }, [keyFrame, resolveChannel, syncHeld]);
 
   /**
+   * Physical Stem Tape SP-1 (M0 firmware over class-compliant USB MIDI).
+   *
+   * These are RAW control events, not musical input: they enter the exact same
+   * GestureEngine press / release and fader paths as the on-screen surface and
+   * the keyboard, so taps, holds, FUNCTION combinations, loops, FX, scrubbing
+   * and contextual Volume stay owned by the surface reducer / arbitrator.
+   * Nothing here talks to the cue system or the audio engine directly.
+   */
+  useEffect(() => {
+    const off = sp1Surface.subscribe((ev) => {
+      if (!readyRef.current) return;
+      if (ev.type === "battery") return; // telemetry only, never a musical control
+      if (ev.type === "fader") {
+        const channel = resolveChannel();
+        faderValuesRef.current[ev.index] = ev.value;
+        faders.current.queue({
+          faderIndex: ev.index,
+          value: ev.value,
+          channel,
+          pointerId: -10 - ev.index,
+        });
+        scheduleFlush();
+        dispatch({ type: "faderCommit", index: ev.index, value: ev.value, claimed: channel });
+        return;
+      }
+      if (ev.type === "down") engine.press(ev.control, `sp1:${ev.deviceId}`, ev.timestampMs);
+      else engine.release(ev.control, `sp1:${ev.deviceId}`, ev.timestampMs);
+      setGestureLog((prev) =>
+        [
+          {
+            id: ++gestureId.current,
+            text: `surface · ${ev.control} ${ev.type}`,
+            t: ev.timestampMs,
+          },
+          ...prev,
+        ].slice(0, LOG_LIMIT),
+      );
+    });
+    return off;
+  }, [engine, resolveChannel, scheduleFlush]);
+
+
+
+  /**
    * True rebase: FUNCTION or HEADS changing while faders are still down
    * retargets every live session to the new channel without a value jump, and
    * the old channel stops receiving previews immediately.
