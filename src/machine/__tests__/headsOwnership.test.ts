@@ -127,15 +127,15 @@ describe("§5 · fader soft takeover", () => {
     const n = s.commands.length;
 
     // Far away: inert, and nothing is emitted.
-    s = applyFader(s, 0, 0.1, 0, "headLevel");
+    s = applyFader(s, 0, 0.1, "headLevel");
     expect(s.tracks[0]!.headLevel).toBe(stored);
     expect(s.commands.length).toBe(n);
 
     // Within the pickup window: the fader takes over from here on.
-    s = applyFader(s, 0, stored - PICKUP_WINDOW / 2, 0, "headLevel");
+    s = applyFader(s, 0, stored - PICKUP_WINDOW / 2, "headLevel");
     expect(s.tracks[0]!.headLevel).toBeCloseTo(stored - PICKUP_WINDOW / 2, 6);
     expect(s.tracks[0]!.headPickup).toBe(false);
-    s = applyFader(s, 0, 0.1, 0, "headLevel");
+    s = applyFader(s, 0, 0.1, "headLevel");
     expect(s.tracks[0]!.headLevel).toBeCloseTo(0.1, 6);
   });
 });
