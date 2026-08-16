@@ -1,4 +1,3 @@
-import { trace } from "@/diagnostics/trace";
 import { COMMAND_LOG_LIMIT, makeCommand, type AudioCommand, type AudioCommandType } from "@/audio/commands";
 import type { Control, TrackIndex } from "@/device/geometry";
 import { type Gesture } from "@/input/gestures";
