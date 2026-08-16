@@ -271,6 +271,14 @@ function readFramesAt(ctx: MockCtx, t: number) {
   return audiblePaths(ctx, t).map((s) => Math.round((s.offset + (t - s.when) * s.node.playbackRate.value) * SR));
 }
 
+/** Run the §6 release deceleration to its hand-off frame on context time. */
+function settleRelease(r: { engine: { globalScrubState: () => { active: boolean } }; advance: (s: number) => void; tick: () => void }) {
+  for (let i = 0; i < 200 && r.engine.globalScrubState().active; i++) {
+    r.advance(0.01);
+    r.tick();
+  }
+}
+
 async function scrubAndRelease(opts: { dir: 1 | -1; ticks: number; dtS: number; markEvery?: number }) {
   const r = await rig({ markEvery: opts.markEvery ?? 0 });
   r.engine.execute(cmd("transport.play"));
@@ -397,6 +405,7 @@ describe("global scrub → playback handoff", () => {
       }
       r.advance(0.002);
       r.engine.execute(cmd("transport.scrub.end"));
+      settleRelease(r);
       r.advance(0.02);
       const live = audiblePaths(r.ctx, r.ctx.currentTime);
       expect(live.length).toBeLessThanOrEqual(4);
@@ -415,6 +424,7 @@ describe("global scrub → playback handoff", () => {
     }
     r.advance(0.002);
     r.engine.execute(cmd("transport.scrub.end"));
+    settleRelease(r);
     const handoff = r.engine.globalScrubState().handoff!.handoffContextFrame / SR;
     const after = handoff + SCRUB_HANDOFF_FADE_S + 0.002;
     expect(audiblePaths(r.ctx, after)).toHaveLength(0);
@@ -446,6 +456,7 @@ describe("global scrub → playback handoff", () => {
     posts.length = 0;
     r.advance(0.002);
     r.engine.execute(cmd("transport.scrub.end"));
+    settleRelease(r);
     const h = r.engine.globalScrubState().handoff!;
     const starts = posts.filter((p) => p["type"] === "start");
     expect(starts).toHaveLength(4); // one per stem, one frame
