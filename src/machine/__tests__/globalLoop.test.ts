@@ -108,9 +108,8 @@ describe("Hold PLAY · global one-bar loop", () => {
     expect(s.globalLoop.division).toBe(8);
     s = applyGesture(s, tap("volume-minus"));
     expect(s.globalLoop.division).toBe(4);
-    // It works with no loop captured: the division is remembered for the next
-    // Hold PLAY, and only a running loop is told to resize.
-    expect(types(s)).not.toContain("loop.global.resize");
+    // A running loop is told to resize on every step.
+    expect(types(s).filter((t) => t === "loop.global.resize").length).toBeGreaterThan(0);
   });
 
   it("arbiter claims PLAY on the rocker deflection so the tap cannot fire", () => {
