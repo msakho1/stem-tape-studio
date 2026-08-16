@@ -73,9 +73,13 @@ def run_case(name, sections, loads, image, entry=APP_ORIGIN + 0x101,
         open(fake_readelf, "w").write(f'#!/bin/sh\ncat "{report}"\n')
         os.chmod(fake_readelf, 0o755)
         fake_objcopy = os.path.join(td, "objcopy")
+        # The real command ends with <elf> <out>; copy the canned image to the
+        # last argument so the stub is independent of the flag list.
         open(fake_objcopy, "w").write(
-            f'#!/bin/sh\ncp "{oc_src}" "$4"\n')
+            '#!/bin/sh\nfor a in "$@"; do out="$a"; done\n'
+            f'cp "{oc_src}" "$out"\n')
         os.chmod(fake_objcopy, 0o755)
+
 
         elf = os.path.join(td, "zephyr.elf")
         open(elf, "wb").write(b"\x7fELF")
