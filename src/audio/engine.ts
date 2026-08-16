@@ -2937,7 +2937,10 @@ export class AudioEngine {
       gs.cursor = at + HOP_S;
       gs.pos = next;
       if (next === offsetS || grainRate < 0.02) continue; // parked / stalled — no grain, no click
-      const backwards = gs.dir < 0;
+      // Direction comes from the SIGN of the instantaneous rate, not from the
+      // held key: a reverse release passes through zero and the grains must
+      // flip to the forward buffer at that same frame (addendum §6).
+      const backwards = this.scrubRateAt(at + GRAIN_S / 2) < 0;
       for (let i = 0; i < this.tracks.length; i++) {
         const t = this.tracks[i]!;
         const pt = gs.perTrack[i];
