@@ -560,6 +560,40 @@ static void enter_dfu(void)
 	for (;;) { }
 }
 
+/* ------------------------------------------------- EARLY DFU ESCAPE ------
+ * Runs immediately after controls_init(), BEFORE boot_signature(),
+ * sample_usbd_init_device(), usbd_enable() and every other USB call, so the
+ * recovery combo still reaches the UF2 bootloader even if USB init would
+ * later hang, fault or brick the visible behaviour of the image.
+ *
+ * Band 1280..1390 = the ONE measured Track1+Track4 chord
+ * [looper a8dd127:5115-5124]. Outside it we return instantly: no boot delay
+ * is added to a normal power-up. A failed ADC read (-1) is treated as
+ * "not held" and returns to normal startup.
+ */
+#define ESCAPE_LO       1280
+#define ESCAPE_HI       1390
+#define ESCAPE_HOLD_MS  1200
+#define ESCAPE_STEP_MS  10
+
+static void early_dfu_escape(void)
+{
+	int v = ladder_read(&adc_ladder[LAD_TRACKS]);
+	if (v < ESCAPE_LO || v > ESCAPE_HI)
+		return;                                   /* no boot delay */
+
+	int64_t t0 = k_uptime_get();
+	while (k_uptime_get() - t0 < ESCAPE_HOLD_MS) {
+		feed_wdt();                               /* all enabled channels */
+		k_msleep(ESCAPE_STEP_MS);
+		v = ladder_read(&adc_ladder[LAD_TRACKS]);
+		if (v < ESCAPE_LO || v > ESCAPE_HI)
+			return;                           /* released / read fail */
+	}
+	feed_wdt();
+	enter_dfu();                                      /* never returns */
+}
+
 /* --------------------------------------------------- Stem Tape boot sig -- */
 static void boot_signature(void)
 {
@@ -572,6 +606,7 @@ static void boot_signature(void)
 		k_msleep(110);
 	}
 }
+
 
 /* ----------------------------------------------------------- main loop --- */
 #define POLL_MS         5
