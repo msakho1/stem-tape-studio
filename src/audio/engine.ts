@@ -3630,9 +3630,10 @@ export class AudioEngine {
     // Evidence keeps reporting the PHYSICAL release, not the end of the ramp.
     const keyup = gs.releasedAt ?? ctx.currentTime;
     // One shared handoff on the next render quantum (two quanta of margin so
-    // the scheduling itself cannot land in the past).
+    // the scheduling itself cannot land in the past). It is measured from NOW —
+    // the end of the deceleration — never from the older key-release frame.
     const quantum = 128 / sr;
-    const handoff = keyup + Math.max(2 * quantum, SCRUB_HANDOFF_MIN_S);
+    const handoff = ctx.currentTime + Math.max(2 * quantum, SCRUB_HANDOFF_MIN_S);
     const landing = this.integrateScrubTo(handoff);
     const landingFrame = Math.round(landing * sr);
     const handoffFrame = Math.round(handoff * sr);
