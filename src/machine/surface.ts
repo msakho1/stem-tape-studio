@@ -630,6 +630,10 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
           );
         }
         if (!fn && g.count === 1) {
+          // Addendum §4: a latched shuttle is a running operation — the bare
+          // PLAY tap ends it first and leaves the transport exactly where the
+          // hand-off lands, instead of toggling play/stop underneath it.
+          if (next.scrubLatched) return releaseScrubLatch(next, t);
           if (next.globalLoop.latched) {
             // A latched global loop owns the bare PLAY tap: the first tap
             // releases the loop and the transport keeps running.
