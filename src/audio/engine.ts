@@ -3549,10 +3549,71 @@ export class AudioEngine {
 
 
 
+  /**
+   * Addendum §6 — releasing the shuttle no longer jump-cuts back to playback.
+   * The signed shuttle rate decelerates along one finite exponential to the
+   * musical rate (or to stillness when the transport was stopped), the grains
+   * and the playhead both follow THAT curve, and the hand-off happens at the
+   * frame the curve finishes. A reverse release therefore glides down through
+   * zero — the grains flip to the forward buffer at the solved zero crossing —
+   * instead of snapping from −R to +1 in one block.
+   */
   endGlobalScrub(): { ok: boolean; detail: string } {
     const gs = this.globalScrub;
     const ctx = this.ctx;
     if (!gs || !ctx) return { ok: false, detail: "no global scrub active" };
+    if (this.inertiaEnabled && !gs.decel) {
+      const now = ctx.currentTime;
+      const fromRate = gs.dir * gs.rate;
+      const toRate = gs.wasPlaying ? gs.musicalRate : 0;
+      const seg = makeScrubReleaseSegment({
+        startAt: now,
+        fromRate,
+        toRate,
+        preset: INERTIA_PRESETS[this.inertiaPreset],
+      });
+      // Re-anchor first: from here the integral IS the deceleration curve.
+      gs.pos = this.integrateScrubTo(now);
+      gs.posCtxTime = now;
+      gs.cursor = Math.max(gs.cursor, now);
+      gs.decel = seg;
+      const crossing = inertiaZeroCrossing(seg);
+      // Worklet kernels ride the same curve; the direction flip is scheduled at
+      // the solved stillness frame, where the swap is inaudible.
+      this.fanout((_t, at) => ({
+        type: "inertia",
+        from: Math.abs(seg.from),
+        to: Math.max(INERTIA_MIN_RATE, Math.abs(seg.to)),
+        k: seg.k,
+        durationFrames: Math.round(seg.durationS * sr0(ctx)),
+        applyAtContextFrame: at,
+      }));
+      if (crossing != null) {
+        const cf = Math.round(crossing * sr0(ctx));
+        this.fanoutAt(cf, () => ({ type: "setDirection", applyAtContextFrame: cf, direction: 1 }));
+      }
+      if (gs.releaseTimer) clearTimeout(gs.releaseTimer);
+      gs.releaseTimer = setTimeout(
+        () => {
+          if (this.globalScrub === gs) this.finishGlobalScrub();
+        },
+        Math.max(0, seg.durationS * 1000),
+      );
+      return {
+        ok: true,
+        detail: `shuttle release decelerating ${fromRate.toFixed(2)}× → ${toRate.toFixed(2)}× over ${(seg.durationS * 1000).toFixed(0)} ms${crossing != null ? `, zero crossing at ${crossing.toFixed(3)}s` : ""}`,
+      };
+    }
+    return this.finishGlobalScrub();
+  }
+
+  /** The shared hand-off frame itself — reached at the end of the release. */
+  private finishGlobalScrub(): { ok: boolean; detail: string } {
+    const gs = this.globalScrub;
+    const ctx = this.ctx;
+    if (!gs || !ctx) return { ok: false, detail: "no global scrub active" };
+    if (gs.releaseTimer) clearTimeout(gs.releaseTimer);
+    gs.releaseTimer = null;
     if (gs.timer) clearInterval(gs.timer);
     gs.timer = null;
     const sr = ctx.sampleRate;
