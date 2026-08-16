@@ -2964,7 +2964,7 @@ export class AudioEngine {
         if (tap) g.connect(tap);
         const node = ctx.createBufferSource();
         node.buffer = buffer;
-        node.playbackRate.value = GLOBAL_SCRUB_RATE;
+        node.playbackRate.value = grainRate;
         node.connect(g);
         const fade = Math.min(0.006, GRAIN_S / 3);
         g.gain.setValueAtTime(0, at);
