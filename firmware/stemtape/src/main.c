@@ -290,11 +290,10 @@ static enum vol_btn decode_vol(int v)
 }
 
 /* --------------------------------------------------------- watchdog ------ */
-static int wdt_ch = -1;
 static void feed_wdt(void)
 {
-	if (wdt_ch >= 0)
-		NRF_WDT->RR[wdt_ch] = WDT_RR_RR_Reload;
+	for (int ch = 0; ch < 8; ch++)
+		NRF_WDT->RR[ch] = WDT_RR_RR_Reload;
 }
 static void wdt_prewarn(const struct device *dev, int channel_id)
 {
@@ -429,7 +428,7 @@ int main(void)
 
 	const struct device *wdt = DEVICE_DT_GET(WDT_NODE);
 	if (device_is_ready(wdt)) {
-		wdt_ch = wdt_install_timeout(wdt, &(struct wdt_timeout_cfg){
+		wdt_install_timeout(wdt, &(struct wdt_timeout_cfg){
 			.window.max = 4000, .callback = wdt_prewarn,
 		});
 		wdt_setup(wdt, 0);
