@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   applyFirmwareLine,
+  EXPECTED_ARTIFACT,
   FirmwareConsole,
   parseFirmwareLine,
   type FirmwareConsoleState,
@@ -17,6 +18,7 @@ import {
 } from "../leds";
 import {
   M0_IMPLEMENTED_LED_OUTPUTS,
+  M0_LED_COVERAGE,
   M0_UNRESOLVED_LED_OUTPUTS,
   PHYSICAL_LED_COUNT,
   PHYSICAL_LED_IDS,
@@ -406,24 +408,9 @@ describe("report redaction and export", () => {
     const r: DiagnosticReport = {
       contractVersion: BEHAVIOR_CONTRACT_VERSION,
       generatedAt: "2026-01-01T00:00:00.000Z",
-      expectedArtifact: {
-        product: "Stem Tape SP-1",
-        firmwareBanner: "Stem Tape M0 v1.0.0",
-        usbVendorId: "0x1915",
-        usbProductId: "0x5211",
-        binarySha256: "53de4c003047e20b7e18c45034eab89b79d58ba1677651348e62f9a85b257eeb",
-        sourceCommit: "ea354f32c8c484c1d48e68804a4f1695a8a7b131",
-        note: "expected build metadata",
-      } as DiagnosticReport["expectedArtifact"],
+      expectedArtifact: EXPECTED_ARTIFACT,
       midiContract: { rows: SP1_MIDI_CONTRACT, warning: "decimal CC20-23" },
-      ledModel: {
-        physicalLeds: 10,
-        webIndicators: "10 physical + 1 web-only",
-        m0Implemented: 8,
-        m0Unresolved: ["function-led-1", "function-led-2"],
-        hostToDeviceLedFeedback: "unsupported",
-        note: "gap reported only",
-      } as DiagnosticReport["ledModel"],
+      ledModel: M0_LED_COVERAGE,
       device: {
         midiInputName: "STEM TAPE SP-1",
         midiInputId: "in-1",

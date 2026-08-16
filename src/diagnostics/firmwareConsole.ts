@@ -207,6 +207,11 @@ export class FirmwareConsole {
     this.publishRaw();
   }
 
+  /** Feed an arbitrary USB chunk (mock console / smoke harness). */
+  feedChunk(text: string): void {
+    this.ingestChunk(text);
+  }
+
   private ingestChunk(text: string): void {
     this.pending += text;
     const parts = this.pending.split("\n");
