@@ -3026,6 +3026,12 @@ export class AudioEngine {
   private globalScrubTick() {
     const gs = this.globalScrub;
     if (!gs) return;
+    // The release completes on CONTEXT time, not on a wall-clock timer: the
+    // hand-off frame must be the frame the deceleration curve actually ends on.
+    if (gs.decel && this.ctx && this.ctx.currentTime >= gs.decel.startAt + gs.decel.durationS) {
+      this.finishGlobalScrub();
+      return;
+    }
     const nowMs = typeof performance !== "undefined" ? performance.now() : Date.now();
     const dt = Math.min(0.2, Math.max(0, (nowMs - gs.last) / 1000));
     gs.last = nowMs;
