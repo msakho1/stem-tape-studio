@@ -5115,5 +5115,11 @@ let singleton: AudioEngine | null = null;
 /** One context per app, never one per track. */
 export function getAudioEngine(): AudioEngine {
   if (!singleton) singleton = new AudioEngine();
+  // Dev-only debug handle: lets an automated audio smoke check read the real
+  // graph (gate values, bus RMS) instead of guessing from the UI. Never
+  // attached in a production build.
+  if (import.meta.env?.DEV && typeof globalThis !== "undefined") {
+    (globalThis as unknown as { __stemTapeEngine?: AudioEngine }).__stemTapeEngine = singleton;
+  }
   return singleton;
 }
