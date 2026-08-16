@@ -173,6 +173,27 @@ cases.append(("8 BIN not byte-identical to the ELF",
               GOOD_SECTIONS, GOOD_LOADS, IMG, APP_ORIGIN + 0x101,
               bytes(tampered), False))
 
+# 8b/8c: NOBITS (tbss) / alignment gap must be reconstructed with 0xFF fill.
+# The shipped zephyr.bin carries 0xFF across the gap; a default/zero-filled
+# reconstruction must be rejected.
+GAP_OFF = 0xC424                      # matches the observed tbss gap offset
+GAP_LEN = 0x40
+_gap_img = bytearray(make_image(size_words=(GAP_OFF + 0x1000) // 4))
+_gap_img[GAP_OFF:GAP_OFF + GAP_LEN] = b"\xff" * GAP_LEN
+GAP_IMG = bytes(_gap_img)
+_zero = bytearray(GAP_IMG)
+_zero[GAP_OFF:GAP_OFF + GAP_LEN] = b"\x00" * GAP_LEN
+GAP_SECTIONS = [("text", APP_ORIGIN, len(GAP_IMG), "AX"),
+                ("tbss", APP_ORIGIN + GAP_OFF, GAP_LEN, "WAT")]
+GAP_LOADS = [(APP_ORIGIN, APP_ORIGIN, len(GAP_IMG), len(GAP_IMG))]
+cases.append(("8b NOBITS/alignment gap reconstructed with 0xFF gap fill",
+              GAP_SECTIONS, GAP_LOADS, GAP_IMG, APP_ORIGIN + 0x101,
+              GAP_IMG, True))
+cases.append(("8c NOBITS/alignment gap reconstructed with zero gap fill",
+              GAP_SECTIONS, GAP_LOADS, GAP_IMG, APP_ORIGIN + 0x101,
+              bytes(_zero), False))
+
+
 results = [run_case(*c) for c in cases]
 print()
 if all(results):
