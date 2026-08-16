@@ -2699,6 +2699,8 @@ export class AudioEngine {
     decel: InertiaSegment | null;
     /** Timer that finishes the release at the hand-off frame. */
     releaseTimer: ReturnType<typeof setTimeout> | null;
+    /** Context time of the physical key release (start of the deceleration). */
+    releasedAt: number | null;
     pos: number;
     startPos: number;
     /** Context time at which `pos` is exact — the integral anchor (= cursor). */
@@ -3085,6 +3087,7 @@ export class AudioEngine {
       rate: GLOBAL_SCRUB_SPEEDS[this.scrubSpeedIndex]!,
       decel: null,
       releaseTimer: null,
+      releasedAt: null,
       pos,
       startPos: pos,
       posCtxTime: now,
@@ -3583,6 +3586,7 @@ export class AudioEngine {
       gs.posCtxTime = now;
       gs.cursor = Math.max(gs.cursor, now);
       gs.decel = seg;
+      gs.releasedAt = now;
       const crossing = inertiaZeroCrossing(seg);
       // Worklet kernels ride the same curve; the direction flip is scheduled at
       // the solved stillness frame, where the swap is inaudible.
@@ -3623,7 +3627,8 @@ export class AudioEngine {
     if (gs.timer) clearInterval(gs.timer);
     gs.timer = null;
     const sr = ctx.sampleRate;
-    const keyup = ctx.currentTime;
+    // Evidence keeps reporting the PHYSICAL release, not the end of the ramp.
+    const keyup = gs.releasedAt ?? ctx.currentTime;
     // One shared handoff on the next render quantum (two quanta of margin so
     // the scheduling itself cannot land in the past).
     const quantum = 128 / sr;
