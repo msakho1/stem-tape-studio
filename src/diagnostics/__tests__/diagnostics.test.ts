@@ -10,7 +10,7 @@ import {
 import { TraceRing, formatTraceRow } from "../trace";
 import { BEHAVIOR_CONTRACT, BEHAVIOR_CONTRACT_VERSION, evaluateContract, validateContract } from "../contract";
 import { SurfaceCommandTracer } from "../commandTrace";
-import { initialSurfaceState, reducer } from "@/machine/surface";
+import { initialSurfaceState, pressControl, releaseControl } from "@/machine/surface";
 import {
   inspectLeds,
   inspectPhysicalLeds,
@@ -495,7 +495,12 @@ describe("report redaction and export", () => {
     expect(text).toContain("electrical GPIO coverage (audited M0 driver): 8/8");
     expect(text).toContain("Stem Tape behaviour mapping coverage: partial");
     expect(text).toContain("host→device LED feedback: unsupported-by-audited-build");
-    expect(text).not.toContain("function-led");
+    const physicalSection = text.slice(
+      text.indexOf("PHYSICAL LED COMPARISON"),
+      text.indexOf("WEB-ONLY INDICATORS"),
+    );
+    expect(physicalSection).not.toContain("function-led");
+    expect(physicalSection).not.toContain("play-indicator");
     expect(text).toContain("WEB-ONLY INDICATORS — NOT PART OF THE 8-LED PHYSICAL FRAME");
     expect(text).toContain("CC    20 (0x14) Fader 1");
     expect(text).toContain("[timing/clock missing]");
@@ -512,13 +517,12 @@ describe("surface command tracing (StrictMode safety)", () => {
 
     // A pure reducer: React StrictMode invokes it twice with the same input.
     const base = initialSurfaceState();
-    const a = reducer(base, { type: "press", control: "track-button-1" });
-    const b = reducer(base, { type: "press", control: "track-button-1" });
-    const next = reducer(reducer(base, { type: "press", control: "track-button-1" }), {
-      type: "release",
-      control: "track-button-1",
-    });
-    expect(a.commands.length).toBe(b.commands.length);
+    const a = pressControl(base, "track-button-1");
+    const b = pressControl(base, "track-button-1");
+    const next = releaseControl(a, "track-button-1");
+    expect(a.commands).toEqual(b.commands); // pure: no side effect, no trace
+    expect(ring.list()).toHaveLength(0);
+    expect(next.commands.length).toBeGreaterThan(0);
 
     // StrictMode also double-invokes the capture effect.
     tracer.capture(next.commands);
