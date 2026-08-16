@@ -311,6 +311,8 @@ export function useDeviceSurface() {
   useEffect(() => {
     const bail = () => {
       engine.releaseAll();
+      // Physical SP-1: forget held buttons too, so nothing stays stuck.
+      sp1Surface.releaseAll();
       heldKeysRef.current.clear();
       scrubKeysRef.current.clear();
       scrubPointersRef.current.clear();
