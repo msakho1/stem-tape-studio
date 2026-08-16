@@ -3585,11 +3585,11 @@ export class AudioEngine {
         from: Math.abs(seg.from),
         to: Math.max(INERTIA_MIN_RATE, Math.abs(seg.to)),
         k: seg.k,
-        durationFrames: Math.round(seg.durationS * sr0(ctx)),
+        durationFrames: Math.round(seg.durationS * ctx.sampleRate),
         applyAtContextFrame: at,
       }));
       if (crossing != null) {
-        const cf = Math.round(crossing * sr0(ctx));
+        const cf = Math.round(crossing * ctx.sampleRate);
         this.fanoutAt(cf, () => ({ type: "setDirection", applyAtContextFrame: cf, direction: 1 }));
       }
       if (gs.releaseTimer) clearTimeout(gs.releaseTimer);
