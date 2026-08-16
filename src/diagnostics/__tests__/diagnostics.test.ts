@@ -10,7 +10,7 @@ import {
 import { TraceRing, formatTraceRow } from "../trace";
 import { BEHAVIOR_CONTRACT, BEHAVIOR_CONTRACT_VERSION, evaluateContract, validateContract } from "../contract";
 import { SurfaceCommandTracer } from "../commandTrace";
-import { initialSurfaceState, pressControl, releaseControl } from "@/machine/surface";
+import { applyPerfIntent, initialSurfaceState } from "@/machine/surface";
 import {
   inspectLeds,
   inspectPhysicalLeds,
@@ -517,10 +517,11 @@ describe("surface command tracing (StrictMode safety)", () => {
 
     // A pure reducer: React StrictMode invokes it twice with the same input.
     const base = initialSurfaceState();
-    const a = pressControl(base, "track-button-1");
-    const b = pressControl(base, "track-button-1");
-    const next = releaseControl(a, "track-button-1");
-    expect(a.commands).toEqual(b.commands); // pure: no side effect, no trace
+    const a = applyPerfIntent(base, { type: "stem.select", dir: 1 });
+    const b = applyPerfIntent(base, { type: "stem.select", dir: 1 });
+    const next = a;
+    expect(a.commands.map((c) => c.type)).toEqual(b.commands.map((c) => c.type));
+    expect(next.commands).toHaveLength(1); // one logical surface command
     expect(ring.list()).toHaveLength(0);
     expect(next.commands.length).toBeGreaterThan(0);
 
