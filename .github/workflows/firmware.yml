@@ -30,17 +30,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout project
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           path: project
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: '3.12'
 
       - name: Set up Zephyr v4.3.1 + SDK 0.17.4 (arm-zephyr-eabi only)
-        uses: zephyrproject-rtos/action-zephyr-setup@v1
+        uses: zephyrproject-rtos/action-zephyr-setup@be8136a8bba01580485d98b7ad2d32477c36a49a  # v1.0.15
         with:
           base-path: project
           app-path: firmware
@@ -81,7 +81,7 @@ jobs:
           sha256sum sp1_looper.bin | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Upload sp1_looper.bin
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: sp1_looper-bin
           path: project/build/zephyr/sp1_looper.bin
@@ -95,17 +95,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout project
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           path: project
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: '3.12'
 
       - name: Set up Zephyr v4.3.1 + SDK 0.17.4 (arm-zephyr-eabi only)
-        uses: zephyrproject-rtos/action-zephyr-setup@v1
+        uses: zephyrproject-rtos/action-zephyr-setup@be8136a8bba01580485d98b7ad2d32477c36a49a  # v1.0.15
         with:
           base-path: project
           app-path: firmware
@@ -246,7 +246,7 @@ jobs:
           grep -A3 'usb_midi' build-stemtape/zephyr/zephyr.dts >> audit/usb-interfaces.txt || true
 
       - name: Upload stemtape-m0-audit
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: stemtape-m0-audit
           path: project/audit/**
