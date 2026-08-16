@@ -231,13 +231,33 @@ jobs:
           "$READELF" -W -S -l -h "$B/zephyr.elf" > audit/readelf.txt
 
 
-      - name: Image assertions (origin, bounds, UICR, vectors, size)
+      - name: Assertion self-test (each assertion must fail when violated)
         working-directory: ${{ github.workspace }}/project
         run: |
           set -euo pipefail
+          python3 .github/scripts/m0_assertions_selftest.py | tee audit/assertions-selftest.txt
+          {
+            echo '### M0 assertion self-test'
+            echo '```text'
+            grep -E '^\[|^SELF-TEST' audit/assertions-selftest.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Image assertions (origin, bounds, storage, UICR, entry, vectors, size, BIN identity)
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          CACHE=build-stemtape/CMakeCache.txt
+          cmv() { sed -n "s|^$1:[^=]*=||p" "$CACHE" | tail -n1; }
+          READELF="$(cmv CMAKE_READELF)"; OBJCOPY="$(cmv CMAKE_OBJCOPY)"
+          OBJDUMP="$(cmv CMAKE_OBJDUMP)"; BINDIR="$(dirname "$OBJDUMP")"
+          PREFIX="$(basename "$OBJDUMP")"; PREFIX="${PREFIX%objdump}"
+          [ -n "$READELF" ] || READELF="$BINDIR/${PREFIX}readelf"
+          [ -n "$OBJCOPY" ] || OBJCOPY="$BINDIR/${PREFIX}objcopy"
           python3 .github/scripts/m0_image_assertions.py \
             build-stemtape/zephyr/zephyr.elf \
-            build-stemtape/zephyr/stemtape_m0.bin | tee audit/image-assertions.txt
+            build-stemtape/zephyr/stemtape_m0.bin \
+            --readelf "$READELF" --objcopy "$OBJCOPY" | tee audit/image-assertions.txt
           {
             echo '### M0 image assertions'
             echo '```text'
@@ -245,7 +265,7 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Persistent-memory and power audit report
+      - name: Persistent-memory and power audit report (descriptive)
         working-directory: ${{ github.workspace }}/project
         run: |
           set -euo pipefail
@@ -253,15 +273,26 @@ jobs:
             audit/nm.txt audit/persistence-audit.md > /dev/null
           echo "report written: audit/persistence-audit.md"
 
-      - name: Provenance, hashes and sources
+      - name: STRICT persistence safety gate (fail-closed)
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/m0_safety_gate.py \
+            audit/nm.txt audit/objdump-d.txt build-stemtape/zephyr/.config \
+            audit/safety-gate.md > audit/safety-gate.txt
+          {
+            echo '### M0 strict persistence safety gate'
+            echo '```text'
+            grep -E '^(PASS|FAIL|GATE)' audit/safety-gate.md
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Hashes and sources
         working-directory: ${{ github.workspace }}/project
         run: |
           set -euxo pipefail
           B=build-stemtape/zephyr
-          git rev-parse HEAD            > audit/git-commit.txt
-          git status --porcelain=v1     > audit/git-status.txt
           git diff                      > audit/git-diff.txt
-          git log -1 --stat             > audit/git-log-head.txt
           ( cd "$B" && sha256sum stemtape_m0.bin zephyr.bin zephyr.elf zephyr.hex 2>/dev/null || true ) \
             > audit/sha256.txt
           cp "$B/stemtape_m0.bin" "$B/zephyr.elf" "$B/zephyr.map" "$B/zephyr.dts" audit/
@@ -271,10 +302,15 @@ jobs:
           mkdir -p audit/src/stemtape audit/src/board audit/src/workflow
           cp -r firmware/stemtape/. audit/src/stemtape/
           cp -r firmware/boards/teenageengineering/stem_player/. audit/src/board/
+          cp firmware/west.yml audit/src/
           cp .github/workflows/firmware.yml audit/src/workflow/
-          cp .github/scripts/m0_image_assertions.py .github/scripts/m0_persistence_audit.py audit/src/workflow/
-          ls -l audit/stemtape_m0.bin
+          cp .github/scripts/m0_image_assertions.py \
+             .github/scripts/m0_assertions_selftest.py \
+             .github/scripts/m0_persistence_audit.py \
+             .github/scripts/m0_safety_gate.py audit/src/workflow/
+          stat -c '%n %s bytes' audit/stemtape_m0.bin | tee -a "$GITHUB_STEP_SUMMARY"
           cat audit/sha256.txt | tee -a "$GITHUB_STEP_SUMMARY"
+
 
       - name: Report USB interfaces in the M0 device
         working-directory: ${{ github.workspace }}/project
