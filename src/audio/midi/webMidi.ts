@@ -11,6 +11,7 @@
 
 import { allNotesOffEvent, normalizeMidiBytes, type StemMidiEvent } from "./contract";
 import { isSp1DeviceName, sp1Surface } from "./sp1Surface";
+import { trace } from "@/diagnostics/trace";
 
 
 type MidiPort = {
@@ -119,10 +120,23 @@ export class WebMidiAdapter {
 
   private handle(port: MidiPort, e: { data: Uint8Array; timeStamp: number }): void {
     const name = port.name ?? "MIDI input";
+    if (trace.enabled) {
+      trace.record("midi.raw", `bytes ${[...e.data].map((b) => b.toString(16).padStart(2, "0")).join(" ")}`, {
+        bytes: [...e.data],
+        device: name,
+      });
+    }
     // The physical Stem Tape SP-1 is a control surface, not an instrument: its
     // messages are consumed here and never reach the cue-learning system.
     if (isSp1DeviceName(name)) {
-      sp1Surface.handleBytes(e.data, { id: port.id, name }, e.timeStamp);
+      const consumed = sp1Surface.handleBytes(e.data, { id: port.id, name }, e.timeStamp);
+      if (trace.enabled) {
+        trace.record(
+          consumed ? "midi.recognized" : "surface.suppressed",
+          consumed ? `SP-1 message accepted (${name})` : `SP-1 device, message outside contract`,
+          { device: name, bytes: [...e.data] },
+        );
+      }
       return;
     }
     const ev = normalizeMidiBytes(e.data, {

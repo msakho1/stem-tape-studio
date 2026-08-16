@@ -1,3 +1,4 @@
+import { trace } from "@/diagnostics/trace";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Ack, AudioCommand } from "./commands";
 import { controlBus } from "./controlBus";
@@ -143,6 +144,9 @@ export function useAudioEngine(commands: AudioCommand[]) {
           const retry = await engine.unlock();
           setUnlockNote(retry.detail);
           if (retry.ok) ack = engine.execute(cmd);
+        }
+        if (trace.enabled) {
+          trace.record("engine.ack", `${ack.type} → ${ack.status}`, { id: ack.id, detail: ack.detail });
         }
         setAcks((prev) => [ack, ...prev].slice(0, 60));
         setStatus(engine.status());

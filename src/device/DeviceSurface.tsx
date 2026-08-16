@@ -177,7 +177,7 @@ export function DeviceSurface({
         {FADER_X.map((cx, i) => {
           const id = `track-led-${i + 1}` as LedId;
           return (
-            <g key={id} className={ledClass(leds, id)}>
+            <g key={id} data-led={id} className={ledClass(leds, id)}>
               <circle className="st-led__halo" cx={cx} cy={548} r={14} fill="#fff6d8" />
               <circle className="st-led__core" cx={cx} cy={548} r={7} fill="#ffffff" />
             </g>
@@ -201,7 +201,7 @@ export function DeviceSurface({
         ))}
 
         {/* Rail: play indicator, side LED song row, function indicators */}
-        <g className={`st-led st-led--${leds["play-indicator"].pattern} st-led--signal`}>
+        <g data-led="play-indicator" className={`st-led st-led--${leds["play-indicator"].pattern} st-led--signal`}>
           <path className="st-led__halo" d="M589.2 213l21 33h-42z" fill="#ff5d63" />
           <path className="st-led__core" d="M589.2 219l18 27h-36z" fill="#ff5d63" />
         </g>
@@ -209,7 +209,7 @@ export function DeviceSurface({
         {[0, 1, 2, 3].map((i) => {
           const id = `side-led-${i + 1}` as LedId;
           return (
-            <g key={id} className={ledClass(leds, id)}>
+            <g key={id} data-led={id} className={ledClass(leds, id)}>
               <circle className="st-led__halo" cx={589.2} cy={392 + i * 26} r={11} fill="#fff6d8" />
               <circle className="st-led__core" cx={589.2} cy={392 + i * 26} r={5.5} fill="#ffffff" />
             </g>
@@ -219,7 +219,7 @@ export function DeviceSurface({
         {[0, 1].map((i) => {
           const id = `function-led-${i + 1}` as LedId;
           return (
-            <g key={id} className={`${ledClass(leds, id)} st-led--signal`}>
+            <g key={id} data-led={id} className={`${ledClass(leds, id)} st-led--signal`}>
               <circle className="st-led__halo" cx={589.2} cy={664 + i * 20} r={12} fill="#ff5d63" />
               <circle className="st-led__core" cx={589.2} cy={664 + i * 20} r={6.5} fill="#ff5d63" />
             </g>
