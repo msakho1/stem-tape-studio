@@ -24,11 +24,19 @@ export type TraceStage =
   | "command.surface"
   | "command.audio"
   | "engine.ack"
+  | "connection.resync"
   | "state.transport"
-  | "led.derived";
+  | "state.mixer"
+  | "state.fx"
+  | "led.derived"
+  | "led.rendered";
 
 export interface TraceRecord {
   seq: number;
+  /** Correlation ID of the physical transition this record belongs to. */
+  corr?: number;
+  /** Gesture / arbitration ID, shared by every record of a multi-control gesture. */
+  gesture?: number;
   /** performance.now() at the decision point (ms). */
   t: number;
   stage: TraceStage;
@@ -45,6 +53,11 @@ export class TraceRing {
   readonly capacity: number;
   private buf: TraceRecord[] = [];
   private seq = 0;
+  private corr = 0;
+  private gesture = 0;
+  /** Correlation ID assigned to records that do not open a new transition. */
+  private currentCorr = 0;
+  private currentGesture = 0;
   private listeners = new Set<() => void>();
   /** Public and hot: instrumented seams read this before doing any work. */
   enabled = false;
@@ -64,7 +77,27 @@ export class TraceRing {
   clear(): void {
     this.buf = [];
     this.seq = 0;
+    this.corr = 0;
+    this.gesture = 0;
+    this.currentCorr = 0;
+    this.currentGesture = 0;
     this.notify();
+  }
+
+  /** Opens a new physical-transition correlation and returns its ID. */
+  beginCorrelation(): number {
+    this.currentCorr = ++this.corr;
+    return this.currentCorr;
+  }
+
+  /** Opens a new multi-control gesture/arbitration ID and returns it. */
+  beginGesture(): number {
+    this.currentGesture = ++this.gesture;
+    return this.currentGesture;
+  }
+
+  endGesture(): void {
+    this.currentGesture = 0;
   }
 
   record(stage: TraceStage, label: string, data?: Record<string, unknown>, t?: number): void {
@@ -75,6 +108,8 @@ export class TraceRing {
       stage,
       label,
     };
+    if (this.currentCorr) rec.corr = this.currentCorr;
+    if (this.currentGesture) rec.gesture = this.currentGesture;
     if (data && typeof data["detail"] === "string") rec.detail = data["detail"] as string;
     if (data) rec.data = data;
     this.buf.push(rec);
@@ -112,7 +147,8 @@ export const trace = new TraceRing();
 export function formatTraceRow(rec: TraceRecord, t0: number): string {
   const rel = (rec.t - t0).toFixed(1).padStart(8);
   const stage = rec.stage.padEnd(20);
-  return `${rel}ms ${stage} ${rec.label}${rec.detail ? ` — ${rec.detail}` : ""}`;
+  const ids = `${rec.corr ? `#${rec.corr}` : "#-"}${rec.gesture ? `/g${rec.gesture}` : ""}`.padEnd(8);
+  return `${rel}ms ${ids} ${stage} ${rec.label}${rec.detail ? ` — ${rec.detail}` : ""}`;
 }
 
 // Browser-proof seam: the smoke harness reads the ring through this handle.

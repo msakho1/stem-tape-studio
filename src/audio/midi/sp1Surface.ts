@@ -181,3 +181,9 @@ export class Sp1SurfaceAdapter {
 }
 
 export const sp1Surface = new Sp1SurfaceAdapter();
+
+// Diagnostic seam: the browser smoke harness injects raw SP-1 bytes here.
+// Read-only observation path — no behaviour depends on this handle.
+if (typeof window !== "undefined") {
+  (window as unknown as { __stemTapeSp1Surface?: Sp1SurfaceAdapter }).__stemTapeSp1Surface = sp1Surface;
+}
