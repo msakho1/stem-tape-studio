@@ -913,7 +913,7 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
             next = emit(next, "loop.global.resize", { division }, { rowId: "tape.loop.global.resize", t });
             return fire(next, "tape.loop.global.resize", `global loop division → 1/${division} bar`, t);
           }
-          const stem = (next.activeTrack + (dir > 0 ? 1 : 3)) % 4;
+          const stem = ((next.activeTrack + (dir > 0 ? 1 : 3)) % 4) as TrackIndex & 0;
           next = { ...next, activeTrack: stem, perf: { ...next.perf, activeStem: stem } };
           next = emit(next, "stem.select", { stem }, { rowId: "tape.track.arm", t });
           return fire(next, "tape.track.arm", `active stem → ${stem + 1}`, t);
