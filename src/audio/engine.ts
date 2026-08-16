@@ -3067,6 +3067,9 @@ export class AudioEngine {
     this.timelineFrozenAt = now;
     this.globalScrub = {
       dir,
+      rate: GLOBAL_SCRUB_SPEEDS[this.scrubSpeedIndex]!,
+      decel: null,
+      releaseTimer: null,
       pos,
       startPos: pos,
       posCtxTime: now,
