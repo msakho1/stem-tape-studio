@@ -126,30 +126,85 @@ jobs:
       - name: Build (west build -p always -b stem_player firmware/stemtape)
         working-directory: ${{ github.workspace }}/project
         run: |
-          set -eux
+          set -euxo pipefail
+          mkdir -p audit
           west build -p always -b stem_player firmware/stemtape -d build-stemtape \
-            -- -DBOARD_ROOT="$GITHUB_WORKSPACE/project/firmware"
+            -- -DBOARD_ROOT="$GITHUB_WORKSPACE/project/firmware" \
+               -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            2>&1 | tee audit/build.log
+
+      - name: Collect toolchain analysis
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euxo pipefail
+          B=build-stemtape/zephyr
+          cp "$B/zephyr.bin" "$B/stemtape_m0.bin"
+          SIZE=$(arm-zephyr-eabi-size --version >/dev/null 2>&1 && echo ok)
+          arm-zephyr-eabi-size -A -x "$B/zephyr.elf"      > audit/size.txt
+          arm-zephyr-eabi-size    "$B/zephyr.elf"        >> audit/size.txt
+          arm-zephyr-eabi-objdump -h "$B/zephyr.elf"      > audit/objdump-h.txt
+          arm-zephyr-eabi-objdump -d "$B/zephyr.elf"      > audit/objdump-d.txt
+          arm-zephyr-eabi-nm -n -S "$B/zephyr.elf"        > audit/nm.txt
+          arm-zephyr-eabi-readelf -W -S -l -h "$B/zephyr.elf" > audit/readelf.txt
+
+      - name: Image assertions (origin, bounds, UICR, vectors, size)
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/m0_image_assertions.py \
+            build-stemtape/zephyr/zephyr.elf \
+            build-stemtape/zephyr/stemtape_m0.bin | tee audit/image-assertions.txt
+          {
+            echo '### M0 image assertions'
+            echo '```text'
+            grep -E '^\[(PASS|FAIL)\]|^ALL IMAGE' audit/image-assertions.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Persistent-memory and power audit report
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/m0_persistence_audit.py \
+            audit/nm.txt audit/persistence-audit.md > /dev/null
+          echo "report written: audit/persistence-audit.md"
+
+      - name: Provenance, hashes and sources
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euxo pipefail
+          B=build-stemtape/zephyr
+          git rev-parse HEAD            > audit/git-commit.txt
+          git status --porcelain=v1     > audit/git-status.txt
+          git diff                      > audit/git-diff.txt
+          git log -1 --stat             > audit/git-log-head.txt
+          ( cd "$B" && sha256sum stemtape_m0.bin zephyr.bin zephyr.elf zephyr.hex 2>/dev/null || true ) \
+            > audit/sha256.txt
+          cp "$B/stemtape_m0.bin" "$B/zephyr.elf" "$B/zephyr.map" "$B/zephyr.dts" audit/
+          cp "$B/.config" audit/config.txt
+          cp build-stemtape/CMakeCache.txt audit/
+          cp build-stemtape/compile_commands.json audit/ 2>/dev/null || true
+          mkdir -p audit/src/stemtape audit/src/board audit/src/workflow
+          cp -r firmware/stemtape/. audit/src/stemtape/
+          cp -r firmware/boards/teenageengineering/stem_player/. audit/src/board/
+          cp .github/workflows/firmware.yml audit/src/workflow/
+          cp .github/scripts/m0_image_assertions.py .github/scripts/m0_persistence_audit.py audit/src/workflow/
+          ls -l audit/stemtape_m0.bin
+          cat audit/sha256.txt | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Report USB interfaces in the M0 device
-        working-directory: ${{ github.workspace }}/project/build-stemtape/zephyr
+        working-directory: ${{ github.workspace }}/project
         run: |
           set -eux
-          grep -E '^CONFIG_(USBD_MIDI2_CLASS|USBD_CDC_ACM_CLASS|USBD_AUDIO2_CLASS|USB_DEVICE_STACK_NEXT)=' .config | tee -a "$GITHUB_STEP_SUMMARY"
-          ( grep -c 'uac2' zephyr.dts && echo 'UAC2 node present but disabled' ) || true
-          grep -A3 'usb_midi' zephyr.dts | tee -a "$GITHUB_STEP_SUMMARY" || true
+          grep -E '^CONFIG_(USBD_MIDI2_CLASS|USBD_CDC_ACM_CLASS|USBD_AUDIO2_CLASS|USB_DEVICE_STACK_NEXT)=' \
+            build-stemtape/zephyr/.config | tee audit/usb-interfaces.txt | tee -a "$GITHUB_STEP_SUMMARY"
+          grep -A3 'usb_midi' build-stemtape/zephyr/zephyr.dts >> audit/usb-interfaces.txt || true
 
-      - name: Report artifact hash
-        working-directory: ${{ github.workspace }}/project/build-stemtape/zephyr
-        run: |
-          set -eux
-          cp zephyr.bin stemtape_m0.bin
-          ls -l stemtape_m0.bin
-          sha256sum stemtape_m0.bin | tee -a "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload stemtape_m0.bin
+      - name: Upload stemtape-m0-audit
         uses: actions/upload-artifact@v4
         with:
-          name: stemtape_m0-bin
-          path: project/build-stemtape/zephyr/stemtape_m0.bin
+          name: stemtape-m0-audit
+          path: project/audit/**
           if-no-files-found: error
+
 
