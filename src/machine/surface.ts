@@ -1008,6 +1008,11 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
       }
 
       if ((c === "volume-plus" || c === "volume-minus") && g.level === "hold" && fn) {
+        // Addendum §1: press duration must NOT change the command. The glide
+        // only exists for the held-lane window resize; in the shuttle-speed,
+        // loop-division and stem-select contexts a hold is just a long tap.
+        const heldLanes = next.pressed.some((x) => x.startsWith("track-button"));
+        if (!heldLanes) return next;
         return fire({ ...next, chopGlide: true }, "volume.chopWindow", "hold = glide", t);
       }
 
