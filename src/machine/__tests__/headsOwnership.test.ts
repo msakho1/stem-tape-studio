@@ -34,7 +34,9 @@ const tap = (control: string, count = 1): Gesture =>
 
 /** PLAY held long enough to open a global loop, then latched with FUNCTION. */
 function latchedGlobalLoop(): SurfaceState {
-  let s = pressControl(initialSurfaceState(), "play");
+  let s = applyGesture(initialSurfaceState(), tap("play"));
+  expect(s.playing).toBe(true);
+  s = pressControl(s, "play");
   s = applyGesture(s, { type: "holdStart", control: "play", level: "hold", duration: 500, t: (clock += 1000) } as Gesture);
   expect(s.globalLoop.active).toBe(true);
   s = applyGesture(s, tap("function"));
