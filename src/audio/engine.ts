@@ -2641,8 +2641,20 @@ export class AudioEngine {
   headsRejectFlashAt: number | null = null;
 
   /**
+   * Context time until which the Vocal handoff owns `stemGate` / `headsInject`.
+   * `applyAudibility` must not stomp a fade that is already scheduled, or the
+   * dry Vocal would jump to zero ahead of the Head sum opening.
+   */
+  private headsHandoffUntil = 0;
+
+  /**
    * Equal-power Vocal <-> Heads handoff at the lane's own routing point.
-   * The normal four-stem bus is NEVER gated: only the Vocal stem copy is.
+   *
+   * PURE AudioContext automation: one `setValueCurveAtTime` per param plus a
+   * terminal `setValueAtTime` scheduled at the end of the curve. No React
+   * state, no `setTimeout`, no rounded restart. The normal four-stem bus is
+   * NEVER gated — only the ordinary Vocal copy is, and it reaches EXACTLY zero
+   * so the dry Vocal and the Head sum are never left summed together.
    */
   private crossfadeVocalToHeads(toHeads: boolean, seconds = HEADS_HANDOFF_S) {
     const ctx = this.ctx;
@@ -2650,39 +2662,37 @@ export class AudioEngine {
     const stem = this.tracks[VOCAL_LANE]?.stemGate;
     if (!ctx || !inject || !stem) return;
     const at = ctx.currentTime;
+    const audible = this.vocalAudible();
+    // Terminal values: after the fade the losing side is EXACTLY 0.
+    const injectEnd = toHeads && audible ? 1 : 0;
+    const stemEnd = toHeads ? 0 : audible ? 1 : 0;
     const N = 64;
-    const up = new Float32Array(N);
-    const down = new Float32Array(N);
-    for (let i = 0; i < N; i++) {
-      const x = (i / (N - 1)) * (Math.PI / 2);
-      up[i] = Math.sin(x);
-      down[i] = Math.cos(x);
-    }
-    const apply = (prm: AudioParam, curve: Float32Array) => {
+    const curve = (from: number, to: number) => {
+      const c = new Float32Array(N);
+      for (let i = 0; i < N; i++) {
+        const x = (i / (N - 1)) * (Math.PI / 2);
+        // Equal power: the rising side is sin, the falling side cos.
+        c[i] = to > from ? from + (to - from) * Math.sin(x) : to + (from - to) * Math.cos(x);
+      }
+      c[N - 1] = to;
+      return c;
+    };
+    const apply = (prm: AudioParam, to: number) => {
+      const from = prm.value;
       try {
         prm.cancelScheduledValues(at);
-        prm.setValueAtTime(prm.value, at);
-        prm.setValueCurveAtTime(curve, at, seconds);
+        prm.setValueAtTime(from, at);
+        prm.setValueCurveAtTime(curve(from, to), at, seconds);
+        prm.setValueAtTime(to, at + seconds);
       } catch {
-        prm.value = curve[curve.length - 1]!;
+        prm.value = to;
       }
     };
-    const audible = this.vocalAudible();
-    apply(inject.gain, toHeads ? up : down);
-    apply(stem.gain, toHeads ? down : up);
-    setTimeout(() => {
-      if (this.ctx !== ctx) return;
-      try {
-        const now = ctx.currentTime;
-        inject.gain.cancelScheduledValues(now);
-        inject.gain.setValueAtTime(toHeads && audible ? 1 : 0, now);
-        stem.gain.cancelScheduledValues(now);
-        stem.gain.setValueAtTime(toHeads ? 0 : audible ? 1 : 0, now);
-      } catch {
-        /* noop */
-      }
-    }, Math.ceil(seconds * 1000) + 20);
+    apply(inject.gain, injectEnd);
+    apply(stem.gain, stemEnd);
+    this.headsHandoffUntil = at + seconds;
   }
+
 
   /** Stored mute/solo verdict for the Vocal lane, Heads or not. */
   private vocalAudible(): boolean {
