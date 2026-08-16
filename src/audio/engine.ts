@@ -2866,6 +2866,31 @@ export class AudioEngine {
    * landing frame is therefore the frame immediately after the last audible
    * scrub frame, never a wall-clock estimate.
    */
+  /**
+   * Signed shuttle rate at a context time. Constant while the shuttle is held;
+   * once a release deceleration is in flight (addendum §6) it is the SAME
+   * exponential curve the timeline integrates, so the grains, the playhead and
+   * the eventual hand-off can never disagree.
+   */
+  private scrubRateAt(atCtx: number): number {
+    const gs = this.globalScrub;
+    if (!gs) return 0;
+    if (gs.decel) return inertiaRateAt(gs.decel, atCtx - gs.decel.startAt);
+    return gs.dir * gs.rate;
+  }
+
+  /** Exact media distance the shuttle covers between two context times. */
+  private scrubTravel(fromT: number, toT: number): number {
+    const gs = this.globalScrub;
+    if (!gs) return 0;
+    if (gs.decel) {
+      const a = inertiaDistance(gs.decel, fromT - gs.decel.startAt);
+      const b = inertiaDistance(gs.decel, toT - gs.decel.startAt);
+      return b - a;
+    }
+    return gs.dir * gs.rate * (toT - fromT);
+  }
+
   private scrubGrainAll(_dtS: number) {
     const gs = this.globalScrub;
     const ctx = this.ctx;
@@ -2874,13 +2899,13 @@ export class AudioEngine {
     const GRAIN_S = 0.06;
     const HOP_S = GRAIN_S * 0.8;
     const LOOKAHEAD_S = 0.05;
-    const advance = (from: number, seconds: number) =>
-      Math.min(this.duration, Math.max(0, from + gs.dir * GLOBAL_SCRUB_RATE * seconds));
+    const advance = (from: number, fromT: number, toT: number) =>
+      Math.min(this.duration, Math.max(0, from + this.scrubTravel(fromT, toT)));
 
     // A late timer (tab throttling, GC) must not queue grains in the past:
     // fast-forward the cursor and the position together, staying continuous.
     if (gs.cursor < now) {
-      gs.pos = advance(gs.pos, now - gs.cursor);
+      gs.pos = advance(gs.pos, gs.cursor, now);
       gs.cursor = now;
     }
 
@@ -2889,10 +2914,13 @@ export class AudioEngine {
     while (gs.cursor < now + LOOKAHEAD_S) {
       const at = gs.cursor;
       const offsetS = gs.pos;
-      const next = advance(offsetS, HOP_S);
+      const next = advance(offsetS, at, at + HOP_S);
+      // The instantaneous rate at the MIDDLE of the grain: during a release
+      // deceleration each grain is played at its own, slower speed.
+      const grainRate = Math.abs(this.scrubRateAt(at + GRAIN_S / 2));
       gs.cursor = at + HOP_S;
       gs.pos = next;
-      if (next === offsetS) continue; // parked at an end — no grain, no click
+      if (next === offsetS || grainRate < 0.02) continue; // parked / stalled — no grain, no click
       const backwards = gs.dir < 0;
       for (let i = 0; i < this.tracks.length; i++) {
         const t = this.tracks[i]!;
