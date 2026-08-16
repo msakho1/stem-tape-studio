@@ -320,6 +320,7 @@ jobs:
 
 
       - name: Report USB interfaces in the M0 device
+        if: ${{ always() }}
         working-directory: ${{ github.workspace }}/project
         run: |
           set -eux
