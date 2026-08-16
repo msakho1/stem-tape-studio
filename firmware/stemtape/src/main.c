@@ -396,7 +396,7 @@ static void wdt_prewarn(const struct device *dev, int channel_id)
 static void wdt_init(void)
 {
 	g_wdt_pre_running =
-		(NRF_WDT->RUNSTATUS & WDT_RUNSTATUS_RUNSTATUSWDT_Msk) != 0u;
+		(NRF_WDT->RUNSTATUS & WDT_RUNSTATUS_RUNSTATUS_Msk) != 0u;
 	feed_wdt();
 	if (g_wdt_pre_running)
 		return;                   /* locked configuration; feed only */
