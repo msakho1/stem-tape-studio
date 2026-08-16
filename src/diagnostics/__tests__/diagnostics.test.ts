@@ -8,7 +8,9 @@ import {
   type SerialPortLike,
 } from "../firmwareConsole";
 import { TraceRing, formatTraceRow } from "../trace";
-import { BEHAVIOR_CONTRACT, BEHAVIOR_CONTRACT_VERSION, evaluateContract } from "../contract";
+import { BEHAVIOR_CONTRACT, BEHAVIOR_CONTRACT_VERSION, evaluateContract, validateContract } from "../contract";
+import { SurfaceCommandTracer } from "../commandTrace";
+import { applyPerfIntent, initialSurfaceState } from "@/machine/surface";
 import {
   inspectLeds,
   inspectPhysicalLeds,
@@ -19,10 +21,10 @@ import {
 import {
   M0_IMPLEMENTED_LED_OUTPUTS,
   M0_LED_COVERAGE,
-  M0_UNRESOLVED_LED_OUTPUTS,
   PHYSICAL_LED_COUNT,
   PHYSICAL_LED_IDS,
   UI_ONLY_INDICATOR_IDS,
+  validatePhysicalFrame,
 } from "../physical";
 import { describeMidiBytes, SP1_MIDI_CONTRACT } from "../midiContract";
 import { decodeSp1Message } from "@/audio/midi/sp1Surface";
@@ -231,17 +233,42 @@ describe("midi contract notation", () => {
 });
 
 describe("physical LED model", () => {
-  it("contains exactly ten physical LEDs and excludes play-indicator", () => {
-    expect(PHYSICAL_LED_IDS).toHaveLength(PHYSICAL_LED_COUNT);
-    expect(PHYSICAL_LED_COUNT).toBe(10);
+  it("contains exactly eight physical LEDs: 4 track + 4 side/status", () => {
+    expect(PHYSICAL_LED_COUNT).toBe(8);
+    expect(PHYSICAL_LED_IDS).toHaveLength(8);
+    expect([...PHYSICAL_LED_IDS]).toEqual([
+      "track-led-1",
+      "track-led-2",
+      "track-led-3",
+      "track-led-4",
+      "side-led-1",
+      "side-led-2",
+      "side-led-3",
+      "side-led-4",
+    ]);
+    expect(PHYSICAL_LED_IDS.some((id) => id.startsWith("function-led"))).toBe(false);
     expect(PHYSICAL_LED_IDS).not.toContain("play-indicator" as never);
-    expect(UI_ONLY_INDICATOR_IDS).toEqual(["play-indicator"]);
+    expect([...UI_ONLY_INDICATOR_IDS]).toEqual(["play-indicator", "function-led-1", "function-led-2"]);
     expect(LED_IDS).toHaveLength(11);
   });
 
-  it("reports the audited M0 driver as 8 of 10 outputs", () => {
+  it("reports 8/8 electrical coverage, partial behaviour mapping, runtime host feedback", () => {
     expect(M0_IMPLEMENTED_LED_OUTPUTS).toHaveLength(8);
-    expect(M0_UNRESOLVED_LED_OUTPUTS).toEqual(["function-led-1", "function-led-2"]);
+    expect(M0_LED_COVERAGE.electricalCoverage).toBe("8/8");
+    expect(M0_LED_COVERAGE.behaviorCoverage).toBe("partial");
+    expect(M0_LED_COVERAGE.hostToDeviceLedFeedback).toBe("unsupported-by-audited-build");
+  });
+
+  it("rejects frames with missing keys, extra keys, function LEDs or a play indicator", () => {
+    expect(validatePhysicalFrame(Object.fromEntries(PHYSICAL_LED_IDS.map((i) => [i, 1])))).toEqual([]);
+    expect(validatePhysicalFrame({ "track-led-1": 1 }).join(" ")).toContain("missing side-led-4");
+    const bad = validatePhysicalFrame({
+      ...Object.fromEntries(PHYSICAL_LED_IDS.map((i) => [i, 1])),
+      "function-led-1": 1,
+      "play-indicator": 1,
+    }).join(" ");
+    expect(bad).toContain("fictional function LED");
+    expect(bad).toContain("play-indicator is web-only");
   });
 });
 
@@ -273,13 +300,25 @@ describe("behaviour contract", () => {
     }
   });
 
-  it("expects exactly ten physical LEDs per frame, never play-indicator", () => {
+  it("expects exactly eight physical LEDs per frame, never function LEDs or play-indicator", () => {
+    expect(validateContract()).toEqual([]);
     for (const e of BEHAVIOR_CONTRACT) {
       const keys = Object.keys(e.expectedLeds);
-      expect(keys).toHaveLength(PHYSICAL_LED_COUNT);
+      expect(keys).toHaveLength(8);
       expect(keys.sort()).toEqual([...PHYSICAL_LED_IDS].sort());
-      expect(keys).not.toContain("play-indicator");
     }
+  });
+
+  it("does not mention a ten-LED model or fictional function LEDs anywhere", () => {
+    const blob = JSON.stringify(BEHAVIOR_CONTRACT);
+    expect(blob).not.toContain("function-led");
+    expect(blob).not.toMatch(/ten LEDs|10 physical|of 10 outputs/);
+  });
+
+  it("marks unverified side-row indices instead of guessing", () => {
+    const scrub = BEHAVIOR_CONTRACT.find((e) => e.id === "scrub.momentary")!;
+    expect(Object.values(scrub.expectedLeds).some((l) => l.indexUnverified)).toBe(true);
+    expect(scrub.expectedLedSummary.toUpperCase()).toContain("UNVERIFIED");
   });
 
   it("covers the required gestures and keeps M0 patterns in their own group", () => {
@@ -307,7 +346,7 @@ describe("behaviour contract", () => {
       "m0.boot",
       "m0.dfu",
       "m0.function.hold",
-      "m0.led.gap",
+      "m0.led.coverage",
     ]) {
       expect(ids).toContain(id);
     }
@@ -344,24 +383,15 @@ describe("led inspector", () => {
     expect(modeOf("pulse")).toBe("pulse");
   });
 
-  it("inspects exactly the ten physical LEDs and the web-only indicator separately", () => {
+  it("inspects exactly the eight physical LEDs, web-only indicators separately", () => {
     const rows = inspectPhysicalLeds(frame({}), frame({}), []);
-    expect(rows).toHaveLength(10);
-    expect(rows.every((r) => r.physical)).toBe(true);
+    expect(rows).toHaveLength(8);
+    expect(rows.every((r) => r.physical && r.m0Driven)).toBe(true);
+    expect(rows.map((r) => r.id).some((id) => id.startsWith("function-led"))).toBe(false);
     expect(rows.map((r) => r.id)).not.toContain("play-indicator");
     const web = inspectWebOnlyIndicators(frame({}), frame({}), []);
-    expect(web).toHaveLength(1);
-    expect(web[0]!.physical).toBe(false);
-  });
-
-  it("flags the two unresolved M0 function outputs", () => {
-    const rows = inspectPhysicalLeds(frame({}), frame({}), []);
-    const fn = rows.filter((r) => r.id.startsWith("function-led"));
-    expect(fn).toHaveLength(2);
-    for (const r of fn) {
-      expect(r.m0Driven).toBe(false);
-      expect(r.divergence).toBe("physical mapping unresolved");
-    }
+    expect(web).toHaveLength(3);
+    expect(web.every((r) => !r.physical)).toBe(true);
   });
 
   it("reports a logical/expected mismatch", () => {
@@ -404,7 +434,7 @@ describe("report redaction and export", () => {
     expect((clean["nested"] as Record<string, unknown>[])[0]!["path"]).toBeUndefined();
   });
 
-  it("renders a text report with the 10-LED model and web-only separation", () => {
+  it("renders a text report with the 8-LED model and web-only separation", () => {
     const r: DiagnosticReport = {
       contractVersion: BEHAVIOR_CONTRACT_VERSION,
       generatedAt: "2026-01-01T00:00:00.000Z",
@@ -461,11 +491,52 @@ describe("report redaction and export", () => {
       observation: { "physical led state": "not-observed" },
     };
     const text = reportToText(r);
-    expect(text).toContain("physical SP-1 LEDs: 10");
-    expect(text).toContain("implemented in the audited M0 LED driver: 8 of 10");
-    expect(text).toContain("WEB-ONLY INDICATORS — NOT PART OF THE 10-LED PHYSICAL FRAME");
+    expect(text).toContain("physical SP-1 LEDs: 8 (4 Track LEDs + 4 side/status LEDs)");
+    expect(text).toContain("electrical GPIO coverage (audited M0 driver): 8/8");
+    expect(text).toContain("Stem Tape behaviour mapping coverage: partial");
+    expect(text).toContain("host→device LED feedback: unsupported-by-audited-build");
+    const physicalSection = text.slice(
+      text.indexOf("PHYSICAL LED COMPARISON"),
+      text.indexOf("WEB-ONLY INDICATORS"),
+    );
+    expect(physicalSection).not.toContain("function-led");
+    expect(physicalSection).not.toContain("play-indicator");
+    expect(text).toContain("WEB-ONLY INDICATORS — NOT PART OF THE 8-LED PHYSICAL FRAME");
     expect(text).toContain("CC    20 (0x14) Fader 1");
     expect(text).toContain("[timing/clock missing]");
-    expect(text).toContain("PHYSICAL LED COMPARISON (10 of 10)");
+    expect(text).toContain("PHYSICAL LED COMPARISON (8 of 8)");
+  });
+});
+
+
+describe("surface command tracing (StrictMode safety)", () => {
+  it("records exactly one command.surface record per logical surface command", () => {
+    const ring = new TraceRing(50);
+    ring.enable();
+    const tracer = new SurfaceCommandTracer(ring);
+
+    // A pure reducer: React StrictMode invokes it twice with the same input.
+    const base = initialSurfaceState();
+    const a = applyPerfIntent(base, { type: "stem.select", dir: 1 });
+    const b = applyPerfIntent(base, { type: "stem.select", dir: 1 });
+    const next = a;
+    expect(a.commands.map((c) => c.type)).toEqual(b.commands.map((c) => c.type));
+    expect(next.commands).toHaveLength(1); // one logical surface command
+    expect(ring.list()).toHaveLength(0);
+    expect(next.commands.length).toBeGreaterThan(0);
+
+    // StrictMode also double-invokes the capture effect.
+    tracer.capture(next.commands);
+    tracer.capture(next.commands);
+
+    const emitted = ring.list().filter((r) => r.stage === "command.surface");
+    expect(emitted).toHaveLength(next.commands.length);
+    const ids = emitted.map((r) => r.data!["id"]);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it("keeps the reducer free of trace side effects", async () => {
+    const src = await import("../commandTrace");
+    expect(typeof src.surfaceCommandTracer.capture).toBe("function");
   });
 });

@@ -14,11 +14,12 @@ import type { SurfaceState } from "@/machine/surface";
 import {
   expectedPhysicalFrame,
   led,
+  validatePhysicalFrame,
   type DivergenceCategory,
   type ExpectedPhysicalLedFrame,
 } from "./physical";
 
-export const BEHAVIOR_CONTRACT_VERSION = "sp1-behavior-contract/2.0.0";
+export const BEHAVIOR_CONTRACT_VERSION = "sp1-behavior-contract/3.0.0";
 
 export type Provenance =
   | "STOCK_SP1_DOCUMENTED"
@@ -63,7 +64,7 @@ export interface ContractEntry {
   expectedOwner: string;
   expectedCommand: string;
   expectedEngineResult: string;
-  /** COMPLETE ten-LED physical frame. Never eleven; never partial. */
+  /** COMPLETE eight-LED physical frame: 4 Track + 4 side/status. Never partial. */
   expectedLeds: ExpectedPhysicalLedFrame;
   /** Human summary of the expected frame, for the text report. */
   expectedLedSummary: string;
@@ -130,7 +131,7 @@ export const BEHAVIOR_CONTRACT: ContractEntry[] = [
     expectedCommand: "none",
     expectedEngineResult: "no audio",
     expectedLeds: expectedPhysicalFrame({}),
-    expectedLedSummary: "all ten LEDs dark",
+    expectedLedSummary: "all eight physical LEDs dark (4 Track + 4 side/status)",
     precedence: 100,
     competing: [],
     provenance: "TAPE_LOOPER_SOURCE",
@@ -380,16 +381,16 @@ export const BEHAVIOR_CONTRACT: ContractEntry[] = [
     expectedOwner: "FX target → loop division → active stem, in that order",
     expectedCommand: "fx.target / loop.division / stem.select — never master volume",
     expectedEngineResult: "context-appropriate change only",
-    expectedLeds: expectedPhysicalFrame({ "function-led-1": led("solid") }),
-    expectedLedSummary: "Function LED 1 solid while held",
+    expectedLeds: expectedPhysicalFrame({}),
+    expectedLedSummary: "no physical LED indicates FUNCTION hold — the `••` marks are printed artwork",
     precedence: 70,
     competing: ["fx.scope", "loop.momentary"],
     provenance: "STEM_TAPE_OVERRIDE",
     citation: ADDENDUM("§1 contextual FUNCTION + Volume"),
     confidence: "high",
     status: "partial",
-    notes: "function-led-1 has no resolved physical output in the audited M0 driver.",
-    firstDivergence: "physical mapping unresolved",
+    notes: "The web build lights a non-physical function indicator; the SP-1 has no FUNCTION LED. Any physical indication would have to use the shared side/status row, and no source establishes an index.",
+    firstDivergence: "expected contract missing",
     observe: (s) => `division=1/${s.globalLoop.division} activeStem=${s.perf.activeStem + 1}`,
   },
 
@@ -496,17 +497,18 @@ export const BEHAVIOR_CONTRACT: ContractEntry[] = [
     expectedCommand: "scrub.start / scrub.end",
     expectedEngineResult: "audible shuttle at the selected multiplier",
     expectedLeds: expectedPhysicalFrame({
-      "function-led-2": led("chase", { periodMs: 550, direction: "forward" }),
+      "side-led-1": led("chase", { periodMs: 550, direction: "forward", indexUnverified: true }),
     }),
-    expectedLedSummary: "Function LED 2 chases in the shuttle direction",
+    expectedLedSummary:
+      "shuttle indication belongs to the shared side/status row — physical index UNVERIFIED (shown on side-led-1 as a placeholder, not evidence)",
     precedence: 45,
     competing: ["fx.momentary", "loop.momentary"],
     provenance: "STEM_TAPE_OVERRIDE",
     citation: ADDENDUM("§3-4 scrub"),
     confidence: "high",
     status: "partial",
-    notes: "Blink does not distinguish forward from reverse; function-led-2 is physically unresolved.",
-    firstDivergence: "physical mapping unresolved",
+    notes: "Chase does not distinguish forward from reverse, and no source establishes which side/status LED stock firmware uses for shuttle.",
+    firstDivergence: "physical LED index unverified",
     observe: (s) => `globalScrub=${s.globalScrub}`,
   },
   {
@@ -519,8 +521,10 @@ export const BEHAVIOR_CONTRACT: ContractEntry[] = [
     expectedOwner: "global scrub",
     expectedCommand: "scrub.latch / scrub.unlatch",
     expectedEngineResult: "shuttle survives rocker release",
-    expectedLeds: expectedPhysicalFrame({ "function-led-2": led("chase", { periodMs: 550 }) }),
-    expectedLedSummary: "Function LED 2 chases while latched",
+    expectedLeds: expectedPhysicalFrame({
+      "side-led-1": led("chase", { periodMs: 550, indexUnverified: true }),
+    }),
+    expectedLedSummary: "latched shuttle shown on the shared side/status row — physical index UNVERIFIED",
     precedence: 46,
     competing: ["fx.momentary"],
     provenance: "STEM_TAPE_OVERRIDE",
@@ -591,8 +595,8 @@ export const BEHAVIOR_CONTRACT: ContractEntry[] = [
     expectedOwner: "FX overlay",
     expectedCommand: "fx.scope",
     expectedEngineResult: "per-stem or post-sum insert",
-    expectedLeds: expectedPhysicalFrame({ "function-led-1": led("breathe", { periodMs: 2400 }) }),
-    expectedLedSummary: "no LED currently distinguishes scope",
+    expectedLeds: expectedPhysicalFrame({}),
+    expectedLedSummary: "no physical LED distinguishes STEM from GLOBAL scope",
     precedence: 72,
     competing: ["function.volume"],
     provenance: "STEM_TAPE_OVERRIDE",
@@ -762,9 +766,8 @@ export const BEHAVIOR_CONTRACT: ContractEntry[] = [
     expectedEngineResult: "energy-normalised four-head sum on the heads bus",
     expectedLeds: expectedPhysicalFrame({
       ...tracks(led("chase", { periodMs: 550, direction: "forward" })),
-      "function-led-1": led("breathe", { periodMs: 2400 }),
     }),
-    expectedLedSummary: "Track LEDs chase per head; Function LED 1 breathes; rejection = flash",
+    expectedLedSummary: "Track LEDs chase per head; rejection = flash. No physical FUNCTION LED exists to mark the mode.",
     precedence: 76,
     competing: ["loop.momentary", "fx.momentary"],
     provenance: "STEM_TAPE_OVERRIDE",
@@ -840,28 +843,26 @@ export const BEHAVIOR_CONTRACT: ContractEntry[] = [
     status: "implemented",
   },
   {
-    id: "m0.led.gap",
+    id: "m0.led.coverage",
     group: "m0-only",
-    name: "M0 LED-driver coverage gap",
+    name: "M0 physical LED coverage",
     initiatingState: "n/a",
     sequence: "n/a",
     timing: "n/a",
     expectedOwner: "firmware",
     expectedCommand: "none",
     expectedEngineResult: "n/a",
-    expectedLeds: expectedPhysicalFrame({
-      "function-led-1": led("off"),
-      "function-led-2": led("off"),
-    }),
-    expectedLedSummary: "function-led-1 / function-led-2 have no resolved electrical control",
+    expectedLeds: expectedPhysicalFrame({}),
+    expectedLedSummary:
+      "all eight physical outputs (4 Track + 4 side/status) are electrically driven by the audited M0 driver; Stem Tape behaviour mapping onto them is partial",
     precedence: 0,
     competing: [],
     provenance: "M0_DIAGNOSTIC_ONLY",
-    citation: M0("led driver — 8 of 10 outputs"),
+    citation: M0("led driver — 8 of 8 physical outputs"),
     confidence: "high",
-    status: "missing",
-    notes: "No GPIO is guessed and no battery/charger pin is reused; the gap is reported only.",
-    firstDivergence: "physical mapping unresolved",
+    status: "partial",
+    notes:
+      "Electrical coverage 8/8. Host→device LED feedback is not implemented by the audited build; a later versioned capability handshake may advertise it.",
   },
   {
     id: "stock.reference",
@@ -888,6 +889,17 @@ export const BEHAVIOR_CONTRACT: ContractEntry[] = [
 
 export interface ContractResult extends ContractEntry {
   observed: string | null;
+}
+
+/** Contract self-validation: every entry must carry an exact 8-LED frame. */
+export function validateContract(entries: ContractEntry[] = BEHAVIOR_CONTRACT): string[] {
+  const problems: string[] = [];
+  for (const e of entries) {
+    for (const p of validatePhysicalFrame(e.expectedLeds as unknown as Record<string, unknown>)) {
+      problems.push(`${e.id}: ${p}`);
+    }
+  }
+  return problems;
 }
 
 export function evaluateContract(state: SurfaceState | null): ContractResult[] {

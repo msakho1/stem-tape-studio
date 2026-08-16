@@ -256,6 +256,8 @@ export function Sp1DiagnosticDrawer({ state, leds, arbiter }: Props) {
       }
 
       const now = traceNow();
+      // Trace of surface commands is captured once at the dispatcher boundary
+      // (diagnostics/commandTrace); the drawer never re-records them.
       const dom = probeDom();
       // deriveLeds re-run 1 s ahead exposes one-shot windows that never expire.
       const expected = deriveLeds(state, now + 1000);
@@ -329,6 +331,9 @@ export function Sp1DiagnosticDrawer({ state, leds, arbiter }: Props) {
       "physical led state": "not-observed",
       "logical led derivation": "browser-observed",
       "behaviour contract expectations": "not-observed",
+      "firmware serial content": console_.lineCount > 0 ? "browser-observed" : "not-observed",
+      "track 1/4 resync sequence": "mocked",
+      "physical side-row playback index": "not-observed",
     };
     return buildReport({
       contractVersion: BEHAVIOR_CONTRACT_VERSION,
@@ -555,15 +560,18 @@ export function Sp1DiagnosticDrawer({ state, leds, arbiter }: Props) {
           {/* ---------- physical LED inspector ---------- */}
           <section className="border border-[var(--bench-line)] p-2" data-testid="physical-led-inspector">
             <p className="text-[var(--signal)]">
-              physical sp-1 frame · {physicalRows.length || PHYSICAL_LED_COUNT} leds ·{" "}
-              {M0_LED_COVERAGE.m0Implemented} of {PHYSICAL_LED_COUNT} driven by the audited m0 firmware · host→device
-              feedback unsupported
+              physical sp-1 frame · {physicalRows.length || PHYSICAL_LED_COUNT} leds (4 track + 4 side/status) ·
+              electrical gpio coverage {M0_LED_COVERAGE.electricalCoverage} · stem tape behaviour mapping{" "}
+              {M0_LED_COVERAGE.behaviorCoverage} · host→device feedback {M0_LED_COVERAGE.hostToDeviceLedFeedback}
             </p>
             <LedRows rows={physicalRows} />
           </section>
 
           <section className="border border-[var(--bench-line)] p-2" data-testid="web-only-indicators">
-            <p className="text-[var(--signal)]">web-only — not part of the 10-led physical frame</p>
+            <p className="text-[var(--signal)]">
+              web-only interface indicators — not physical sp-1 leds (the `••` marks and the red play triangle are
+              printed artwork)
+            </p>
             <LedRows rows={webRows} />
           </section>
 

@@ -36,6 +36,7 @@ import { sp1Surface, type Sp1SurfaceEvent } from "@/audio/midi/sp1Surface";
 import type { StemMidiEvent } from "@/audio/midi/contract";
 import { FaderSessionManager, type FaderIndex } from "@/input/faderSessions";
 import { installDiagnostics, publishArbiter, publishSurface, publishTapLatency } from "@/lib/diagnostics";
+import { surfaceCommandTracer } from "@/diagnostics/commandTrace";
 
 
 
@@ -145,6 +146,12 @@ export function useDeviceSurface() {
   // acceptance runs. Read-only; it never dispatches.
   useEffect(() => installDiagnostics(), []);
   publishSurface(state);
+  // Flight recorder: one record per logical surface command, captured at the
+  // consumer boundary. Watermarked, so StrictMode double-invocation cannot
+  // duplicate it.
+  useEffect(() => {
+    surfaceCommandTracer.capture(state.commands);
+  }, [state.commands]);
 
   /** Which fader layer is live (FN = chop window, HEADS = scrub, else volume). */
   const layerRef = useRef<{ fn: boolean; heads: boolean }>({ fn: false, heads: false });
