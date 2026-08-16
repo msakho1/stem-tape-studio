@@ -630,10 +630,9 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
           );
         }
         if (!fn && g.count === 1) {
-          // Addendum §4: a latched shuttle is a running operation — the bare
-          // PLAY tap ends it first and leaves the transport exactly where the
-          // hand-off lands, instead of toggling play/stop underneath it.
-          if (next.scrubLatched) return releaseScrubLatch(next, t);
+          // Ownership (§0): PLAY owns the LATCHED GLOBAL LOOP only. A latched
+          // shuttle is owned exclusively by the bare FUNCTION tap, so PLAY must
+          // never substitute for that release gesture.
           if (next.globalLoop.latched) {
             // A latched global loop owns the bare PLAY tap: the first tap
             // releases the loop and the transport keeps running.
@@ -657,7 +656,14 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
         //   global loop held (§2)         → LATCH it
         //   global loop latched (§2)      → RELEASE it
         //   otherwise                     → ARM active-track selection
-        if (next.globalScrub !== 0 && !next.scrubLatched) {
+        // §0 — the scrub latch is released ONLY by a completed BARE FUNCTION
+        // tap. Any other control joining the chord (Track for FX, Volume for
+        // shuttle speed, PLAY) disqualifies the release; the rocker is the
+        // shuttle's own control and therefore does not count as "joining".
+        const bareFunctionTap = next.pressed.every(
+          (x) => x === "function" || x === "rocker-fwd" || x === "rocker-rwd",
+        );
+        if (next.globalScrub !== 0 && !next.scrubLatched && bareFunctionTap) {
           next = { ...next, scrubLatched: true };
           return fire(
             next,
@@ -666,7 +672,10 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
             t,
           );
         }
-        if (next.scrubLatched) return releaseScrubLatch(next, t);
+        if (next.scrubLatched) {
+          if (!bareFunctionTap) return next;
+          return releaseScrubLatch(next, t);
+        }
         if (next.globalLoop.active && !next.globalLoop.latched) {
           next = { ...next, globalLoop: { ...next.globalLoop, latched: true } };
           return fire(next, "tape.loop.global.latch", "global loop latched — PLAY may be released", t);
