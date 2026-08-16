@@ -901,17 +901,22 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
             }
             return fire(next, "loop.resize", notes.join(" · "), t);
           }
-          // FUNCTION + Volume with NO Track held ALWAYS sets the global-loop
-          // division — whether the loop is running, held or not yet captured.
-          // The division is remembered, so the next Hold PLAY starts there.
-          const order: (1 | 2 | 4 | 8)[] = [1, 2, 4, 8];
-          const at = order.indexOf(next.globalLoop.division);
-          const division = order[Math.max(0, Math.min(order.length - 1, at + (dir > 0 ? 1 : -1)))]!;
-          next = { ...next, globalLoop: { ...next.globalLoop, division } };
-          if (next.globalLoop.active) {
+          // Addendum §1: FUNCTION + Volume with NO Track held is CONTEXTUAL.
+          // A global loop that is running or latched owns it — the division is
+          // the thing being performed. With no loop, the same chord selects the
+          // active stem, so the gesture is never dead.
+          if (next.globalLoop.active || next.globalLoop.latched) {
+            const order: (1 | 2 | 4 | 8)[] = [1, 2, 4, 8];
+            const at = order.indexOf(next.globalLoop.division);
+            const division = order[Math.max(0, Math.min(order.length - 1, at + (dir > 0 ? 1 : -1)))]!;
+            next = { ...next, globalLoop: { ...next.globalLoop, division } };
             next = emit(next, "loop.global.resize", { division }, { rowId: "tape.loop.global.resize", t });
+            return fire(next, "tape.loop.global.resize", `global loop division → 1/${division} bar`, t);
           }
-          return fire(next, "tape.loop.global.resize", `global loop division → 1/${division} bar`, t);
+          const stem = (next.activeTrack + (dir > 0 ? 1 : 3)) % 4;
+          next = { ...next, activeTrack: stem, perf: { ...next.perf, activeStem: stem } };
+          next = emit(next, "stem.select", { stem }, { rowId: "tape.track.arm", t });
+          return fire(next, "tape.track.arm", `active stem → ${stem + 1}`, t);
         }
         const masterVolume = clamp01(next.masterVolume + dir * 0.0625);
         next = emit({ ...next, masterVolume }, "master.gain", { level: masterVolume }, { rowId: "volume.master", t });
