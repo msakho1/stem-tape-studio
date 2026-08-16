@@ -122,8 +122,8 @@ const HEADS_HANDOFF_S = 0.02;
  * Stateless soft-clip curve for the Head bus. No lookahead, no feedback, no
  * accumulating state — a pure transfer function, so it can never run away.
  */
-function softLimitCurve(n = 1024): Float32Array {
-  const c = new Float32Array(n);
+function softLimitCurve(n = 1024): Float32Array<ArrayBuffer> {
+  const c = new Float32Array(new ArrayBuffer(n * 4));
   for (let i = 0; i < n; i++) {
     const x = (i / (n - 1)) * 2 - 1;
     c[i] = Math.tanh(x * 1.4) / Math.tanh(1.4);
