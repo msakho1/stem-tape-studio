@@ -2635,11 +2635,12 @@ export class AudioEngine {
       enteredAtFrame: Math.round(this.ctx.currentTime * this.ctx.sampleRate),
     };
     this.preHeadsMutes = null;
-    this.applyAudibilityAll();
     // Equal-power handoff INSIDE the Vocal lane: the dry Vocal copy closes as
     // the Head sum opens. Drums, Bass and Instrument are untouched, the
     // transport is untouched, and nothing is stacked on top of anything.
+    // Scheduled FIRST so the audibility pass below cannot stomp the fade.
     this.crossfadeVocalToHeads(true);
+    this.applyAudibilityAll();
     return {
       ok: true,
       detail: `heads on — 4 heads over ${sourceName} at frames ${frames.map((f) => f.toFixed(0)).join(" / ")} (cycle ${cycleFrames.toFixed(0)} frames from ${cycleStartFrame.toFixed(0)}) — head 1 audible, heads 2-4 muted`,
@@ -2745,9 +2746,11 @@ export class AudioEngine {
         if (this.ctx) this.setGain(t.gain.gain, sn.level);
       }
     }
-    this.applyAudibilityAll();
     // Hand the Vocal lane back to its ordinary source at the shared frame.
+    // The ordinary Vocal voice was never stopped — only gated — so it is
+    // already AT that frame and nothing is restarted or relocated.
     this.crossfadeVocalToHeads(false);
+    this.applyAudibilityAll();
     return { ok: r.ok, detail: `${r.detail} — dry vocal resumed at shared frame ${sharedFrame.toFixed(0)}` };
   }
 
