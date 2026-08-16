@@ -32,6 +32,7 @@ import { controlBus, type ContinuousChannel } from "@/audio/controlBus";
 import { getAudioEngine } from "@/audio/engine";
 import { webMidi } from "@/audio/midi/webMidi";
 import { nativeMidiBridge } from "@/audio/midi/nativeBridge";
+import { sp1Surface, type Sp1SurfaceEvent } from "@/audio/midi/sp1Surface";
 import type { StemMidiEvent } from "@/audio/midi/contract";
 import { FaderSessionManager, type FaderIndex } from "@/input/faderSessions";
 import { installDiagnostics, publishArbiter, publishSurface, publishTapLatency } from "@/lib/diagnostics";
@@ -67,6 +68,9 @@ const FADER_KEYS: Record<string, { index: FaderIndex; dir: 1 | -1 }> = {
   KeyO: { index: 3, dir: 1 },
   KeyL: { index: 3, dir: -1 },
 };
+
+/** Synthetic pointer id for the physical SP-1 surface (never a real pointer). */
+const SP1_POINTER_ID = -1000;
 
 /** Value units per second while a fader key is held. */
 const KEY_FADER_RATE = 0.9;
@@ -533,7 +537,7 @@ export function useDeviceSurface() {
    * Nothing here talks to the cue system or the audio engine directly.
    */
   useEffect(() => {
-    const off = sp1Surface.subscribe((ev) => {
+    const off = sp1Surface.subscribe((ev: Sp1SurfaceEvent) => {
       if (!readyRef.current) return;
       if (ev.type === "battery") return; // telemetry only, never a musical control
       if (ev.type === "fader") {
@@ -549,8 +553,8 @@ export function useDeviceSurface() {
         dispatch({ type: "faderCommit", index: ev.index, value: ev.value, claimed: channel });
         return;
       }
-      if (ev.type === "down") engine.press(ev.control, `sp1:${ev.deviceId}`, ev.timestampMs);
-      else engine.release(ev.control, `sp1:${ev.deviceId}`, ev.timestampMs);
+      if (ev.type === "down") engine.press(ev.control, SP1_POINTER_ID, ev.timestampMs);
+      else engine.release(ev.control, SP1_POINTER_ID, ev.timestampMs);
       setGestureLog((prev) =>
         [
           {
