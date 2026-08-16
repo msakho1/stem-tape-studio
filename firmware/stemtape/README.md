@@ -34,11 +34,73 @@ tap/hold discrimination and no musical LED feedback on the device: the host
 
 Button down = velocity 127, button up = velocity 0.
 
-**Hardware limitation:** the track/PLAY buttons share one resistor ladder, as
-do the volume/rocker buttons. Only one button *per ladder* is reportable at a
-time (the 1+4 band is reserved for the DFU failsafe). Cross-ladder chords —
-e.g. PLAY + Volume +, FUNCTION + anything — are fully reportable because
-FUNCTION is a dedicated GPIO and the two ladders are independent.
+## Pinned baseline
+
+Every copied power, DFU, ADC-band, LED and GPIO constant comes from
+`firmware/src/main.c` at commit **a8dd127ba1d595e54f92503a0bd75eabca86334d**
+(2026-08-15 08:21:32 +0000). Each constant in `src/main.c` carries an inline
+`[looper a8dd127:<line>]` citation. The Tape Looper target is unchanged.
+
+## Shared-ladder decoding (bitmask, measured bands only)
+
+The SP-1 has no independent digital input per button: PLAY + Track 1–4 share
+SAADC AIN0, and Vol−/Vol+/rocker share AIN1. A chord is therefore a *single
+new voltage*, not two readings.
+
+The pinned looper revision contains exactly one measured chord band —
+Track 1 + Track 4, raw 1280–1390, the DFU failsafe. All other chord bands are
+**UNMEASURED**. M0 decodes into a bitmask against a measured-band table; an
+unmeasured reading emits **no MIDI**, holds that ladder's previous stable
+bits, and is surfaced on the CDC diagnostic stream for capture. Note On/Off
+transitions are derived by XOR-diffing the previous and current *stable*
+masks. FUNCTION (P0.27) is a real GPIO and stays independently detectable.
+
+Deliberate difference from the looper: `decode_tracks()` maps 950–1499 to
+Track 4 and everything ≥1500 to PLAY. M0 narrows the single-button bands to
+their measured neighbourhoods (T4 950–1279, PLAY 1600–2047; VOL+ 1600–2047)
+so that a chord voltage is never reported as an unrelated single button.
+
+### ADC bands still requiring physical measurement
+
+1. PLAY + each Track button (AIN0).
+2. Volume − + Volume + (AIN1).
+3. Rocker direction + each Volume button (AIN1).
+4. FUNCTION with every other control (verifies the GPIO stays independent).
+5. Press/release order in both directions for each chord.
+
+## CDC ACM diagnostics
+
+The composite device is **MIDI2 + CDC ACM, no UAC2**. When the serial port is
+opened with DTR asserted, M0 prints a banner and then one line **only when a
+ladder value changes** (±3-count hysteresis, ≥40 ms apart):
+
+```
+AIN0= 213 AIN1=   0 dec=T1           stable=T1           unmeas=0
+```
+
+fields: raw AIN0, raw AIN1, decoded mask (or `UNMEASURED`), debounced stable
+mask, cumulative unmeasured-reading count. No continuous flooding.
+
+## MIDI compatibility status
+
+Zephyr 4.3.1 implements only the USB MIDI 2.0 class (`CONFIG_USBD_MIDI2_CLASS`);
+**the USB-MIDI 1.0 alternate mode is not implemented in that revision.** M0
+sends MIDI 1.0 Channel Voice messages inside UMP message type 2, which hosts
+translate back to plain MIDI 1.0 events. CC123 + the full-state resend fire
+only from `ready_cb`, i.e. after the host has actually selected the
+operational alternate setting.
+
+Compatibility with the Stem Tape bridge is **unverified** until the artifact
+is flashed and checked on: macOS Audio MIDI Setup / MIDI Monitor, Chrome Web
+MIDI, and the native CoreMIDI wrapper on a physical iPhone or iPad.
+
+## Safety
+
+UAC2 is disabled in this diagnostic target only. The eMMC driver is not
+compiled in: no mount, no format, no write — stored Tape Looper audio is
+untouched. The Track 1 + Track 4 → UF2 bootloader recovery from the pinned
+revision is preserved and checked on the raw ADC code before decoding. No
+automatic flashing.
 
 ## Boot signature
 
