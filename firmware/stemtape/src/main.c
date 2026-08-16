@@ -62,6 +62,7 @@
 #include <sample_usbd.h>
 #include <soc.h>
 #include <string.h>
+#include <errno.h>
 
 #include "midi_protocol.h"
 
@@ -360,16 +361,65 @@ static uint32_t decode_bands(const struct band *tbl, size_t n, int v)
 	return MASK_UNMEASURED;   /* a real chord we have never measured */
 }
 
-/* --------------------------------------------------------- watchdog ------ */
+/* --------------------------------------------------------- watchdog ------
+ * The TE bootloader may already have STARTED the nRF52840 WDT before handing
+ * over. Once running, its CONFIG/CRV/RREN are locked: wdt_install_timeout()
+ * and wdt_setup() will fail and MUST NOT be assumed to have succeeded. We
+ * therefore (a) detect RUNSTATUS first, (b) record every return value, and
+ * (c) always feed exactly the reload channels that are ENABLED (RREN), which
+ * is the set the running configuration actually requires.
+ */
+static int  g_wdt_install_rc = -ENODEV;   /* -ENODEV = never attempted */
+static int  g_wdt_setup_rc   = -ENODEV;
+static bool g_wdt_pre_running;            /* started by the bootloader */
+static bool g_wdt_ours;                   /* started by this firmware  */
+
 static void feed_wdt(void)
 {
+	uint32_t en = NRF_WDT->RREN;
+	if (en == 0u) {
+		/* No channel enabled (WDT idle, or RREN not yet latched):
+		 * feeding all channels is harmless and keeps startup safe. */
+		en = 0xFFu;
+	}
 	for (int ch = 0; ch < 8; ch++)
-		NRF_WDT->RR[ch] = WDT_RR_RR_Reload;
+		if (en & (1u << ch))
+			NRF_WDT->RR[ch] = WDT_RR_RR_Reload;
 }
 static void wdt_prewarn(const struct device *dev, int channel_id)
 {
 	ARG_UNUSED(dev); ARG_UNUSED(channel_id);
 }
+
+/* Returns nothing: failure to configure the watchdog is never fatal, it is
+ * recorded and reported over the CDC diagnostic banner instead. */
+static void wdt_init(void)
+{
+	g_wdt_pre_running =
+		(NRF_WDT->RUNSTATUS & WDT_RUNSTATUS_RUNSTATUSWDT_Msk) != 0u;
+	feed_wdt();
+	if (g_wdt_pre_running)
+		return;                   /* locked configuration; feed only */
+
+	const struct device *wdt = DEVICE_DT_GET(WDT_NODE);
+	if (!device_is_ready(wdt))
+		return;
+
+	struct wdt_timeout_cfg cfg = {
+		.window.max = 4000, .callback = wdt_prewarn,
+	};
+	g_wdt_install_rc = wdt_install_timeout(wdt, &cfg);
+	if (g_wdt_install_rc < 0)
+		return;
+
+	g_wdt_setup_rc = wdt_setup(wdt, 0);
+	if (g_wdt_setup_rc < 0)
+		return;
+
+	g_wdt_ours = true;
+	feed_wdt();
+}
+
 
 /* ------------------------------------------------------------ USB MIDI ---
  * Zephyr 4.3.1 ships only the USB MIDI 2.0 class (CONFIG_USBD_MIDI2_CLASS);
@@ -511,6 +561,40 @@ static void enter_dfu(void)
 	for (;;) { }
 }
 
+/* ------------------------------------------------- EARLY DFU ESCAPE ------
+ * Runs immediately after controls_init(), BEFORE boot_signature(),
+ * sample_usbd_init_device(), usbd_enable() and every other USB call, so the
+ * recovery combo still reaches the UF2 bootloader even if USB init would
+ * later hang, fault or brick the visible behaviour of the image.
+ *
+ * Band 1280..1390 = the ONE measured Track1+Track4 chord
+ * [looper a8dd127:5115-5124]. Outside it we return instantly: no boot delay
+ * is added to a normal power-up. A failed ADC read (-1) is treated as
+ * "not held" and returns to normal startup.
+ */
+#define ESCAPE_LO       1280
+#define ESCAPE_HI       1390
+#define ESCAPE_HOLD_MS  1200
+#define ESCAPE_STEP_MS  10
+
+static void early_dfu_escape(void)
+{
+	int v = ladder_read(&adc_ladder[LAD_TRACKS]);
+	if (v < ESCAPE_LO || v > ESCAPE_HI)
+		return;                                   /* no boot delay */
+
+	int64_t t0 = k_uptime_get();
+	while (k_uptime_get() - t0 < ESCAPE_HOLD_MS) {
+		feed_wdt();                               /* all enabled channels */
+		k_msleep(ESCAPE_STEP_MS);
+		v = ladder_read(&adc_ladder[LAD_TRACKS]);
+		if (v < ESCAPE_LO || v > ESCAPE_HI)
+			return;                           /* released / read fail */
+	}
+	feed_wdt();
+	enter_dfu();                                      /* never returns */
+}
+
 /* --------------------------------------------------- Stem Tape boot sig -- */
 static void boot_signature(void)
 {
@@ -523,6 +607,7 @@ static void boot_signature(void)
 		k_msleep(110);
 	}
 }
+
 
 /* ----------------------------------------------------------- main loop --- */
 #define POLL_MS         5
@@ -567,17 +652,12 @@ int main(void)
 	track_all_off();
 	led_pwm_init();
 
-	const struct device *wdt = DEVICE_DT_GET(WDT_NODE);
-	if (device_is_ready(wdt)) {
-		wdt_install_timeout(wdt, &(struct wdt_timeout_cfg){
-			.window.max = 4000, .callback = wdt_prewarn,
-		});
-		wdt_setup(wdt, 0);
-	}
-	feed_wdt();
+	wdt_init();          /* detects a bootloader-started WDT, checks rc */
 
 	controls_init();
+	early_dfu_escape();  /* BEFORE boot_signature() and all USB init */
 	boot_signature();
+
 
 	if (device_is_ready(midi_dev)) {
 		usbd_midi_set_ops(midi_dev, &midi_ops);
@@ -688,7 +768,14 @@ int main(void)
 			if (!banner_done) {
 				printk("%s  diagnostic target: USB MIDI2 + CDC ACM, no UAC2, "
 				       "eMMC never touched\n", ST_FW_VERSION);
+				printk("wdt: pre_running=%d ours=%d install_rc=%d setup_rc=%d "
+				       "rren=0x%02x runstatus=%lu\n",
+				       (int)g_wdt_pre_running, (int)g_wdt_ours,
+				       g_wdt_install_rc, g_wdt_setup_rc,
+				       (unsigned)(NRF_WDT->RREN & 0xFFu),
+				       (unsigned long)NRF_WDT->RUNSTATUS);
 				printk("fields: AIN0 AIN1 decoded stable [unmeasured-count]\n");
+
 				banner_done = true;
 				diag_t = now;
 			} else if (changed && now - diag_t >= DIAG_MIN_GAP_MS) {

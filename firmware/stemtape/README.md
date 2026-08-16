@@ -126,3 +126,26 @@ with its SHA-256 in the job summary.
 
 Hold Track 1 + Track 4 while plugging in (or ≈1.2 s while running) to enter
 the UF2 bootloader, then copy the built image as usual for the SP-1.
+
+## Firmware-safety corrections (this revision)
+
+* **Early T1+T4 bootloader escape** — `early_dfu_escape()` runs immediately
+  after `controls_init()` and **before** `boot_signature()`,
+  `sample_usbd_init_device()`, `usbd_enable()` and every other USB call. It
+  reads raw AIN0; outside 1280..1390 it returns instantly (no added boot
+  delay); inside, the reading must stay in band continuously for 1200 ms
+  (re-sampled every 10 ms, all enabled watchdog reload channels fed) before
+  the existing `enter_dfu()` is called. Release or a failed ADC read returns
+  to normal startup. Recovery therefore works even if USB init would later
+  fail. The in-loop combo check is unchanged.
+* **Watchdog** — `wdt_init()` first reads `NRF_WDT->RUNSTATUS`. If the
+  bootloader already started the WDT the configuration is locked and only
+  feeding happens. Otherwise `wdt_install_timeout()` and `wdt_setup()` return
+  values are both captured (`g_wdt_install_rc`, `g_wdt_setup_rc`) and never
+  assumed to have succeeded. `feed_wdt()` reloads exactly the channels
+  enabled in `RREN` (all channels when none is enabled yet). The CDC
+  diagnostic banner prints `pre_running`, `ours`, both return codes, `RREN`
+  and `RUNSTATUS`.
+
+Physical approval still requires a debugger-connected SP-1 test proving the
+early T1+T4 recovery path before any stock device is used.

@@ -30,17 +30,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout project
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           path: project
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: '3.12'
 
       - name: Set up Zephyr v4.3.1 + SDK 0.17.4 (arm-zephyr-eabi only)
-        uses: zephyrproject-rtos/action-zephyr-setup@v1
+        uses: zephyrproject-rtos/action-zephyr-setup@be8136a8bba01580485d98b7ad2d32477c36a49a  # v1.0.15
         with:
           base-path: project
           app-path: firmware
@@ -81,7 +81,7 @@ jobs:
           sha256sum sp1_looper.bin | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Upload sp1_looper.bin
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: sp1_looper-bin
           path: project/build/zephyr/sp1_looper.bin
@@ -95,17 +95,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout project
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           path: project
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: '3.12'
 
       - name: Set up Zephyr v4.3.1 + SDK 0.17.4 (arm-zephyr-eabi only)
-        uses: zephyrproject-rtos/action-zephyr-setup@v1
+        uses: zephyrproject-rtos/action-zephyr-setup@be8136a8bba01580485d98b7ad2d32477c36a49a  # v1.0.15
         with:
           base-path: project
           app-path: firmware
@@ -120,8 +120,43 @@ jobs:
           test -f firmware/stemtape/CMakeLists.txt
           test -f firmware/stemtape/src/main.c
           test -f firmware/stemtape/app.overlay
+          test -f firmware/west.yml
           test -d firmware/boards/teenageengineering/stem_player
           west topdir
+
+      - name: Provenance preflight (clean tree, frozen manifest, toolchain versions)
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          mkdir -p audit
+          # FAIL CLOSED: no untracked-or-modified tracked file may enter a build
+          # whose artifact is used for approval decisions.
+          git status --porcelain=v1 --untracked-files=no > audit/git-status.txt
+          if [ -s audit/git-status.txt ]; then
+            echo "tracked Git tree is dirty:" >&2
+            cat audit/git-status.txt >&2
+            exit 1
+          fi
+          git rev-parse HEAD                > audit/git-commit.txt
+          git log -1 --stat                 > audit/git-log-head.txt
+          west manifest --freeze            > audit/west-manifest-freeze.yml
+          cp firmware/west.yml                audit/west.yml
+          ( cd zephyr && git rev-parse HEAD && cat VERSION ) > audit/zephyr-revision.txt
+          west list -f '{name} {path} {revision} {url}' > audit/west-modules.txt
+          {
+            echo "runner: $RUNNER_OS $RUNNER_ARCH"
+            echo "python: $(python3 --version)"
+            echo "west:   $(west --version)"
+            echo "ZEPHYR_SDK_INSTALL_DIR=${ZEPHYR_SDK_INSTALL_DIR:-unset}"
+            echo "sdk-version (workflow input): 0.17.4"
+            echo "actions:"
+            echo "  actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1"
+            echo "  actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0"
+            echo "  actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1"
+            echo "  zephyrproject-rtos/action-zephyr-setup@be8136a8bba01580485d98b7ad2d32477c36a49a  # v1.0.15"
+          } > audit/provenance.txt
+          cat audit/provenance.txt audit/zephyr-revision.txt
+
 
       - name: Build (west build -p always -b stem_player firmware/stemtape)
         working-directory: ${{ github.workspace }}/project
@@ -146,6 +181,7 @@ jobs:
           SIZE="$(cmv CMAKE_SIZE_UTIL)"
           NM="$(cmv CMAKE_NM)"
           READELF="$(cmv CMAKE_READELF)"
+          OBJCOPY="$(cmv CMAKE_OBJCOPY)"
 
           if [ -z "$OBJDUMP" ]; then
             echo "CMAKE_OBJDUMP missing from $CACHE" >&2
@@ -157,8 +193,9 @@ jobs:
           [ -n "$SIZE" ]    || SIZE="$BINDIR/${PREFIX}size"
           [ -n "$NM" ]      || NM="$BINDIR/${PREFIX}nm"
           [ -n "$READELF" ] || READELF="$BINDIR/${PREFIX}readelf"
+          [ -n "$OBJCOPY" ] || OBJCOPY="$BINDIR/${PREFIX}objcopy"
 
-          for t in "$SIZE" "$OBJDUMP" "$NM" "$READELF"; do
+          for t in "$SIZE" "$OBJDUMP" "$NM" "$READELF" "$OBJCOPY"; do
             if [ ! -x "$t" ]; then
               echo "resolved binutils executable not found or not executable: $t" >&2
               exit 1
@@ -170,6 +207,8 @@ jobs:
             echo "CMAKE_OBJDUMP   = $OBJDUMP"
             echo "CMAKE_NM        = $NM"
             echo "CMAKE_READELF   = $READELF"
+            echo "CMAKE_OBJCOPY   = $OBJCOPY"
+            echo "compiler        = $("$(cmv CMAKE_C_COMPILER)" --version | head -n1)"
           } | tee audit/tool-paths.txt
           {
             echo '### M0 resolved binutils paths'
@@ -192,13 +231,33 @@ jobs:
           "$READELF" -W -S -l -h "$B/zephyr.elf" > audit/readelf.txt
 
 
-      - name: Image assertions (origin, bounds, UICR, vectors, size)
+      - name: Assertion self-test (each assertion must fail when violated)
         working-directory: ${{ github.workspace }}/project
         run: |
           set -euo pipefail
+          python3 .github/scripts/m0_assertions_selftest.py | tee audit/assertions-selftest.txt
+          {
+            echo '### M0 assertion self-test'
+            echo '```text'
+            grep -E '^\[|^SELF-TEST' audit/assertions-selftest.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Image assertions (origin, bounds, storage, UICR, entry, vectors, size, BIN identity)
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          CACHE=build-stemtape/CMakeCache.txt
+          cmv() { sed -n "s|^$1:[^=]*=||p" "$CACHE" | tail -n1; }
+          READELF="$(cmv CMAKE_READELF)"; OBJCOPY="$(cmv CMAKE_OBJCOPY)"
+          OBJDUMP="$(cmv CMAKE_OBJDUMP)"; BINDIR="$(dirname "$OBJDUMP")"
+          PREFIX="$(basename "$OBJDUMP")"; PREFIX="${PREFIX%objdump}"
+          [ -n "$READELF" ] || READELF="$BINDIR/${PREFIX}readelf"
+          [ -n "$OBJCOPY" ] || OBJCOPY="$BINDIR/${PREFIX}objcopy"
           python3 .github/scripts/m0_image_assertions.py \
             build-stemtape/zephyr/zephyr.elf \
-            build-stemtape/zephyr/stemtape_m0.bin | tee audit/image-assertions.txt
+            build-stemtape/zephyr/stemtape_m0.bin \
+            --readelf "$READELF" --objcopy "$OBJCOPY" | tee audit/image-assertions.txt
           {
             echo '### M0 image assertions'
             echo '```text'
@@ -206,7 +265,7 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Persistent-memory and power audit report
+      - name: Persistent-memory and power audit report (descriptive)
         working-directory: ${{ github.workspace }}/project
         run: |
           set -euo pipefail
@@ -214,15 +273,26 @@ jobs:
             audit/nm.txt audit/persistence-audit.md > /dev/null
           echo "report written: audit/persistence-audit.md"
 
-      - name: Provenance, hashes and sources
+      - name: STRICT persistence safety gate (fail-closed)
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/m0_safety_gate.py \
+            audit/nm.txt audit/objdump-d.txt build-stemtape/zephyr/.config \
+            audit/safety-gate.md > audit/safety-gate.txt
+          {
+            echo '### M0 strict persistence safety gate'
+            echo '```text'
+            grep -E '^(PASS|FAIL|GATE)' audit/safety-gate.md
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Hashes and sources
         working-directory: ${{ github.workspace }}/project
         run: |
           set -euxo pipefail
           B=build-stemtape/zephyr
-          git rev-parse HEAD            > audit/git-commit.txt
-          git status --porcelain=v1     > audit/git-status.txt
           git diff                      > audit/git-diff.txt
-          git log -1 --stat             > audit/git-log-head.txt
           ( cd "$B" && sha256sum stemtape_m0.bin zephyr.bin zephyr.elf zephyr.hex 2>/dev/null || true ) \
             > audit/sha256.txt
           cp "$B/stemtape_m0.bin" "$B/zephyr.elf" "$B/zephyr.map" "$B/zephyr.dts" audit/
@@ -232,10 +302,15 @@ jobs:
           mkdir -p audit/src/stemtape audit/src/board audit/src/workflow
           cp -r firmware/stemtape/. audit/src/stemtape/
           cp -r firmware/boards/teenageengineering/stem_player/. audit/src/board/
+          cp firmware/west.yml audit/src/
           cp .github/workflows/firmware.yml audit/src/workflow/
-          cp .github/scripts/m0_image_assertions.py .github/scripts/m0_persistence_audit.py audit/src/workflow/
-          ls -l audit/stemtape_m0.bin
+          cp .github/scripts/m0_image_assertions.py \
+             .github/scripts/m0_assertions_selftest.py \
+             .github/scripts/m0_persistence_audit.py \
+             .github/scripts/m0_safety_gate.py audit/src/workflow/
+          stat -c '%n %s bytes' audit/stemtape_m0.bin | tee -a "$GITHUB_STEP_SUMMARY"
           cat audit/sha256.txt | tee -a "$GITHUB_STEP_SUMMARY"
+
 
       - name: Report USB interfaces in the M0 device
         working-directory: ${{ github.workspace }}/project
@@ -246,7 +321,7 @@ jobs:
           grep -A3 'usb_midi' build-stemtape/zephyr/zephyr.dts >> audit/usb-interfaces.txt || true
 
       - name: Upload stemtape-m0-audit
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: stemtape-m0-audit
           path: project/audit/**
