@@ -294,6 +294,7 @@ jobs:
           exit "$gate_rc"
 
       - name: Hashes and sources
+        if: ${{ always() }}
         working-directory: ${{ github.workspace }}/project
         run: |
           set -euxo pipefail
