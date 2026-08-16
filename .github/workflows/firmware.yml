@@ -19,10 +19,12 @@ on:
     paths:
       - 'firmware/**'
       - '.github/workflows/firmware.yml'
+      - '.github/scripts/**'
   pull_request:
     paths:
       - 'firmware/**'
       - '.github/workflows/firmware.yml'
+      - '.github/scripts/**'
   workflow_dispatch:
 
 jobs:
