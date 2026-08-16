@@ -1,3 +1,4 @@
+import { trace } from "@/diagnostics/trace";
 import { COMMAND_LOG_LIMIT, makeCommand, type AudioCommand, type AudioCommandType } from "@/audio/commands";
 import type { Control, TrackIndex } from "@/device/geometry";
 import { type Gesture } from "@/input/gestures";
@@ -273,7 +274,11 @@ function emit(
   payload: AudioCommand["payload"],
   opts: { rowId?: string; txnId?: string; t?: number } = {},
 ): SurfaceState {
-  return { ...state, commands: [...state.commands, makeCommand(type, payload, opts)].slice(-COMMAND_LOG_LIMIT) };
+  const command = makeCommand(type, payload, opts);
+  if (trace.enabled) {
+    trace.record("command.surface", `emit ${type}`, { id: command.id, payload: command.payload as unknown });
+  }
+  return { ...state, commands: [...state.commands, command].slice(-COMMAND_LOG_LIMIT) };
 }
 let firedSeq = 0;
 
