@@ -464,7 +464,7 @@ describe("report redaction and export", () => {
     expect(text).toContain("physical SP-1 LEDs: 10");
     expect(text).toContain("implemented in the audited M0 LED driver: 8 of 10");
     expect(text).toContain("WEB-ONLY INDICATORS — NOT PART OF THE 10-LED PHYSICAL FRAME");
-    expect(text).toContain("CC   20 (0x14) Fader 1");
+    expect(text).toContain("CC    20 (0x14) Fader 1");
     expect(text).toContain("[timing/clock missing]");
     expect(text).toContain("PHYSICAL LED COMPARISON (10 of 10)");
   });
