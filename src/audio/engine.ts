@@ -4177,6 +4177,12 @@ export class AudioEngine {
           const r = this.endGlobalScrub();
           return this.ack(cmd, r.ok ? "completed" : "rejected", r.detail);
         }
+        case "transport.scrub.speed": {
+          const raw = Math.round(Number(p["index"] ?? DEFAULT_SCRUB_SPEED_INDEX));
+          const index = (Math.min(GLOBAL_SCRUB_SPEEDS.length - 1, Math.max(0, raw)) as ScrubSpeedIndex);
+          const r = this.setGlobalScrubSpeed(index);
+          return this.ack(cmd, r.ok ? "completed" : "rejected", r.detail);
+        }
         case "transport.scrub": {
           if (!this.ctx) return this.ack(cmd, "rejected", "audio not unlocked");
           if (this.duration === 0) return this.ack(cmd, "rejected", "no stems decoded");
