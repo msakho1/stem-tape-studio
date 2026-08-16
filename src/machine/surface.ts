@@ -10,6 +10,13 @@ import { type Gesture } from "@/input/gestures";
 export const TRACK_SELECT_ARM_MS = 1200;
 /** Addendum §5 — duration of the four-light FX latch confirmation flash. */
 export const FX_LATCH_FLASH_MS = 220;
+/**
+ * Heads-entry REJECTION: all four Track LEDs flash twice rapidly. Deliberately
+ * distinct from the single simultaneous FX-latch flash above.
+ */
+export const HEADS_REJECT_FLASH_MS = 420;
+/** Soft-takeover window: a fader picks the stored value up within this margin. */
+export const PICKUP_WINDOW = 0.04;
 import { V26_ROW_BY_ID } from "@/machine/v26map";
 import type { PerfIntent } from "@/machine/chordArbiter";
 import {
@@ -77,6 +84,13 @@ export interface TrackSlice {
   headLatched: boolean;
   /** Heads v2: this head is repeating a captured loop. */
   headLoop: { active: boolean; bars: number };
+  /**
+   * Soft takeover. Head faders are a SEPARATE contextual value set, so the
+   * physical fader position at the moment of entry/exit must not jump a level.
+   * The fader is inert until it crosses (or reaches) the stored value.
+   */
+  headPickup: boolean;
+  volumePickup: boolean;
   /** PLAY + Track latching solo (§2.1). Independent of momentary audition. */
   soloLatched: boolean;
   /**
@@ -184,6 +198,11 @@ export interface SurfaceState {
    * arbiter turns this into a short four-light confirmation flash.
    */
   fxFlashAt: number | null;
+  /**
+   * `performance.now()` of the last REJECTED Heads entry (no decoded Vocal).
+   * The LED arbiter turns this into a rapid double flash on all four Tracks.
+   */
+  headsRejectFlashAt: number | null;
   /** Per-lane shuttle direction (FUNCTION + Track held + rocker). 0 = idle. */
   laneScrub: (0 | 1 | -1)[];
 
@@ -269,6 +288,8 @@ function track(stem: TrackSlice["stem"], volume: number): TrackSlice {
     headLevel: 0.8,
     headLatched: false,
     headLoop: { active: false, bars: 1 },
+    headPickup: false,
+    volumePickup: false,
     soloLatched: false,
     laneReverse: false,
     laneLoop: { active: false, bars: 1 },
@@ -374,6 +395,7 @@ export function initialSurfaceState(): SurfaceState {
     scrubSpeed: DEFAULT_SCRUB_SPEED_INDEX as ScrubSpeedIndex,
     scrubLatched: false,
     fxFlashAt: null,
+    headsRejectFlashAt: null,
     laneScrub: [0, 0, 0, 0],
     auditionChord: [],
 
@@ -630,10 +652,9 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
           );
         }
         if (!fn && g.count === 1) {
-          // Addendum §4: a latched shuttle is a running operation — the bare
-          // PLAY tap ends it first and leaves the transport exactly where the
-          // hand-off lands, instead of toggling play/stop underneath it.
-          if (next.scrubLatched) return releaseScrubLatch(next, t);
+          // Ownership (§0): PLAY owns the LATCHED GLOBAL LOOP only. A latched
+          // shuttle is owned exclusively by the bare FUNCTION tap, so PLAY must
+          // never substitute for that release gesture.
           if (next.globalLoop.latched) {
             // A latched global loop owns the bare PLAY tap: the first tap
             // releases the loop and the transport keeps running.
@@ -657,7 +678,14 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
         //   global loop held (§2)         → LATCH it
         //   global loop latched (§2)      → RELEASE it
         //   otherwise                     → ARM active-track selection
-        if (next.globalScrub !== 0 && !next.scrubLatched) {
+        // §0 — the scrub latch is released ONLY by a completed BARE FUNCTION
+        // tap. Any other control joining the chord (Track for FX, Volume for
+        // shuttle speed, PLAY) disqualifies the release; the rocker is the
+        // shuttle's own control and therefore does not count as "joining".
+        const bareFunctionTap = next.pressed.every(
+          (x) => x === "function" || x === "rocker-fwd" || x === "rocker-rwd",
+        );
+        if (next.globalScrub !== 0 && !next.scrubLatched && bareFunctionTap) {
           next = { ...next, scrubLatched: true };
           return fire(
             next,
@@ -666,7 +694,10 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
             t,
           );
         }
-        if (next.scrubLatched) return releaseScrubLatch(next, t);
+        if (next.scrubLatched) {
+          if (!bareFunctionTap) return next;
+          return releaseScrubLatch(next, t);
+        }
         if (next.globalLoop.active && !next.globalLoop.latched) {
           next = { ...next, globalLoop: { ...next.globalLoop, latched: true } };
           return fire(next, "tape.loop.global.latch", "global loop latched — PLAY may be released", t);
@@ -747,23 +778,15 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
             return fire(next, "heads.latch", `head ${i + 1} independent playback ${latched ? "latched" : "released"} — transport untouched`, t);
           }
           if (g.count === 2) {
-            // FUNCTION + double-tap is handled by the UNIVERSAL lane layer
-            // above (lane.reverse); in heads mode the engine routes it to the
-            // head. A bare double-tap captures this head's loop.
-            const active = !slice.headLoop.active;
-            next = {
-              ...next,
-              tracks: setTrack(next, i, { headLoop: { ...slice.headLoop, active }, headLatched: active ? true : slice.headLatched }),
-            };
-            next = emit(next, "heads.loop.capture", { head: i, bars: slice.headLoop.bars }, { rowId: "heads.loop", t });
-            return fire(next, "heads.loop", `head ${i + 1} ${active ? `captured a ${slice.headLoop.bars} bar loop` : "loop released"}`, t);
+            // Track double-tap REVERSES this head, atomically. It must not
+            // also toggle mute: the ×1 mute branch below is never reached
+            // because recognition is deferred until the gesture is known.
+            const reverse = !slice.headReverse;
+            next = { ...next, tracks: setTrack(next, i, { headReverse: reverse }) };
+            next = emit(next, "heads.reverse", { head: i, reverse }, { rowId: "heads.reverse", t });
+            return fire(next, "heads.reverse", `head ${i + 1} → ${reverse ? "REVERSE" : "forward"} (mute unchanged)`, t);
           }
-          // ×1: release the loop if one is running, otherwise mute / unmute.
-          if (slice.headLoop.active) {
-            next = { ...next, tracks: setTrack(next, i, { headLoop: { ...slice.headLoop, active: false } }) };
-            next = emit(next, "heads.mute", { head: i, muted: slice.headMuted }, { rowId: "heads.loop", t });
-            return fire(next, "heads.loop", `head ${i + 1} loop released — back into normal playback`, t);
-          }
+          // ×1: mute / unmute this head. Muted heads keep advancing.
           const muted = !slice.headMuted;
           next = { ...next, tracks: setTrack(next, i, { headMuted: muted }) };
           next = emit(next, "heads.mute", { head: i, muted }, { rowId: "heads.mute", t });
@@ -1160,7 +1183,7 @@ export function setTrackContent(state: SurfaceState, i: number, content: TrackCo
  */
 export function applyHeadsFeedback(
   state: SurfaceState,
-  patch: { active?: boolean; source?: number | null; printedTrack?: number },
+  patch: { active?: boolean; source?: number | null; printedTrack?: number; rejectedAt?: number },
 ): SurfaceState {
   let next: SurfaceState = { ...state };
   if (patch.active !== undefined && patch.active !== state.headsMode) {
@@ -1176,9 +1199,13 @@ export function applyHeadsFeedback(
         headLevel: 0.8,
         headLatched: false,
         headLoop: { active: false, bars: 1 },
+        headPickup: true,
+        volumePickup: true,
       };
     next = { ...next, headsMode: patch.active, tracks, headsSource: patch.active ? next.headsSource : null };
   }
+  if (patch.active === true) next = { ...next, headsSource: 0, headsRejectFlashAt: null };
+  if (patch.rejectedAt !== undefined) next = { ...next, headsRejectFlashAt: patch.rejectedAt, headsMode: false };
   if (patch.source !== undefined) next = { ...next, headsSource: patch.source };
   if (patch.printedTrack !== undefined) next = { ...next, tracks: setTrack(next, patch.printedTrack, { content: "loaded" }) };
   return next;
@@ -1210,8 +1237,13 @@ export function applyFader(
       return fire(next, "heads.scrub", `head ${index + 1} scrubbed to ${(value * 100).toFixed(1)}% of the cycle`, t);
     }
     // Releasing FUNCTION returns faders to level control with the STORED level.
+    const slice = state.tracks[index]!;
+    if (slice.headPickup && Math.abs(value - slice.headLevel) > PICKUP_WINDOW) {
+      // Not picked up yet: the head level is untouched and NOTHING is emitted.
+      return state;
+    }
     const next = emit(
-      { ...state, tracks: setTrack(state, index, { headLevel: value }) },
+      { ...state, tracks: setTrack(state, index, { headLevel: value, headPickup: false }) },
       "heads.level",
       { head: index, level: value },
       { rowId: "heads.level", t },
@@ -1249,9 +1281,11 @@ export function applyFader(
 
   // Commit value MUST equal the last audible preview value pushed by the
   // continuous control bus during the drag — same number, no re-derivation.
+  const vslice = state.tracks[index]!;
+  if (vslice.volumePickup && Math.abs(value - vslice.volume) > PICKUP_WINDOW) return state;
   return fire(
     emit(
-      { ...state, tracks: setTrack(state, index, { volume: value }) },
+      { ...state, tracks: setTrack(state, index, { volume: value, volumePickup: false }) },
       "track.gain",
       { track: index, level: value },
       { rowId: "fader.trackVolume", t },
@@ -1445,6 +1479,12 @@ export function deriveLeds(
   // back to the normal arbitration.
   const flashing =
     state.fxFlashAt != null && now - state.fxFlashAt >= 0 && now - state.fxFlashAt < FX_LATCH_FLASH_MS;
+  // Heads entry refused (no decoded Vocal): a rapid DOUBLE flash, above the
+  // single FX-latch flash and every other track pattern.
+  const rejecting =
+    state.headsRejectFlashAt != null &&
+    now - state.headsRejectFlashAt >= 0 &&
+    now - state.headsRejectFlashAt < HEADS_REJECT_FLASH_MS;
 
   state.tracks.forEach((track, i) => {
     const id = `track-led-${i + 1}` as LedId;
@@ -1453,6 +1493,12 @@ export function deriveLeds(
       frame[id] = { pattern: "dark", reason: "powered off (FUNCTION hold)", priority: 100 };
     } else if (state.grid.rejected) {
       frame[id] = { pattern: "blink", reason: "grid far off — all four blink, nothing moves (v2.6)", priority: 98 };
+    } else if (rejecting) {
+      frame[id] = {
+        pattern: "blink",
+        reason: "heads refused — no decoded Vocal stem (two rapid flashes)",
+        priority: LED_PRIORITY.momentaryFx + 2,
+      };
     } else if (flashing) {
       frame[id] = { pattern: "blink", reason: "FX latch confirmed — four-light flash", priority: LED_PRIORITY.momentaryFx + 1 };
     } else if (state.perf.fxOverlay) {

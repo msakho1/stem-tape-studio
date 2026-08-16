@@ -215,3 +215,51 @@ export function peakOf(channels: Float32Array[]): number {
   for (const ch of channels) for (let i = 0; i < ch.length; i++) p = Math.max(p, Math.abs(ch[i]!));
   return p;
 }
+
+// ---------------------------------------------------------------------------
+// Performance-safe Heads (Vocal-only model)
+// ---------------------------------------------------------------------------
+
+/** Supporting Heads are capped at this LINEAR gain relative to the focused Head. */
+export const SUPPORT_HEAD_CAP = 0.35;
+
+/**
+ * Exact quarter-cycle placement of the four Heads, in SOURCE FRAMES.
+ *
+ * `p` is the shared transport frame at entry, `s` the cycle start frame and
+ * `l` the cycle length in frames. Head 1 lands exactly on the frame the normal
+ * Vocal lane is producing; Heads 2-4 are +25 / +50 / +75 % of the cycle,
+ * wrapped inside it. Nothing is rounded to seconds, beats or React state.
+ */
+export function quarterCycleHeadFrames(p: number, s: number, l: number): number[] {
+  const len = Math.max(1, l);
+  return [0, 0.25, 0.5, 0.75].map((f) => s + mod(p - s + f * len, len));
+}
+
+export interface HeadMixInput {
+  /** Requested fader gain of each Head, 0..1. */
+  level: number;
+  muted: boolean;
+}
+
+/**
+ * Bounded multi-Head gain hierarchy.
+ *
+ * One focused Head keeps its full requested gain. Every other AUDIBLE Head is
+ * capped at `SUPPORT_HEAD_CAP` relative to the focused Head's gain. The summed
+ * energy `sqrt(Σ g²)` is then normalised to at most 1 so four Heads can never
+ * become four equal-volume lead vocals, and the master is never touched.
+ */
+export function headMixGains(heads: readonly HeadMixInput[], focus: number): number[] {
+  const focused = Math.max(0, Math.min(heads.length - 1, focus));
+  const focusGain = heads[focused] && !heads[focused]!.muted ? Math.max(0, Math.min(1, heads[focused]!.level)) : 0;
+  const raw = heads.map((h, i) => {
+    if (h.muted) return 0;
+    const want = Math.max(0, Math.min(1, h.level));
+    if (i === focused) return want;
+    return Math.min(want, SUPPORT_HEAD_CAP * (focusGain > 0 ? focusGain : want));
+  });
+  const energy = Math.sqrt(raw.reduce((a, g) => a + g * g, 0));
+  if (energy > 1) return raw.map((g) => g / energy);
+  return raw;
+}

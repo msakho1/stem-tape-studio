@@ -1,16 +1,16 @@
 /**
- * Defect 1 — Heads Mode path isolation.
+ * Heads Mode path isolation — Vocal-only model.
  *
  * Asserted against the recording Web Audio mock, so the claims are about the
  * GRAPH and the SCHEDULE, not about reducer flags:
  *
- *   - exactly two edges reach the master: normalBus→normalTap and
- *     headsBus→headsTap;
  *   - every stem's audible chain terminates on the normal bus, never on master;
- *   - while heads is active the normal bus gate is EXACTLY 0 after the fade,
- *     while its stem sources are still running (the hidden song timeline must
- *     keep advancing);
- *   - exiting reopens the normal bus and closes the heads bus.
+ *   - the Head sum re-enters the graph at the VOCAL LANE input, so Heads obey
+ *     the Vocal stem's mute, solo, fader and FX chain;
+ *   - entering Heads closes the dry Vocal stem gate to 0 and opens the Head
+ *     injection to 1, while the normal bus itself stays wide open so Drums,
+ *     Bass and Instrument keep sounding and the song timeline keeps advancing;
+ *   - exiting restores the dry Vocal and closes the injection.
  */
 
 import { describe, expect, it } from "vitest";
@@ -49,26 +49,34 @@ function priv(engine: AudioEngine) {
     headsBus: MockGain;
     normalTap: MockNode;
     headsTap: MockNode;
-    tracks: { analyser: MockNode; sources: unknown[] }[];
+    headsLimiter: MockNode;
+    headsInject: MockGain;
+    tracks: { analyser: MockNode; input: MockNode; stemGate: MockGain; sources: unknown[] }[];
   };
 }
 
 describe("heads / normal bus isolation", () => {
-  it("routes every stem through the normal bus and nothing else into master", async () => {
+  it("keeps every stem on the normal bus and injects the Head sum at the Vocal lane", async () => {
     const { engine } = await rig();
     const p = priv(engine);
-    // Only the two taps feed the master.
-    const intoMaster = [p.normalTap, p.headsTap].filter((n) => n.outs.includes(p.master));
-    expect(intoMaster).toHaveLength(2);
+    // Only the normal tap reaches the master; the heads tap is a lane-level
+    // send, not a second path to the output.
+    expect(p.normalTap.outs).toContain(p.master);
+    expect(p.headsTap.outs).not.toContain(p.master);
     expect(p.normalBus.outs).toEqual([p.normalTap]);
     expect(p.headsBus.outs).toEqual([p.headsTap]);
+    // Head sum -> soft limiter -> injection gate -> VOCAL lane input.
+    expect(p.headsTap.outs).toContain(p.headsLimiter);
+    expect(p.headsLimiter.outs).toContain(p.headsInject);
+    expect(p.headsInject.outs).toContain(p.tracks[0]!.input);
+    expect(p.headsInject.gain.value).toBe(0);
     for (const t of p.tracks) {
       expect(t.analyser.outs).toContain(p.normalBus);
       expect(t.analyser.outs).not.toContain(p.master);
     }
   });
 
-  it("closes the normal bus to exactly zero while heads is active, and reopens on exit", async () => {
+  it("replaces only the Vocal stem while heads is active, and restores it on exit", async () => {
     const { engine, ctx, advance } = await rig();
     const p = priv(engine);
     engine.execute(cmd("transport.play"));
@@ -79,18 +87,22 @@ describe("heads / normal bus isolation", () => {
     expect(r.ok).toBe(true);
 
     const settled = ctx.currentTime + 0.06;
-    expect(p.normalBus.gain.at(settled)).toBeCloseTo(0, 6);
-    expect(p.headsBus.gain.at(settled)).toBeCloseTo(1, 6);
+    // Vocal is replaced, not stacked: dry gate closed, injection open.
+    expect(p.tracks[0]!.stemGate.gain.at(settled)).toBeCloseTo(0, 6);
+    expect(p.headsInject.gain.at(settled)).toBeCloseTo(1, 6);
+    // The other three stems are untouched, and the normal bus is never gated.
+    expect(p.normalBus.gain.at(settled)).toBeCloseTo(1, 6);
+    for (let i = 1; i < 4; i++) expect(p.tracks[i]!.stemGate.gain.at(settled)).toBeCloseTo(1, 6);
 
-    // The stem sources are STILL RUNNING — silence comes from the gate only,
-    // so the hidden song timeline keeps advancing underneath heads.
+    // The stem sources are STILL RUNNING — the hidden song timeline keeps
+    // advancing underneath heads.
     expect(p.tracks.every((t) => t.sources.length > 0)).toBe(true);
     advance(2.0);
     expect(engine.status().position).toBeGreaterThan(posBefore + 1.9);
 
     engine.exitHeadsMode();
     const after = ctx.currentTime + 0.06;
-    expect(p.normalBus.gain.at(after)).toBeCloseTo(1, 6);
-    expect(p.headsBus.gain.at(after)).toBeCloseTo(0, 6);
+    expect(p.tracks[0]!.stemGate.gain.at(after)).toBeCloseTo(1, 6);
+    expect(p.headsInject.gain.at(after)).toBeCloseTo(0, 6);
   });
 });

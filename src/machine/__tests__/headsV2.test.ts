@@ -6,7 +6,7 @@
  * tests pin the CONTROL contract at the reducer and gesture level:
  *
  *   tap                       → heads.mute (this head only)
- *   double-tap                → heads.loop.capture / release
+ *   double-tap                → heads.reverse (mute untouched)
  *   triple-tap                → heads.latch (independent playback)
  *   hold                      → heads.play.hold with the held mask
  *   FUNCTION + double-tap     → lane.reverse (universal lane layer → head)
@@ -87,18 +87,21 @@ describe("Heads v2 · Track button table", () => {
     expect(types(s, n)).not.toContain("heads.mute");
   });
 
-  it("×2 captures the head's own loop and a following ×1 releases it", () => {
+  it("\u00d72 reverses that head atomically and never toggles its mute", () => {
     let s = headsOn();
-    let n = s.commands.length;
+    const n = s.commands.length;
     s = applyGesture(s, tap("track-button-1", 2));
-    expect(s.tracks[0]!.headLoop).toEqual({ active: true, bars: 1 });
-    expect(s.commands.slice(n).find((c) => c.type === "heads.loop.capture")!.payload).toMatchObject({ head: 0, bars: 1 });
-
-    n = s.commands.length;
-    s = applyGesture(s, tap("track-button-1"));
-    expect(s.tracks[0]!.headLoop.active).toBe(false);
-    // A loop release must NOT mute the head as a side effect.
+    expect(s.tracks[0]!.headReverse).toBe(true);
     expect(s.tracks[0]!.headMuted).toBe(false);
+    expect(s.commands.slice(n).find((c) => c.type === "heads.reverse")!.payload).toMatchObject({ head: 0, reverse: true });
+    expect(types(s, n)).not.toContain("heads.mute");
+
+    // A second \u00d72 puts it back forward, still without muting.
+    const m = s.commands.length;
+    s = applyGesture(s, tap("track-button-1", 2));
+    expect(s.tracks[0]!.headReverse).toBe(false);
+    expect(s.tracks[0]!.headMuted).toBe(false);
+    expect(types(s, m)).not.toContain("heads.mute");
   });
 
   it("hold plays exactly the held heads (heads.play.hold), not the tape audition", () => {

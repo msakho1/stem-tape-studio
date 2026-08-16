@@ -15,12 +15,18 @@
  *  - A head with no loop stops at the end of its source rather than wrapping.
  */
 
+import { headMixGains } from "./heads";
+
 /**
  * Entry descriptor: which stem the four heads read, and its display name.
  */
 export interface HeadsEntry {
   source: number;
   sourceName: string;
+  /** Exact quarter-cycle start positions (seconds) for the four Heads. */
+  positions?: number[];
+  /** Entry mute mask. Performance-safe entry mutes Heads 2-4. */
+  mutedMask?: boolean[];
 }
 
 
@@ -40,6 +46,8 @@ export interface HeadLaneSnapshot {
   scrubCandidate: number | null;
   /** True while the head has run past its source end with no loop. */
   ended: boolean;
+  /** The ONE foreground Head; the others are capped supporting layers. */
+  focused: boolean;
 }
 
 interface LaneRuntime {
@@ -82,6 +90,8 @@ export interface HeadLaneHost {
 
 
 const FADE_S = 0.008;
+/** Focus / mute / normalisation ramp, seconds (spec: 15-25 ms). */
+const MIX_RAMP_S = 0.02;
 const GRAIN_S = 0.07;
 
 function mod(x: number, n: number): number {
@@ -141,6 +151,11 @@ export class HeadLanes {
   source: number | null = null;
   sourceName: string | null = null;
   private lanes: LaneRuntime[] = [0, 1, 2, 3].map(freshLane);
+  /**
+   * The ONE foreground Head. Only this Head may use its full requested fader
+   * gain; every other audible Head is a capped supporting layer.
+   */
+  focused = 0;
   private bus: GainNode | null = null;
   private tap: AnalyserNode | null = null;
   private scrubbing: (boolean | null)[] = [null, null, null, null];
@@ -195,12 +210,18 @@ export class HeadLanes {
     this.tap = tap;
     // POSITION FIRST: four DISTINCT read positions inside the one source,
     // written before any moving/latch/anchor state exists.
-    const spread = distributeHeads(buf.duration, Math.max(0, this.host.songPosition()));
+    const spread =
+      entry.positions && entry.positions.length === 4
+        ? entry.positions.slice()
+        : distributeHeads(buf.duration, Math.max(0, this.host.songPosition()));
+    this.focused = 0;
     this.lanes = [0, 1, 2, 3].map((i) => {
       const l = freshLane();
       l.posS = spread[i]!;
-      // While the tape is rolling all four heads sound at once — that layering
-      // of four moments of the same stem IS heads mode. Paused: parked, silent.
+      // Performance-safe entry: every Head advances with the tape, but only
+      // Head 1 is audible. Muted Heads keep moving, so unmuting one later does
+      // not restart it.
+      l.muted = entry.mutedMask ? entry.mutedMask[i] === true : false;
       l.latched = entry.playing === true;
       return l;
     });
@@ -234,6 +255,7 @@ export class HeadLanes {
     this.source = null;
     this.sourceName = null;
     this.lanes = [0, 1, 2, 3].map(freshLane);
+    this.focused = 0;
     this.note("heads.exit", -1, "heads off — heads bus disconnected, stem mapping restored");
     return { ok: true, detail: "heads off — four readers stopped, transport untouched" };
   }
@@ -314,8 +336,27 @@ export class HeadLanes {
   private audible(i: number): boolean {
     const l = this.lanes[i]!;
     const anyHeld = this.lanes.some((x) => x.held);
-    if (anyHeld) return l.held; // momentary group solo — hear exactly that group
+    if (anyHeld) return l.held && !l.muted; // momentary group solo
     return l.latched && !l.muted;
+  }
+
+  /**
+   * Bounded Head gains: focused Head at full requested level, every other
+   * audible Head capped, then the whole sum energy-normalised.
+   */
+  mixGains(): number[] {
+    return headMixGains(
+      this.lanes.map((l, i) => ({ level: l.level, muted: !this.audible(i) })),
+      this.focused,
+    );
+  }
+
+  /** Make Head `i` the foreground Head. */
+  setFocus(i: number, why: string) {
+    if (i < 0 || i > 3 || this.focused === i) return;
+    this.focused = i;
+    this.note("heads.focus", i, `head ${i + 1} focused (${why})`);
+    this.reconcile("focus");
   }
 
   private shouldMove(i: number): boolean {
@@ -350,7 +391,7 @@ export class HeadLanes {
       offset = Math.min(Math.max(node.loopStart, offset), node.loopEnd - 1e-4);
     }
     node.connect(gain);
-    const level = this.audible(i) ? l.level : 0;
+    const level = this.mixGains()[i] ?? 0;
     gain.gain.setValueAtTime(0, at);
     gain.gain.linearRampToValueAtTime(level, at + FADE_S);
     node.start(at, Math.min(Math.max(0, offset), Math.max(0, src.duration - 1e-4)));
@@ -400,10 +441,10 @@ export class HeadLanes {
       else if (!this.shouldMove(i) && l.moving) this.stopLane(i, why);
       const v = l.voice;
       if (v && ctx) {
-        const target = this.scrubbing[i] ? 0 : this.audible(i) ? l.level : 0;
+        const target = this.scrubbing[i] ? 0 : (this.mixGains()[i] ?? 0);
         v.gain.gain.cancelScheduledValues(ctx.currentTime);
         v.gain.gain.setValueAtTime(v.gain.gain.value, ctx.currentTime);
-        v.gain.gain.linearRampToValueAtTime(target, ctx.currentTime + FADE_S);
+        v.gain.gain.linearRampToValueAtTime(target, ctx.currentTime + MIX_RAMP_S);
       }
     }
   }
@@ -451,6 +492,9 @@ export class HeadLanes {
       return { ok: true, detail: `head ${i + 1} loop released — back to straight playback from ${l.posS.toFixed(3)}s` };
     }
     l.muted = !l.muted;
+    // Unmuting a Head brings it to the foreground; the previous focus becomes
+    // a capped supporting layer.
+    if (!l.muted) this.focused = i;
     this.reconcile("mute");
     return { ok: true, detail: `head ${i + 1} ${l.muted ? "muted" : "unmuted"}` };
   }
@@ -530,6 +574,7 @@ export class HeadLanes {
   beginScrub(i: number): { ok: boolean; detail: string } {
     if (!this.active) return { ok: false, detail: "heads mode is not active" };
     this.scrubbing[i] = true;
+    this.focused = i; // scrubbing a Head focuses it
     this.lanes[i]!.posS = this.position(i);
     this.reconcile("scrub start");
     this.note("heads.scrub.start", i, `head ${i + 1} scrub armed at ${this.lanes[i]!.posS.toFixed(3)}s`);
@@ -608,6 +653,7 @@ export class HeadLanes {
     const l = this.lanes[i];
     if (!l) return;
     l.level = Math.max(0, Math.min(1, level));
+    this.focused = i; // moving a Head's fader focuses it
     this.reconcile("level");
   }
 
@@ -624,6 +670,7 @@ export class HeadLanes {
       loop: l.loop ? { ...l.loop } : null,
       scrubCandidate: l.scrubCandidate,
       ended: l.ended,
+      focused: this.focused === i,
     }));
   }
 

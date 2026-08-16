@@ -95,6 +95,7 @@ import {
   type HeadsState,
   type SourceCandidate,
   headReadPosition,
+  quarterCycleHeadFrames,
 } from "./heads";
 import { HeadLanes, type HeadLaneSnapshot } from "./headLanes";
 import {
@@ -112,6 +113,24 @@ export type EnginePreference = "node" | "worklet";
 
 export const LOOKAHEAD_S = 0.08;
 export const RAMP_TAU = 0.008;
+/** Heads Mode always reads the VOCAL stem — lane 0 by construction. */
+export const VOCAL_LANE = 0;
+/** Entry/exit Vocal <-> Heads handoff, seconds (spec: 15-25 ms). */
+const HEADS_HANDOFF_S = 0.02;
+
+/**
+ * Stateless soft-clip curve for the Head bus. No lookahead, no feedback, no
+ * accumulating state — a pure transfer function, so it can never run away.
+ */
+function softLimitCurve(n = 1024): Float32Array<ArrayBuffer> {
+  const c = new Float32Array(new ArrayBuffer(n * 4));
+  for (let i = 0; i < n; i++) {
+    const x = (i / (n - 1)) * 2 - 1;
+    c[i] = Math.tanh(x * 1.4) / Math.tanh(1.4);
+  }
+  return c;
+}
+
 /** How far ahead the seam scheduler commits work, seconds. */
 export const SEAM_LOOKAHEAD_S = 0.25;
 const SCHEDULER_INTERVAL_MS = 25;
@@ -560,12 +579,23 @@ export class AudioEngine {
     this.normalBus.connect(this.normalTap);
     this.normalTap.connect(this.master);
 
+    // Heads REPLACE the Vocal source at the Vocal lane's routing point: the
+    // heads bus is soft-limited, gated and injected at track 0's `input`, so
+    // Heads obey the Vocal stem's stored mute/solo/fader and its FX rack, then
+    // the global rack and master — exactly like the ordinary Vocal copy. It is
+    // NOT a hidden fifth mixer lane.
     this.headsBus = ctx.createGain();
-    this.headsBus.gain.value = 0;
+    this.headsBus.gain.value = 1;
     this.headsTap = ctx.createAnalyser();
     this.headsTap.fftSize = 1024;
     this.headsBus.connect(this.headsTap);
-    this.headsTap.connect(this.master);
+    this.headsLimiter = ctx.createWaveShaper();
+    this.headsLimiter.curve = softLimitCurve();
+    this.headsLimiter.oversample = "2x";
+    this.headsInject = ctx.createGain();
+    this.headsInject.gain.value = 0;
+    this.headsTap.connect(this.headsLimiter);
+    this.headsLimiter.connect(this.headsInject);
 
 
     this.tracks = [0, 1, 2, 3].map((i) => {
@@ -658,6 +688,11 @@ export class AudioEngine {
         nodeReleased: false,
       } satisfies TrackRuntime;
     });
+
+    // The Head sum enters the VOCAL lane downstream of its mute/solo gate, so
+    // the ordinary Vocal copy can be closed for the whole of Heads mode while
+    // the Heads themselves still ride that lane's FX, fader and solo.
+    this.headsInject?.connect(this.tracks[VOCAL_LANE]!.input);
   }
 
   get ready() {
@@ -1730,9 +1765,14 @@ export class AudioEngine {
     // is silenced at the gate instead.
     // Heads no longer ride the per-stem chains — they have their own bus into
     // the master — so the lane FX gate follows the stem alone.
-    t.fxRack?.setInputOpen(stemAudible || cued);
-    this.setGain(t.stemGate.gain, stemAudible ? 1 : 0);
+    // Heads REPLACE the Vocal lane's own copy: while Heads is active the stem
+    // gate is closed and the Head sum, injected downstream of it, obeys the
+    // very same stored mute/solo verdict through `headsInject`.
+    const headsOwn = this.heads.active && id === VOCAL_LANE;
+    t.fxRack?.setInputOpen(stemAudible || cued || headsOwn);
+    this.setGain(t.stemGate.gain, headsOwn ? 0 : stemAudible ? 1 : 0);
     this.setGain(t.soloGain.gain, cued || audibleBySolo ? 1 : 0);
+    if (headsOwn && this.headsInject) this.setGain(this.headsInject.gain, stemAudible ? 1 : 0);
   }
 
 
@@ -2250,6 +2290,14 @@ export class AudioEngine {
   private headsBus: GainNode | null = null;
   /** Analyser on the heads bus — head-path output, isolated from the transport. */
   private headsTap: AnalyserNode | null = null;
+  /** Bounded, stateless soft limiter on the Head sum. Never touches master. */
+  private headsLimiter: WaveShaperNode | null = null;
+  /** Gate + injection point of the Head sum into the VOCAL lane's `input`. */
+  private headsInject: GainNode | null = null;
+  /** Frames the four Heads were placed on at the last accepted entry. */
+  headEntryFrames: number[] = [];
+  /** Cycle the Heads read: source frames. */
+  headCycle: { startFrame: number; frames: number; sr: number } | null = null;
 
   /** RMS of the heads bus only. 0 when heads mode is not serving audio. */
   /**
@@ -2522,15 +2570,45 @@ export class AudioEngine {
   enterHeadsMode(): { ok: boolean; detail: string } {
     if (!this.ctx) return { ok: false, detail: "audio not unlocked" };
     if (this.heads.active) return { ok: true, detail: "heads already active" };
-    // ONE source stem for all four heads: the most recently targeted track if
-    // it is decoded, otherwise the first decoded stem.
-    const preferred = this.tracks[this.lastTargetedTrack]?.buffer ? this.lastTargetedTrack : null;
-    const source = preferred ?? this.tracks.findIndex((t) => t.buffer != null);
-    if (source < 0) return { ok: false, detail: "heads rejected — no decoded lane to read" };
-    const sourceName = (this.tracks[source]?.name ?? `stem ${source + 1}`).replace(/\.[a-z0-9]+$/i, "");
-    const r = this.headLanes.enter({ source, sourceName, playing: this.requestedPlaying });
+    // Heads ALWAYS read the Vocal stem. There is no source selection.
+    const vocal = this.tracks[VOCAL_LANE];
+    if (!vocal?.buffer) {
+      // Physical-compatible failure: all four Track LEDs flash TWICE rapidly.
+      this.headsRejectFlashAt = Date.now();
+      return { ok: false, detail: "heads rejected — no decoded Vocal stem to read" };
+    }
+    const sr = vocal.buffer.sampleRate;
+    const dur = vocal.buffer.duration;
+    // Active Head cycle: global loop → Vocal lane loop → whole Vocal buffer.
+    let startS = 0;
+    let lengthS = dur;
+    if (this.globalLoop) {
+      startS = this.globalLoop.start;
+      lengthS = this.globalLoop.lengthS;
+    } else if (vocal.loop.enabled) {
+      const b = resolveLoop(vocal.loop, dur);
+      startS = b.start;
+      lengthS = b.length;
+    }
+    startS = Math.max(0, Math.min(startS, Math.max(0, dur - 1e-4)));
+    lengthS = Math.max(1e-4, Math.min(lengthS, dur - startS));
+    // Exact FRAME geometry — no rounding to seconds, beats or React state.
+    const cycleStartFrame = startS * sr;
+    const cycleFrames = lengthS * sr;
+    const p = this.position() * sr;
+    const frames = quarterCycleHeadFrames(p, cycleStartFrame, cycleFrames);
+    this.headEntryFrames = frames.slice();
+    this.headCycle = { startFrame: cycleStartFrame, frames: cycleFrames, sr };
+    const sourceName = (vocal.name ?? "vocals").replace(/\.[a-z0-9]+$/i, "");
+    const r = this.headLanes.enter({
+      source: VOCAL_LANE,
+      sourceName,
+      playing: this.requestedPlaying,
+      positions: frames.map((f) => f / sr),
+      // Performance-safe entry: Head 1 alone is audible and focused.
+      mutedMask: [false, true, true, true],
+    });
     if (!r.ok) return r;
-
 
     this.headsEntrySnapshot = this.tracks.map((t) => ({
       muted: t.muted,
@@ -2538,22 +2616,92 @@ export class AudioEngine {
       level: t.level,
       loop: { ...t.loop },
     }));
-    // The reducer-visible flag only; geometry belongs to HeadLanes now. There
-    // is no heads SOURCE any more: head N is lane N by construction.
-    this.heads = { ...emptyHeads(), active: true, engine: null, enteredAtFrame: Math.round(this.ctx.currentTime * this.ctx.sampleRate) };
+    this.heads = {
+      ...emptyHeads(),
+      active: true,
+      engine: null,
+      source: VOCAL_LANE,
+      cycleStartFrame,
+      cycleFrames,
+      enteredAtFrame: Math.round(this.ctx.currentTime * this.ctx.sampleRate),
+    };
     this.preHeadsMutes = null;
     this.applyAudibilityAll();
-    // Defect 1: the normal four-stem bus is GATED SHUT for the whole of heads
-    // mode. Its sources keep running (the hidden song timeline must not stop),
-    // they simply contribute nothing to the master.
-    this.crossfadeBuses(true);
-    return r;
+    // Equal-power handoff INSIDE the Vocal lane: the dry Vocal copy closes as
+    // the Head sum opens. Drums, Bass and Instrument are untouched, the
+    // transport is untouched, and nothing is stacked on top of anything.
+    this.crossfadeVocalToHeads(true);
+    return {
+      ok: true,
+      detail: `heads on — 4 heads over ${sourceName} at frames ${frames.map((f) => f.toFixed(0)).join(" / ")} (cycle ${cycleFrames.toFixed(0)} frames from ${cycleStartFrame.toFixed(0)}) — head 1 audible, heads 2-4 muted`,
+    };
+  }
+
+  /** Timestamp of the last Heads-entry rejection (drives the double flash). */
+  headsRejectFlashAt: number | null = null;
+
+  /**
+   * Equal-power Vocal <-> Heads handoff at the lane's own routing point.
+   * The normal four-stem bus is NEVER gated: only the Vocal stem copy is.
+   */
+  private crossfadeVocalToHeads(toHeads: boolean, seconds = HEADS_HANDOFF_S) {
+    const ctx = this.ctx;
+    const inject = this.headsInject;
+    const stem = this.tracks[VOCAL_LANE]?.stemGate;
+    if (!ctx || !inject || !stem) return;
+    const at = ctx.currentTime;
+    const N = 64;
+    const up = new Float32Array(N);
+    const down = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+      const x = (i / (N - 1)) * (Math.PI / 2);
+      up[i] = Math.sin(x);
+      down[i] = Math.cos(x);
+    }
+    const apply = (prm: AudioParam, curve: Float32Array) => {
+      try {
+        prm.cancelScheduledValues(at);
+        prm.setValueAtTime(prm.value, at);
+        prm.setValueCurveAtTime(curve, at, seconds);
+      } catch {
+        prm.value = curve[curve.length - 1]!;
+      }
+    };
+    const audible = this.vocalAudible();
+    apply(inject.gain, toHeads ? up : down);
+    apply(stem.gain, toHeads ? down : up);
+    setTimeout(() => {
+      if (this.ctx !== ctx) return;
+      try {
+        const now = ctx.currentTime;
+        inject.gain.cancelScheduledValues(now);
+        inject.gain.setValueAtTime(toHeads && audible ? 1 : 0, now);
+        stem.gain.cancelScheduledValues(now);
+        stem.gain.setValueAtTime(toHeads ? 0 : audible ? 1 : 0, now);
+      } catch {
+        /* noop */
+      }
+    }, Math.ceil(seconds * 1000) + 20);
+  }
+
+  /** Stored mute/solo verdict for the Vocal lane, Heads or not. */
+  private vocalAudible(): boolean {
+    const t = this.tracks[VOCAL_LANE];
+    if (!t) return false;
+    const auditing = this.audition.some(Boolean);
+    const audibleBySolo = auditing ? this.audition[VOCAL_LANE] === true : this.anySolo() ? t.soloed : true;
+    return audibleBySolo && (!t.muted || t.soloed || (auditing && this.audition[VOCAL_LANE] === true));
   }
 
   exitHeadsMode(): { ok: boolean; detail: string } {
     if (!this.heads.active) return { ok: true, detail: "heads already off" };
+    // Capture the shared transport frame: the dry Vocal resumes THERE, never
+    // at a Head's independent position.
+    const sr = this.ctx?.sampleRate ?? 48000;
+    const sharedFrame = this.position() * sr;
     const r = this.headLanes.exit();
     this.heads = exitHeads(this.heads);
+    this.headCycle = null;
     // Restore the entry mixer exactly. Anything the musician did to a LANE
     // while Heads was open (reverse, loop capture, resize) was a heads-only
     // performance and is discarded here.
@@ -2562,29 +2710,26 @@ export class AudioEngine {
     if (snap) {
       for (let i = 0; i < this.tracks.length; i++) {
         const t = this.tracks[i]!;
-        const s = snap[i]!;
-        t.muted = s.muted;
-        t.soloed = s.soloed;
-        t.level = s.level;
-        if (t.loop.reverse !== s.loop.reverse) {
+        const sn = snap[i]!;
+        t.muted = sn.muted;
+        t.soloed = sn.soloed;
+        t.level = sn.level;
+        if (t.loop.reverse !== sn.loop.reverse) {
           this.execute({
             id: Date.now() + i,
             t: Date.now(),
             type: "tape.reverse",
-            payload: { track: i, on: s.loop.reverse },
+            payload: { track: i, on: sn.loop.reverse },
           } as AudioCommand);
         }
-        t.loop = { ...s.loop };
-        if (this.ctx) this.setGain(t.gain.gain, s.level);
+        t.loop = { ...sn.loop };
+        if (this.ctx) this.setGain(t.gain.gain, sn.level);
       }
     }
-    // Stems rejoin the hidden timeline where it now is, through the normal
-    // click-free audibility ramp.
     this.applyAudibilityAll();
-    // Re-open the normal bus; heads voices are already stopped and their bus
-    // closes on the same equal-power curve.
-    this.crossfadeBuses(false);
-    return r;
+    // Hand the Vocal lane back to its ordinary source at the shared frame.
+    this.crossfadeVocalToHeads(false);
+    return { ok: r.ok, detail: `${r.detail} — dry vocal resumed at shared frame ${sharedFrame.toFixed(0)}` };
   }
 
   // ------------------------------------------------- audible head scrubbing
