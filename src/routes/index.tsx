@@ -113,10 +113,11 @@ function LabPage() {
     }
     // Rejected entry: the surface must NOT claim heads, and the musician gets
     // product language, never the engine's internal detail string.
-    applyEngineHeads({ active: false });
+    // Physical LED failure pattern: all four Track LEDs flash twice rapidly.
+    applyEngineHeads({ active: false, rejectedAt: performance.now() });
     setHeadsNotice(
-      /decoded lane|no output bus/i.test(headsAck.detail)
-        ? "HEADS unavailable · load a song first"
+      /decoded (lane|Vocal)|no output bus/i.test(headsAck.detail)
+        ? "HEADS unavailable · load a vocal stem first"
         : "HEADS unavailable · audio engine locked",
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps

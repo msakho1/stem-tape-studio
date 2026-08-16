@@ -82,7 +82,7 @@ type Action =
   | { type: "gesture"; gesture: Gesture }
   | { type: "perf"; intent: PerfIntent }
   | { type: "globalScrub"; dir: 1 | -1 | null }
-  | { type: "headsFeedback"; patch: { active?: boolean; source?: number | null } }
+  | { type: "headsFeedback"; patch: { active?: boolean; source?: number | null; rejectedAt?: number } }
   | { type: "faderCommit"; index: number; value: number; claimed?: ContinuousChannel }
   | { type: "midi"; event: StemMidiEvent };
 
@@ -819,7 +819,7 @@ export function useDeviceSurface() {
    * The engine's verdict on heads entry/exit. Called from the ack subscription;
    * it is the only path that may change `headsMode`.
    */
-  const applyEngineHeads = useCallback((patch: { active?: boolean; source?: number | null }) => {
+  const applyEngineHeads = useCallback((patch: { active?: boolean; source?: number | null; rejectedAt?: number }) => {
     dispatch({ type: "headsFeedback", patch });
   }, []);
 
