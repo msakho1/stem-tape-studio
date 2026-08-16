@@ -106,3 +106,59 @@ describe("heads / normal bus isolation", () => {
     expect(p.headsInject.gain.at(after)).toBeCloseTo(0, 6);
   });
 });
+
+describe("heads handoff is pure AudioContext automation", () => {
+  it("drives the dry Vocal contribution to EXACTLY zero and keeps it there", async () => {
+    const { engine, ctx, advance } = await rig();
+    const p = priv(engine);
+    engine.execute(cmd("transport.play"));
+    advance(1.0);
+    expect(engine.enterHeadsMode().ok).toBe(true);
+
+    const gate = p.tracks[0]!.stemGate.gain;
+    // Mid-fade the dry Vocal is falling but not yet gone, and the Head sum is
+    // already rising: an equal-power handoff, not a gap and not a stack.
+    const mid = ctx.currentTime + 0.01;
+    expect(gate.at(mid)).toBeLessThan(1);
+    expect(gate.at(mid)).toBeGreaterThan(0);
+    expect(p.headsInject.gain.at(mid)).toBeGreaterThan(0);
+    const power = gate.at(mid) ** 2 + p.headsInject.gain.at(mid) ** 2;
+    expect(power).toBeCloseTo(1, 2);
+
+    // After the fade the ONLY edge carrying the ordinary Vocal source into the
+    // lane is closed to exactly zero, and STAYS closed with no timer needed —
+    // sampled a full second later with no callbacks having run.
+    for (const t of [0.05, 0.2, 1.0, 5.0]) expect(gate.at(ctx.currentTime + t)).toBe(0);
+    // Nothing else feeds the vocal lane input except the stem gate and the
+    // Head injection, so gate === 0 IS "no dry vocal in the mix".
+    const intoVocalInput = [p.tracks[0]!.stemGate, p.headsInject].filter((n) =>
+      n.outs.includes(p.tracks[0]!.input),
+    );
+    expect(intoVocalInput).toHaveLength(2);
+
+    // A mute pass during heads must not reopen the dry copy either.
+    engine.execute(cmd("track.mute", { track: 0, muted: true }));
+    engine.execute(cmd("track.mute", { track: 0, muted: false }));
+    expect(gate.at(ctx.currentTime + 1)).toBe(0);
+  });
+
+  it("restores the dry Vocal on exit without restarting or relocating any stem", async () => {
+    const { engine, ctx, advance } = await rig();
+    const p = priv(engine);
+    engine.execute(cmd("transport.play"));
+    advance(1.0);
+    engine.enterHeadsMode();
+    advance(2.0);
+
+    const before = p.tracks.map((t) => t.sources.length);
+    const posBefore = engine.status().position;
+    engine.exitHeadsMode();
+    // No source was stopped/restarted for the handoff: the ordinary vocal
+    // voice ran silently behind the gate the whole time.
+    expect(p.tracks.map((t) => t.sources.length)).toEqual(before);
+    expect(engine.status().position).toBeCloseTo(posBefore, 3);
+    const after = ctx.currentTime + 0.06;
+    expect(p.tracks[0]!.stemGate.gain.at(after)).toBe(1);
+    expect(p.headsInject.gain.at(after)).toBe(0);
+  });
+});
