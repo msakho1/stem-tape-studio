@@ -3146,7 +3146,8 @@ export class AudioEngine {
   setGlobalScrubDirection(dir: 1 | -1): { ok: boolean; detail: string } {
     const gs = this.globalScrub;
     if (!gs) return this.beginGlobalScrub(dir);
-    if (gs.dir !== dir) {
+    const decelerating = gs.decel != null;
+    if (gs.dir !== dir || decelerating) {
       const ctx = this.ctx;
       if (ctx) {
         // Reversal starts a fresh schedule at the audible frame: everything
@@ -3155,6 +3156,12 @@ export class AudioEngine {
         gs.posCtxTime = ctx.currentTime;
         gs.cursor = ctx.currentTime;
       }
+      // A new deflection during the release deceleration cancels it outright —
+      // the shuttle re-engages instead of completing a hand-off nobody wants.
+      if (gs.releaseTimer) clearTimeout(gs.releaseTimer);
+      gs.releaseTimer = null;
+      gs.decel = null;
+      gs.rate = GLOBAL_SCRUB_SPEEDS[this.scrubSpeedIndex]!;
       gs.dir = dir;
       this.worbletShuttle(dir, gs.pos, true);
     }
