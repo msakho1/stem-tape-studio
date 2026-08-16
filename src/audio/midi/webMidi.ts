@@ -10,6 +10,8 @@
  */
 
 import { allNotesOffEvent, normalizeMidiBytes, type StemMidiEvent } from "./contract";
+import { isSp1DeviceName, sp1Surface } from "./sp1Surface";
+
 
 type MidiPort = {
   id: string;
