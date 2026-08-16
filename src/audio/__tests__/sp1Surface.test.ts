@@ -59,13 +59,18 @@ describe("firmware contract mapping", () => {
     expect(decodeSp1Message([0x80, 36, 0])).toEqual({ type: "up", control: "track-button-1" });
   });
 
-  it("maps CC20..23 to faders, CC24 to battery, CC123 to all-off", () => {
-    expect(decodeSp1Message([0xb0, 20, 127])).toEqual({ type: "fader", index: 0, value: 1 });
-    expect(decodeSp1Message([0xb0, 21, 0])).toEqual({ type: "fader", index: 1, value: 0 });
-    expect(decodeSp1Message([0xb0, 22, 64])).toMatchObject({ type: "fader", index: 2 });
-    expect(decodeSp1Message([0xb0, 23, 127])).toEqual({ type: "fader", index: 3, value: 1 });
-    expect(decodeSp1Message([0xb0, 24, 90])).toEqual({ type: "battery", value: 90 });
-    expect(decodeSp1Message([0xb0, 123, 0])).toEqual({ type: "allOff" });
+  it("maps CC20..23 (bytes 0x14..0x17) to faders, CC24 (0x18) to battery, CC123 (0x7B) to all-off", () => {
+    expect(decodeSp1Message([0xb0, 0x14, 127])).toEqual({ type: "fader", index: 0, value: 1 });
+    expect(decodeSp1Message([0xb0, 0x15, 0])).toEqual({ type: "fader", index: 1, value: 0 });
+    expect(decodeSp1Message([0xb0, 0x16, 64])).toMatchObject({ type: "fader", index: 2 });
+    expect(decodeSp1Message([0xb0, 0x17, 127])).toEqual({ type: "fader", index: 3, value: 1 });
+    expect(decodeSp1Message([0xb0, 0x18, 90])).toEqual({ type: "battery", value: 90 });
+    expect(decodeSp1Message([0xb0, 0x7b, 0])).toEqual({ type: "allOff" });
+    // CC32..35 (bytes 0x20..0x23) are NOT the firmware fader numbers.
+    expect(decodeSp1Message([0xb0, 0x20, 127])).toBeNull();
+    expect(decodeSp1Message([0xb0, 0x21, 127])).toBeNull();
+    expect(decodeSp1Message([0xb0, 0x22, 127])).toBeNull();
+    expect(decodeSp1Message([0xb0, 0x23, 127])).toBeNull();
     expect(decodeSp1Message([0xb0, 7, 100])).toBeNull();
   });
 });
