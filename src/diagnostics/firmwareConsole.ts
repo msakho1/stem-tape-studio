@@ -286,3 +286,9 @@ export class FirmwareConsole {
 }
 
 export const firmwareConsole = new FirmwareConsole();
+
+// Browser-proof seam: the smoke harness feeds mocked CDC lines through this.
+if (typeof window !== "undefined") {
+  (window as unknown as { __stemTapeFirmwareConsole?: FirmwareConsole }).__stemTapeFirmwareConsole =
+    firmwareConsole;
+}
