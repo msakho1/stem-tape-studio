@@ -1,36 +1,38 @@
 /**
  * LED inspector model.
  *
- * The web surface derives an 11-LED logical frame (`deriveLeds`), but only the
- * pattern name reaches the DOM — every brightness/period value lives in CSS.
- * This module maps logical pattern → diagnostic MODE, records which state owns
- * an LED and which competing state lost precedence, and compares the logical
- * frame against what the DOM/CSS actually renders.
+ * Two strictly separate surfaces:
+ *   • the TEN physical SP-1 LEDs (`PHYSICAL_LED_IDS`);
+ *   • the web-only `play-indicator`, which is never part of a physical frame.
  *
- * It never claims parity with physical LEDs: M0 has no host→device LED path.
+ * The web surface derives a logical frame (`deriveLeds`), but only the pattern
+ * name reaches the DOM — every brightness/period value lives in CSS. This
+ * module maps logical pattern → diagnostic MODE, records which state owns an
+ * LED, and compares logical against what the DOM/CSS actually renders.
+ *
+ * It never claims parity with physical LEDs: M0 has no host→device LED path,
+ * and only 8 of the 10 physical outputs are driven by the audited firmware.
  */
 
 import type { LedFrame, LedId, LedPattern, LedState, SurfaceState } from "@/machine/surface";
 import { deriveLeds } from "@/machine/surface";
+import {
+  M0_IMPLEMENTED_LED_OUTPUTS,
+  PHYSICAL_LED_IDS,
+  UI_ONLY_INDICATOR_IDS,
+  type DivergenceCategory,
+  type LedDiagnosticMode,
+  type PhysicalLedId,
+  type UiOnlyIndicatorId,
+} from "./physical";
 
-export type LedMode = "off" | "dim" | "solid" | "blink" | "breathe" | "one-shot flash" | "chase";
+export type LedMode = LedDiagnosticMode;
 
-export const LED_IDS: LedId[] = [
-  "track-led-1",
-  "track-led-2",
-  "track-led-3",
-  "track-led-4",
-  "side-led-1",
-  "side-led-2",
-  "side-led-3",
-  "side-led-4",
-  "play-indicator",
-  "function-led-1",
-  "function-led-2",
-];
+/** Everything the web renders: the 10 physical LEDs plus 1 web-only indicator. */
+export const LED_IDS: LedId[] = [...PHYSICAL_LED_IDS, ...UI_ONLY_INDICATOR_IDS] as LedId[];
 
-/** The eight surface LEDs the SP-1 panel exposes (tracks + side row). */
-export const PANEL_LED_IDS: LedId[] = LED_IDS.slice(0, 8);
+/** The eight SP-1 panel LEDs (tracks + side row) the audited M0 driver writes. */
+export const PANEL_LED_IDS: LedId[] = [...M0_IMPLEMENTED_LED_OUTPUTS] as LedId[];
 
 export function modeOf(pattern: LedPattern): LedMode {
   switch (pattern) {
@@ -45,7 +47,7 @@ export function modeOf(pattern: LedPattern): LedMode {
     case "breathe":
       return "breathe";
     case "pulse":
-      return "breathe";
+      return "pulse";
     case "chase":
       return "chase";
   }
@@ -62,6 +64,16 @@ export const CORE_OPACITY: Record<LedPattern, string> = {
   chase: "0.20→1.00 @0.55s",
 };
 
+export const CSS_PERIOD_MS: Record<LedPattern, number | null> = {
+  dark: null,
+  faint: null,
+  solid: null,
+  pulse: 1200,
+  blink: 400,
+  breathe: 2400,
+  chase: 550,
+};
+
 /** Which patterns are animated by CSS keyframes with no application clock. */
 export const CSS_ONLY_ANIMATION: Record<LedPattern, boolean> = {
   dark: false,
@@ -76,12 +88,18 @@ export const CSS_ONLY_ANIMATION: Record<LedPattern, boolean> = {
 export interface LedInspectionRow {
   id: LedId;
   index: number;
+  /** True for the 10 physical LEDs, false for `play-indicator`. */
+  physical: boolean;
+  /** Does the audited M0 firmware drive this output at all? */
+  m0Driven: boolean;
   /** Expected mode from the behaviour contract / reducer intent. */
   expectedMode: LedMode;
   expectedPattern: LedPattern;
   actualMode: LedMode;
   actualPattern: LedPattern;
   brightness: string;
+  periodMs: number | null;
+  phaseAnchor: "none" | "css-arbitrary";
   owner: string;
   priority: number;
   /** Highest-priority state that did NOT win this LED. */
@@ -90,12 +108,13 @@ export interface LedInspectionRow {
   animation: "application-driven" | "css-only";
   domClass: string | null;
   mismatch: string | null;
+  divergence: DivergenceCategory | null;
 }
 
 const SOURCE: Record<string, string> = {
   track: "src/machine/surface.ts · deriveLeds() track branch",
   side: "src/machine/surface.ts · deriveLeds() side branch",
-  play: "src/machine/surface.ts · deriveLeds() play-indicator",
+  play: "src/machine/surface.ts · deriveLeds() play-indicator (web-only)",
   function: "src/machine/surface.ts · deriveLeds() function-led",
 };
 
@@ -144,6 +163,63 @@ function patternFromClass(cls: string | null): LedPattern | null {
   return (m?.[1] as LedPattern) ?? null;
 }
 
+function inspectOne(
+  id: LedId,
+  index: number,
+  actual: LedFrame,
+  expected: LedFrame,
+  byId: Map<LedId, DomLedProbe>,
+  lostTo: Partial<Record<LedId, string>>,
+): LedInspectionRow {
+  const a: LedState = actual[id];
+  const e: LedState = expected[id];
+  const probe = byId.get(id) ?? null;
+  const rendered = patternFromClass(probe?.className ?? null);
+  const cssOnly = CSS_ONLY_ANIMATION[a.pattern];
+  const problems: string[] = [];
+  let divergence: DivergenceCategory | null = null;
+  if (a.pattern !== e.pattern) {
+    problems.push(`logical ${a.pattern} ≠ expected ${e.pattern} (time-window not re-derived)`);
+    divergence = "timing/clock missing";
+  }
+  if (rendered && rendered !== a.pattern) {
+    problems.push(`DOM renders ${rendered}, logical state is ${a.pattern}`);
+    divergence = "logical LED state correct but DOM rendering wrong";
+  }
+  if (cssOnly && (a.pattern === "blink" || a.pattern === "chase") && /flash|reject|confirm/i.test(a.reason)) {
+    problems.push("one-shot flash rendered as an infinite CSS animation");
+    divergence = "DOM state correct but CSS timing wrong";
+  }
+  const physical = (PHYSICAL_LED_IDS as readonly string[]).includes(id);
+  const m0Driven = (M0_IMPLEMENTED_LED_OUTPUTS as readonly string[]).includes(id);
+  if (physical && !m0Driven) {
+    problems.push("no resolved physical output in the audited M0 LED driver");
+    divergence = "physical mapping unresolved";
+  }
+  return {
+    id,
+    index,
+    physical,
+    m0Driven,
+    expectedMode: modeOf(e.pattern),
+    expectedPattern: e.pattern,
+    actualMode: modeOf(a.pattern),
+    actualPattern: a.pattern,
+    brightness: CORE_OPACITY[a.pattern],
+    periodMs: CSS_PERIOD_MS[a.pattern],
+    phaseAnchor: cssOnly ? "css-arbitrary" : "none",
+    owner: a.reason,
+    priority: a.priority,
+    lostTo: lostTo[id] ?? null,
+    source: sourceOf(id),
+    animation: cssOnly ? "css-only" : "application-driven",
+    domClass: probe?.className ?? null,
+    mismatch: problems.length ? problems.join("; ") : null,
+    divergence,
+  };
+}
+
+/** All rendered indicators (physical + web-only). */
 export function inspectLeds(
   actual: LedFrame,
   expected: LedFrame,
@@ -151,37 +227,32 @@ export function inspectLeds(
   lostTo: Partial<Record<LedId, string>> = {},
 ): LedInspectionRow[] {
   const byId = new Map(dom.map((d) => [d.id, d]));
-  return LED_IDS.map((id, index) => {
-    const a: LedState = actual[id];
-    const e: LedState = expected[id];
-    const probe = byId.get(id) ?? null;
-    const rendered = patternFromClass(probe?.className ?? null);
-    const cssOnly = CSS_ONLY_ANIMATION[a.pattern];
-    const problems: string[] = [];
-    if (a.pattern !== e.pattern) {
-      problems.push(`logical ${a.pattern} ≠ expected ${e.pattern} (time-window not re-derived)`);
-    }
-    if (rendered && rendered !== a.pattern) {
-      problems.push(`DOM renders ${rendered}, logical state is ${a.pattern}`);
-    }
-    if (cssOnly && (a.pattern === "blink" || a.pattern === "chase") && /flash/i.test(a.reason)) {
-      problems.push("one-shot flash rendered as an infinite CSS animation");
-    }
-    return {
-      id,
-      index,
-      expectedMode: modeOf(e.pattern),
-      expectedPattern: e.pattern,
-      actualMode: modeOf(a.pattern),
-      actualPattern: a.pattern,
-      brightness: CORE_OPACITY[a.pattern],
-      owner: a.reason,
-      priority: a.priority,
-      lostTo: lostTo[id] ?? null,
-      source: sourceOf(id),
-      animation: cssOnly ? "css-only" : "application-driven",
-      domClass: probe?.className ?? null,
-      mismatch: problems.length ? problems.join("; ") : null,
-    };
-  });
+  return LED_IDS.map((id, index) => inspectOne(id, index, actual, expected, byId, lostTo));
 }
+
+/** EXACTLY the ten physical SP-1 LEDs, in physical order. */
+export function inspectPhysicalLeds(
+  actual: LedFrame,
+  expected: LedFrame,
+  dom: DomLedProbe[],
+  lostTo: Partial<Record<LedId, string>> = {},
+): LedInspectionRow[] {
+  const byId = new Map(dom.map((d) => [d.id, d]));
+  return PHYSICAL_LED_IDS.map((id, index) =>
+    inspectOne(id as LedId, index, actual, expected, byId, lostTo),
+  );
+}
+
+/** The web-only indicators — never presented as physical SP-1 LEDs. */
+export function inspectWebOnlyIndicators(
+  actual: LedFrame,
+  expected: LedFrame,
+  dom: DomLedProbe[],
+): LedInspectionRow[] {
+  const byId = new Map(dom.map((d) => [d.id, d]));
+  return UI_ONLY_INDICATOR_IDS.map((id, index) =>
+    inspectOne(id as LedId, index, actual, expected, byId, {}),
+  );
+}
+
+export type { PhysicalLedId, UiOnlyIndicatorId };
