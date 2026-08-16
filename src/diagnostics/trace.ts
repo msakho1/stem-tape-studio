@@ -114,3 +114,8 @@ export function formatTraceRow(rec: TraceRecord, t0: number): string {
   const stage = rec.stage.padEnd(20);
   return `${rel}ms ${stage} ${rec.label}${rec.detail ? ` — ${rec.detail}` : ""}`;
 }
+
+// Browser-proof seam: the smoke harness reads the ring through this handle.
+if (typeof window !== "undefined") {
+  (window as unknown as { __stemTapeTrace?: TraceRing }).__stemTapeTrace = trace;
+}
