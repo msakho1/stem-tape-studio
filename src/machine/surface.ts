@@ -15,6 +15,8 @@ export const FX_LATCH_FLASH_MS = 220;
  * distinct from the single simultaneous FX-latch flash above.
  */
 export const HEADS_REJECT_FLASH_MS = 420;
+/** Soft-takeover window: a fader picks the stored value up within this margin. */
+export const PICKUP_WINDOW = 0.04;
 import { V26_ROW_BY_ID } from "@/machine/v26map";
 import type { PerfIntent } from "@/machine/chordArbiter";
 import {
@@ -82,6 +84,13 @@ export interface TrackSlice {
   headLatched: boolean;
   /** Heads v2: this head is repeating a captured loop. */
   headLoop: { active: boolean; bars: number };
+  /**
+   * Soft takeover. Head faders are a SEPARATE contextual value set, so the
+   * physical fader position at the moment of entry/exit must not jump a level.
+   * The fader is inert until it crosses (or reaches) the stored value.
+   */
+  headPickup: boolean;
+  volumePickup: boolean;
   /** PLAY + Track latching solo (§2.1). Independent of momentary audition. */
   soloLatched: boolean;
   /**
@@ -279,6 +288,8 @@ function track(stem: TrackSlice["stem"], volume: number): TrackSlice {
     headLevel: 0.8,
     headLatched: false,
     headLoop: { active: false, bars: 1 },
+    headPickup: false,
+    volumePickup: false,
     soloLatched: false,
     laneReverse: false,
     laneLoop: { active: false, bars: 1 },
@@ -1188,6 +1199,8 @@ export function applyHeadsFeedback(
         headLevel: 0.8,
         headLatched: false,
         headLoop: { active: false, bars: 1 },
+        headPickup: true,
+        volumePickup: true,
       };
     next = { ...next, headsMode: patch.active, tracks, headsSource: patch.active ? next.headsSource : null };
   }
@@ -1224,8 +1237,13 @@ export function applyFader(
       return fire(next, "heads.scrub", `head ${index + 1} scrubbed to ${(value * 100).toFixed(1)}% of the cycle`, t);
     }
     // Releasing FUNCTION returns faders to level control with the STORED level.
+    const slice = state.tracks[index]!;
+    if (slice.headPickup && Math.abs(value - slice.headLevel) > PICKUP_WINDOW) {
+      // Not picked up yet: the head level is untouched and NOTHING is emitted.
+      return state;
+    }
     const next = emit(
-      { ...state, tracks: setTrack(state, index, { headLevel: value }) },
+      { ...state, tracks: setTrack(state, index, { headLevel: value, headPickup: false }) },
       "heads.level",
       { head: index, level: value },
       { rowId: "heads.level", t },
@@ -1263,9 +1281,11 @@ export function applyFader(
 
   // Commit value MUST equal the last audible preview value pushed by the
   // continuous control bus during the drag — same number, no re-derivation.
+  const vslice = state.tracks[index]!;
+  if (vslice.volumePickup && Math.abs(value - vslice.volume) > PICKUP_WINDOW) return state;
   return fire(
     emit(
-      { ...state, tracks: setTrack(state, index, { volume: value }) },
+      { ...state, tracks: setTrack(state, index, { volume: value, volumePickup: false }) },
       "track.gain",
       { track: index, level: value },
       { rowId: "fader.trackVolume", t },
