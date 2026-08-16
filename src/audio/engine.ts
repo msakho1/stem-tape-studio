@@ -2974,7 +2974,7 @@ export class AudioEngine {
         node.start(
           at,
           Math.min(Math.max(0, readAt), Math.max(0, buffer.duration - 1e-3)),
-          GRAIN_S * GLOBAL_SCRUB_RATE,
+          GRAIN_S * grainRate,
         );
         gs.lastGrainAt[i] = at;
         pt.grains++;
