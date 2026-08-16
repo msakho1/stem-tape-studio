@@ -10,6 +10,8 @@
  */
 
 import { allNotesOffEvent, normalizeMidiBytes, type StemMidiEvent } from "./contract";
+import { isSp1DeviceName, sp1Surface } from "./sp1Surface";
+
 
 type MidiPort = {
   id: string;
@@ -97,12 +99,18 @@ export class WebMidiAdapter {
     for (const id of [...this.bound]) {
       if (seen.has(id)) continue;
       this.bound.delete(id);
+      const name = this.state.devices.find((d) => d.id === id)?.name ?? "MIDI input";
+      if (isSp1DeviceName(name)) {
+        // Physical SP-1: release every held control, never a cue allNotesOff.
+        sp1Surface.deviceDisconnected(id);
+        continue;
+      }
       this.emit(
         allNotesOffEvent({
           timestampMs: typeof performance !== "undefined" ? performance.now() : Date.now(),
           source: "webmidi",
           deviceId: id,
-          deviceName: this.state.devices.find((d) => d.id === id)?.name ?? "MIDI input",
+          deviceName: name,
         }),
       );
     }
@@ -110,14 +118,22 @@ export class WebMidiAdapter {
   }
 
   private handle(port: MidiPort, e: { data: Uint8Array; timeStamp: number }): void {
+    const name = port.name ?? "MIDI input";
+    // The physical Stem Tape SP-1 is a control surface, not an instrument: its
+    // messages are consumed here and never reach the cue-learning system.
+    if (isSp1DeviceName(name)) {
+      sp1Surface.handleBytes(e.data, { id: port.id, name }, e.timeStamp);
+      return;
+    }
     const ev = normalizeMidiBytes(e.data, {
       timestampMs: Number.isFinite(e.timeStamp) ? e.timeStamp : performance.now(),
       source: "webmidi",
       deviceId: port.id,
-      deviceName: port.name ?? "MIDI input",
+      deviceName: name,
     });
     if (ev) this.emit(ev);
   }
+
 
   /** Test/browser-proof seam: inject a raw message as if it came from a port. */
   injectMessage(data: number[], port: { id: string; name: string }, timeStamp: number): void {
@@ -140,3 +156,8 @@ export class WebMidiAdapter {
 }
 
 export const webMidi = new WebMidiAdapter();
+
+// Browser-proof seam: harness runs inject port messages through this handle.
+if (typeof window !== "undefined") {
+  (window as unknown as { __stemTapeWebMidi?: WebMidiAdapter }).__stemTapeWebMidi = webMidi;
+}

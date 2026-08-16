@@ -32,6 +32,7 @@ import { controlBus, type ContinuousChannel } from "@/audio/controlBus";
 import { getAudioEngine } from "@/audio/engine";
 import { webMidi } from "@/audio/midi/webMidi";
 import { nativeMidiBridge } from "@/audio/midi/nativeBridge";
+import { sp1Surface, type Sp1SurfaceEvent } from "@/audio/midi/sp1Surface";
 import type { StemMidiEvent } from "@/audio/midi/contract";
 import { FaderSessionManager, type FaderIndex } from "@/input/faderSessions";
 import { installDiagnostics, publishArbiter, publishSurface, publishTapLatency } from "@/lib/diagnostics";
@@ -67,6 +68,9 @@ const FADER_KEYS: Record<string, { index: FaderIndex; dir: 1 | -1 }> = {
   KeyO: { index: 3, dir: 1 },
   KeyL: { index: 3, dir: -1 },
 };
+
+/** Synthetic pointer id for the physical SP-1 surface (never a real pointer). */
+const SP1_POINTER_ID = -1000;
 
 /** Value units per second while a fader key is held. */
 const KEY_FADER_RATE = 0.9;
@@ -307,6 +311,8 @@ export function useDeviceSurface() {
   useEffect(() => {
     const bail = () => {
       engine.releaseAll();
+      // Physical SP-1: forget held buttons too, so nothing stays stuck.
+      sp1Surface.releaseAll();
       heldKeysRef.current.clear();
       scrubKeysRef.current.clear();
       scrubPointersRef.current.clear();
@@ -522,6 +528,50 @@ export function useDeviceSurface() {
       keyFadersRef.current.clear();
     };
   }, [keyFrame, resolveChannel, syncHeld]);
+
+  /**
+   * Physical Stem Tape SP-1 (M0 firmware over class-compliant USB MIDI).
+   *
+   * These are RAW control events, not musical input: they enter the exact same
+   * GestureEngine press / release and fader paths as the on-screen surface and
+   * the keyboard, so taps, holds, FUNCTION combinations, loops, FX, scrubbing
+   * and contextual Volume stay owned by the surface reducer / arbitrator.
+   * Nothing here talks to the cue system or the audio engine directly.
+   */
+  useEffect(() => {
+    const off = sp1Surface.subscribe((ev: Sp1SurfaceEvent) => {
+      if (!readyRef.current) return;
+      if (ev.type === "battery") return; // telemetry only, never a musical control
+      if (ev.type === "fader") {
+        const channel = resolveChannel();
+        faderValuesRef.current[ev.index] = ev.value;
+        faders.current.queue({
+          faderIndex: ev.index,
+          value: ev.value,
+          channel,
+          pointerId: -10 - ev.index,
+        });
+        scheduleFlush();
+        dispatch({ type: "faderCommit", index: ev.index, value: ev.value, claimed: channel });
+        return;
+      }
+      if (ev.type === "down") engine.press(ev.control, SP1_POINTER_ID, ev.timestampMs);
+      else engine.release(ev.control, SP1_POINTER_ID, ev.timestampMs);
+      setGestureLog((prev) =>
+        [
+          {
+            id: ++gestureId.current,
+            text: `surface · ${ev.control} ${ev.type}`,
+            t: ev.timestampMs,
+          },
+          ...prev,
+        ].slice(0, LOG_LIMIT),
+      );
+    });
+    return off;
+  }, [engine, resolveChannel, scheduleFlush]);
+
+
 
   /**
    * True rebase: FUNCTION or HEADS changing while faders are still down

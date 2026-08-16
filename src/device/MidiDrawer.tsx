@@ -14,6 +14,7 @@ import { midiClock } from "@/audio/midi/clock";
 import { describeEvent, isStale, STALE_EVENT_MS, type StemMidiEvent } from "@/audio/midi/contract";
 import { nativeMidiBridge, type NativeBridgeState } from "@/audio/midi/nativeBridge";
 import { webMidi, type WebMidiState } from "@/audio/midi/webMidi";
+import { sp1Surface, type Sp1SurfaceEvent } from "@/audio/midi/sp1Surface";
 import { getAudioEngine } from "@/audio/engine";
 
 export function MidiDrawer() {
@@ -23,6 +24,8 @@ export function MidiDrawer() {
   const [web, setWeb] = useState<WebMidiState>(() => ({ ...webMidi.snapshot(), supported: false }));
   const [native, setNative] = useState<NativeBridgeState>(() => ({ present: false, deviceName: null, ready: false }));
   const [last, setLast] = useState<StemMidiEvent | null>(null);
+  /** Recognized physical SP-1 traffic — accepted surface input, never a cue. */
+  const [surface, setSurface] = useState<{ text: string; device: string; t: number } | null>(null);
   const [count, setCount] = useState(0);
   const [nowMs, setNowMs] = useState(() => (typeof performance !== "undefined" ? performance.now() : 0));
   const [cue, setCue] = useState<{ learned: number; invalid: number; open: number; owned: string; detail: string | null }>(
@@ -43,6 +46,15 @@ export function MidiDrawer() {
     const offB = nativeMidiBridge.subscribe(onEvent);
     const offC = webMidi.onStateChange(setWeb);
     const offD = nativeMidiBridge.onStateChange(setNative);
+    const offE = sp1Surface.subscribe((ev: Sp1SurfaceEvent) => {
+      const text =
+        ev.type === "fader"
+          ? `fader ${ev.index + 1} ${(ev.value * 100).toFixed(0)}%`
+          : ev.type === "battery"
+            ? `battery ${ev.value}`
+            : `${ev.control} ${ev.type}`;
+      setSurface({ text, device: ev.deviceName, t: ev.timestampMs });
+    });
     // Calibration pair: refreshed here and on visibility change.
     const anchor = () => midiClock.anchor(performance.now(), midiClock.calibration().ctxTime0);
     document.addEventListener("visibilitychange", anchor);
@@ -62,6 +74,7 @@ export function MidiDrawer() {
       offB();
       offC();
       offD();
+      offE();
       document.removeEventListener("visibilitychange", anchor);
       window.clearInterval(id);
     };
@@ -87,6 +100,7 @@ export function MidiDrawer() {
     ? native.deviceName ?? "CoreMIDI device"
     : web.devices[0]?.name ?? "—";
   const stale = last ? isStale(last, nowMs) : false;
+  const surfaceLabel = surface ? `surface · ${surface.text}`.toUpperCase() : null;
 
   const connected = transport !== "none";
 
@@ -99,6 +113,8 @@ export function MidiDrawer() {
       data-midi-events={count}
       data-midi-last={last ? describeEvent(last) : ""}
       data-midi-stale={stale ? "true" : "false"}
+      data-sp1-surface={surfaceLabel ?? ""}
+      data-sp1-device={surface?.device ?? ""}
       data-cue-learned={cue.learned}
       data-cue-invalid={cue.invalid}
       data-cue-open={cue.open}
@@ -117,6 +133,14 @@ export function MidiDrawer() {
         <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--ink-faint)]">
           {last ? describeEvent(last) : "no events"}
         </span>
+        {surfaceLabel && (
+          <span
+            className="font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--signal)]"
+            data-testid="midi-drawer-surface"
+          >
+            {surfaceLabel}
+          </span>
+        )}
         <span
           className="font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--ink-faint)]"
           data-testid="midi-drawer-timestamp"
