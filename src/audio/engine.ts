@@ -2738,6 +2738,12 @@ export class AudioEngine {
     keyupContextFrame: number;
     handoffContextFrame: number;
     fadeMs: number;
+    /** Addendum §6 — length of the release deceleration that preceded it, ms. */
+    releaseDecelMs: number;
+    /** Signed shuttle rate the release started from. */
+    releaseFromRate: number;
+    /** Context frame at which the reverse release passed through stillness. */
+    zeroCrossingFrame: number | null;
     stems: {
       id: number;
       mode: "node" | "worklet";
@@ -3709,6 +3715,12 @@ export class AudioEngine {
       keyupContextFrame: Math.round(keyup * sr),
       handoffContextFrame: handoffFrame,
       fadeMs: SCRUB_HANDOFF_FADE_S * 1000,
+      releaseDecelMs: (gs.decel?.durationS ?? 0) * 1000,
+      releaseFromRate: gs.decel?.from ?? gs.dir * gs.rate,
+      zeroCrossingFrame: gs.decel ? (() => {
+        const z = inertiaZeroCrossing(gs.decel!);
+        return z == null ? null : Math.round(z * sr);
+      })() : null,
       stems: this.tracks.map((t, i) => {
         const restart = t.sources.length > 0 ? Math.round((t.sources[t.sources.length - 1]!.startPos ?? landing) * sr) : landingFrame;
         const normal = t.buffer ? (gs.wasPlaying ? t.sources.length : 0) : 0;
