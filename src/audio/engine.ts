@@ -2681,6 +2681,12 @@ export class AudioEngine {
    * and the movement is rendered as overlapping grains through each track's own
    * input node, so faders, mutes, solo and FX all stay in the signal path.
    */
+  /**
+   * Addendum §3 — the shuttle speed is a persistent machine setting, not a
+   * per-gesture argument: it survives release, direction changes and latching.
+   */
+  private scrubSpeedIndex: ScrubSpeedIndex = DEFAULT_SCRUB_SPEED_INDEX;
+
   private globalScrub: {
     dir: 1 | -1;
     /** Shuttle speed in source-seconds per second — the persistent §3 setting. */
