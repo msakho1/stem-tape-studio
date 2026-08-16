@@ -55,6 +55,9 @@ const PERFORMANCE: [string, string][] = [
   ["lane.scrub.candidate", "Capture a bar from the parked scrub point"],
   ["transport.scrub.global", "Shuttle all four stems together"],
   ["transport.scrub.landing", "Land cleanly when the shuttle is released"],
+  ["transport.scrub.speed", "Four persistent shuttle speeds"],
+  ["transport.scrub.latch", "Latch the shuttle so both hands are free"],
+  ["transport.scrub.inertia", "The shuttle slows like tape when you let go"],
   ["lane.reverse", "Play one stem backwards"],
   ["lane.reverse.rejoin", "Rejoin the song when reverse is turned off"],
   ["varispeed.rocker", "Drag or run the tape fast with the rocker"],
@@ -121,13 +124,14 @@ export const FX_BANK_CARDS: FxBankCard[] = BANKS.map((b) => ({
 }));
 
 /** Overlay grammar shared by every bank. */
-export const FX_GRAMMAR_FEATURES = ["fx.momentary", "fx.latch", "fx.cycle"];
+export const FX_GRAMMAR_FEATURES = ["fx.momentary", "fx.latch", "fx.latch.feedback", "fx.cycle"];
 
 const FX: [string, string][] = [
   ...BANKS.map((b) => [`fx.bank.${b.id}`, `${b.label} bank — Track ${b.buttonIndex + 1} in the FX overlay`] as [string, string]),
   ...BANKS.flatMap((b) => b.algorithms.map((a) => [`fx.algo.${a.id}`, a.label] as [string, string])),
   ["fx.momentary", "Hold a Track button for momentary FX"],
   ["fx.latch", "FUNCTION + Track latches the bank on"],
+  ["fx.latch.feedback", "All four Track LEDs pulse when a bank latches or unlatches"],
   ["fx.cycle", "VOL -/+ cycles the algorithm inside the selected bank"],
 ];
 
@@ -321,6 +325,34 @@ export const LESSONS: Lesson[] = [
     features: ["transport.scrub.global", "transport.scrub.landing"],
   },
   {
+    id: "scrub-speed",
+    title: "How to change the shuttle speed",
+    gesture: "FUNCTION + rocker, then VOL −/+",
+    body: "While you are shuttling, VOL − and VOL + step through four shuttle speeds: 1.25×, 1.6×, 2.5× and 4×. The speed is remembered — the next shuttle, in either direction, starts at the speed you left it on.",
+    highlight: ["function", "rocker-fwd", "volume-minus", "volume-plus"],
+    motion: "sequence",
+    held: ["function", "rocker-fwd"],
+    features: ["transport.scrub.speed"],
+  },
+  {
+    id: "scrub-latch",
+    title: "How to latch the shuttle",
+    gesture: "FUNCTION + rocker, then tap FUNCTION",
+    body: "Tap FUNCTION while shuttling and the shuttle latches in that direction, so you can let both the rocker and FUNCTION go. Push the opposite side of the rocker to flip direction without dropping the latch. Tap FUNCTION again, or press PLAY, to let it go.",
+    highlight: ["function", "rocker-fwd", "rocker-rwd"],
+    motion: "sequence",
+    features: ["transport.scrub.latch"],
+  },
+  {
+    id: "scrub-inertia",
+    title: "How the shuttle lets go",
+    gesture: "Release the rocker",
+    body: "Release and the shuttle does not stop dead: the reels slow over a real inertia curve back into the song, and a reverse shuttle passes through stillness before it turns around. Playback rejoins on the exact frame the deceleration ends, so the landing is silent.",
+    highlight: ["rocker-fwd", "rocker-rwd"],
+    motion: "rocker",
+    features: ["transport.scrub.inertia"],
+  },
+  {
     id: "reverse",
     title: "How to reverse a stem",
     gesture: "FUNCTION + Track · double tap",
@@ -398,7 +430,7 @@ export const LESSONS: Lesson[] = [
     id: "global-loop-division",
     title: "How to change the loop length",
     gesture: "FUNCTION + VOL −/+",
-    body: "Hold FUNCTION and press VOL − or VOL + to set the global loop division: one bar, half, quarter, eighth. Change it while the loop runs and the window resizes from the same start.",
+    body: "FUNCTION + VOL −/+ is contextual, exactly like the stock SP-1. While a global loop is captured or latched it sets the loop division: one bar, half, quarter, eighth — change it while the loop runs and the window resizes from the same start. While the shuttle is running it steps the shuttle speed instead. With neither running it walks the active stem.",
     highlight: ["function", "volume-minus", "volume-plus"],
     motion: "sequence",
     held: ["function"],
