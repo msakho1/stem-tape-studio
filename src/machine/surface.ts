@@ -866,7 +866,14 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
 
       if (c === "volume-plus" || c === "volume-minus") {
         const dir = c === "volume-plus" ? 1 : -1;
+        // Addendum §3: while the shuttle is open (held OR latched) Volume ± is
+        // the shuttle-speed selector, with or without FUNCTION, and it must
+        // never move the master gain.
+        if (next.globalScrub !== 0 || next.scrubLatched) return stepScrubSpeed(next, dir, t);
         if (fn) {
+          // Addendum §1: with the FX overlay open, FUNCTION + Volume belongs to
+          // the FX target chord layer — the transport must not read it here.
+          if (next.perf.fxOverlay) return next;
           // Universal lane loop resize: FUNCTION + Track held + Volume ±.
           // Halve / double the captured loop of every held lane, in bars, so
           // the resize is grid-exact instead of a free-running time nudge.
