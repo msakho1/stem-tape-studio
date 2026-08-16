@@ -3105,8 +3105,29 @@ export class AudioEngine {
     const wk = this.globalScrub.perTrack.filter((p) => p.mode === "worklet").length;
     return {
       ok: true,
-      detail: `global shuttle ${dir > 0 ? "forward" : "backward"} at ${GLOBAL_SCRUB_RATE}× from ${pos.toFixed(3)}s — four stems on one playhead (${wk} worklet / ${4 - wk} node)`,
+      detail: `global shuttle ${dir > 0 ? "forward" : "backward"} at ${this.globalScrub.rate}× from ${pos.toFixed(3)}s — four stems on one playhead (${wk} worklet / ${4 - wk} node)`,
     };
+  }
+
+  /**
+   * Addendum §3 — persistent shuttle speed. Applied live to a running shuttle
+   * by re-anchoring the integral at the audible frame first, so the speed step
+   * never teleports the playhead.
+   */
+  setGlobalScrubSpeed(index: ScrubSpeedIndex): { ok: boolean; detail: string } {
+    this.scrubSpeedIndex = index;
+    const rate = GLOBAL_SCRUB_SPEEDS[index]!;
+    const gs = this.globalScrub;
+    const ctx = this.ctx;
+    if (gs && ctx && !gs.decel) {
+      const now = ctx.currentTime;
+      gs.pos = this.integrateScrubTo(now);
+      gs.posCtxTime = now;
+      gs.cursor = now;
+      gs.rate = rate;
+      this.worbletShuttle(gs.dir, gs.pos, true);
+    }
+    return { ok: true, detail: `shuttle speed → ${rate.toFixed(2)}×${gs ? " (live)" : " (armed)"}` };
   }
 
   /** Advance the shuttle integral to `atCtx` without emitting a grain. */
@@ -3114,9 +3135,9 @@ export class AudioEngine {
     const gs = this.globalScrub;
     if (!gs) return this.position();
     // Signed: the handoff frame is BEHIND the schedule cursor, so the integral
-    // must be able to run backwards to the last audible frame.
-    const dt = atCtx - gs.posCtxTime;
-    return Math.min(this.duration, Math.max(0, gs.pos + gs.dir * GLOBAL_SCRUB_RATE * dt));
+    // must be able to run backwards to the last audible frame. During a release
+    // it follows the deceleration curve, exactly like the grains.
+    return Math.min(this.duration, Math.max(0, gs.pos + this.scrubTravel(gs.posCtxTime, atCtx)));
   }
 
   setGlobalScrubDirection(dir: 1 | -1): { ok: boolean; detail: string } {
