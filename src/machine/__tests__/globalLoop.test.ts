@@ -94,7 +94,11 @@ describe("Hold PLAY · global one-bar loop", () => {
   });
 
   it("FUNCTION + Volume steps the division 1 → 2 → 4 → 8 and clamps", () => {
-    let s = pressControl(running(), "function");
+    // Addendum §1: FUNCTION + Volume is contextual — it only owns the loop
+    // division while a global loop is captured or latched.
+    let s = applyGesture(running(), holdStart("play"));
+    expect(s.globalLoop.active).toBe(true);
+    s = pressControl(s, "function");
     s = applyGesture(s, tap("volume-plus"));
     expect(s.globalLoop.division).toBe(2);
     s = applyGesture(s, tap("volume-plus"));
@@ -104,9 +108,8 @@ describe("Hold PLAY · global one-bar loop", () => {
     expect(s.globalLoop.division).toBe(8);
     s = applyGesture(s, tap("volume-minus"));
     expect(s.globalLoop.division).toBe(4);
-    // It works with no loop captured: the division is remembered for the next
-    // Hold PLAY, and only a running loop is told to resize.
-    expect(types(s)).not.toContain("loop.global.resize");
+    // A running loop is told to resize on every step.
+    expect(types(s).filter((t) => t === "loop.global.resize").length).toBeGreaterThan(0);
   });
 
   it("arbiter claims PLAY on the rocker deflection so the tap cannot fire", () => {

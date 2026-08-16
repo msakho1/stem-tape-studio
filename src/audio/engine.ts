@@ -28,12 +28,20 @@ import { allowed, defaultBudget, describeVerdict, formatMiB, judge, SSR_BUDGET, 
 import { DEFAULT_WINDOW, resolveLoop, TapeTimeline, type LoopWindow } from "./tape";
 import {
   DEFAULT_INERTIA_PRESET,
+  DEFAULT_SCRUB_SPEED_INDEX,
+  GLOBAL_SCRUB_SPEEDS,
   INERTIA_MIN_RATE,
   INERTIA_PRESETS,
   INERTIA_STOP_FADE_S,
   inertiaCurve,
+  inertiaDistance,
+  inertiaRateAt,
+  inertiaZeroCrossing,
   makeInertiaSegment,
+  makeScrubReleaseSegment,
   type InertiaPresetName,
+  type InertiaSegment,
+  type ScrubSpeedIndex,
   type TransportPhase,
   CUE_FADE_S,
 } from "./inertia";
@@ -2673,8 +2681,26 @@ export class AudioEngine {
    * and the movement is rendered as overlapping grains through each track's own
    * input node, so faders, mutes, solo and FX all stay in the signal path.
    */
+  /**
+   * Addendum §3 — the shuttle speed is a persistent machine setting, not a
+   * per-gesture argument: it survives release, direction changes and latching.
+   */
+  private scrubSpeedIndex: ScrubSpeedIndex = DEFAULT_SCRUB_SPEED_INDEX;
+
   private globalScrub: {
     dir: 1 | -1;
+    /** Shuttle speed in source-seconds per second — the persistent §3 setting. */
+    rate: number;
+    /**
+     * Addendum §6 — release deceleration in flight. While set, the shuttle is
+     * no longer at a constant rate: every grain, the shared playhead and the
+     * hand-off frame are derived from this one curve.
+     */
+    decel: InertiaSegment | null;
+    /** Timer that finishes the release at the hand-off frame. */
+    releaseTimer: ReturnType<typeof setTimeout> | null;
+    /** Context time of the physical key release (start of the deceleration). */
+    releasedAt: number | null;
     pos: number;
     startPos: number;
     /** Context time at which `pos` is exact — the integral anchor (= cursor). */
@@ -2682,7 +2708,7 @@ export class AudioEngine {
     /**
      * Schedule cursor: the context time of the NEXT grain. `pos` is the source
      * position at exactly this time, so the audible position at any context
-     * time t is `pos + dir·rate·(t − cursor)`.
+     * time t is `pos + ∫rate` from the cursor.
      */
     cursor: number;
     wasPlaying: boolean;
@@ -2712,6 +2738,12 @@ export class AudioEngine {
     keyupContextFrame: number;
     handoffContextFrame: number;
     fadeMs: number;
+    /** Addendum §6 — length of the release deceleration that preceded it, ms. */
+    releaseDecelMs: number;
+    /** Signed shuttle rate the release started from. */
+    releaseFromRate: number;
+    /** Context frame at which the reverse release passed through stillness. */
+    zeroCrossingFrame: number | null;
     stems: {
       id: number;
       mode: "node" | "worklet";
@@ -2858,6 +2890,31 @@ export class AudioEngine {
    * landing frame is therefore the frame immediately after the last audible
    * scrub frame, never a wall-clock estimate.
    */
+  /**
+   * Signed shuttle rate at a context time. Constant while the shuttle is held;
+   * once a release deceleration is in flight (addendum §6) it is the SAME
+   * exponential curve the timeline integrates, so the grains, the playhead and
+   * the eventual hand-off can never disagree.
+   */
+  private scrubRateAt(atCtx: number): number {
+    const gs = this.globalScrub;
+    if (!gs) return 0;
+    if (gs.decel) return inertiaRateAt(gs.decel, atCtx - gs.decel.startAt);
+    return gs.dir * gs.rate;
+  }
+
+  /** Exact media distance the shuttle covers between two context times. */
+  private scrubTravel(fromT: number, toT: number): number {
+    const gs = this.globalScrub;
+    if (!gs) return 0;
+    if (gs.decel) {
+      const a = inertiaDistance(gs.decel, fromT - gs.decel.startAt);
+      const b = inertiaDistance(gs.decel, toT - gs.decel.startAt);
+      return b - a;
+    }
+    return gs.dir * gs.rate * (toT - fromT);
+  }
+
   private scrubGrainAll(_dtS: number) {
     const gs = this.globalScrub;
     const ctx = this.ctx;
@@ -2866,13 +2923,13 @@ export class AudioEngine {
     const GRAIN_S = 0.06;
     const HOP_S = GRAIN_S * 0.8;
     const LOOKAHEAD_S = 0.05;
-    const advance = (from: number, seconds: number) =>
-      Math.min(this.duration, Math.max(0, from + gs.dir * GLOBAL_SCRUB_RATE * seconds));
+    const advance = (from: number, fromT: number, toT: number) =>
+      Math.min(this.duration, Math.max(0, from + this.scrubTravel(fromT, toT)));
 
     // A late timer (tab throttling, GC) must not queue grains in the past:
     // fast-forward the cursor and the position together, staying continuous.
     if (gs.cursor < now) {
-      gs.pos = advance(gs.pos, now - gs.cursor);
+      gs.pos = advance(gs.pos, gs.cursor, now);
       gs.cursor = now;
     }
 
@@ -2881,11 +2938,17 @@ export class AudioEngine {
     while (gs.cursor < now + LOOKAHEAD_S) {
       const at = gs.cursor;
       const offsetS = gs.pos;
-      const next = advance(offsetS, HOP_S);
+      const next = advance(offsetS, at, at + HOP_S);
+      // The instantaneous rate at the MIDDLE of the grain: during a release
+      // deceleration each grain is played at its own, slower speed.
+      const grainRate = Math.abs(this.scrubRateAt(at + GRAIN_S / 2));
       gs.cursor = at + HOP_S;
       gs.pos = next;
-      if (next === offsetS) continue; // parked at an end — no grain, no click
-      const backwards = gs.dir < 0;
+      if (next === offsetS || grainRate < 0.02) continue; // parked / stalled — no grain, no click
+      // Direction comes from the SIGN of the instantaneous rate, not from the
+      // held key: a reverse release passes through zero and the grains must
+      // flip to the forward buffer at that same frame (addendum §6).
+      const backwards = this.scrubRateAt(at + GRAIN_S / 2) < 0;
       for (let i = 0; i < this.tracks.length; i++) {
         const t = this.tracks[i]!;
         const pt = gs.perTrack[i];
@@ -2909,7 +2972,7 @@ export class AudioEngine {
         if (tap) g.connect(tap);
         const node = ctx.createBufferSource();
         node.buffer = buffer;
-        node.playbackRate.value = GLOBAL_SCRUB_RATE;
+        node.playbackRate.value = grainRate;
         node.connect(g);
         const fade = Math.min(0.006, GRAIN_S / 3);
         g.gain.setValueAtTime(0, at);
@@ -2919,7 +2982,7 @@ export class AudioEngine {
         node.start(
           at,
           Math.min(Math.max(0, readAt), Math.max(0, buffer.duration - 1e-3)),
-          GRAIN_S * GLOBAL_SCRUB_RATE,
+          GRAIN_S * grainRate,
         );
         gs.lastGrainAt[i] = at;
         pt.grains++;
@@ -2971,6 +3034,12 @@ export class AudioEngine {
   private globalScrubTick() {
     const gs = this.globalScrub;
     if (!gs) return;
+    // The release completes on CONTEXT time, not on a wall-clock timer: the
+    // hand-off frame must be the frame the deceleration curve actually ends on.
+    if (gs.decel && this.ctx && this.ctx.currentTime >= gs.decel.startAt + gs.decel.durationS) {
+      this.finishGlobalScrub();
+      return;
+    }
     const nowMs = typeof performance !== "undefined" ? performance.now() : Date.now();
     const dt = Math.min(0.2, Math.max(0, (nowMs - gs.last) / 1000));
     gs.last = nowMs;
@@ -2986,7 +3055,7 @@ export class AudioEngine {
     this.fanout((_t, at) => ({
       type: "setRate",
       applyAtContextFrame: at,
-      rate: engage ? GLOBAL_SCRUB_RATE : this.timeline.musicalRate(),
+      rate: engage ? (this.globalScrub?.rate ?? GLOBAL_SCRUB_SPEEDS[this.scrubSpeedIndex]!) : this.timeline.musicalRate(),
       rampFrames: Math.round(0.008 * sr),
     }));
     if (engage) {
@@ -3021,6 +3090,10 @@ export class AudioEngine {
     this.timelineFrozenAt = now;
     this.globalScrub = {
       dir,
+      rate: GLOBAL_SCRUB_SPEEDS[this.scrubSpeedIndex]!,
+      decel: null,
+      releaseTimer: null,
+      releasedAt: null,
       pos,
       startPos: pos,
       posCtxTime: now,
@@ -3050,8 +3123,29 @@ export class AudioEngine {
     const wk = this.globalScrub.perTrack.filter((p) => p.mode === "worklet").length;
     return {
       ok: true,
-      detail: `global shuttle ${dir > 0 ? "forward" : "backward"} at ${GLOBAL_SCRUB_RATE}× from ${pos.toFixed(3)}s — four stems on one playhead (${wk} worklet / ${4 - wk} node)`,
+      detail: `global shuttle ${dir > 0 ? "forward" : "backward"} at ${this.globalScrub.rate}× from ${pos.toFixed(3)}s — four stems on one playhead (${wk} worklet / ${4 - wk} node)`,
     };
+  }
+
+  /**
+   * Addendum §3 — persistent shuttle speed. Applied live to a running shuttle
+   * by re-anchoring the integral at the audible frame first, so the speed step
+   * never teleports the playhead.
+   */
+  setGlobalScrubSpeed(index: ScrubSpeedIndex): { ok: boolean; detail: string } {
+    this.scrubSpeedIndex = index;
+    const rate = GLOBAL_SCRUB_SPEEDS[index]!;
+    const gs = this.globalScrub;
+    const ctx = this.ctx;
+    if (gs && ctx && !gs.decel) {
+      const now = ctx.currentTime;
+      gs.pos = this.integrateScrubTo(now);
+      gs.posCtxTime = now;
+      gs.cursor = now;
+      gs.rate = rate;
+      this.worbletShuttle(gs.dir, gs.pos, true);
+    }
+    return { ok: true, detail: `shuttle speed → ${rate.toFixed(2)}×${gs ? " (live)" : " (armed)"}` };
   }
 
   /** Advance the shuttle integral to `atCtx` without emitting a grain. */
@@ -3059,15 +3153,16 @@ export class AudioEngine {
     const gs = this.globalScrub;
     if (!gs) return this.position();
     // Signed: the handoff frame is BEHIND the schedule cursor, so the integral
-    // must be able to run backwards to the last audible frame.
-    const dt = atCtx - gs.posCtxTime;
-    return Math.min(this.duration, Math.max(0, gs.pos + gs.dir * GLOBAL_SCRUB_RATE * dt));
+    // must be able to run backwards to the last audible frame. During a release
+    // it follows the deceleration curve, exactly like the grains.
+    return Math.min(this.duration, Math.max(0, gs.pos + this.scrubTravel(gs.posCtxTime, atCtx)));
   }
 
   setGlobalScrubDirection(dir: 1 | -1): { ok: boolean; detail: string } {
     const gs = this.globalScrub;
     if (!gs) return this.beginGlobalScrub(dir);
-    if (gs.dir !== dir) {
+    const decelerating = gs.decel != null;
+    if (gs.dir !== dir || decelerating) {
       const ctx = this.ctx;
       if (ctx) {
         // Reversal starts a fresh schedule at the audible frame: everything
@@ -3076,6 +3171,12 @@ export class AudioEngine {
         gs.posCtxTime = ctx.currentTime;
         gs.cursor = ctx.currentTime;
       }
+      // A new deflection during the release deceleration cancels it outright —
+      // the shuttle re-engages instead of completing a hand-off nobody wants.
+      if (gs.releaseTimer) clearTimeout(gs.releaseTimer);
+      gs.releaseTimer = null;
+      gs.decel = null;
+      gs.rate = GLOBAL_SCRUB_SPEEDS[this.scrubSpeedIndex]!;
       gs.dir = dir;
       this.worbletShuttle(dir, gs.pos, true);
     }
@@ -3463,18 +3564,82 @@ export class AudioEngine {
 
 
 
+  /**
+   * Addendum §6 — releasing the shuttle no longer jump-cuts back to playback.
+   * The signed shuttle rate decelerates along one finite exponential to the
+   * musical rate (or to stillness when the transport was stopped), the grains
+   * and the playhead both follow THAT curve, and the hand-off happens at the
+   * frame the curve finishes. A reverse release therefore glides down through
+   * zero — the grains flip to the forward buffer at the solved zero crossing —
+   * instead of snapping from −R to +1 in one block.
+   */
   endGlobalScrub(): { ok: boolean; detail: string } {
     const gs = this.globalScrub;
     const ctx = this.ctx;
     if (!gs || !ctx) return { ok: false, detail: "no global scrub active" };
+    if (this.inertiaEnabled && !gs.decel) {
+      const now = ctx.currentTime;
+      const fromRate = gs.dir * gs.rate;
+      const toRate = gs.wasPlaying ? gs.musicalRate : 0;
+      const seg = makeScrubReleaseSegment({
+        startAt: now,
+        fromRate,
+        toRate,
+        preset: INERTIA_PRESETS[this.inertiaPreset],
+      });
+      // Re-anchor first: from here the integral IS the deceleration curve.
+      gs.pos = this.integrateScrubTo(now);
+      gs.posCtxTime = now;
+      gs.cursor = Math.max(gs.cursor, now);
+      gs.decel = seg;
+      gs.releasedAt = now;
+      const crossing = inertiaZeroCrossing(seg);
+      // Worklet kernels ride the same curve; the direction flip is scheduled at
+      // the solved stillness frame, where the swap is inaudible.
+      this.fanout((_t, at) => ({
+        type: "inertia",
+        from: Math.abs(seg.from),
+        to: Math.max(INERTIA_MIN_RATE, Math.abs(seg.to)),
+        k: seg.k,
+        durationFrames: Math.round(seg.durationS * ctx.sampleRate),
+        applyAtContextFrame: at,
+      }));
+      if (crossing != null) {
+        const cf = Math.round(crossing * ctx.sampleRate);
+        this.fanoutAt(cf, () => ({ type: "setDirection", applyAtContextFrame: cf, direction: 1 }));
+      }
+      if (gs.releaseTimer) clearTimeout(gs.releaseTimer);
+      gs.releaseTimer = setTimeout(
+        () => {
+          if (this.globalScrub === gs) this.finishGlobalScrub();
+        },
+        Math.max(0, seg.durationS * 1000),
+      );
+      return {
+        ok: true,
+        detail: `shuttle release decelerating ${fromRate.toFixed(2)}× → ${toRate.toFixed(2)}× over ${(seg.durationS * 1000).toFixed(0)} ms${crossing != null ? `, zero crossing at ${crossing.toFixed(3)}s` : ""}`,
+      };
+    }
+    return this.finishGlobalScrub();
+  }
+
+  /** The shared hand-off frame itself — reached at the end of the release. */
+  private finishGlobalScrub(): { ok: boolean; detail: string } {
+    const gs = this.globalScrub;
+    const ctx = this.ctx;
+    if (!gs || !ctx) return { ok: false, detail: "no global scrub active" };
+    if (gs.releaseTimer) clearTimeout(gs.releaseTimer);
+    gs.releaseTimer = null;
     if (gs.timer) clearInterval(gs.timer);
     gs.timer = null;
     const sr = ctx.sampleRate;
-    const keyup = ctx.currentTime;
+    // Evidence keeps reporting the PHYSICAL release, not the end of the ramp.
+    const keyup = gs.releasedAt ?? ctx.currentTime;
     // One shared handoff on the next render quantum (two quanta of margin so
-    // the scheduling itself cannot land in the past).
+    // the scheduling itself cannot land in the past). It is measured from NOW —
+    // the end of the deceleration — never from the older key-release frame.
     const quantum = 128 / sr;
-    const handoff = keyup + Math.max(2 * quantum, SCRUB_HANDOFF_MIN_S);
+    const handoff = ctx.currentTime + Math.max(2 * quantum, SCRUB_HANDOFF_MIN_S);
     const landing = this.integrateScrubTo(handoff);
     const landingFrame = Math.round(landing * sr);
     const handoffFrame = Math.round(handoff * sr);
@@ -3550,6 +3715,12 @@ export class AudioEngine {
       keyupContextFrame: Math.round(keyup * sr),
       handoffContextFrame: handoffFrame,
       fadeMs: SCRUB_HANDOFF_FADE_S * 1000,
+      releaseDecelMs: (gs.decel?.durationS ?? 0) * 1000,
+      releaseFromRate: gs.decel?.from ?? gs.dir * gs.rate,
+      zeroCrossingFrame: gs.decel ? (() => {
+        const z = inertiaZeroCrossing(gs.decel!);
+        return z == null ? null : Math.round(z * sr);
+      })() : null,
       stems: this.tracks.map((t, i) => {
         const restart = t.sources.length > 0 ? Math.round((t.sources[t.sources.length - 1]!.startPos ?? landing) * sr) : landingFrame;
         const normal = t.buffer ? (gs.wasPlaying ? t.sources.length : 0) : 0;
@@ -4028,6 +4199,12 @@ export class AudioEngine {
         }
         case "transport.scrub.end": {
           const r = this.endGlobalScrub();
+          return this.ack(cmd, r.ok ? "completed" : "rejected", r.detail);
+        }
+        case "transport.scrub.speed": {
+          const raw = Math.round(Number(p["index"] ?? DEFAULT_SCRUB_SPEED_INDEX));
+          const index = (Math.min(GLOBAL_SCRUB_SPEEDS.length - 1, Math.max(0, raw)) as ScrubSpeedIndex);
+          const r = this.setGlobalScrubSpeed(index);
           return this.ack(cmd, r.ok ? "completed" : "rejected", r.detail);
         }
         case "transport.scrub": {
