@@ -23,6 +23,30 @@ Explicitly allowed (documented, volatile, no persistent write):
   * existing power / charger GPIOs   electrical only
   * READ-ONLY Zephyr UICR references (listed verbatim below)
 
+Two categories of build/link ARTIFACT are excluded from the symbol/source
+scan, both narrowly, both with evidence printed in the report rather than
+silently dropped:
+
+  * Kconfig link-time value markers: Zephyr links every referenced boolean/
+    int Kconfig option in as an absolute (nm type 'A') symbol literally named
+    "CONFIG_<OPTION>" for external debug tooling. These carry no code, no
+    data, no section and are never executed or read by the firmware; a
+    pattern that happens to match the *option's name* (e.g. "NRF_NVMC" inside
+    "CONFIG_HAS_HW_NRF_NVMC_PE", a SoC "this chip has the peripheral"
+    capability flag) is not evidence that code using that peripheral is
+    linked in. The actual effective Kconfig is separately and exhaustively
+    checked against build-stemtape/zephyr/.config in pass B below, which is
+    the correct place to fail on a *dangerous option being enabled* — pass A
+    only excludes the nm-symbol false-positive, it never excludes pass B.
+  * Empty Zephyr iterable-section boundaries: Z_STRUCT_SECTION_LABEL-style
+    driver-API registries emit an unconditional "<x>_list_start"/
+    "<x>_list_end" symbol pair at link time whenever the API type is
+    referenced anywhere in the build graph, independent of whether any
+    Kconfig subsystem is enabled or any device object of that type exists.
+    When start == end the section holds zero entries: no instance of that
+    driver type is linked into the image. Only an exactly-empty pair is
+    excluded; a nonzero-size registry still fails.
+
 Usage: m0_safety_gate.py <nm.txt> <objdump-d.txt> <.config> <out-report.md>
 """
 
@@ -108,6 +132,60 @@ report.append(f"Source files scanned: {len(files)}  |  symbols: {len(nm_lines)}"
               f"  |  disassembly lines: {len(dis)}  |  config lines: {len(cfg)}")
 report.append("")
 
+
+# ---- nm-line parsing + the two documented false-positive exclusions -----
+def parse_nm_line(line: str):
+    """`arm-zephyr-eabi-nm -n -S` prints 'ADDR [SIZE] TYPE NAME'; SIZE is
+    omitted for symbols nm cannot size (e.g. absolute symbols). Returns
+    (addr, size_or_None, type, name) or None if the line doesn't parse."""
+    parts = line.split(None, 3)
+    if len(parts) == 3:
+        addr, typ, name = parts
+        return addr, None, typ, name
+    if len(parts) == 4:
+        addr, size, typ, name = parts
+        return addr, size, typ, name
+    return None
+
+
+nm_addr: dict[str, int] = {}
+for _l in nm_lines:
+    _p = parse_nm_line(_l)
+    if _p is None:
+        continue
+    try:
+        nm_addr[_p[3]] = int(_p[0], 16)
+    except ValueError:
+        pass
+
+
+def is_kconfig_marker(nm_line: str) -> bool:
+    """Absolute (type 'A') symbol literally named CONFIG_<OPTION>: a linked
+    Kconfig value marker, not code or data. See module docstring."""
+    parsed = parse_nm_line(nm_line)
+    if parsed is None:
+        return False
+    _addr, _size, typ, name = parsed
+    return typ == "A" and name.startswith("CONFIG_")
+
+
+def empty_iterable_boundary(nm_line: str) -> bool:
+    """'<x>_list_start' / '<x>_list_end' pair from Zephyr's iterable-section
+    macros, present with start == end, i.e. the registry holds zero entries.
+    See module docstring."""
+    parsed = parse_nm_line(nm_line)
+    if parsed is None:
+        return False
+    _addr, _size, _typ, name = parsed
+    for suffix, other_suffix in (("_list_start", "_list_end"),
+                                  ("_list_end", "_list_start")):
+        if name.endswith(suffix):
+            paired = name[: -len(suffix)] + other_suffix
+            if name in nm_addr and paired in nm_addr:
+                return nm_addr[name] == nm_addr[paired]
+    return False
+
+
 # --- pass A: symbols + source text ---------------------------------------
 report.append("## A. Symbol and source scan")
 report.append("")
@@ -122,7 +200,18 @@ for label, pattern in FORBIDDEN_SYMBOLS:
                         hits.append(f"{path}:{n}: {line.strip()[:180]}")
         except OSError:
             continue
-    hits += [f"symbol: {l}" for l in nm_lines if rx.search(l)]
+    excluded_kconfig = []
+    excluded_iterable = []
+    for l in nm_lines:
+        if not rx.search(l):
+            continue
+        if is_kconfig_marker(l):
+            excluded_kconfig.append(l)
+            continue
+        if empty_iterable_boundary(l):
+            excluded_iterable.append(l)
+            continue
+        hits.append(f"symbol: {l}")
     if hits:
         failures.append(f"{label}: {len(hits)} reference(s)")
         report.append(f"FAIL — {label}: {len(hits)} reference(s)")
@@ -132,6 +221,22 @@ for label, pattern in FORBIDDEN_SYMBOLS:
         report.append("```")
     else:
         report.append(f"PASS — {label}: none found.")
+    if excluded_kconfig:
+        report.append("")
+        report.append(f"  Excluded as Kconfig link-time markers (absolute symbol, "
+                       f"CONFIG_-named, no code/data — see module docstring): "
+                       f"{len(excluded_kconfig)}")
+        report.append("```text")
+        report.extend(excluded_kconfig[:50])
+        report.append("```")
+    if excluded_iterable:
+        report.append("")
+        report.append(f"  Excluded as empty iterable-section boundaries "
+                       f"(start == end, zero linked instances): "
+                       f"{len(excluded_iterable)}")
+        report.append("```text")
+        report.extend(excluded_iterable[:50])
+        report.append("```")
     report.append("")
 
 # --- pass B: Kconfig -----------------------------------------------------
@@ -158,10 +263,33 @@ report.append("")
 report.append("## C. Literal peripheral-address scan (register writes without symbols)")
 report.append("")
 hexrx = re.compile(r"0x([0-9a-fA-F]{8})")
-current_sym = "?"
 symrx = re.compile(r"^[0-9a-f]+ <([^>]+)>:")
+
+# Index function boundaries so a hit can be traced to the complete
+# enclosing disassembly — the actual str/ldr instruction and register
+# offset, not just the literal-pool word — before any finding is accepted
+# or excluded.
+func_starts = [(i, m.group(1)) for i, line in enumerate(dis)
+               for m in [symrx.match(line)] if m]
+
+
+def enclosing_function(line_idx: int):
+    start, name = 0, "?"
+    for s, n in func_starts:
+        if s > line_idx:
+            break
+        start, name = s, n
+    end = len(dis)
+    for s, _n in func_starts:
+        if s > start:
+            end = s
+            break
+    return start, end, name
+
+
+current_sym = "?"
 found = {label: [] for label, _lo, _hi in ADDRESS_WINDOWS}
-for line in dis:
+for i, line in enumerate(dis):
     m = symrx.match(line)
     if m:
         current_sym = m.group(1)
@@ -170,7 +298,7 @@ for line in dis:
         v = int(h, 16)
         for label, lo, hi in ADDRESS_WINDOWS:
             if lo <= v <= hi:
-                found[label].append(f"{current_sym}: {line.strip()[:180]}")
+                found[label].append((current_sym, i, line.strip()[:180]))
 
 for label, lo, hi in ADDRESS_WINDOWS:
     hits = found[label]
@@ -180,14 +308,14 @@ for label, lo, hi in ADDRESS_WINDOWS:
         continue
     if label.startswith("UICR"):
         unexpected = [h for h in hits
-                      if not any(a in h for a in ALLOWED_UICR_READONLY)]
+                      if not any(a in h[0] for a in ALLOWED_UICR_READONLY)]
         report.append(f"{'FAIL' if unexpected else 'PASS'} — {label}: "
                       f"{len(hits)} reference(s), "
                       f"{len(unexpected)} outside the verified read-only allow-list "
                       f"({', '.join(ALLOWED_UICR_READONLY)}).")
         report.append("")
         report.append("```text")
-        report.extend(hits[:200])
+        report.extend(f"{sym}: {txt}" for sym, _i, txt in hits[:200])
         report.append("```")
         report.append("")
         if unexpected:
@@ -197,9 +325,24 @@ for label, lo, hi in ADDRESS_WINDOWS:
     report.append(f"FAIL — {label}: {len(hits)} literal reference(s)")
     report.append("")
     report.append("```text")
-    report.extend(hits[:200])
+    report.extend(f"{sym}: {txt}" for sym, _i, txt in hits[:200])
     report.append("```")
     report.append("")
+    # Full disassembly of every distinct enclosing function, so the exact
+    # instruction, register and offset that uses this base address can be
+    # read directly from the audit artifact/job log — required evidence
+    # before this (or any future) finding may ever be allow-listed.
+    seen = []
+    for sym, i, _txt in hits:
+        if sym in seen:
+            continue
+        seen.append(sym)
+        start, end, _name = enclosing_function(i)
+        report.append(f"Full disassembly of `{sym}` (offset tracing evidence):")
+        report.append("```text")
+        report.extend(dis[start:end][:200])
+        report.append("```")
+        report.append("")
 
 # --- explicitly permitted volatile operations ----------------------------
 report.append("## D. Permitted volatile operations (documented, not persistent)")
