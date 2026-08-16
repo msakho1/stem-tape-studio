@@ -5,6 +5,7 @@ import { KeyboardPanel } from "@/device/KeyboardPanel";
 import { ControlsGuide, LESSONS } from "@/device/ControlsGuide";
 import { Sp1GuideIllustration } from "@/device/Sp1GuideIllustration";
 import { HeadsStatus } from "@/device/HeadsStatus";
+import { Sp1DiagnosticDrawer } from "@/device/Sp1DiagnosticDrawer";
 import { SupportButton } from "@/components/SupportButton";
 import { KEY_HINTS, useDeviceSurface } from "@/device/useDeviceSurface";
 import { CONTROL_LABELS } from "@/device/geometry";
@@ -367,6 +368,8 @@ function LabPage() {
                 </p>
               )}
             </div>
+
+            <Sp1DiagnosticDrawer state={state} leds={leds} arbiter={arbiter} />
           </section>
 
           {/* ---------- project rail ---------- */}
