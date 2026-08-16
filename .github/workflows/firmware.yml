@@ -86,3 +86,62 @@ jobs:
           name: sp1_looper-bin
           path: project/build/zephyr/sp1_looper.bin
           if-no-files-found: error
+
+  stemtape-m0:
+    # Milestone M0: the Stem Tape raw USB-MIDI control surface. Same board,
+    # same Zephyr revision and SDK; no Zephyr patch is needed (the UAC2
+    # Windows feedback workaround only concerns the audio class, which M0
+    # does not build).
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+        with:
+          path: project
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up Zephyr v4.3.1 + SDK 0.17.4 (arm-zephyr-eabi only)
+        uses: zephyrproject-rtos/action-zephyr-setup@v1
+        with:
+          base-path: project
+          app-path: firmware
+          toolchains: arm-zephyr-eabi
+          sdk-version: 0.17.4
+
+      - name: Path preflight
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -eux
+          test -d zephyr
+          test -f firmware/stemtape/CMakeLists.txt
+          test -f firmware/stemtape/src/main.c
+          test -f firmware/stemtape/app.overlay
+          test -d firmware/boards/teenageengineering/stem_player
+          west topdir
+
+      - name: Build (west build -p always -b stem_player firmware/stemtape)
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -eux
+          west build -p always -b stem_player firmware/stemtape -d build-stemtape \
+            -- -DBOARD_ROOT="$GITHUB_WORKSPACE/project/firmware"
+
+      - name: Report artifact hash
+        working-directory: ${{ github.workspace }}/project/build-stemtape/zephyr
+        run: |
+          set -eux
+          cp zephyr.bin stemtape_m0.bin
+          ls -l stemtape_m0.bin
+          sha256sum stemtape_m0.bin | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload stemtape_m0.bin
+        uses: actions/upload-artifact@v4
+        with:
+          name: stemtape_m0-bin
+          path: project/build-stemtape/zephyr/stemtape_m0.bin
+          if-no-files-found: error
+
