@@ -156,3 +156,8 @@ export class WebMidiAdapter {
 }
 
 export const webMidi = new WebMidiAdapter();
+
+// Browser-proof seam: harness runs inject port messages through this handle.
+if (typeof window !== "undefined") {
+  (window as unknown as { __stemTapeWebMidi?: WebMidiAdapter }).__stemTapeWebMidi = webMidi;
+}
