@@ -183,25 +183,43 @@ def main() -> int:
           f"{image_size} bytes / allowance {APP_SIZE} bytes "
           f"({image_size * 100.0 / APP_SIZE:.2f}%)")
 
-    # 8. BIN is byte-for-byte the ELF's own flash contents
+    # 8. BIN is byte-for-byte the ELF's own flash contents.
+    # Zephyr produces zephyr.bin with an explicit 0xFF gap fill and the same
+    # section removals; reproduce those exact conversion rules.
     with tempfile.TemporaryDirectory() as td:
         rebuilt = os.path.join(td, "rebuilt.bin")
-        rc = subprocess.run([args.objcopy, "-O", "binary", args.elf, rebuilt],
-                            capture_output=True, text=True)
+        cmd = [args.objcopy,
+               "--gap-fill", "0xff",
+               "--output-target=binary",
+               "--remove-section=.comment",
+               "--remove-section=COMMON",
+               "--remove-section=.eh_frame",
+               args.elf, rebuilt]
+        cmd_str = " ".join(cmd)
+        rc = subprocess.run(cmd, capture_output=True, text=True)
         if rc.returncode != 0:
             check(False, "8 BIN reconstructed from the ELF is byte-identical",
-                  f"objcopy failed: {rc.stderr.strip()[:200]}")
+                  f"objcopy failed: {rc.stderr.strip()[:200]} | command: {cmd_str}")
         else:
             a = open(rebuilt, "rb").read()
             b = open(args.binary, "rb").read()
             if a == b:
                 check(True, "8 BIN reconstructed from the ELF is byte-identical",
-                      f"{len(a)} bytes identical")
+                      f"{len(a)} bytes identical | command: {cmd_str}")
             else:
                 diff = next((i for i, (x, y) in enumerate(zip(a, b)) if x != y),
                             min(len(a), len(b)))
+                lo = max(0, diff - 8)
+                wa = a[lo:lo + 16].hex(" ")
+                wb = b[lo:lo + 16].hex(" ")
                 check(False, "8 BIN reconstructed from the ELF is byte-identical",
-                      f"sizes {len(a)} vs {len(b)}, first difference at offset {diff}")
+                      f"sizes {len(a)} vs {len(b)}, first difference at offset "
+                      f"{hex(diff)} (ELF address {hex(APP_ORIGIN + diff)})\n"
+                      f"    window offset {hex(lo)} (+16 bytes)\n"
+                      f"    reconstructed: {wa}\n"
+                      f"    zephyr.bin   : {wb}\n"
+                      f"    command: {cmd_str}")
+
 
     print()
     if failures:
