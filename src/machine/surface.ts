@@ -1428,9 +1428,14 @@ export const LED_PRIORITY = {
  * song row: solid = song, blink = bank. Input feedback sits above it and every
  * winner states its reason so diagnostics can explain the arbitration.
  */
-export function deriveLeds(state: SurfaceState): LedFrame {
+export function deriveLeds(state: SurfaceState, now = state.fxFlashAt ?? 0): LedFrame {
   const frame = {} as LedFrame;
   const off = state.power === "off";
+  // Addendum §5 — FX latch confirmation: all four track lights flash briefly on
+  // the toggle, above every FX-overlay pattern, then hand the lights straight
+  // back to the normal arbitration.
+  const flashing =
+    state.fxFlashAt != null && now - state.fxFlashAt >= 0 && now - state.fxFlashAt < FX_LATCH_FLASH_MS;
 
   state.tracks.forEach((track, i) => {
     const id = `track-led-${i + 1}` as LedId;
@@ -1439,6 +1444,8 @@ export function deriveLeds(state: SurfaceState): LedFrame {
       frame[id] = { pattern: "dark", reason: "powered off (FUNCTION hold)", priority: 100 };
     } else if (state.grid.rejected) {
       frame[id] = { pattern: "blink", reason: "grid far off — all four blink, nothing moves (v2.6)", priority: 98 };
+    } else if (flashing) {
+      frame[id] = { pattern: "blink", reason: "FX latch confirmed — four-light flash", priority: LED_PRIORITY.momentaryFx + 1 };
     } else if (state.perf.fxOverlay) {
       // Overlay on: track LEDs show STEM state, not v2.6 track content.
       const st = state.perf.tracks[i]!;
