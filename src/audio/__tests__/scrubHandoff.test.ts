@@ -284,8 +284,16 @@ async function scrubAndRelease(opts: { dir: 1 | -1; ticks: number; dtS: number; 
   r.advance(0.001);
   const keyup = r.ctx.currentTime;
   r.engine.execute(cmd("transport.scrub.end"));
+  // Addendum §6: the release is a deceleration, so the hand-off happens when
+  // the curve ends. Run the shuttle's own tick over context time until it does.
+  const decelStart = r.ctx.currentTime;
+  for (let i = 0; i < 200 && r.engine.globalScrubState().active; i++) {
+    r.advance(0.01);
+    r.tick();
+  }
+  const decelS = r.ctx.currentTime - decelStart;
   const handoff = r.engine.globalScrubState().handoff!.handoffContextFrame / SR;
-  return { ...r, keyup, handoff };
+  return { ...r, keyup, handoff, decelS };
 }
 
 // -------------------------------------------------------------------- tests
