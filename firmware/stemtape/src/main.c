@@ -651,17 +651,12 @@ int main(void)
 	track_all_off();
 	led_pwm_init();
 
-	const struct device *wdt = DEVICE_DT_GET(WDT_NODE);
-	if (device_is_ready(wdt)) {
-		wdt_install_timeout(wdt, &(struct wdt_timeout_cfg){
-			.window.max = 4000, .callback = wdt_prewarn,
-		});
-		wdt_setup(wdt, 0);
-	}
-	feed_wdt();
+	wdt_init();          /* detects a bootloader-started WDT, checks rc */
 
 	controls_init();
+	early_dfu_escape();  /* BEFORE boot_signature() and all USB init */
 	boot_signature();
+
 
 	if (device_is_ready(midi_dev)) {
 		usbd_midi_set_ops(midi_dev, &midi_ops);
