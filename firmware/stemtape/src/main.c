@@ -767,7 +767,14 @@ int main(void)
 			if (!banner_done) {
 				printk("%s  diagnostic target: USB MIDI2 + CDC ACM, no UAC2, "
 				       "eMMC never touched\n", ST_FW_VERSION);
+				printk("wdt: pre_running=%d ours=%d install_rc=%d setup_rc=%d "
+				       "rren=0x%02x runstatus=%lu\n",
+				       (int)g_wdt_pre_running, (int)g_wdt_ours,
+				       g_wdt_install_rc, g_wdt_setup_rc,
+				       (unsigned)(NRF_WDT->RREN & 0xFFu),
+				       (unsigned long)NRF_WDT->RUNSTATUS);
 				printk("fields: AIN0 AIN1 decoded stable [unmeasured-count]\n");
+
 				banner_done = true;
 				diag_t = now;
 			} else if (changed && now - diag_t >= DIAG_MIN_GAP_MS) {
