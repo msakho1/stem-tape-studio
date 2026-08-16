@@ -89,7 +89,7 @@ export interface DiagnosticReport {
   rates: EventRates;
   trace: TraceRecord[];
   contract: ContractResult[];
-  /** EXACTLY the ten physical SP-1 LEDs. */
+  /** EXACTLY the eight physical SP-1 LEDs. */
   physicalLeds: LedInspectionRow[];
   /** Web-only indicators, never part of the physical frame. */
   webOnlyIndicators: LedInspectionRow[];
@@ -131,11 +131,13 @@ export function reportToText(r: DiagnosticReport): string {
   for (const [k, v] of Object.entries(r.expectedArtifact)) lines.push(`  ${k}: ${v}`);
   lines.push("");
   lines.push("PHYSICAL LED MODEL");
-  lines.push(`  physical SP-1 LEDs: ${PHYSICAL_LED_COUNT}`);
+  lines.push(`  physical SP-1 LEDs: ${PHYSICAL_LED_COUNT} (${r.ledModel.layout})`);
+  lines.push(`  side row: ${r.ledModel.sideRow}`);
   lines.push(`  represented on the website: ${r.ledModel.webIndicators}`);
-  lines.push(`  implemented in the audited M0 LED driver: ${r.ledModel.m0Implemented} of ${PHYSICAL_LED_COUNT}`);
-  lines.push(`  unresolved M0 outputs: ${r.ledModel.m0Unresolved.join(", ")}`);
+  lines.push(`  electrical GPIO coverage (audited M0 driver): ${r.ledModel.electricalCoverage}`);
+  lines.push(`  Stem Tape behaviour mapping coverage: ${r.ledModel.behaviorCoverage}`);
   lines.push(`  host→device LED feedback: ${r.ledModel.hostToDeviceLedFeedback}`);
+  lines.push(`  note: ${r.ledModel.note}`);
   lines.push("");
   lines.push("MIDI CONTRACT (decimal / hex)");
   lines.push(`  ${SP1_NOTATION_WARNING}`);
@@ -169,7 +171,7 @@ export function reportToText(r: DiagnosticReport): string {
     );
   }
   lines.push("");
-  lines.push("WEB-ONLY INDICATORS — NOT PART OF THE 10-LED PHYSICAL FRAME");
+  lines.push("WEB-ONLY INDICATORS — NOT PART OF THE 8-LED PHYSICAL FRAME");
   for (const l of r.webOnlyIndicators) {
     lines.push(`  ${l.id.padEnd(16)} actual ${l.actualMode} · ${l.owner}`);
   }

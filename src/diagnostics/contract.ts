@@ -14,6 +14,7 @@ import type { SurfaceState } from "@/machine/surface";
 import {
   expectedPhysicalFrame,
   led,
+  validatePhysicalFrame,
   type DivergenceCategory,
   type ExpectedPhysicalLedFrame,
 } from "./physical";
@@ -888,6 +889,17 @@ export const BEHAVIOR_CONTRACT: ContractEntry[] = [
 
 export interface ContractResult extends ContractEntry {
   observed: string | null;
+}
+
+/** Contract self-validation: every entry must carry an exact 8-LED frame. */
+export function validateContract(entries: ContractEntry[] = BEHAVIOR_CONTRACT): string[] {
+  const problems: string[] = [];
+  for (const e of entries) {
+    for (const p of validatePhysicalFrame(e.expectedLeds as unknown as Record<string, unknown>)) {
+      problems.push(`${e.id}: ${p}`);
+    }
+  }
+  return problems;
 }
 
 export function evaluateContract(state: SurfaceState | null): ContractResult[] {

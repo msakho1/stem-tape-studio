@@ -10,8 +10,10 @@
  * module maps logical pattern → diagnostic MODE, records which state owns an
  * LED, and compares logical against what the DOM/CSS actually renders.
  *
- * It never claims parity with physical LEDs: M0 has no host→device LED path,
- * and only 8 of the 10 physical outputs are driven by the audited firmware.
+ * It never claims parity with physical LEDs: the audited M0 build has no
+ * host→device LED path, so nothing here is proof of what the panel shows.
+ * The panel has exactly EIGHT LEDs (4 Track + 4 side/status); the `••` marks
+ * and the red PLAY triangle are printed artwork, not outputs.
  */
 
 import type { LedFrame, LedId, LedPattern, LedState, SurfaceState } from "@/machine/surface";
@@ -28,10 +30,10 @@ import {
 
 export type LedMode = LedDiagnosticMode;
 
-/** Everything the web renders: the 10 physical LEDs plus 1 web-only indicator. */
+/** Everything the web renders: the 8 physical LEDs plus the web-only indicators. */
 export const LED_IDS: LedId[] = [...PHYSICAL_LED_IDS, ...UI_ONLY_INDICATOR_IDS] as LedId[];
 
-/** The eight SP-1 panel LEDs (tracks + side row) the audited M0 driver writes. */
+/** The eight SP-1 panel LEDs (4 Track + 4 side/status) the M0 driver writes. */
 export const PANEL_LED_IDS: LedId[] = [...M0_IMPLEMENTED_LED_OUTPUTS] as LedId[];
 
 export function modeOf(pattern: LedPattern): LedMode {
@@ -192,10 +194,6 @@ function inspectOne(
   }
   const physical = (PHYSICAL_LED_IDS as readonly string[]).includes(id);
   const m0Driven = (M0_IMPLEMENTED_LED_OUTPUTS as readonly string[]).includes(id);
-  if (physical && !m0Driven) {
-    problems.push("no resolved physical output in the audited M0 LED driver");
-    divergence = "physical mapping unresolved";
-  }
   return {
     id,
     index,
@@ -230,7 +228,7 @@ export function inspectLeds(
   return LED_IDS.map((id, index) => inspectOne(id, index, actual, expected, byId, lostTo));
 }
 
-/** EXACTLY the ten physical SP-1 LEDs, in physical order. */
+/** EXACTLY the eight physical SP-1 LEDs, in physical order. */
 export function inspectPhysicalLeds(
   actual: LedFrame,
   expected: LedFrame,
