@@ -1535,6 +1535,14 @@ export function deriveLeds(state: SurfaceState, now = state.fxFlashAt ?? 0): Led
     ? { pattern: "dark", reason: "powered off", priority: 100 }
     : state.perf.fxOverlay
     ? { pattern: "blink", reason: "FX overlay open — FUNCTION LEDs alternate-pulse", priority: LED_PRIORITY.momentaryFx }
+    : state.scrubLatched
+      ? {
+          pattern: "chase",
+          // Addendum §4: a latched shuttle is a running operation with nothing
+          // held, so it must be visible on the surface.
+          reason: `shuttle latched ${state.globalScrub > 0 ? "forward" : "reverse"} at ${GLOBAL_SCRUB_SPEEDS[state.scrubSpeed]!.toFixed(2)}×`,
+          priority: 55,
+        }
     : state.pressed.some((c) => c.startsWith("rocker"))
       ? { pattern: "blink", reason: "rocker engaged", priority: 50 }
       : state.grid.bpm != null
