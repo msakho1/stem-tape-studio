@@ -332,7 +332,7 @@ export function Sp1DiagnosticDrawer({ state, leds, arbiter }: Props) {
       "logical led derivation": "browser-observed",
       "behaviour contract expectations": "not-observed",
       "firmware serial content": console_.lineCount > 0 ? "browser-observed" : "not-observed",
-      "track 1/4 resync sequence": "injected/simulated",
+      "track 1/4 resync sequence": "mocked",
       "physical side-row playback index": "not-observed",
     };
     return buildReport({
