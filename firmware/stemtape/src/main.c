@@ -1,33 +1,49 @@
 /*
  * ============================================================================
- *  STEM TAPE FIRMWARE — MILESTONE M0: raw USB-MIDI control surface
+ *  STEM TAPE FIRMWARE — MILESTONE M0: hardware / MIDI DIAGNOSTIC TARGET
  * ============================================================================
- *  The SP-1 enumerates as a class-compliant USB MIDI device and transmits
- *  RAW PHYSICAL STATE ONLY. Nothing on the device interprets the surface:
- *  no chords, no tap/hold discrimination, no looper state, no musical LED
- *  feedback. The host (Stem Tape) owns all interpretation.
+ *  M0 is NOT a product build. It exists to prove two things on real hardware,
+ *  before any of it is merged into the SP-1 Tape Looper:
  *
- *  What is reused UNCHANGED from the verified SP-1 Tape Looper firmware
- *  (firmware/src/main.c, same repository):
- *    - the board definition (firmware/boards/teenageengineering/stem_player)
- *    - the LED pin map + the always-dim soft-PWM renderer (zero-latency IRQ)
- *    - the BTN_COM ladder rail, the oversampled ADC read and the verified
- *      voltage-band decoders for the track/PLAY and Vol/rocker ladders
- *    - the fader ADC channels + deadband
- *    - the power button (P0.27), the 2.5 s hold-to-power-off with the LED
- *      countdown, SYSTEM_OFF wake arming, and the Track1+Track4 DFU failsafe
- *    - the 4 s watchdog and the fault->reboot handler
- *    - the device_next USB stack + the shared sample_usbd bring-up helper
+ *    (a) that the SP-1 control surface can be decoded correctly, INCLUDING the
+ *        shared-resistor-ladder chords that stock firmware never needed, and
+ *    (b) that a class-compliant USB MIDI descriptor produced by Zephyr 4.3.1
+ *        is actually accepted by macOS, Chrome Web MIDI and CoreMIDI on iOS.
  *
- *  What is new in M0:
- *    - usbd_midi2 replaces the UAC2 audio class (CDC ACM console kept)
- *    - one MIDI event per physical edge (see src/midi_protocol.h)
- *    - CC123 All Notes Off whenever the host (re)enables the interface
- *    - the Stem Tape boot signature: a double all-track-LED flash
+ *  PINNED BASELINE FOR EVERY COPIED HARDWARE CONSTANT
+ *  --------------------------------------------------
+ *  All power, DFU, LED, GPIO and ADC-band constants below were copied from
+ *  this repository's Tape Looper application source:
  *
- *  BOOTLOADER SAFETY (the SP-1 "BIG FIVE") is preserved: app at 0x20000,
- *  watchdog fed < 5 s, no re-init of bootloader-owned clocks, SYSTEM_OFF
- *  returns to the bootloader, RESETREAS cleared on boot and before sleep.
+ *      file     firmware/src/main.c
+ *      commit   a8dd127ba1d595e54f92503a0bd75eabca86334d  ("Changes",
+ *               2026-08-15 08:21:32 +0000)
+ *
+ *  Each copied constant carries an inline [looper a8dd127:<line>] citation.
+ *  Constants NOT carrying such a citation are new to M0 and are marked
+ *  UNMEASURED where they depend on hardware measurements that do not exist
+ *  yet. The Tape Looper target (firmware/) is untouched by this milestone.
+ *
+ *  SHARED-LADDER REALITY
+ *  ---------------------
+ *  The SP-1 has no independent digital line per button. PLAY + Track 1-4 sit
+ *  on one SAADC ladder (AIN0) and Vol-/Vol+/rocker sit on another (AIN1), so a
+ *  chord is a SINGLE new voltage, not two readings. Only ONE chord band was
+ *  ever measured by the looper (Track1+Track4, 1280..1390 — the DFU combo).
+ *  Every other chord band is UNMEASURED, and this firmware refuses to guess:
+ *  an unmeasured reading produces NO MIDI, holds the previous stable mask and
+ *  is captured for the CDC diagnostic stream instead.
+ *
+ *  FUNCTION (P0.27) is a real, separate GPIO and therefore remains
+ *  independently detectable in every chord.
+ *
+ *  SAFETY (unchanged from the pinned revision)
+ *  -------------------------------------------
+ *  App at 0x20000, watchdog fed < 5 s, SYSTEM_OFF returns to the bootloader,
+ *  RESETREAS cleared on boot and before sleep, Track1+Track4 = UF2 bootloader
+ *  recovery. This target NEVER touches eMMC: no mount, no format, no write —
+ *  the sp1_emmc driver is not even compiled in, so stored Tape Looper audio
+ *  cannot be altered. UAC2 audio is disabled in THIS diagnostic target only.
  * ============================================================================
  */
 
@@ -36,18 +52,21 @@
 #include <zephyr/device.h>
 #include <zephyr/drivers/watchdog.h>
 #include <zephyr/drivers/adc.h>
+#include <zephyr/drivers/uart.h>
 #include <zephyr/usb/usbd.h>
 #include <zephyr/usb/class/usbd_midi2.h>
 #include <zephyr/audio/midi.h>
 #include <zephyr/fatal.h>
 #include <zephyr/sys/reboot.h>
+#include <zephyr/sys/printk.h>
 #include <sample_usbd.h>
 #include <soc.h>
 #include <string.h>
 
 #include "midi_protocol.h"
 
-/* FAILSAFE: any unrecoverable fault becomes a clean reboot (never a brick). */
+/* FAILSAFE: any unrecoverable fault becomes a clean reboot (never a brick).
+ * [looper a8dd127: k_sys_fatal_error_handler] */
 void k_sys_fatal_error_handler(unsigned int reason, const struct arch_esf *esf)
 {
 	ARG_UNUSED(reason);
@@ -59,25 +78,25 @@ void k_sys_fatal_error_handler(unsigned int reason, const struct arch_esf *esf)
 #define WDT_NODE DT_ALIAS(watchdog0)
 
 /* ---------------------------------------------------------------- LEDs ---
- * Pin map and soft-PWM dimming reused from the looper firmware.
+ * Pin map and soft-PWM dimming copied from [looper a8dd127:101-108, 3906-3988].
  */
 struct led { NRF_GPIO_Type *port; uint32_t pin; };
 
-/* the 4 playback / status LEDs (center row) */
+/* the 4 playback / status LEDs (center row)  [looper a8dd127:101-103] */
 static const struct led leds[] = {
 	{ NRF_P1, 13 }, { NRF_P0, 0 }, { NRF_P1, 12 }, { NRF_P0, 1 },
 };
 #define NUM_LEDS (sizeof(leds) / sizeof(leds[0]))
 
-/* the 4 TRACK LEDs (directly above buttons 1-4) */
+/* the 4 TRACK LEDs (directly above buttons 1-4)  [looper a8dd127:107-109] */
 static const struct led track_leds[] = {
 	{ NRF_P0, 29 }, { NRF_P0, 26 }, { NRF_P1, 15 }, { NRF_P1, 14 },
 };
 #define NUM_TRACK_LEDS (sizeof(track_leds) / sizeof(track_leds[0]))
 
-#define LED_PWM_PERIOD_US 1000u   /* 1 kHz frame */
-#define LED_PWM_ON_US       52u   /* track row duty  (verified, flicker-free) */
-#define LED_STATUS_ON_US    66u   /* status row duty */
+#define LED_PWM_PERIOD_US 1000u   /* [looper a8dd127:3906] */
+#define LED_PWM_ON_US       52u   /* [looper a8dd127:3907] track row duty  */
+#define LED_STATUS_ON_US    66u   /* [looper a8dd127:3913] status row duty */
 #define LED_PWM_TIMER      NRF_TIMER3
 #define LED_PWM_TIMER_IRQn TIMER3_IRQn
 #define LED_ALL_P0 ((1u<<0)|(1u<<1)|(1u<<29)|(1u<<26))
@@ -161,8 +180,8 @@ static void led_set(const struct led *l, bool on)
 static void led_on(int i)        { led_set(&leds[i], true); }
 static void led_off(int i)       { led_set(&leds[i], false); }
 static void all_off(void)        { for (int i = 0; i < NUM_LEDS; i++) led_off(i); }
-static void track_led_on(int i)  { led_set(&track_leds[i], true); }
 static void track_led_off(int i) { led_set(&track_leds[i], false); }
+static void track_led_on(int i)  { led_set(&track_leds[i], true); }
 static void track_all_on(void)   { for (int i = 0; i < NUM_TRACK_LEDS; i++) track_led_on(i); }
 static void track_all_off(void)  { for (int i = 0; i < NUM_TRACK_LEDS; i++) track_led_off(i); }
 
@@ -175,7 +194,8 @@ static void shutdown_leds(void)
 	NRF_P1->OUTCLR = LED_ALL_P1;
 }
 
-/* ------------------------------------------------------- power button ---- */
+/* ------------------------------------------------------- power button ----
+ * [looper a8dd127:123-124, 131, 4231-4249] */
 #define PWR_PORT        NRF_P0
 #define PWR_PIN         27u
 #define HOLD_MS_TO_OFF  2500
@@ -200,7 +220,7 @@ static void pwr_btn_arm_wake(void)
 		(GPIO_PIN_CNF_SENSE_Low     << GPIO_PIN_CNF_SENSE_Pos);
 }
 
-/* ---- BQ24232 battery charger control (verified pins) ---- */
+/* ---- BQ24232 battery charger control  [looper a8dd127:128, 4274-4279] ---- */
 #define BQ_PORT         NRF_P0
 #define BQ_NCE_PIN      21u   /* charge enable, ACTIVE-LOW */
 
@@ -211,9 +231,11 @@ static void charger_init(void)
 		(GPIO_PIN_CNF_DIR_Output    << GPIO_PIN_CNF_DIR_Pos)   |
 		(GPIO_PIN_CNF_DRIVE_S0S1    << GPIO_PIN_CNF_DRIVE_Pos) |
 		(GPIO_PIN_CNF_INPUT_Connect << GPIO_PIN_CNF_INPUT_Pos);
+	BQ_PORT->OUTCLR = (1u << BQ_NCE_PIN);
 }
 
-/* ----------------------------------------------------- button ladders ---- */
+/* ----------------------------------------------------- button ladders ----
+ * [looper a8dd127:140-156] */
 #define BTN_COM_PORT    NRF_P1
 #define BTN_COM_PIN     10u
 
@@ -234,7 +256,7 @@ static const struct adc_dt_spec adc_ladder[] = {
 
 static int16_t adc_sample;
 
-/* Oversampled ladder read (2x average), unchanged from the looper. */
+/* Oversampled ladder read (2x average)  [looper a8dd127:192-207]. */
 static int ladder_read(const struct adc_dt_spec *spec)
 {
 	struct adc_sequence seq = {
@@ -267,26 +289,75 @@ static void controls_init(void)
 	}
 }
 
-/* ---- verified voltage-band decoders (copied from the looper firmware) ---- */
-enum trk_btn { TRK_NONE = -1, TRK_1, TRK_2, TRK_3, TRK_4, TRK_PLAY };
-enum vol_btn { VOL_NONE = -1, VOL_TEMPO_DOWN, VOL_DOWN, VOL_TEMPO_UP, VOL_UP };
+/* ======================= SHARED-LADDER BITMASK DECODE =====================
+ * Every control is one bit. A ladder reading maps to a MASK, never to a
+ * single enum, so a measured chord band can express both of its buttons.
+ *
+ * MEASURED BANDS ONLY. The pinned looper revision contains exactly these
+ * measured AIN0/AIN1 bands:
+ *   AIN0 singles  [looper a8dd127:3879-3887] : T1 ~213, T2 ~403, T3 ~733,
+ *                                              T4 ~1220, PLAY ~1823
+ *   AIN0 chord    [looper a8dd127:5115-5124] : Track1+Track4 = 1280..1390
+ *   AIN1 singles  [looper a8dd127:3889-3896] : RWD ~404, VOL- ~729,
+ *                                              FWD ~1220, VOL+ ~1820
+ * There is NO measured table for PLAY+Track, for Vol- +Vol+, or for
+ * rocker+Vol. Those readings fall into the gaps below and are reported as
+ * UNMEASURED: no MIDI is emitted, the previous stable mask is held, and the
+ * raw code is captured for the CDC diagnostic stream so it can be measured.
+ *
+ * NOTE ON A DELIBERATE DIFFERENCE FROM THE LOOPER: decode_tracks() maps the
+ * whole 950..1499 window to Track 4 and >=1500 to PLAY. That is safe for a
+ * looper (it only ever needed singles) but it would decode the known
+ * Track1+Track4 chord region's shoulders, and any PLAY+Track chord, as an
+ * unrelated single button. M0 therefore narrows the single-button bands to
+ * their measured neighbourhoods and calls everything else UNMEASURED.
+ */
+#define BTN_T1        (1u << 0)
+#define BTN_T2        (1u << 1)
+#define BTN_T3        (1u << 2)
+#define BTN_T4        (1u << 3)
+#define BTN_PLAY      (1u << 4)
+#define BTN_VOL_UP    (1u << 5)
+#define BTN_VOL_DOWN  (1u << 6)
+#define BTN_ROCK_FWD  (1u << 7)
+#define BTN_ROCK_RWD  (1u << 8)
+#define BTN_FUNCTION  (1u << 9)   /* P0.27, a real independent GPIO */
 
-static enum trk_btn decode_tracks(int v)
+#define LADDER_MASK_AIN0 (BTN_T1|BTN_T2|BTN_T3|BTN_T4|BTN_PLAY)
+#define LADDER_MASK_AIN1 (BTN_VOL_UP|BTN_VOL_DOWN|BTN_ROCK_FWD|BTN_ROCK_RWD)
+
+struct band { int lo; int hi; uint32_t mask; };
+
+/* AIN0: PLAY + Track 1-4 (and the one measured chord). */
+static const struct band bands_ain0[] = {
+	{    0,  109, 0u },                    /* idle          [3880] */
+	{  110,  299, BTN_T1 },                /* ~213          [3881] */
+	{  300,  559, BTN_T2 },                /* ~403          [3882] */
+	{  560,  949, BTN_T3 },                /* ~733          [3883] */
+	{  950, 1279, BTN_T4 },                /* ~1220         [3884] */
+	{ 1280, 1390, BTN_T1 | BTN_T4 },       /* measured chord [5124] */
+	{ 1600, 2047, BTN_PLAY },              /* ~1823         [3885] */
+};
+
+/* AIN1: Vol-/Vol+ and the tempo rocker. */
+static const struct band bands_ain1[] = {
+	{    0,  199, 0u },                    /* idle          [3891] */
+	{  200,  559, BTN_ROCK_RWD },          /* ~404          [3892] */
+	{  560,  949, BTN_VOL_DOWN },          /* ~729          [3893] */
+	{  950, 1499, BTN_ROCK_FWD },          /* ~1220         [3894] */
+	{ 1600, 2047, BTN_VOL_UP },            /* ~1820         [3895] */
+};
+
+#define MASK_UNMEASURED 0xFFFFFFFFu
+
+static uint32_t decode_bands(const struct band *tbl, size_t n, int v)
 {
-	if (v <  110) return TRK_NONE;
-	if (v <  300) return TRK_1;     /* ~213  */
-	if (v <  560) return TRK_2;     /* ~403  */
-	if (v <  950) return TRK_3;     /* ~733  */
-	if (v < 1500) return TRK_4;     /* ~1220 */
-	return TRK_PLAY;                /* ~1823 */
-}
-static enum vol_btn decode_vol(int v)
-{
-	if (v <  200) return VOL_NONE;
-	if (v <  560) return VOL_TEMPO_DOWN; /* ~404  = rocker RWD */
-	if (v <  950) return VOL_DOWN;       /* ~729  */
-	if (v < 1500) return VOL_TEMPO_UP;   /* ~1220 = rocker FWD */
-	return VOL_UP;                       /* ~1820 */
+	if (v < 0)
+		return MASK_UNMEASURED;
+	for (size_t i = 0; i < n; i++)
+		if (v >= tbl[i].lo && v <= tbl[i].hi)
+			return tbl[i].mask;
+	return MASK_UNMEASURED;   /* a real chord we have never measured */
 }
 
 /* --------------------------------------------------------- watchdog ------ */
@@ -300,7 +371,17 @@ static void wdt_prewarn(const struct device *dev, int channel_id)
 	ARG_UNUSED(dev); ARG_UNUSED(channel_id);
 }
 
-/* ------------------------------------------------------------ USB MIDI --- */
+/* ------------------------------------------------------------ USB MIDI ---
+ * Zephyr 4.3.1 ships only the USB MIDI 2.0 class (CONFIG_USBD_MIDI2_CLASS);
+ * the USB-MIDI 1.0 alternate setting is NOT implemented in that revision.
+ * The MIDI 2.0 class descriptor declares alternate setting 0 (MIDI 1.0-style
+ * legacy interface with no endpoints) and alternate setting 1 (UMP). We
+ * therefore send MIDI 1.0 Channel Voice messages wrapped in UMP message
+ * type 2, which hosts translate back to plain MIDI 1.0 events.
+ *
+ * ready_cb fires when the host SELECTS the operational alternate setting, so
+ * the CC123 + full-state resend below is gated on it and never runs against
+ * an interface that is merely enumerated. */
 #define USB_MIDI_NODE DT_NODELABEL(usb_midi)
 static const struct device *const midi_dev = DEVICE_DT_GET(USB_MIDI_NODE);
 static volatile bool g_midi_ready;
@@ -336,7 +417,7 @@ static void on_midi_ready(const struct device *dev, const bool ready)
 	ARG_UNUSED(dev);
 	g_midi_ready = ready;
 	if (ready)
-		g_send_reset = true;   /* CC123 on (re)connect, sent from main */
+		g_send_reset = true;   /* CC123 + resend, emitted from main */
 }
 
 static const struct usbd_midi_ops midi_ops = {
@@ -344,7 +425,55 @@ static const struct usbd_midi_ops midi_ops = {
 	.ready_cb = on_midi_ready,
 };
 
-/* ------------------------------------------------------------ power off -- */
+/* ------------------------------------------------- CDC ACM diagnostics ---
+ * The composite device is MIDI2 + CDC ACM (no UAC2). Diagnostics print ONLY
+ * when a host has the port open with DTR asserted, ONLY when one of the two
+ * ladder readings actually changes, and never faster than DIAG_MIN_GAP_MS.
+ */
+static const struct device *const cdc = DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
+
+#define DIAG_MIN_GAP_MS  40
+#define DIAG_HYST        3     /* raw counts: ignore pure ADC dither */
+
+static bool diag_open(void)
+{
+	uint32_t dtr = 0;
+	if (!device_is_ready(cdc))
+		return false;
+	(void)uart_line_ctrl_get(cdc, UART_LINE_CTRL_DTR, &dtr);
+	return dtr != 0;
+}
+
+static void mask_str(uint32_t m, char *out, size_t n)
+{
+	if (m == MASK_UNMEASURED) {
+		strncpy(out, "UNMEASURED", n);
+		out[n - 1] = '\0';
+		return;
+	}
+	/* fixed field order: T1 T2 T3 T4 PLAY VOL+ VOL- FWD RWD FN */
+	static const char *const names[] = { "T1","T2","T3","T4","PLAY",
+					     "VOL+","VOL-","FWD","RWD","FN" };
+	size_t p = 0;
+	out[0] = '\0';
+	for (int b = 0; b < 10; b++) {
+		if (!(m & (1u << b)))
+			continue;
+		size_t l = strlen(names[b]);
+		if (p + l + 2 >= n)
+			break;
+		if (p) out[p++] = '+';
+		memcpy(&out[p], names[b], l);
+		p += l;
+		out[p] = '\0';
+	}
+	if (p == 0)
+		strncpy(out, "-", n);
+}
+
+/* ------------------------------------------------------------ power off --
+ * [looper a8dd127: power_off()] — SYSTEM_OFF hands control back to the
+ * bootloader; RESETREAS is cleared first. */
 static void power_off(void)
 {
 	for (int i = NUM_LEDS - 1; i >= 0; i--) {
@@ -370,7 +499,8 @@ static void power_off(void)
 	for (;;) { }
 }
 
-/* Track1+Track4 held ~1.2 s -> reset into the UF2 bootloader for reflashing. */
+/* RECOVERY, preserved verbatim from the pinned revision
+ * [looper a8dd127:4386-4396]: Track1+Track4 held ~1.2 s -> UF2 bootloader. */
 static void enter_dfu(void)
 {
 	all_off();
@@ -395,15 +525,15 @@ static void boot_signature(void)
 }
 
 /* ----------------------------------------------------------- main loop --- */
-#define POLL_MS        5
-#define DEBOUNCE_PASSES 2      /* a band must repeat before it is committed */
-#define FADER_DEADBAND  8      /* raw 12-bit counts (the looper's value) */
+#define POLL_MS         5
+#define DEBOUNCE_PASSES 2      /* a mask must repeat before it is committed */
+#define FADER_DEADBAND  8      /* raw 12-bit counts  [looper a8dd127:1865ff] */
 
-static const uint8_t trk_notes[] = {
-	ST_NOTE_TRACK1, ST_NOTE_TRACK2, ST_NOTE_TRACK3, ST_NOTE_TRACK4, ST_NOTE_PLAY,
-};
-static const uint8_t vol_notes[] = {
-	ST_NOTE_ROCKER_RWD, ST_NOTE_VOL_DOWN, ST_NOTE_ROCKER_FWD, ST_NOTE_VOL_UP,
+/* bit index -> note number, same order as the BTN_* bits above */
+static const uint8_t bit_notes[10] = {
+	ST_NOTE_TRACK1, ST_NOTE_TRACK2, ST_NOTE_TRACK3, ST_NOTE_TRACK4,
+	ST_NOTE_PLAY,   ST_NOTE_VOL_UP, ST_NOTE_VOL_DOWN,
+	ST_NOTE_ROCKER_FWD, ST_NOTE_ROCKER_RWD, ST_NOTE_FUNCTION,
 };
 static const uint8_t fader_cc[] = {
 	ST_CC_FADER1, ST_CC_FADER2, ST_CC_FADER3, ST_CC_FADER4,
@@ -412,6 +542,17 @@ static const uint8_t fader_cc[] = {
 static void all_notes_off(void)
 {
 	midi_cc(ST_CC_ALL_NOTES_OFF, 0);
+}
+
+/* Emit one Note On/Off per changed bit, comparing stable masks. */
+static void emit_mask_delta(uint32_t prev, uint32_t now)
+{
+	uint32_t diff = prev ^ now;
+	for (int b = 0; b < 10; b++) {
+		if (!(diff & (1u << b)))
+			continue;
+		midi_note(bit_notes[b], (now & (1u << b)) != 0u);
+	}
 }
 
 int main(void)
@@ -446,11 +587,10 @@ int main(void)
 	}
 	feed_wdt();
 
-	/* committed physical state */
-	enum trk_btn t_committed = TRK_NONE, t_cand = TRK_NONE;
-	enum vol_btn v_committed = VOL_NONE, v_cand = VOL_NONE;
-	int t_cnt = 0, v_cnt = 0;
-	bool fn_down = false;
+	/* committed physical state, as bitmasks */
+	uint32_t stable = 0u;                  /* debounced, published mask */
+	uint32_t cand = 0u;                    /* candidate awaiting repeats */
+	int cand_cnt = 0;
 	int64_t press_start = -1;
 	bool press_spent = false;
 	int64_t combo14_t = -1;
@@ -459,6 +599,12 @@ int main(void)
 	int batt_last = -1;
 	int64_t batt_t = 0;
 
+	/* diagnostics */
+	int64_t diag_t = 0;
+	int diag_a0 = -9999, diag_a1 = -9999;
+	uint32_t unmeasured_hits = 0;
+	bool banner_done = false;
+
 	for (;;) {
 		feed_wdt();
 
@@ -466,31 +612,26 @@ int main(void)
 			g_send_reset = false;
 			all_notes_off();
 			/* Resend the current physical state so the host is in sync. */
-			if (t_committed != TRK_NONE) midi_note(trk_notes[t_committed], true);
-			if (v_committed != VOL_NONE) midi_note(vol_notes[v_committed], true);
-			if (fn_down) midi_note(ST_NOTE_FUNCTION, true);
+			emit_mask_delta(0u, stable);
 			for (int i = 0; i < 4; i++)
 				if (fader_last[i] >= 0)
 					midi_cc(fader_cc[i], (uint8_t)(fader_last[i] >> 5));
 		}
 
-		/* ---- FUNCTION / power button (raw state + hold-to-power-off) ---- */
+		/* ---- FUNCTION (independent GPIO) + hold-to-power-off ---- */
 		bool fn_now = pwr_pressed();
-		if (fn_now && !fn_down) {
-			fn_down = true;
+		bool fn_was = (stable & BTN_FUNCTION) != 0u;
+		if (fn_now && !fn_was) {
 			press_start = k_uptime_get();
 			press_spent = false;
-			midi_note(ST_NOTE_FUNCTION, true);
-		} else if (!fn_now && fn_down) {
-			fn_down = false;
+		} else if (!fn_now && fn_was) {
 			press_start = -1;
-			midi_note(ST_NOTE_FUNCTION, false);
 			all_off();
 		}
-		if (fn_down && !press_spent) {
+		if (fn_now && !press_spent && press_start >= 0) {
 			int64_t held = k_uptime_get() - press_start;
 			if (held >= HOLD_MS_TO_OFF) {
-				midi_note(ST_NOTE_FUNCTION, false);
+				emit_mask_delta(stable, 0u);
 				all_notes_off();
 				power_off();               /* never returns */
 			}
@@ -502,48 +643,69 @@ int main(void)
 			}
 		}
 
-		/* ---- track / PLAY ladder ---- */
-		int trk_raw = ladder_read(&adc_ladder[LAD_TRACKS]);
-		enum trk_btn t_raw = TRK_NONE;
-		if (trk_raw >= 0) {
-			if (trk_raw >= 1280 && trk_raw <= 1390) {   /* Track1+Track4 = DFU */
-				if (combo14_t < 0) combo14_t = k_uptime_get();
-				else if (k_uptime_get() - combo14_t >= 1200) enter_dfu();
-				t_raw = TRK_NONE;
-			} else {
-				combo14_t = -1;
-				t_raw = decode_tracks(trk_raw);
-			}
-			if (t_raw == t_cand) {
-				if (t_cnt < DEBOUNCE_PASSES) t_cnt++;
-			} else {
-				t_cand = t_raw; t_cnt = 1;
-			}
-			if (t_cnt >= DEBOUNCE_PASSES && t_cand != t_committed) {
-				if (t_committed != TRK_NONE)
-					midi_note(trk_notes[t_committed], false);
-				t_committed = t_cand;
-				if (t_committed != TRK_NONE)
-					midi_note(trk_notes[t_committed], true);
-			}
+		/* ---- read both shared ladders ---- */
+		int a0 = ladder_read(&adc_ladder[LAD_TRACKS]);
+		int a1 = ladder_read(&adc_ladder[LAD_VOL]);
+
+		/* RECOVERY combo is checked on the RAW code, before decoding, so a
+		 * measured Track1+Track4 hold still reaches the bootloader.
+		 * [looper a8dd127:5115-5124] */
+		if (a0 >= 1280 && a0 <= 1390) {
+			if (combo14_t < 0) combo14_t = k_uptime_get();
+			else if (k_uptime_get() - combo14_t >= 1200) enter_dfu();
+		} else {
+			combo14_t = -1;
 		}
 
-		/* ---- Vol / rocker ladder ---- */
-		int vol_raw = ladder_read(&adc_ladder[LAD_VOL]);
-		if (vol_raw >= 0) {
-			enum vol_btn v_raw = decode_vol(vol_raw);
-			if (v_raw == v_cand) {
-				if (v_cnt < DEBOUNCE_PASSES) v_cnt++;
-			} else {
-				v_cand = v_raw; v_cnt = 1;
+		uint32_t m0 = decode_bands(bands_ain0, ARRAY_SIZE(bands_ain0), a0);
+		uint32_t m1 = decode_bands(bands_ain1, ARRAY_SIZE(bands_ain1), a1);
+		bool unmeasured = (m0 == MASK_UNMEASURED) || (m1 == MASK_UNMEASURED);
+		if (unmeasured)
+			unmeasured_hits++;
+
+		/* An unmeasured reading must never be decoded as some unrelated
+		 * single button: hold the previous stable contribution instead. */
+		uint32_t raw_mask =
+			((m0 == MASK_UNMEASURED) ? (stable & LADDER_MASK_AIN0) : m0) |
+			((m1 == MASK_UNMEASURED) ? (stable & LADDER_MASK_AIN1) : m1) |
+			(fn_now ? BTN_FUNCTION : 0u);
+
+		if (raw_mask == cand) {
+			if (cand_cnt < DEBOUNCE_PASSES) cand_cnt++;
+		} else {
+			cand = raw_mask; cand_cnt = 1;
+		}
+		if (cand_cnt >= DEBOUNCE_PASSES && cand != stable) {
+			emit_mask_delta(stable, cand);
+			stable = cand;
+		}
+
+		/* ---- CDC diagnostics: only on ladder change, rate limited ---- */
+		if (diag_open()) {
+			int64_t now = k_uptime_get();
+			bool changed = (a0 > diag_a0 + DIAG_HYST) || (a0 < diag_a0 - DIAG_HYST) ||
+				       (a1 > diag_a1 + DIAG_HYST) || (a1 < diag_a1 - DIAG_HYST);
+			if (!banner_done) {
+				printk("%s  diagnostic target: USB MIDI2 + CDC ACM, no UAC2, "
+				       "eMMC never touched\n", ST_FW_VERSION);
+				printk("fields: AIN0 AIN1 decoded stable [unmeasured-count]\n");
+				banner_done = true;
+				diag_t = now;
+			} else if (changed && now - diag_t >= DIAG_MIN_GAP_MS) {
+				char db[64], sb[64];
+				uint32_t dm = (m0 == MASK_UNMEASURED || m1 == MASK_UNMEASURED)
+					      ? MASK_UNMEASURED
+					      : (m0 | m1 | (fn_now ? BTN_FUNCTION : 0u));
+				mask_str(dm, db, sizeof(db));
+				mask_str(stable, sb, sizeof(sb));
+				printk("AIN0=%4d AIN1=%4d dec=%-12s stable=%-12s unmeas=%u\n",
+				       a0, a1, db, sb, (unsigned)unmeasured_hits);
+				diag_t = now;
+				diag_a0 = a0;
+				diag_a1 = a1;
 			}
-			if (v_cnt >= DEBOUNCE_PASSES && v_cand != v_committed) {
-				if (v_committed != VOL_NONE)
-					midi_note(vol_notes[v_committed], false);
-				v_committed = v_cand;
-				if (v_committed != VOL_NONE)
-					midi_note(vol_notes[v_committed], true);
-			}
+		} else {
+			banner_done = false;
 		}
 
 		/* ---- faders: one per pass (round-robin keeps ADC cost flat) ---- */
@@ -556,11 +718,11 @@ int main(void)
 			    fv < fader_last[fi] - FADER_DEADBAND) {
 				uint8_t prev = (fader_last[fi] < 0) ? 0xFFu
 						: (uint8_t)(fader_last[fi] >> 5);
-				uint8_t now = (uint8_t)(fv >> 5);
-				if (now > 127u) now = 127u;
+				uint8_t now8 = (uint8_t)(fv >> 5);
+				if (now8 > 127u) now8 = 127u;
 				fader_last[fi] = fv;
-				if (now != prev)
-					midi_cc(fader_cc[fi], now);
+				if (now8 != prev)
+					midi_cc(fader_cc[fi], now8);
 			}
 		}
 

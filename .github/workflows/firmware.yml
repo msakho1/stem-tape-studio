@@ -130,6 +130,14 @@ jobs:
           west build -p always -b stem_player firmware/stemtape -d build-stemtape \
             -- -DBOARD_ROOT="$GITHUB_WORKSPACE/project/firmware"
 
+      - name: Report USB interfaces in the M0 device
+        working-directory: ${{ github.workspace }}/project/build-stemtape/zephyr
+        run: |
+          set -eux
+          grep -E '^CONFIG_(USBD_MIDI2_CLASS|USBD_CDC_ACM_CLASS|USBD_AUDIO2_CLASS|USB_DEVICE_STACK_NEXT)=' .config | tee -a "$GITHUB_STEP_SUMMARY"
+          ( grep -c 'uac2' zephyr.dts && echo 'UAC2 node present but disabled' ) || true
+          grep -A3 'usb_midi' zephyr.dts | tee -a "$GITHUB_STEP_SUMMARY" || true
+
       - name: Report artifact hash
         working-directory: ${{ github.workspace }}/project/build-stemtape/zephyr
         run: |
