@@ -2683,6 +2683,16 @@ export class AudioEngine {
    */
   private globalScrub: {
     dir: 1 | -1;
+    /** Shuttle speed in source-seconds per second — the persistent §3 setting. */
+    rate: number;
+    /**
+     * Addendum §6 — release deceleration in flight. While set, the shuttle is
+     * no longer at a constant rate: every grain, the shared playhead and the
+     * hand-off frame are derived from this one curve.
+     */
+    decel: InertiaSegment | null;
+    /** Timer that finishes the release at the hand-off frame. */
+    releaseTimer: ReturnType<typeof setTimeout> | null;
     pos: number;
     startPos: number;
     /** Context time at which `pos` is exact — the integral anchor (= cursor). */
@@ -2690,7 +2700,7 @@ export class AudioEngine {
     /**
      * Schedule cursor: the context time of the NEXT grain. `pos` is the source
      * position at exactly this time, so the audible position at any context
-     * time t is `pos + dir·rate·(t − cursor)`.
+     * time t is `pos + ∫rate` from the cursor.
      */
     cursor: number;
     wasPlaying: boolean;
