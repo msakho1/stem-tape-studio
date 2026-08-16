@@ -1430,7 +1430,10 @@ export const LED_PRIORITY = {
  * song row: solid = song, blink = bank. Input feedback sits above it and every
  * winner states its reason so diagnostics can explain the arbitration.
  */
-export function deriveLeds(state: SurfaceState, now = state.fxFlashAt ?? 0): LedFrame {
+export function deriveLeds(
+  state: SurfaceState,
+  now = typeof performance !== "undefined" ? performance.now() : Date.now(),
+): LedFrame {
   const frame = {} as LedFrame;
   const off = state.power === "off";
   // Addendum §5 — FX latch confirmation: all four track lights flash briefly on
