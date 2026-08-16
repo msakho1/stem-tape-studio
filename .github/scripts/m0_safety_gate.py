@@ -287,6 +287,36 @@ def enclosing_function(line_idx: int):
     return start, end, name
 
 
+# nRF52840 NVMC register map (offsets from base 0x4001E000). Only ICACHECNF
+# is a volatile, non-destructive write; every other write-capable offset
+# alters flash state and must fail the gate. (Read-only status/count
+# registers are listed for completeness but are irrelevant to a WRITE scan.)
+NVMC_OFFSET_NAMES = {
+    0x400: "READY (read-only status)",
+    0x504: "CONFIG (write/erase enable — DANGEROUS)",
+    0x508: "ERASEPAGE (DANGEROUS)",
+    0x50C: "ERASEALL (DANGEROUS — destroys the whole device incl. bootloader)",
+    0x510: "ERASEPAGEPARTIAL (DANGEROUS)",
+    0x514: "ERASEUICR (DANGEROUS)",
+    0x518: "ERASEPAGEPARTIALCFG (DANGEROUS)",
+    0x540: "ICACHECNF (instruction-cache enable, volatile, resets on power-cycle)",
+    0x548: "IHIT (read-only cache-hit counter)",
+    0x54C: "IMISS (read-only cache-miss counter)",
+}
+NVMC_ALLOWED_WRITE_OFFSETS = {0x540}
+# Matches any store mnemonic (str/strb/strh, with an optional .w width suffix).
+STORE_MNEM_RX = re.compile(r"\bstr[bh]?(?:\.w)?\s")
+# objdump prints the resolved absolute immediate as a trailing "; 0xNNN"
+# comment on indexed str instructions — that comment IS the effective
+# byte offset from the base register, independent of the raw encoded field.
+STORE_OFFSET_RX = re.compile(r";\s*0x([0-9a-fA-F]+)\s*$")
+CALL_RX = re.compile(r"\bbl[x]?(?:\.w)?\s")
+# A PC-relative literal load: "ldr rX, [pc, #N] ; (ADDR <sym+off>)". Group 1 is
+# the destination register, group 2 the resolved literal-pool address — used
+# to identify exactly which register receives a given literal-pool value.
+LOAD_LITERAL_RX = re.compile(
+    r"\bldr(?:\.w)?\s+(r\d+),\s*\[pc,[^\]]*\]\s*;\s*\(([0-9a-fA-F]+)")
+
 current_sym = "?"
 found = {label: [] for label, _lo, _hi in ADDRESS_WINDOWS}
 for i, line in enumerate(dis):
@@ -304,6 +334,96 @@ for label, lo, hi in ADDRESS_WINDOWS:
     hits = found[label]
     if not hits:
         report.append(f"PASS — {label}: no literal reference.")
+        report.append("")
+        continue
+    if label.startswith("NVMC"):
+        report.append(f"{label}: {len(hits)} literal reference(s) — resolving each "
+                      f"to the exact register that loads the NVMC base and every "
+                      f"write through that register. ICACHECNF (base+0x540 = "
+                      f"0x4001E540) is the sole permitted write: an nRF52 "
+                      f"instruction-cache enable/disable bit that resets on every "
+                      f"power cycle and touches no flash. Every other offset — "
+                      f"CONFIG, ERASEPAGE, ERASEALL, ERASEPAGEPARTIAL, ERASEUICR, "
+                      f"ERASEPAGEPARTIALCFG — is a flash write/erase control and "
+                      f"fails the gate. Failing closed: an unresolved base register, "
+                      f"a store whose offset cannot be resolved, or a function that "
+                      f"branches out (bl/blx) while the base may still be live in a "
+                      f"register all fail the gate.")
+        report.append("")
+        seen = []
+        any_bad = False
+        for sym, i, _txt in hits:
+            if sym in seen:
+                continue
+            seen.append(sym)
+            start, end, _name = enclosing_function(i)
+            body = dis[start:end]
+            report.append(f"### `{sym}`")
+            report.append("")
+            report.append("```text")
+            report.extend(l.rstrip() for l in body[:200])
+            report.append("```")
+            report.append("")
+
+            # Which register does this literal end up in? Match the PC-relative
+            # load whose resolved-target comment points at this literal's own
+            # address (objdump prints "; (<addr> <sym+off>)" on such loads).
+            lit_addr_m = re.match(r"^\s*([0-9a-fA-F]+):", dis[i])
+            lit_addr = lit_addr_m.group(1).lstrip("0") or "0" if lit_addr_m else None
+            base_reg = None
+            for l in body:
+                lm = LOAD_LITERAL_RX.search(l)
+                if lm and lit_addr is not None and lm.group(2).lstrip("0") == lit_addr:
+                    base_reg = lm.group(1)
+                    break
+
+            bad_here = []
+            offsets_here = []
+            if base_reg is None:
+                bad_here.append(("could not resolve which register receives the "
+                                 "NVMC base address — cannot verify any offset",
+                                 dis[i].strip()))
+            else:
+                reg_operand_rx = re.compile(r"\[\s*" + re.escape(base_reg) + r"\s*,")
+                for l in body:
+                    if CALL_RX.search(l):
+                        bad_here.append(("function branches out (bl/blx); the NVMC "
+                                         "base may still be live in a register and "
+                                         "the callee cannot be verified here",
+                                         l.strip()))
+                        continue
+                    if not STORE_MNEM_RX.search(l) or not reg_operand_rx.search(l):
+                        continue
+                    om = STORE_OFFSET_RX.search(l)
+                    if not om:
+                        bad_here.append((f"store through {base_reg} with an "
+                                         "unresolved offset", l.strip()))
+                        continue
+                    off = int(om.group(1), 16)
+                    name = NVMC_OFFSET_NAMES.get(off, f"undocumented offset 0x{off:x}")
+                    offsets_here.append((off, name, l.strip()))
+                    if off not in NVMC_ALLOWED_WRITE_OFFSETS:
+                        bad_here.append((name, l.strip()))
+            if bad_here:
+                any_bad = True
+                report.append(f"FAIL — `{sym}`: non-permitted NVMC write:")
+                for name, l in bad_here:
+                    report.append(f"  - {name}: {l}")
+            elif offsets_here:
+                report.append(f"PASS — `{sym}`: base address resolved to register "
+                              f"`{base_reg}`; the only NVMC offset(s) written through "
+                              f"it: " + ", ".join(f"0x{o:x} ({n})"
+                                                   for o, n, _l in offsets_here))
+            else:
+                report.append(f"PASS — `{sym}`: base address resolved to register "
+                              f"`{base_reg}`; no write through it in this function.")
+            report.append("")
+        if any_bad:
+            failures.append(f"{label}: non-permitted NVMC register write (see per-function analysis above)")
+            report.append(f"FAIL — {label}: see per-function analysis above.")
+        else:
+            report.append(f"PASS — {label}: {len(hits)} literal reference(s), every "
+                          f"resolved write traced to ICACHECNF (0x4001E540) only.")
         report.append("")
         continue
     if label.startswith("UICR"):
