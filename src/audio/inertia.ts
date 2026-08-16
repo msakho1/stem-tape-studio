@@ -137,3 +137,62 @@ export type TransportPhase = "stopped" | "cued" | "windingUp" | "playing" | "win
 
 /** Exact cue launch: no wind-up, only a click-free 8 ms open. */
 export const CUE_FADE_S = 0.008;
+
+/**
+ * Stock-SP-1 addendum §6 — the shuttle release is a real tape hand-off, not a
+ * jump cut. The transport decelerates from the SIGNED shuttle rate to the
+ * musical rate along the same finite exponential the wind-up/wind-down uses:
+ *
+ *   forward shuttle  +R → +musical            (monotone, never leaves forward)
+ *   reverse shuttle  −R → 0 → +musical        (one continuous curve through 0)
+ *
+ * Duration scales with how far the rate has to travel, so a reverse release is
+ * audibly longer than a forward one — exactly as reel inertia behaves.
+ */
+export function makeScrubReleaseSegment(args: {
+  startAt: number;
+  /** Signed shuttle rate at release (negative when shuttling backwards). */
+  fromRate: number;
+  /** Musical rate to land on (always positive). */
+  toRate: number;
+  preset: InertiaPreset;
+}): InertiaSegment {
+  const { startAt, fromRate, toRate, preset } = args;
+  const span = Math.abs(toRate - fromRate);
+  const reference = Math.max(Math.abs(fromRate), Math.abs(toRate), 1e-6);
+  const scaled = preset.stopS * Math.min(2, span / reference);
+  return {
+    startAt,
+    from: fromRate,
+    to: toRate,
+    durationS: Math.max(0.02, Math.min(1.2, scaled)),
+    k: INERTIA_K,
+    kind: "windUp",
+  };
+}
+
+/**
+ * Context time at which a sign-crossing segment passes through zero rate, or
+ * null when it never changes direction. Solving the shape exactly is what lets
+ * the reverse hand-off swap from reversed grains to forward playback at the one
+ * frame where the tape is momentarily still — so the swap cannot click.
+ */
+export function inertiaZeroCrossing(seg: InertiaSegment): number | null {
+  if (seg.from === 0 || seg.to === 0) return seg.from === 0 ? seg.startAt : null;
+  if (seg.from > 0 === seg.to > 0) return null;
+  const s = -seg.to / (seg.from - seg.to); // required shape value in (0,1)
+  if (!(s > 0 && s < 1)) return null;
+  const k = seg.k;
+  const e = Math.exp(-k);
+  const u = -Math.log(s * (1 - e) + e) / k;
+  if (!(u > 0 && u < 1)) return null;
+  return seg.startAt + u * seg.durationS;
+}
+
+/**
+ * Four persistent shuttle speeds (stock-SP-1 addendum §3). 1.6× is the value
+ * the shuttle already ran at and stays the default; the others bracket it.
+ */
+export const GLOBAL_SCRUB_SPEEDS = [1.25, 1.6, 2.5, 4] as const;
+export const DEFAULT_SCRUB_SPEED_INDEX = 1;
+export type ScrubSpeedIndex = 0 | 1 | 2 | 3;

@@ -29,6 +29,11 @@ import {
   type StemPerformanceState,
 } from "@/machine/stemPerformance";
 import { BANKS, algorithmDef, bankOfButton } from "@/machine/fx12";
+import {
+  DEFAULT_SCRUB_SPEED_INDEX,
+  GLOBAL_SCRUB_SPEEDS,
+  type ScrubSpeedIndex,
+} from "@/audio/inertia";
 
 
 export type LedPattern = "dark" | "faint" | "solid" | "pulse" | "blink" | "breathe" | "chase";
@@ -160,6 +165,23 @@ export interface SurfaceState {
 
   /** Held global four-stem shuttle: +1 forward, -1 backward, 0 idle. */
   globalScrub: 0 | 1 | -1;
+  /**
+   * Stock-SP-1 addendum §3 — the shuttle speed is a PERSISTENT machine setting,
+   * not a per-gesture value: it survives release and the next shuttle starts
+   * there. Index into `GLOBAL_SCRUB_SPEEDS`.
+   */
+  scrubSpeed: ScrubSpeedIndex;
+  /**
+   * Addendum §4 — a FUNCTION tap during a shuttle latches it, so forward or
+   * reverse shuttling continues after the keys come up. Direction may still be
+   * flipped while latched; an explicit release ends it.
+   */
+  scrubLatched: boolean;
+  /**
+   * Addendum §5 — `performance.now()` of the last FX latch toggle. The LED
+   * arbiter turns this into a short four-light confirmation flash.
+   */
+  fxFlashAt: number | null;
   /** Per-lane shuttle direction (FUNCTION + Track held + rocker). 0 = idle. */
   laneScrub: (0 | 1 | -1)[];
 
@@ -347,6 +369,9 @@ export function initialSurfaceState(): SurfaceState {
 
     commands: [],
     globalScrub: 0,
+    scrubSpeed: DEFAULT_SCRUB_SPEED_INDEX as ScrubSpeedIndex,
+    scrubLatched: false,
+    fxFlashAt: null,
     laneScrub: [0, 0, 0, 0],
     auditionChord: [],
 
@@ -382,6 +407,9 @@ export function applyGlobalScrub(state: SurfaceState, dir: 1 | -1 | null, t = 0)
     }
     if (dir === null) {
       if (next.globalScrub === 0) return next;
+      // Addendum §4: a LATCHED shuttle ignores the key release entirely — the
+      // reels keep turning until an explicit release. Direction is kept.
+      if (next.scrubLatched) return next;
       return emit(
         { ...next, globalScrub: 0, lastGesture: "global shuttle release" },
         "transport.scrub.end",
@@ -401,7 +429,12 @@ export function applyGlobalScrub(state: SurfaceState, dir: 1 | -1 | null, t = 0)
   // scope can ever be sounding.
   let next = state;
   if (next.globalScrub !== 0) {
-    next = emit({ ...next, globalScrub: 0 }, "transport.scrub.end", {}, { rowId: "transport.scrub.global", t });
+    next = emit(
+      { ...next, globalScrub: 0, scrubLatched: false },
+      "transport.scrub.end",
+      {},
+      { rowId: "transport.scrub.global", t },
+    );
   }
   const laneScrub = [...next.laneScrub] as (0 | 1 | -1)[];
   let changed = false;
@@ -424,6 +457,38 @@ export function applyGlobalScrub(state: SurfaceState, dir: 1 | -1 | null, t = 0)
     laneScrub,
     lastGesture: `lane shuttle ${dir > 0 ? "forward" : "backward"} · ${held.map((i) => i + 1).join(",")}`,
   };
+}
+
+/**
+ * Addendum §4 — end a LATCHED shuttle. This is the only way a latched shuttle
+ * can stop, so it is also what the transport calls before any command that
+ * assumes the tape is under normal control.
+ */
+export function releaseScrubLatch(state: SurfaceState, t = 0): SurfaceState {
+  if (!state.scrubLatched) return state;
+  const next = emit(
+    { ...state, scrubLatched: false, globalScrub: 0, lastGesture: "shuttle latch released" },
+    "transport.scrub.end",
+    {},
+    { rowId: "transport.scrub.global", t },
+  );
+  return fire(next, "rocker.scrub", "shuttle latch released — transport returns to the song", t);
+}
+
+/**
+ * Addendum §3 — step the PERSISTENT shuttle speed. It is remembered whether or
+ * not a shuttle is currently open, and while one IS open the change is audible
+ * immediately. Master volume is never touched on this path.
+ */
+export function stepScrubSpeed(state: SurfaceState, dir: 1 | -1, t = 0): SurfaceState {
+  const index = Math.max(
+    0,
+    Math.min(GLOBAL_SCRUB_SPEEDS.length - 1, state.scrubSpeed + dir),
+  ) as ScrubSpeedIndex;
+  const rate = GLOBAL_SCRUB_SPEEDS[index]!;
+  let next: SurfaceState = { ...state, scrubSpeed: index };
+  next = emit(next, "transport.scrub.speed", { index, rate }, { rowId: "rocker.scrub", t });
+  return fire(next, "rocker.scrub", `shuttle speed ${index + 1}/4 → ${rate.toFixed(2)}×`, t);
 }
 
 function fire(state: SurfaceState, rowId: string, detail: string, t: number): SurfaceState {
@@ -580,14 +645,30 @@ export function applyGesture(state: SurfaceState, g: Gesture): SurfaceState {
       if (c === "function") {
         // Tempo tapping, FN ×4 rounding and beatmatch re-tap are REMOVED: the
         // grid is detected automatically from the stems. A bare FUNCTION tap is
-        // now CONTEXT-SENSITIVE:
-        //   an operation is running (global loop held) → LATCH it
-        //   otherwise                                  → ARM active-track
-        //                                                selection for
-        //                                                TRACK_SELECT_ARM_MS
+        // now CONTEXT-SENSITIVE, most-specific running operation first:
+        //   shuttle open, unlatched (§4)  → LATCH the shuttle
+        //   shuttle latched (§4)          → RELEASE it
+        //   global loop held (§2)         → LATCH it
+        //   global loop latched (§2)      → RELEASE it
+        //   otherwise                     → ARM active-track selection
+        if (next.globalScrub !== 0 && !next.scrubLatched) {
+          next = { ...next, scrubLatched: true };
+          return fire(
+            next,
+            "rocker.scrub",
+            `shuttle latched ${next.globalScrub > 0 ? "forward" : "reverse"} — the rocker may be released`,
+            t,
+          );
+        }
+        if (next.scrubLatched) return releaseScrubLatch(next, t);
         if (next.globalLoop.active && !next.globalLoop.latched) {
           next = { ...next, globalLoop: { ...next.globalLoop, latched: true } };
           return fire(next, "tape.loop.global.latch", "global loop latched — PLAY may be released", t);
+        }
+        if (next.globalLoop.latched) {
+          next = { ...next, globalLoop: { ...next.globalLoop, active: false, latched: false } };
+          next = emit(next, "loop.global.release", {}, { rowId: "tape.loop.global.release", t });
+          return fire(next, "tape.loop.global.release", "latched global loop released — song continues", t);
         }
         next = { ...next, trackSelectArmedAt: t };
         return fire(next, "tape.track.arm", "active-track selection armed — tap a Track button", t);

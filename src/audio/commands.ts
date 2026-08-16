@@ -19,6 +19,7 @@ export type AudioCommandType =
   | "transport.scrub"
   | "transport.scrub.start"
   | "transport.scrub.end"
+  | "transport.scrub.speed"
   | "track.mute"
   | "track.unmute"
   | "track.gain"
