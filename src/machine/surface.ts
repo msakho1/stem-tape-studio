@@ -8,6 +8,8 @@ import { type Gesture } from "@/input/gestures";
  * Track tap is a normal mute and not a stray selection.
  */
 export const TRACK_SELECT_ARM_MS = 1200;
+/** Addendum §5 — duration of the four-light FX latch confirmation flash. */
+export const FX_LATCH_FLASH_MS = 220;
 import { V26_ROW_BY_ID } from "@/machine/v26map";
 import type { PerfIntent } from "@/machine/chordArbiter";
 import {
