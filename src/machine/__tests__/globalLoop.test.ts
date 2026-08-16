@@ -94,7 +94,11 @@ describe("Hold PLAY · global one-bar loop", () => {
   });
 
   it("FUNCTION + Volume steps the division 1 → 2 → 4 → 8 and clamps", () => {
-    let s = pressControl(running(), "function");
+    // Addendum §1: FUNCTION + Volume is contextual — it only owns the loop
+    // division while a global loop is captured or latched.
+    let s = applyGesture(running(), holdStart("play"));
+    expect(s.globalLoop.active).toBe(true);
+    s = pressControl(s, "function");
     s = applyGesture(s, tap("volume-plus"));
     expect(s.globalLoop.division).toBe(2);
     s = applyGesture(s, tap("volume-plus"));
