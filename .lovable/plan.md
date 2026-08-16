@@ -1,298 +1,145 @@
-# Stem Instrument Mode — MIDI cue learning, iOS CoreMIDI wrapper, Guide card
+# LED Behaviour Audit — read-only
+
+No code changed. `git status --porcelain` → empty. `git diff --stat` → empty.
+
+## 0. Inventory (as implemented)
+
+`LedId` (`src/machine/surface.ts:50-61`) is **11** LEDs, not 8:
+`track-led-1..4`, `side-led-1..4`, `play-indicator`, `function-led-1`, `function-led-2`.
+All 11 are rendered in `src/device/DeviceSurface.tsx` (tracks L177-185, side L209-217, play-indicator L204-207, function L219-227).
+
+Single producer: `deriveLeds(state, now)` — `src/machine/surface.ts:1471-1604`.
+Single consumer: `useDeviceSurface.ts:865` `useMemo(() => deriveLeds(state), [state])` → `index.tsx:303` → `DeviceSurface`.
+Patterns are class names only: `ledClass()` → `st-led--<pattern>`; all visual values live in `src/styles.css:229-345`.
+
+Pattern → CSS (core opacity / period):
+
+| Pattern | Core | Halo | Period | Source |
+| --- | --- | --- | --- | --- |
+| dark | 0.08 | 0 | — | `styles.css:240` |
+| faint | 0.32 | 0.06 | — | `:244,248` |
+| solid | 1.0 | 0.34 | — | `:252,256` |
+| pulse | 0.34→1 at 12% | 0.04→0.36 | 1.2 s ease-in-out infinite | `:260,264`, `@keyframes st-pulse :303` |
+| blink | 1 / 0.12 square | — | 0.4 s steps(1,end) infinite | `:268`, `st-blink :322` |
+| breathe | 0.22↔0.95 | — | 2.4 s ease-in-out infinite | `:272`, `st-breathe :331` |
+| chase | 0.2→1 at 40%→0.2 | pulse-halo | 0.55 s linear infinite | `:277,281`, `st-chase :285` |
+
+Global brightness: `data-lights="dim"` overrides core 0.28 / halo 0.05 (`:298`), overriding all patterns via specificity — **dim silently kills every animation's amplitude for non-animated patterns only** (animations still win over the static rule because animated properties beat non-animated declarations). `prefers-reduced-motion` forces `animation:none` and 0.8 opacity for pulse/blink/breathe, but **not for chase** (`:347-356`) — chase becomes frozen at core 0.1.
+Phase: all animations start at element/class mount; there is **no phase anchor**, so LEDs are mutually unsynchronised and re-derive does not restart them.
+
+## 1. State matrix (exact, as coded)
+
+Track LEDs, evaluated in strict `if/else` order (`surface.ts:1489-1541`) — this order **is** the precedence:
+
+| # | Condition | Track 1-4 pattern | Priority field | Source |
+| --- | --- | --- | --- | --- |
+| 1 | `power==="off"` | dark | 100 | :1492 |
+| 2 | `grid.rejected` | blink 0.4 s | 98 | :1494 |
+| 3 | heads-entry rejected, `now-headsRejectFlashAt < 420 ms` | blink | 84 | :1496 |
+| 4 | FX latch flash, `now-fxFlashAt < 220 ms` | blink | 83 | :1503 |
+| 5 | `perf.fxOverlay` + soloed | solid | 74 | :1509 |
+| 6 | overlay + `!linked` | blink | 70 | :1511 |
+| 7 | overlay + `activeStem===i` | breathe | 66 | :1513 |
+| 8 | overlay + another stem soloed | faint | 10 | :1515 |
+| 9 | overlay idle | faint | 10 | :1517 |
+| 10 | that track button physically held | solid | 95 | :1519 |
+| 11 | heads + `headLatched` | solid | 77 | :1527 |
+| 12 | heads + `headMuted` | faint | 74 | :1528 |
+| 13 | heads + loaded | chase 0.55 s | 76 | :1529 |
+| 14 | heads + empty | faint | 75 | :1530 |
+| 15 | `content==="empty"` | dark | 0 | :1532 |
+| 16 | `content==="muted"` | faint | 30 | :1534 |
+| 17 | `playing` | pulse 1.2 s | 20 | :1536 |
+| 18 | loaded + stopped | faint | 10 | :1538 |
+
+Side LEDs 1-4 (`:1544-1568`):
+
+| Condition | Pattern | Source |
+| --- | --- | --- |
+| power off | dark | :1546 |
+| overlay + algorithm `rejected` | blink | :1557 |
+| overlay + `bank.momentary` | breathe | :1559 |
+| overlay + `bank.latched` | solid | :1561 |
+| overlay, bank inactive | dark | :1562 |
+| `bankJumpArmed && i===bank` | blink | :1564 |
+| `i === song % 4` | solid | :1566 |
+| else | dark | :1567 |
+
+`play-indicator` (`:1573`): off→dark; `playing`→solid; else faint. Red core, `st-led--signal`.
+`function-led-1` (`:1577`): off→dark; overlay→pulse; `functionHeld`→solid; `headsMode`→breathe; else dark.
+`function-led-2` (`:1587`): off→dark; overlay→blink; `scrubLatched`→chase; any rocker pressed→blink; `grid.bpm != null`→pulse; else dark.
+
+## 2. Requested states → what actually exists
+
+| Requested state | Implemented? | Evidence |
+| --- | --- | --- |
+| idle / loaded | Yes (rows 15,18) | :1532,:1538 |
+| playing | Yes — track pulse + play-indicator solid | :1536,:1573 |
+| stopped | Yes | :1538,:1575 |
+| **paused** | **Missing** — no paused state exists; only boolean `state.playing` | — |
+| active stem | Partial — breathe, **only while FX overlay is open** | :1513 |
+| mute | Partial — `content==="muted"` faint outside overlay; per-stem `perf` mute not shown | :1534 |
+| solo | Partial — solid, **overlay only** | :1509 |
+| momentary global loop | **Missing** — `globalLoop.active` never read by `deriveLeds` | grep: `globalLoop` absent from :1471-1604 |
+| latched global loop | **Missing** — `globalLoop.latched` never read | same |
+| loop-division selection | **Missing** — `globalLoop.division` never read | same |
+| momentary fwd/rev scrub | Partial — function-led-2 blink for *any* rocker press; no direction | :1592 |
+| latched fwd/rev scrub | Partial — chase; direction only in the `reason` string, **same pattern both ways** | :1594-1600 |
+| four scrub-speed levels | **Missing visually** — `scrubSpeed` appears only inside `reason` text | :1597 |
+| scrub inertia handoff | **Missing** | no reference |
+| STEM vs GLOBAL FX scope | **Missing** — `fxTargetOf` only picks *which* rack to display; no LED distinguishes scope | :1553 |
+| FX-bank selection | Partial — the four side LEDs *are* the banks; the **selected algorithm within a bank is not shown** | :1554-1556 |
+| momentary FX | Yes — breathe | :1559 |
+| latched FX | Yes — solid | :1561 |
+| FX latch/unlatch confirm flash | Partial — 220 ms window, but rendered as infinite `blink`, and see §3 defect | :1481,:1503 |
+| clear-all latches | **Missing** — `fx.clearLatches` sets no flash | :1425-1432 |
+| Heads mode | Yes — chase/solid/faint per head + function-led-1 breathe | :1521-1531,:1583 |
+| heads rejected | Yes — 420 ms blink (described as "double flash", is not) | :1496 |
+| grid rejected | Yes — all four blink | :1494 |
+| tempo grid present | Yes — function-led-2 pulse (fixed 1.2 s, **not BPM-locked**) | :1594 |
+| loading / decode in progress | **Missing** | — |
+| errors (engine, decode, export) | **Missing** — only `grid.rejected` and FX `alg.rejected` | — |
+| MIDI connect/disconnect | **Missing** — no LED path reads MIDI state | grep: no midi ref in `deriveLeds` |
+| recording / overdub / print | **Priority constants exist, no branch uses them** (`recording:90`, `overdubbing:89`, `armed:88`, `printing:93`, `failedPrint:95`) | :1447-1463 |
 
-Plan only. No code in this response. Revised per the corrections of this turn. Final addendum applied.
+## 3. Defects found
 
-## 1. Current-code audit (verified)
+1. **Flash windows never expire.** `fxFlashAt` / `headsRejectFlashAt` are compared against `now` computed inside `deriveLeds`, but the memo key is `[state]` (`useDeviceSurface.ts:865`) and no timer schedules a re-render at +220/+420 ms. The flash therefore persists until the next unrelated dispatch, and if the next dispatch is >window it disappears instantly with no minimum on-time. Neither duration is honoured on screen.
+2. **One-shot flashes are rendered as infinite animations.** `blink` is `infinite`; there is no one-shot keyframe anywhere. "Two rapid flashes" (heads reject) and "four-light flash" (FX latch) are visually identical to `grid.rejected` and to `!linked` stems.
+3. **`priority` is decorative.** Every branch writes a `priority` number but arbitration is the `if/else` order, which contradicts the stated table: e.g. button-held (95) is evaluated *after* the overlay branches (10-74), and heads latched (77) after overlay solo (74). `LED_PRIORITY` is never read to choose a winner.
+4. **`pulse` is not loop-locked.** The reason string says "pulses on its own loop wrap"; the CSS is a fixed 1.2 s cycle with no per-track phase — so the documented v2.6 polyrhythm is not produced.
+5. **`chase` ignores direction and rate.** `headReverse` changes only the reason text; forward and reversed chase animate identically at 0.55 s.
+6. **`prefers-reduced-motion` does not cover `chase`** → frozen at inherited 0.1 opacity.
+7. **`data-lights="dim"` is inconsistent** — it dims static patterns but cannot dim animated ones.
 
-MIDI: **none exists.** `rg -ni "midi" src public` returns zero hits (only `webkitAudioContext` at `src/audio/engine.ts:465` and `-webkit-` rules in `src/styles.css:181-182`). No Web MIDI code, no device list, no native wrapper, no Xcode project.
+## 4. Conflicting states with no explicit precedence
 
-Reusable engine paths (`src/audio/engine.ts`, 4251 lines):
+- Track button held vs FX overlay open: overlay wins by ordering, contradicting priority 95 > 74.
+- Heads mode + FX overlay: overlay wins; heads head-state is invisible while the overlay is open.
+- `grid.rejected` is sticky-ish (state flag, not timed) and outranks every flash and the overlay.
+- Latched shuttle vs rocker held vs grid BPM all compete for `function-led-2` with no combined encoding — a latched shuttle hides the grid indication permanently.
+- FX overlay hides the song row (side LEDs) with no fallback.
 
-- Voice creation: `private spawn(t, startAt, offset, fadeIn)` `:782`. Builds `AudioBufferSourceNode` + a **per-voice** `fade` GainNode, `fade.connect(t.stemGate)` `:788`, reverse mirroring and loop wrap `:793-801`, equal-power fade-in `sampleCurve(equalPower,"b")` `:812-815`, `node.start(startAt, readOffset)` `:817`, pushes to `t.sources`.
-- Voice removal: `private fadeOutAndStop(t, live, at)` `:845` — equal-power `"a"` ramp + `node.stop(at + SEAM_FADE_S)`. **Identity protection**: `if (this.isReleaseTarget(t, live)) return;` `:849`, backed by `pendingRelease[lane]` (the repaired loop-release path).
-- Seam constant: `SEAM_FADE_S = 0.012` (`src/audio/crossfade.ts:72`); curves `equalPower`/`complementary` `:24/:30`.
-- Lane relocation without touching the shared clock: `respawnLane` `:828`, `relocateLane` `:1021`.
-- Shared clock: `timeline.positionAt(t)` / `timeline.anchor(at, pos)` (`:903, :1011, :1137, :3033`); `position()` `:752-758`.
-- Global loop: `globalLoop: { start; lengthS; division } | null` `:407`; start handler `:4049`; `releaseGlobalLoop()` `:1074` anchors the shared timeline to the audible frame `:1101/:1137`. **Unchanged.**
-- Lane loop: handlers `:3990-3998`; hidden-timeline bar rejoin `scheduleLoopRelease` `:1147-1190` (`hiddenNow` `:1162`). **Unchanged.**
-- Audibility: `applyAudibility(id)` `:1650` sets `fxRack.setInputOpen(...)` and `setGain(t.stemGate.gain, …)` `:1665-1667`.
-- FX: rack sits ahead of `stemGate` (`stemGate.connect(input)` `:529-531`); buses `normalBus` `:302/:509`, `headsBus` `:1802/:516`; RMS taps `:1891-1896`.
-- Momentary audition `:3979`; lane fader scrub `:2846-2968`; Heads voices `spawnHeadVoice` `:1970`, `heads.enter` `:3916`.
+## 5. Is there a reusable resolved frame for physical MIDI output?
 
-Command stream: `src/audio/commands.ts` — union `:14-94`, `AudioCommand` `:99`, ack `:112-120`, `makeCommand` `:128`.
+Partially. `deriveLeds(state, now)` is already a pure `SurfaceState → LedFrame` function with stable ids and a closed pattern vocabulary, so it is the right seam. It is **not yet consumable by hardware** because:
 
-Input/state: `src/machine/surface.ts` — `functionHeld` `:95`, held-Track derivation `:324`/`:746`, `auditionChord` `:169`, `headsMode`/`perf.fxOverlay` `:747`. `src/input/gestures.ts` (496 lines), `src/machine/chordArbiter.ts` (533 lines). Host `src/device/useDeviceSurface.ts` (801 lines), engine handle `:30`.
+- it is only invoked from a React `useMemo` keyed on `state`, so time-dependent frames (flashes, and anything phase-locked) are never re-evaluated;
+- `LedFrame` carries a pattern name, not brightness/period/phase — those live in CSS, so a device would have to re-derive the timing table independently and would drift;
+- no one-shot / duration semantics exist in the type (`LedState` = pattern + reason + priority);
+- `priority` is present but unused, so a second consumer would resolve conflicts differently from the DOM.
 
-Persistence: `src/audio/store.ts` — `SCHEMA_VERSION = 2` `:10`, `StoredProject.control` `:52-95`, optional-field precedent `chopDiv?`/`songGrid?` `:69/:76`; `StoredStem.contentHash` `:43`. Single writer `src/audio/session.ts:117 toStoredProject()`.
+### Smallest architecture to make web + device share one authoritative model
 
-Guide: `src/device/guideContent.ts` (485 lines) — `Lesson { highlight; motion; held? }` `:250-260`, 20 lessons `:265+`; renderer `src/device/ControlsGuide.tsx:87-101`; illustration `src/device/Sp1GuideIllustration.tsx` over `src/assets/stem-tape-sp1-outline.svg`; coverage test `src/device/__tests__/guideCoverage.test.ts` (asserts exactly 20 lessons `:21-23` and exactly 80 feature ids `:44-47`).
+1. Extend `LedState` to `{ pattern, periodMs, phaseAnchorMs, brightness, durationMs | null, priority, reason }` — timing moves out of CSS into the frame.
+2. Make arbitration data-driven: each branch pushes a candidate; a single reducer picks max `priority`. Deletes the if/else-vs-priority contradiction.
+3. Add a clock: a single rAF/interval ticker in `useDeviceSurface` re-derives whenever any frame carries a live `durationMs` or phase anchor, so flashes expire deterministically.
+4. Add one-shot patterns (`flash1`, `flash2`) driven by `durationMs`, and drive CSS via inline `animation-duration` / `animation-delay` from the frame instead of fixed class periods.
+5. Expose `deriveLeds` through a transport-agnostic `LedSink` interface; the DOM renderer and a MIDI SysEx/CC emitter both subscribe to the same emitted frame.
 
-**Correction absorbed:** `stemGate` is per-lane and shared by every voice on that lane, so a cue can *not* be isolated by closing the gate. Cue ownership is therefore expressed **per source voice**: fade the normal voice with `fadeOutAndStop`, spawn the cue voice, and protect the cue voice by identity exactly as `pendingRelease`/`isReleaseTarget` protect a queued release target (`:845-849`).
+Steps 1-3 are the minimum for correctness; 4-5 are what physical parity requires.
 
-## 2. Concept
+## 6. Verification
 
-A MIDI key is a **cue marker**, never a pad. No mode toggle, no pad grid, no cue editor, no fixed note bank.
-
-- FUNCTION held + MIDI key = learn a **global** cue (all four stems).
-- Exactly one Track held + MIDI key = learn an **isolated** cue for that lane.
-- Note On records `startFrame`; Note Off records `endFrame`. Same channel+note relearns overwrite.
-- Unqualified Note On plays the **complete learned passage as a one-shot**; Note Off does not shorten it.
-- Only marker metadata is persisted. No audio is copied.
-
-## 3. Timestamp → AudioContext conversion (authoritative)
-
-Cue frames are never taken from `engine.position()` at JS-callback time.
-
-- Every `StemMidiEvent` carries `timestampMs` in a monotonic domain aligned to `performance.now()`.
-- One calibration pair is maintained: `(perfNowMs0, ctx.currentTime0)`, refreshed on unlock, on visibility change, and on every native re-anchor. `ctxTimeOf(ev) = ctx.currentTime0 + (ev.timestampMs - perfNowMs0)/1000`.
-- Cue frames: `frame = round(timeline.positionAt(clamp(ctxTimeOf(ev), ctxStart, ctx.currentTime)) * sampleRate)`. `positionAt` already integrates the rate curve, so a late JS callback still resolves the frame the key was actually pressed at.
-- Events whose converted time is older than 250 ms (a stall) are marked `stale: true`, still applied, and reported in the status strip.
-
-## 4. Cue-learning state machine (contiguous and simple)
-
-Keyed by `channel:note`. Concurrent captures on different keys are independent and cannot corrupt one another; a Note Off only closes the capture with the identical `channel:note`.
-
-States per key: `idle → capturing(scope, startFrame) → committed | discarded`.
-
-**Eligibility gate — learning is permitted only during aligned, forward Tape playback.** Learning is rejected, with an explicit reason in the status strip and a `rejected` ack, when any of these hold at Note On:
-
-- Heads mode active
-- any scrub in progress (global shuttle or `laneFaderScrub` `:2846`)
-- any lane reversed (`t.loop.reverse`)
-- the global loop is running (`globalLoop != null` `:407`)
-- any lane loop is enabled
-- transport is not playing, or the rate is not aligned forward (rate ≤ 0, or |rate − 1| beyond a small tolerance)
-
-Rules:
-
-- Qualifier is read at the Note On instant: FUNCTION held → global. Exactly one Track held → that lane. **Two or more Track buttons held → explicit rejection** ("hold one Track button to learn an isolated cue"); no lane is chosen silently.
-- **The qualifier is claimed, not merely observed.** Reading `functionHeld`/held Tracks inside `useDeviceSurface` is not enough: the button will still fire its own release action later. At the instant learning begins the dispatcher calls `chordArbiter.claimExternal([...])` (§11), so FUNCTION's release cannot arm active-track selection and the Track's release cannot emit mute, loop or any other tap action. A Track-hold audition that was already running when the note arrived continues untouched and restores normally on release — only the release *action* is suppressed. The claim clears on that control's own release through the arbiter's existing path (`chordArbiter.ts:236-238`).
-- If an eligibility condition becomes true *during* a capture (loop captured, reverse engaged, Heads entered, scrub started), the capture is **discarded** and reported. Learning stays contiguous by construction.
-- Commit requires `endFrame - startFrame >= minCueFrames` (proposed 1024 frames); otherwise discarded with a reason.
-- Overwrite: a new commit on the same `channel:note` replaces the previous marker in place.
-- Cancel: All Notes Off, device disconnect, song/stem change, or transport stop discards all open captures.
-
-## 5. Cue-playback state machine (sample-accurate, fixed 1×)
-
-Playback is allowed in every state except Heads: normal play, global loop running, lane loops running, FX overlay open, **and while the transport is stopped**. Only *learning* requires aligned forward playback.
-
-On unqualified Note On for a learned marker, at `at = max(ctx.currentTime + lookahead, ctxTimeOf(ev))` with `lookahead ≥ SEAM_FADE_S`:
-
-1. **Eligibility gate for v1**: reject if any active scrub or reverse conflicts with the cue.
-   - Isolated cue: reject if its target lane is currently scrubbing (`laneFaderScrub` active) or reversed.
-   - Global cue: reject if **any** lane is scrubbing or reversed.
-   - This is a playback rejection, not a state change; the note is reported and ignored.
-2. Affected lanes: all four for a global cue, one for an isolated cue.
-3. For each affected lane: spawn the cue voice with the dedicated `spawnCue({ track, startAt, startFrame, endFrame, reverse: false, window: null, playbackRate: 1 })` path, register `cueOwner[lane] = { voice, noteKey, scope, endAt, runtimeGeneration }`, and give the voice the same **identity protection** as `pendingRelease` so no wrap, sweep, relocate or respawn can fade or stop it.
-4. **Audibility override**: while `cueOwner[lane]` exists, the cue voice must be audible regardless of that lane's mute/solo state. The engine temporarily overrides that lane's input audibility **without mutating** `t.muted`/`t.soloed`. The fader level and FX rack remain active. On completion, normal audibility is restored from the unchanged mixer state.
-5. Fade any previously audible voice on that lane out with `fadeOutAndStop(t, live, at)` `:845`. The two overlap for exactly `SEAM_FADE_S`.
-4. **At the same moment**, schedule the completion seam and the rejoin voice: `endAt = at + (endFrame − startFrame)/sr`. Start time and read offset are both computed up front, so the seam is sample-accurate. `tick()` only reaps dead nodes and clears `cueOwner`; it never decides the seam.
-
-**Fixed 1× for v1.** Learning is only possible during aligned 1× playback, and the key's held duration *is* the passage, so a cue always plays at 1×. A varispeed change during an active cue does **not** reschedule, stretch or re-pitch it; the completion lands at the frame scheduled at trigger time. (Rate-following cues are explicitly out of scope.)
-
-**Stopped transport.** A cue triggered while stopped plays normally — a global cue sounds all four stems, an isolated cue sounds its one stem — through the same lane faders and FX. The shared timeline is **not** anchored or started, and at completion no rejoin voice is scheduled: the lane returns to silence.
-
-Normal-source suppression: **while `cueOwner[lane]` is set, nothing else may create an audible normal source on that lane** — not the wrap/seam scheduler, not `relocateLane` `:1021`, not `respawnLane` `:828`, not `tick()`. Loop windows, hidden pointers and the shared timeline continue to advance mathematically underneath; the correct source is respawned only at cue rejoin.
-
-Performance semantics:
-
-- **One-shot**: Note Off during playback does nothing and never shortens the passage.
-- **Retrigger**: a new Note On for the same key bumps the runtime generation, cancels the pending completion, crossfades to a fresh cue voice at `startFrame`, and reschedules.
-- A second, different note takes ownership per §6.
-- All Notes Off / device disconnect / transport stop ends the cue safely at the next seam and rejoins per §6 (silence when stopped).
-
-Voice invariant (corrected): **one steady-state audible voice per affected lane, temporarily two during the bounded `SEAM_FADE_S` crossfade, exactly one afterwards** — measured as audible sources at an asserted context frame, not as entries in `t.sources` (see §12).
-
-## 6. Ownership and rejoin
-
-Ownership is per lane, held by `cueOwner[lane]`.
-
-- Isolated cue: owns one lane. The other three are untouched — voices, loops and hidden pointers keep running.
-- Global cue: **temporarily owns all four lanes**. It never mutates `globalLoop`, lane-loop windows or the shared timeline.
-- A global cue starting while an isolated cue plays takes over that lane too; the isolated note ends at the same seam.
-- An isolated note targeting a lane already owned by a global cue is rejected while the global cue runs.
-
-At completion each affected lane **independently returns to its actual underlay**, evaluated per lane at `endAt`:
-
-| Lane underlay at `endAt` | Rejoin target for that lane |
-| --- | --- |
-| Normal forward play | `timeline.positionAt(endAt)` — the hidden song frame |
-| Global loop running | the global window's phase at `endAt`: `start + ((positionAt(endAt) − start) mod lengthS)` from `globalLoop` `:407` |
-| That lane has its own lane loop | the lane-loop window's phase at `endAt`, the hidden-pointer math of `scheduleLoopRelease` `:1147-1190` |
-| Transport stopped | no rejoin voice; the cue voice ends on its own fade and the lane is silent |
-
-A global cue can therefore end with four *different* targets — e.g. two lanes in the global-loop phase, one in its own lane loop, one on the normal timeline. Internal engine rejoin tolerance: ≤ 2 frames per lane (an engine measurement, not a hardware claim — see §12).
-
-## 7. Precedence table
-
-| Situation | Result |
-| --- | --- |
-| FUNCTION + Track(s) held + Note On | FUNCTION wins → global learn |
-| Exactly one Track held + Note On | isolated learn on that lane |
-| Two or more Tracks held + Note On | **rejected explicitly**, reason shown |
-| No qualifier + learned note | one-shot playback |
-| No qualifier + unlearned note | no-op, reported |
-| Learning Note On (either scope) | the qualifier is **claimed** via `chordArbiter.claimExternal` — FUNCTION release arms no selection, Track release emits no mute/loop/tap |
-| Track hold that already produced `lane.audition` `:3979` | the audition continues and restores normally; only the button's *release* action is suppressed |
-| FX overlay open | learning eligibility unchanged; playback allowed; FX controls untouched |
-| Heads mode | learning and playback both rejected (Heads owns `headsBus` `:1802`) |
-| Scrub / reverse | learning rejected; **playback rejected in v1** (isolated: if its lane is scrubbing/reversed; global: if any lane is scrubbing/reversed) |
-| Any loop / off-1× rate | learning rejected; playback allowed and rejoins per §6 |
-| Transport stopped | learning rejected; **playback allowed**, completion returns to silence |
-| Same channel+note relearned | overwrite |
-| Note On while that note plays | retrigger from `startFrame`, one bounded crossfade |
-| Two global notes overlapping | last wins; the earlier ends at that seam |
-| Global note over an isolated one | global takes all four lanes; isolated ends |
-| Isolated note into a globally-owned lane | rejected while the global cue plays |
-| Note Off during playback | ignored (one-shot) |
-| All Notes Off / disconnect | open captures discarded; playing cues end at the next seam |
-
-## 8. Persistence (additive, per project)
-
-`StoredProject.control` gains one optional field, following `songGrid?` (`store.ts:76`):
-
-```
-cues?: {
-  version: 1;
-  markers: {
-    id: string;
-    channel: number;        // learning is keyed by channel+note
-    note: number;
-    scope: "global" | "lane";
-    lane: 0|1|2|3 | null;
-    startFrame: number;
-    endFrame: number;
-    sampleRate: number;
-    /** Content identity of every stem the marker depends on. */
-    sources: { role: string; contentHash: string }[];
-    createdAt: number;
-  }[];
-}
-```
-
-- `contentHash` (from `StoredStem.contentHash` `store.ts:43`) is the **only** persisted source identity. A marker is invalidated when its recorded `contentHash` no longer matches the current stem's `contentHash`. A global marker is invalidated if any of the four stems changed; an isolated marker only by its own lane.
-- **Invalidation**: on load and on any stem replacement, a marker whose recorded `contentHash` no longer matches its stem is marked invalid — retained on disk, but unplayable and shown as "source replaced" in the status strip. A global marker is invalidated if *any* of the four stems changed; an isolated marker only by its own lane.
-- Rate mismatch: frames are converted through seconds using the recorded `sampleRate`; markers past the song duration are clamped and flagged.
-- `SCHEMA_VERSION` stays 2 (purely additive optional field). Absent → `{ version: 1, markers: [] }`.
-- Privacy: metadata only, asserted by extending `src/audio/__tests__/privacy.test.ts`.
-
-## 9. Normalized MIDI event contract
-
-```
-type StemMidiEvent = {
-  kind: "noteOn" | "noteOff" | "allNotesOff";
-  note: number; velocity: number; channel: number;   // channel 0..15
-  timestampMs: number;        // performance.now() domain, monotonic
-  source: "webmidi" | "coremidi-bridge" | "test";
-  deviceId: string; deviceName: string;
-};
-```
-
-- Desktop/Android: Web MIDI adapter converts status bytes + `DOMHighResTimeStamp`.
-- iOS/iPadOS: the native bridge delivers **arrays** of these objects with the identical shape; the web layer cannot tell the transports apart.
-- Note On with velocity 0 is normalized to `noteOff`. CC 123 → `allNotesOff`.
-- Tests inject the same objects, so no hardware is needed.
-
-## 10. iOS/iPadOS native wrapper (CoreMIDI)
-
-Safari and Chrome on iPhone/iPad do **not** support Web MIDI (Chrome on iOS is WebKit). The native shell is the only MIDI path on those devices. Initial delivery: a TestFlight WKWebView shell loading the published Stem Tape URL; offline bundling later.
-
-New `ios/` folder, outside the Vite build:
-
-- `StemTapeApp.swift` — SwiftUI shell.
-- `WebHostView.swift` — `WKWebView`, `allowsInlineMediaPlayback = true`, `mediaTypesRequiringUserActionForPlayback = []`, loads the published URL.
-- `MidiBridge.swift` — `MIDIClientCreateWithBlock` + **one MIDI input port** (`MIDIInputPortCreateWithProtocol`) connected to every source with `MIDIPortConnectSource`. **No virtual destination is created** — nothing needs to advertise Stem Tape as a MIDI destination. Sources are enumerated at start and re-enumerated on `MIDIObjectAddRemoveNotification` (hot-plug).
-- **MIDI 1.0 device support**: USB class-compliant controllers (Lightning/USB-C Camera Adapter or USB-C hub) and Bluetooth LE MIDI both appear to CoreMIDI as ordinary sources. The port is created with `MIDIProtocolID._1_0` so incoming MIDI 1.0 is delivered natively; if the port is negotiated to UMP, MIDI 1.0 channel-voice messages arrive as UMP message-type 2 and are decoded to the same note/channel/velocity fields. Either way the page sees identical `StemMidiEvent`s.
-- BLE pairing uses the standard `CABTMIDICentralViewController` picker.
-- **Delivery to the page**: events are **batched** per read block and sent with `webView.callAsyncJavaScript("window.__stemTapeMidi.push(events)", arguments: ["events": [[String: Any]]], in: nil, in: .page)` — **structured arguments only; JSON is never interpolated into an executable string.**
-- **Clock anchoring**: `MIDITimeStamp` (mach absolute ticks) → seconds via `mach_timebase_info`, then mapped to the page's `performance.now()` origin by a calibration exchange at bridge-ready. The anchor is **re-established after foregrounding, after any `AVAudioSession` interruption, and after a route change**, because the WebKit process clock and the page's `performance.now()` origin can drift or reset.
-- `AudioSessionController.swift` — `AVAudioSession` category `.playback`, `setActive(true)`; handles `interruptionNotification` (pause, then resume + re-anchor + re-unlock the `AudioContext`) and `routeChangeNotification`. Because the category is `.playback`, **the hardware Silent switch does not mute the native app.**
-- Background/foreground: on background, emit `allNotesOff` into the page; on foreground, re-enumerate sources and re-anchor.
-
-**Silent Mode disclosure applies to browser playback only.** In a browser on iPhone/iPad the page may be muted by the Silent switch and MIDI is unavailable; the status strip says so and points to the native app. The native shell shows no such warning.
-
-## 11. Exact file changes
-
-Web engine
-- `src/audio/midi/contract.ts` (new) — `StemMidiEvent`, velocity-0 and CC-123 normalization.
-- `src/audio/midi/clock.ts` (new) — `performance.now()` ↔ `AudioContext` calibration and `ctxTimeOf(ev)`.
-- `src/audio/midi/webMidi.ts` (new) — Web MIDI adapter (desktop/Android).
-- `src/audio/midi/nativeBridge.ts` (new) — `window.__stemTapeMidi` batched-array queue + bridge-ready handshake.
-- `src/audio/cues.ts` (new) — marker store keyed by `channel:note`, learn/play state machines, eligibility gate, invalidation — all pure over `StemMidiEvent`.
-- `src/audio/engine.ts` — add `cueOwner: (CueOwner|null)[]`; add a **dedicated cue spawn path** `spawnCue({ track, startAt, startFrame, endFrame, reverse: false, window: null, playbackRate: 1 })` that reuses the per-voice `fade` gain and connects to `t.stemGate` (`:788`) so fader/FX chains stay intact, but never applies lane reverse, loop wrapping or transport varispeed; extend identity protection so `fadeOutAndStop` `:845`/`isReleaseTarget` `:849` also spare a cue voice; add a **single `cueOwner[lane]` guard** at every place that creates an audible normal source (`spawn` call sites in the wrap/seam path `:967-980`, `relocateLane` `:1021`, `respawnLane` `:828`, the `tick()` scheduler) so an owned lane creates none; add handlers `cue.learn.start`, `cue.learn.end`, `cue.play`, `cue.stopAll`, `cue.clear`; schedule the fixed-1× completion + per-lane rejoin at play time; temporarily override lane audibility for the cue voice without mutating `t.muted`/`t.soloed`; `tick()` reaps only. **No change** to `releaseGlobalLoop` `:1074`, `scheduleLoopRelease` `:1147`.
-- `src/audio/commands.ts` — append the five command types to the union `:14-94`.
-
-Input/qualifiers (smallest claim change)
-- `src/machine/chordArbiter.ts` — **one new public method**, `claimExternal(controls: Control[], detail: string)`, that calls the existing `private claim(...)` `:161` and pushes a log record. The existing machinery then does the rest for free: `isClaimed` `:167` makes the v2.6 consumer drop those controls' base gestures, and a claim is cleared on the control's own release `:236-238`, so no lifecycle code is added. A hold-audition already dispatched on press is untouched and restores normally.
-- `src/device/useDeviceSurface.ts` — subscribe both adapters; on a learn Note On, read `functionHeld` `surface.ts:95` / held-Track lanes `surface.ts:324` **and immediately** `arbiter.claimExternal(["function"])` or `claimExternal([trackControl])`. FUNCTION release can then no longer arm active-track selection, and Track release can no longer emit mute/loop/tap. No gesture-engine change.
-
-Persistence
-- `src/audio/store.ts` — `control.cues?` type; `src/audio/session.ts:117` — write/restore. `contentHash` only; **no `sourceGeneration` is ever persisted.**
-
-UI status
-- `src/device/CueStatus.tsx` (new), beside `HeadsStatus.tsx`: transport source (native bridge vs Web MIDI vs none), device name, armed scope, learned/invalid marker counts, last event, last rejection reason, and the browser-only Silent Mode + no-MIDI disclosure. No pads, no editor.
-
-Native
-- New `ios/` folder per §10; not part of the Vite build.
-
-Guide
-- `src/device/guideContent.ts` — **the Guide extends to 21 lessons and 81 feature ids.** No existing lesson is replaced or deleted. New feature id `stem.instrument.cues` in `PERFORMANCE` `:44-82`, new lesson appended to `LESSONS` `:262-470` animating FUNCTION-held global learning then a single-Track-held isolated learn on the SP-1 outline (existing `Control`s and motions only, `Lesson` `:249-260`), with body copy distinguishing **native iPhone/iPad MIDI (CoreMIDI app)** from **browser MIDI (desktop/Android Web MIDI)**. No drawn pads, no new SVG.
-- `src/device/__tests__/guideCoverage.test.ts` — the two pinned counts move together in the same change: 20 → 21 lessons (`:21-23`) and 80 → 81 unique ids (`:44-47`).
-
-## 12. Tests
-
-**Audible-voice measurement.** `t.sources` holds queued-future and fading nodes as well as the live one, so a raw array length proves nothing. Every voice assertion uses an `audibleAt(lane, ctxFrame)` probe: a source counts only if `startAt ≤ f` and (`stopAt == null` or `stopAt > f`) and its fade gain at `f` is > 0. Required: **one audible path steady-state, at most two inside the 12 ms (`SEAM_FADE_S`) seam, exactly one after it.**
-
-Unit (vitest, injected `StemMidiEvent`s, `MockCtx` from `src/audio/__tests__/mockAudio.ts`)
-- Timestamp conversion: an event delivered 120 ms late still resolves the frame at its own timestamp, ≤ 2 frames error (internal engine measurement).
-- Learning: global, isolated, overwrite on same channel+note, interleaved overlapping captures on two keys stay independent, sub-minimum discard.
-- Eligibility: learning rejected in Heads / scrub / reverse / global loop / lane loop / stopped / off-1× rate, each with a distinct reason; a capture interrupted by a loop capture is discarded.
-- Two Tracks held → explicit rejection, no marker written.
-- Qualifier claim: FUNCTION release after a global learn arms **no** active-track selection; Track release after an isolated learn emits **no** mute/loop/tap action; an audition already running before the note continues and restores the prior mix exactly.
-- Suppression: while `cueOwner[lane]` exists, driving wraps, seams, relocate, respawn and many `tick()` cycles produces **zero** additional audible normal sources on that lane, while `timeline.positionAt` and the loop windows keep advancing.
-- Voice counts via `audibleAt`: at the seam ≤ 2, steady-state 1; unaffected lanes' audible source identity is unchanged during an isolated cue.
-- One-shot: Note Off during playback changes nothing; retrigger yields one bounded crossfade.
-- Fixed 1×: a varispeed change mid-cue neither reschedules nor stretches the cue; the completion lands at the originally scheduled frame.
-- Stopped transport: a global cue while stopped produces four audible cue voices and, at completion, zero audible sources; an isolated cue produces one and then zero; the shared timeline is never anchored.
-- Rejoin matrix: every §6 underlay, per lane, ≤ 2 frames (internal tolerance, style of `loopRejoin.test.ts:93`); one global-cue case where the four lanes have three different underlays.
-- Scheduling: the completion seam is scheduled at play time — a test that never calls `tick()` still observes the scheduled rejoin start.
-- Invalidation: replacing one stem (new `contentHash`) invalidates its isolated markers and all global markers, leaves others playable.
-- Persistence round-trip asserts no `sourceGeneration` field is written; privacy test asserts no audio bytes in markers.
-
-Browser (Playwright, `tests/browser/`)
-- Events injected via `window.__stemTapeMidi`: learn + play with the FX overlay open; `normalBus` RMS proves faders and FX process cue audio; the `audibleAt` probe proves no doubling outside the seam.
-
-Physical device (TestFlight) — reported, not asserted against the engine tolerance
-- USB class-compliant and BLE MIDI 1.0 controllers: hot-plug add/remove mid-performance.
-- **Input-to-audio latency reported as median and p95** across ≥ 200 notes per transport (USB and BLE separately), measured by recording the acoustic/line output against the controller's own key event. No end-to-end two-frame claim is made: the ≤ 2 frame figure is an internal engine-rejoin measurement only.
-- **Clock drift reported** over a 30-minute run as observed native↔page anchor error (median and p95), before and after a forced re-anchor.
-- Silent switch ON must **not** mute the native app; call interruption then resume re-anchors clock and audio; backgrounding leaves no stuck cue.
-
-## 13. Implementation checkpoints (each independently reviewable)
-
-1. Contract + clock calibration + both adapters + `CueStatus` strip. No audio behavior. Review: events and timestamps visible on screen.
-2. `cues.ts` — marker store, keying, eligibility gate, invalidation. Pure, fully unit-tested, no engine change.
-3. Qualifier claim API (`claimExternal`) + MIDI dispatcher wiring. Review: the claim tests in §12, no audio behavior yet.
-4. Engine: cue voice ownership, identity protection, **normal-source suppression while owned**, isolated cues only, scheduled fixed-1× completion + rejoin for normal play.
-5. Rejoin matrix completed: global-loop phase, lane-loop phase, and the stopped-transport (silence) case — still isolated cues.
-6. Global cues: four-lane ownership, per-lane independent underlay return, precedence arbitration.
-7. Persistence + migration + `contentHash` invalidation wired to stem replacement.
-8. Guide: 21st lesson + 81st feature id, coverage test counts updated together.
-9. iOS wrapper: an **Xcode-ready, buildable** iPhone/iPad project using client + input port, batched `callAsyncJavaScript`, `AVAudioSession.playback`, and re-anchoring. Actual signing and TestFlight upload require your Apple Developer account and Xcode and are not claimed as completed inside Lovable's environment.
-
-
-## 14. Exclusions
-
-No MIDI clock or output, no quantization, no launch modes, no cue editor, no onscreen pads, no fixed note bank, no new FX, no change to global-loop or lane-loop semantics, no Heads redesign, no unrelated UI, no offline bundling in the first iOS delivery, and no implementation in this response.
-
-## 16. Final addendum (approved)
-
-1. **Cue spawn is dedicated, not reused.** `spawnCue({ track, startAt, startFrame, endFrame, reverse: false, window: null, playbackRate: 1 })` keeps the per-voice fade and the `t.stemGate` connection so fader/FX chains stay intact, but never inherits lane reverse, loop wrapping, or transport varispeed.
-2. **Playback rejection during scrub/reverse (v1).** An isolated cue is rejected if its target lane is scrubbing or reversed; a global cue is rejected if any lane is scrubbing or reversed. Playback over global and lane loops remains supported through the underlay-rejoin rules.
-3. **Cue audibility overrides mute/solo.** While `cueOwner[lane]` exists, the cue voice is audible regardless of that lane's mute/solo state, without mutating `t.muted` or `t.soloed`. Fader level and FX remain active; normal audibility restores on completion.
-4. **Invalidation uses `contentHash` only.** No persisted generation field exists.
-5. **Checkpoint 9 is Xcode-ready, not TestFlight-uploaded.** Actual signing and TestFlight upload require your Apple Developer account and Xcode and are outside Lovable's environment.
-
-No code will be written until you separately authorize implementation.
-
-
+- `git status --porcelain` → empty
+- `git diff --stat` → empty
