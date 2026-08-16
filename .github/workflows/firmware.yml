@@ -139,7 +139,6 @@ jobs:
           set -euxo pipefail
           B=build-stemtape/zephyr
           cp "$B/zephyr.bin" "$B/stemtape_m0.bin"
-          SIZE=$(arm-zephyr-eabi-size --version >/dev/null 2>&1 && echo ok)
           arm-zephyr-eabi-size -A -x "$B/zephyr.elf"      > audit/size.txt
           arm-zephyr-eabi-size    "$B/zephyr.elf"        >> audit/size.txt
           arm-zephyr-eabi-objdump -h "$B/zephyr.elf"      > audit/objdump-h.txt
