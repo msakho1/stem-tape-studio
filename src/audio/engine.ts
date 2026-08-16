@@ -1770,9 +1770,18 @@ export class AudioEngine {
     // very same stored mute/solo verdict through `headsInject`.
     const headsOwn = this.heads.active && id === VOCAL_LANE;
     t.fxRack?.setInputOpen(stemAudible || cued || headsOwn);
-    this.setGain(t.stemGate.gain, headsOwn ? 0 : stemAudible ? 1 : 0);
+    // While a Vocal<->Heads handoff is in flight the crossfade OWNS these two
+    // params; stomping them here would drop the dry Vocal before the Head sum
+    // has opened. Mute/solo changes made during the fade are picked up by the
+    // next audibility pass after it lands.
+    const handing = this.ctx != null && this.ctx.currentTime < this.headsHandoffUntil;
+    if (!handing) {
+      this.setGain(t.stemGate.gain, headsOwn ? 0 : stemAudible ? 1 : 0);
+      if (headsOwn && this.headsInject) this.setGain(this.headsInject.gain, stemAudible ? 1 : 0);
+      if (!this.heads.active && id === VOCAL_LANE && this.headsInject) this.setGain(this.headsInject.gain, 0);
+    }
     this.setGain(t.soloGain.gain, cued || audibleBySolo ? 1 : 0);
-    if (headsOwn && this.headsInject) this.setGain(this.headsInject.gain, stemAudible ? 1 : 0);
+
   }
 
 
