@@ -279,15 +279,19 @@ jobs:
         working-directory: ${{ github.workspace }}/project
         run: |
           set -euo pipefail
+          set +e
           python3 .github/scripts/m0_safety_gate.py \
             audit/nm.txt audit/objdump-d.txt build-stemtape/zephyr/.config \
-            audit/safety-gate.md > audit/safety-gate.txt
+            audit/safety-gate.md 2>&1 | tee audit/safety-gate.txt
+          gate_rc=${PIPESTATUS[0]}
+          set -e
           {
             echo '### M0 strict persistence safety gate'
             echo '```text'
-            grep -E '^(PASS|FAIL|GATE)' audit/safety-gate.md
+            cat audit/safety-gate.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+          exit "$gate_rc"
 
       - name: Hashes and sources
         working-directory: ${{ github.workspace }}/project
