@@ -360,16 +360,65 @@ static uint32_t decode_bands(const struct band *tbl, size_t n, int v)
 	return MASK_UNMEASURED;   /* a real chord we have never measured */
 }
 
-/* --------------------------------------------------------- watchdog ------ */
+/* --------------------------------------------------------- watchdog ------
+ * The TE bootloader may already have STARTED the nRF52840 WDT before handing
+ * over. Once running, its CONFIG/CRV/RREN are locked: wdt_install_timeout()
+ * and wdt_setup() will fail and MUST NOT be assumed to have succeeded. We
+ * therefore (a) detect RUNSTATUS first, (b) record every return value, and
+ * (c) always feed exactly the reload channels that are ENABLED (RREN), which
+ * is the set the running configuration actually requires.
+ */
+static int  g_wdt_install_rc = -ENODEV;   /* -ENODEV = never attempted */
+static int  g_wdt_setup_rc   = -ENODEV;
+static bool g_wdt_pre_running;            /* started by the bootloader */
+static bool g_wdt_ours;                   /* started by this firmware  */
+
 static void feed_wdt(void)
 {
+	uint32_t en = NRF_WDT->RREN;
+	if (en == 0u) {
+		/* No channel enabled (WDT idle, or RREN not yet latched):
+		 * feeding all channels is harmless and keeps startup safe. */
+		en = 0xFFu;
+	}
 	for (int ch = 0; ch < 8; ch++)
-		NRF_WDT->RR[ch] = WDT_RR_RR_Reload;
+		if (en & (1u << ch))
+			NRF_WDT->RR[ch] = WDT_RR_RR_Reload;
 }
 static void wdt_prewarn(const struct device *dev, int channel_id)
 {
 	ARG_UNUSED(dev); ARG_UNUSED(channel_id);
 }
+
+/* Returns nothing: failure to configure the watchdog is never fatal, it is
+ * recorded and reported over the CDC diagnostic banner instead. */
+static void wdt_init(void)
+{
+	g_wdt_pre_running =
+		(NRF_WDT->RUNSTATUS & WDT_RUNSTATUS_RUNSTATUSWDT_Msk) != 0u;
+	feed_wdt();
+	if (g_wdt_pre_running)
+		return;                   /* locked configuration; feed only */
+
+	const struct device *wdt = DEVICE_DT_GET(WDT_NODE);
+	if (!device_is_ready(wdt))
+		return;
+
+	struct wdt_timeout_cfg cfg = {
+		.window.max = 4000, .callback = wdt_prewarn,
+	};
+	g_wdt_install_rc = wdt_install_timeout(wdt, &cfg);
+	if (g_wdt_install_rc < 0)
+		return;
+
+	g_wdt_setup_rc = wdt_setup(wdt, 0);
+	if (g_wdt_setup_rc < 0)
+		return;
+
+	g_wdt_ours = true;
+	feed_wdt();
+}
+
 
 /* ------------------------------------------------------------ USB MIDI ---
  * Zephyr 4.3.1 ships only the USB MIDI 2.0 class (CONFIG_USBD_MIDI2_CLASS);
