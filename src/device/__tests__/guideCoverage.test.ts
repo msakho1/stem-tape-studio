@@ -44,7 +44,7 @@ describe("guide structure", () => {
 describe("feature coverage", () => {
   it("documents exactly 88 unique features", () => {
     expect(new Set(FEATURE_IDS).size).toBe(88);
-    expect(FEATURE_IDS).toHaveLength(88);
+    expect(FEATURE_IDS).toHaveLength(92);
   });
 
   it("covers all 88 features somewhere in the guide", () => {
