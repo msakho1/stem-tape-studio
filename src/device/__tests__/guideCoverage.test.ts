@@ -42,12 +42,12 @@ describe("guide structure", () => {
 });
 
 describe("feature coverage", () => {
-  it("documents exactly 88 unique features", () => {
-    expect(new Set(FEATURE_IDS).size).toBe(88);
+  it("documents exactly 92 unique features", () => {
+    expect(new Set(FEATURE_IDS).size).toBe(92);
     expect(FEATURE_IDS).toHaveLength(92);
   });
 
-  it("covers all 88 features somewhere in the guide", () => {
+  it("covers all 92 features somewhere in the guide", () => {
     const covered = guideCoverage();
     const missing = FEATURE_IDS.filter((id) => !covered.has(id));
     expect(missing).toEqual([]);
