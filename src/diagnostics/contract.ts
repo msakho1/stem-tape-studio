@@ -137,7 +137,7 @@ export const BEHAVIOR_CONTRACT: ContractEntry[] = [
     citation: LOOPER,
     confidence: "high",
     status: "implemented",
-    observe: (s) => (s.poweredOff ? "powered off" : "powered on"),
+    observe: (s) => `power=${s.power}`,
   },
   {
     id: "base.startup",
