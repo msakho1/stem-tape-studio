@@ -3041,7 +3041,7 @@ export class AudioEngine {
     this.fanout((_t, at) => ({
       type: "setRate",
       applyAtContextFrame: at,
-      rate: engage ? GLOBAL_SCRUB_RATE : this.timeline.musicalRate(),
+      rate: engage ? (this.globalScrub?.rate ?? GLOBAL_SCRUB_SPEEDS[this.scrubSpeedIndex]!) : this.timeline.musicalRate(),
       rampFrames: Math.round(0.008 * sr),
     }));
     if (engage) {
