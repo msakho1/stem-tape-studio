@@ -62,6 +62,7 @@
 #include <sample_usbd.h>
 #include <soc.h>
 #include <string.h>
+#include <errno.h>
 
 #include "midi_protocol.h"
 
