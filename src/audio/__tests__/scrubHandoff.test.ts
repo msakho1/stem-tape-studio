@@ -317,8 +317,12 @@ describe("global scrub → playback handoff", () => {
     const h = st.handoff!;
     expect(h.keyupContextFrame).toBe(Math.round(keyup * SR));
     expect(h.handoffContextFrame).toBeGreaterThan(h.keyupContextFrame);
-    // Handoff is the next render quantum, never the 80 ms transport lookahead.
-    expect((h.handoffContextFrame - h.keyupContextFrame) / SR).toBeLessThan(0.02);
+    // Addendum §6: the hand-off is the next render quantum after the RELEASE
+    // DECELERATION ends — never the 80 ms transport lookahead.
+    expect(h.releaseDecelMs).toBeGreaterThan(0);
+    const afterDecel = (h.handoffContextFrame - h.keyupContextFrame) / SR - h.releaseDecelMs / 1000;
+    expect(afterDecel).toBeLessThan(0.02);
+    expect(afterDecel).toBeGreaterThanOrEqual(0);
     for (const s of h.stems) {
       expect(s.landingErrorFrames).toBeLessThanOrEqual(2);
       expect(s.activeScrubSources).toBe(0);
