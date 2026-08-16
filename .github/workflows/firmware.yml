@@ -279,17 +279,22 @@ jobs:
         working-directory: ${{ github.workspace }}/project
         run: |
           set -euo pipefail
+          set +e
           python3 .github/scripts/m0_safety_gate.py \
             audit/nm.txt audit/objdump-d.txt build-stemtape/zephyr/.config \
-            audit/safety-gate.md > audit/safety-gate.txt
+            audit/safety-gate.md 2>&1 | tee audit/safety-gate.txt
+          gate_rc=${PIPESTATUS[0]}
+          set -e
           {
             echo '### M0 strict persistence safety gate'
             echo '```text'
-            grep -E '^(PASS|FAIL|GATE)' audit/safety-gate.md
+            cat audit/safety-gate.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+          exit "$gate_rc"
 
       - name: Hashes and sources
+        if: ${{ always() }}
         working-directory: ${{ github.workspace }}/project
         run: |
           set -euxo pipefail
@@ -315,6 +320,7 @@ jobs:
 
 
       - name: Report USB interfaces in the M0 device
+        if: ${{ always() }}
         working-directory: ${{ github.workspace }}/project
         run: |
           set -eux
@@ -323,6 +329,7 @@ jobs:
           grep -A3 'usb_midi' build-stemtape/zephyr/zephyr.dts >> audit/usb-interfaces.txt || true
 
       - name: Upload stemtape-m0-audit
+        if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: stemtape-m0-audit
