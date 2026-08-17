@@ -22,7 +22,27 @@
  */
 
 import { trace, traceNow } from "./trace";
-import { formatPhysicalFrame, type ResolvedPhysicalFrame } from "./physicalFrame";
+
+/**
+ * Minimal structural contract every authoritative resolver must satisfy.
+ * `src/leds/sp1LedEngine.ts` is the production producer; the legacy
+ * `resolvePhysicalFrame` shape remains assignable for diagnostics/tests.
+ */
+export interface TransmittableFrame {
+  values: number[];
+  signature: string;
+  leds: readonly { owner: string; priority?: number; precedence?: number }[];
+}
+
+const SHORT = ["T1", "T2", "T3", "T4", "S1", "S2", "S3", "S4"];
+
+function formatFrame(f: TransmittableFrame): string {
+  const cell = (i: number) => `${SHORT[i]} ${f.values[i] ?? 0}`;
+  const rank = (l: TransmittableFrame["leds"][number]) => l.priority ?? l.precedence ?? 0;
+  const top = [...f.leds].sort((a, b) => rank(b) - rank(a))[0];
+  return `[${[0, 1, 2, 3].map(cell).join(", ")} | ${[4, 5, 6, 7].map(cell).join(", ")}] owner=${top?.owner ?? "none"}`;
+}
+
 
 export const LED_CHANNEL = 15; // channel 16, zero-based
 export const LED_STATUS = 0xb0 | LED_CHANNEL; // 0xBF
@@ -247,7 +267,7 @@ export class PhysicalLedTransport {
    * (the heartbeat alone keeps the lease). Changed frames stage only the
    * changed indices; the first takeover stages all eight.
    */
-  present(resolved: ResolvedPhysicalFrame): "sent" | "unchanged" | "blocked" {
+  present(resolved: TransmittableFrame): "sent" | "unchanged" | "blocked" {
     if (!this.canTransmit()) return "blocked";
     const out = this.out!;
     const values = resolved.values;
@@ -274,7 +294,7 @@ export class PhysicalLedTransport {
       });
       trace.record(
         "led.transmitted",
-        `${formatPhysicalFrame(resolved)} staged=${changed.length}${first ? " (full takeover)" : ""} commit=${seq}`,
+        `${formatFrame(resolved)} staged=${changed.length}${first ? " (full takeover)" : ""} commit=${seq}`,
         { staged: changed, values: [...values], commitSequence: seq, channel: 16 },
         { causeId: "led.frame" },
       );

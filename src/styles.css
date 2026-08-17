@@ -226,7 +226,24 @@
   transform: rotate(3.2deg);
 }
 
+/*
+ * The EIGHT physical LEDs are driven exclusively by the application clock in
+ * src/leds/useSp1LedFrame.ts: CSS owns neither their phase nor their
+ * lifecycle. Any element carrying data-led-mode has its keyframe animation
+ * suppressed and reads its brightness from the inline opacity written by the
+ * resolver. The remaining web-only indicators keep the legacy CSS patterns.
+ */
+[data-led-mode] .st-led__core,
+[data-led-mode] .st-led__halo {
+  animation: none !important;
+}
+
+[data-led-mode]:not([data-led-mode="off"]) .st-led__halo {
+  opacity: 0.35;
+}
+
 /* LEDs: static halo + core, opacity only. No SVG filters (Safari cost). */
+
 .st-led__halo {
   opacity: 0;
   transition: opacity 120ms linear;
