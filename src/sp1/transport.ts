@@ -14,10 +14,13 @@
 
 import {
   evaluate,
+  parseCapabilities,
   readOnlyVerdict,
+  sameCapabilities,
   type CompatibilityVerdict,
   type StemTapeCapabilities,
 } from "./compatibility";
+import { sha256Hex } from "./digest";
 import { BLOCK_BYTES, type Sp1Session } from "./protocol";
 import {
   BLOCKS_PER_SECTOR,
@@ -68,15 +71,40 @@ export interface DeviceSongSlot {
   sectorCount: number;
 }
 
+/**
+ * Three independent verification facts. There is deliberately no single
+ * "hardwareVerified" boolean: simulation, device read-back and physical
+ * playback are different claims and are never conflated.
+ */
+export interface VerificationState {
+  /** A mock/in-process device completed the protocol. Proves nothing about hardware. */
+  simulatedVerification: boolean;
+  /** A real serial device returned matching committed bytes on an independent re-read. */
+  deviceReadbackVerification: boolean;
+  /** Only a human can set this, after hearing the song play from the SP-1. */
+  physicalPlaybackVerification: boolean;
+}
+
+export type UploadOutcome = "committed" | "failed" | "unknown";
+
 export interface UploadResult {
   ok: boolean;
+  outcome: UploadOutcome;
   detail: string;
   writtenBlocks: number;
   verifiedBlocks: number;
+  totalBlocks: number;
+  bytesWritten: number;
+  sectorCount: number;
   retries: number;
-  /** True only when a physical device acknowledged the durable commit AND the
-   *  independent re-read matched. Mock runs never set this. */
-  hardwareVerified: boolean;
+  elapsedMs: number;
+  /** SHA-256 of the canonical audio actually transmitted. */
+  songSha256: string;
+  /** SHA-256 of the committed index image. */
+  indexSha256: string;
+  stemChecksums: number[];
+  songChecksum: number;
+  verification: VerificationState;
   failure?: { operation: string; block: number } | undefined;
 }
 
@@ -96,6 +124,8 @@ export interface TransportMode {
 export class StemTapeTransport {
   readonly verdict: CompatibilityVerdict;
   private index: StemTapeIndex | null = null;
+  /** True once the authoritative magic block may have reached the device. */
+  magicAttempted = false;
 
   constructor(
     readonly session: Sp1Session,
@@ -210,6 +240,40 @@ export class StemTapeTransport {
       }
     }
     throw new Error(`block ${blk} failed after ${MAX_CHUNK_RETRIES} retries: ${String(last)}`);
+  }
+
+  /**
+   * Immediately-before-write re-negotiation. Re-queries 'Q', re-parses STCP and
+   * requires every capability field to be byte-identical to the negotiated set,
+   * plus enough capacity for this song. Any difference aborts before any write.
+   */
+  async revalidate(requiredSectors: number): Promise<CompatibilityVerdict> {
+    const raw = await this.session.queryCapabilities();
+    const fresh = raw ? parseCapabilities(raw) : null;
+    if (!sameCapabilities(fresh, this.caps)) {
+      throw new Error("the device's reported capabilities changed since connection — nothing was written");
+    }
+    const verdict = evaluate(fresh, { requiredSectors });
+    if (!verdict.writable) {
+      throw new Error(
+        `compatibility re-check failed: ${verdict.requirements.filter((r) => !r.satisfied).map((r) => r.label).join(", ")} — nothing was written`,
+      );
+    }
+    return verdict;
+  }
+
+  /**
+   * Resolve an outcome that was left unknown by a disconnect around the commit.
+   * Reads the committed index back and compares it with what was intended.
+   */
+  async resolveOutcome(expected: { slot: number; frames: number; songChecksum: number }): Promise<UploadOutcome> {
+    const after = await this.readIndex();
+    if (!after || !indexIsValid(after, FORMAT_MAJOR)) return "unknown";
+    const e = after.songs[expected.slot];
+    if (!e) return "unknown";
+    return e.committed && e.frames === expected.frames && e.songChecksum === expected.songChecksum
+      ? "committed"
+      : "failed";
   }
 
   /* ---------- upload ---------- */
