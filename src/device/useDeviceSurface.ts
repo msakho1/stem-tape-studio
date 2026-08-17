@@ -966,6 +966,7 @@ export function useDeviceSurface() {
     state,
     applyEngineHeads,
     leds,
+    sp1Leds,
     observed,
     engine,
     arbiter,
