@@ -64,9 +64,9 @@ describe("canonical stereo 24-bit song", () => {
     const r = new Float32Array([-1, 1, 0, -0.5]);
     const pcm = packStereo24(l, r, 4);
     expect(pcm.length).toBe(4 * 6);
-    expect(Array.from(pcm.slice(0, 6))).toEqual([0xff, 0xff, 0x7f, 0x00, 0x00, 0x80]);
+    expect(Array.from(pcm.slice(0, 6))).toEqual([0xff, 0xff, 0x7f, 0x01, 0x00, 0x80]);
     expect(readInt24LE(pcm, 0)).toBe(8388607);
-    expect(readInt24LE(pcm, 3)).toBe(-8388608);
+    expect(readInt24LE(pcm, 3)).toBe(-8388607); // symmetric ±8388607 scaling
     expect(readInt24LE(pcm, 12)).toBe(0);
     expect(readInt24LE(pcm, 18)).toBe(Math.round(0.5 * 8388607));
   });
