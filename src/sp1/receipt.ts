@@ -22,7 +22,7 @@ import {
 } from "./stemTapeFormat";
 
 export interface TransferReceipt {
-  schema: "stem-tape-transfer-receipt/1";
+  schema: "stem-tape-transfer-receipt/2";
   generatedAt: string;
   mode: "mock" | "physical";
   outcome: UploadResult["outcome"];
@@ -50,6 +50,10 @@ export interface TransferReceipt {
   };
   transfer: {
     slot: number;
+    songSlot: "A" | "B" | null;
+    indexSlot: "A" | "B" | null;
+    generation: number;
+    previousGeneration: number;
     sectorCount: number;
     blockCount: number;
     bytesWritten: number;
@@ -62,11 +66,11 @@ export interface TransferReceipt {
     protocolVersion: string;
     formatVersion: string;
     capabilityFlags: string;
-    songSlots: number;
-    libraryBase: number;
-    sectorsPerSong: number;
-    indexBlocks: number;
-    generation: number;
+    stixVersion: number;
+    songRegions: { start: number; blocks: number }[];
+    indexRegions: { start: number; blocks: number }[];
+    deviceBlocks: number;
+    activeGeneration: number;
   } | null;
 }
 
@@ -80,7 +84,7 @@ export function buildReceipt(args: {
 }): TransferReceipt {
   const { song, result, caps, slot, mode } = args;
   return {
-    schema: "stem-tape-transfer-receipt/1",
+    schema: "stem-tape-transfer-receipt/2",
     generatedAt: new Date().toISOString(),
     mode,
     outcome: result.outcome,
@@ -122,6 +126,10 @@ export function buildReceipt(args: {
     },
     transfer: {
       slot,
+      songSlot: result.targetSongSlot === null || result.targetSongSlot === undefined ? null : result.targetSongSlot === 0 ? "A" : "B",
+      indexSlot: result.targetIndexSlot === null || result.targetIndexSlot === undefined ? null : result.targetIndexSlot === 0 ? "A" : "B",
+      generation: result.generation,
+      previousGeneration: result.previousGeneration,
       sectorCount: result.sectorCount,
       blockCount: result.totalBlocks,
       bytesWritten: result.bytesWritten,
@@ -135,11 +143,11 @@ export function buildReceipt(args: {
           protocolVersion: `${caps.protoMajor}.${caps.protoMinor}`,
           formatVersion: `${caps.formatMajor}.${caps.formatMinor}`,
           capabilityFlags: `0x${(caps.flags >>> 0).toString(16)}`,
-          songSlots: caps.songSlots,
-          libraryBase: caps.libraryBase,
-          sectorsPerSong: caps.sectorsPerSong,
-          indexBlocks: caps.indexBlocks,
-          generation: caps.generation,
+          stixVersion: caps.stixVersion,
+          songRegions: caps.song.map((r) => ({ ...r })),
+          indexRegions: caps.index.map((r) => ({ ...r })),
+          deviceBlocks: caps.deviceBlocks,
+          activeGeneration: caps.activeGeneration,
         }
       : null,
   };
