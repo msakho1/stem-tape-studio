@@ -8,6 +8,7 @@ include(${ZEPHYR_BASE}/samples/subsys/usb/common/common.cmake)
 
 target_sources(app PRIVATE
 	src/main.c
+	src/led_battery.c
 	src/led_duty.c
 	src/led_frame.c
 	src/led_midi.c

@@ -17,12 +17,16 @@
  * enable PWM2/PWM3 here, at the app-overlay level only; the Tape Looper
  * target and its board usage are untouched.
  *
- * Pin map + PWM2 (track row) / PWM3 (playback row) split + 1024 us period is
+ * Pin map + PWM2 (Track row) / PWM3 (side row) split + 1024 us period is
  * the proven layout from bnjreece/feldd-sp1-firmware's app.overlay
  * (MIT-licensed, hardware-tested on this same board), cross-checked against
  * timknapen/SP-1-dev's stemplayer_pins.h. See led_protocol.h for the full
- * index/GPIO table and citation. Channel order below MUST match
- * led_render.c's led_pwm[] array index for index. */
+ * index/GPIO table, citation, and the caveat that the PLAY-end/FUNCTION-end
+ * direction of the side row is a best-effort inference pending hardware
+ * sweep confirmation — that inference affects ONLY which node label
+ * led_render.c's led_pwm[] array assigns to which protocol index; the psel
+ * pin numbers and pwms channel numbers below are the fixed, proven
+ * electrical wiring and are unaffected by it. */
 &pinctrl {
 	stemtape_pwm2_default: stemtape_pwm2_default {
 		group1 {
@@ -41,10 +45,10 @@
 	};
 	stemtape_pwm3_default: stemtape_pwm3_default {
 		group1 {
-			psels = <NRF_PSEL(PWM_OUT0, 0, 1)>,   /* Playback 1 P0.01 */
-				<NRF_PSEL(PWM_OUT1, 1, 12)>,  /* Playback 2 P1.12 */
-				<NRF_PSEL(PWM_OUT2, 0, 0)>,   /* Playback 3 P0.00 */
-				<NRF_PSEL(PWM_OUT3, 1, 13)>;  /* Playback 4 P1.13 */
+			psels = <NRF_PSEL(PWM_OUT0, 0, 1)>,   /* side, P0.01 (nearest FUNCTION; see led_protocol.h) */
+				<NRF_PSEL(PWM_OUT1, 1, 12)>,  /* side, P1.12 (FUNCTION-side middle) */
+				<NRF_PSEL(PWM_OUT2, 0, 0)>,   /* side, P0.00 (PLAY-side middle) */
+				<NRF_PSEL(PWM_OUT3, 1, 13)>;  /* side, P1.13 (nearest PLAY; see led_protocol.h) */
 		};
 	};
 	stemtape_pwm3_sleep: stemtape_pwm3_sleep {
@@ -74,32 +78,34 @@
 	 * `pwms` property the binding PWM_DT_SPEC_GET() needs. led_render.c
 	 * drives the channels directly via pwm_set_pulse_dt(), so
 	 * CONFIG_LED_PWM is intentionally NOT enabled — this node exists only
-	 * to make the eight devicetree handles resolvable. */
+	 * to make the eight devicetree handles resolvable. Node labels name
+	 * the GPIO/electrical position (fixed, proven); led_render.c's
+	 * led_pwm[] array maps each to a protocol index (see led_protocol.h). */
 	stemtape_leds: stemtape-leds {
 		compatible = "pwm-leds";
-		stemtape_led_t1: stemtape_led_t1 {
-			pwms = <&pwm2 0 PWM_USEC(1024) PWM_POLARITY_NORMAL>; /* Track 1 P0.29 */
+		stemtape_led_track1: stemtape_led_track1 {
+			pwms = <&pwm2 0 PWM_USEC(1024) PWM_POLARITY_NORMAL>; /* P0.29 */
 		};
-		stemtape_led_t2: stemtape_led_t2 {
-			pwms = <&pwm2 1 PWM_USEC(1024) PWM_POLARITY_NORMAL>; /* Track 2 P0.26 */
+		stemtape_led_track2: stemtape_led_track2 {
+			pwms = <&pwm2 1 PWM_USEC(1024) PWM_POLARITY_NORMAL>; /* P0.26 */
 		};
-		stemtape_led_t3: stemtape_led_t3 {
-			pwms = <&pwm2 2 PWM_USEC(1024) PWM_POLARITY_NORMAL>; /* Track 3 P1.15 */
+		stemtape_led_track3: stemtape_led_track3 {
+			pwms = <&pwm2 2 PWM_USEC(1024) PWM_POLARITY_NORMAL>; /* P1.15 */
 		};
-		stemtape_led_t4: stemtape_led_t4 {
-			pwms = <&pwm2 3 PWM_USEC(1024) PWM_POLARITY_NORMAL>; /* Track 4 P1.14 */
+		stemtape_led_track4: stemtape_led_track4 {
+			pwms = <&pwm2 3 PWM_USEC(1024) PWM_POLARITY_NORMAL>; /* P1.14 */
 		};
-		stemtape_led_p1: stemtape_led_p1 {
-			pwms = <&pwm3 0 PWM_USEC(1024) PWM_POLARITY_NORMAL>; /* Playback 1 P0.01 */
+		stemtape_led_side_function: stemtape_led_side_function {
+			pwms = <&pwm3 0 PWM_USEC(1024) PWM_POLARITY_NORMAL>; /* P0.01 */
 		};
-		stemtape_led_p2: stemtape_led_p2 {
-			pwms = <&pwm3 1 PWM_USEC(1024) PWM_POLARITY_NORMAL>; /* Playback 2 P1.12 */
+		stemtape_led_side_mid2: stemtape_led_side_mid2 {
+			pwms = <&pwm3 1 PWM_USEC(1024) PWM_POLARITY_NORMAL>; /* P1.12 */
 		};
-		stemtape_led_p3: stemtape_led_p3 {
-			pwms = <&pwm3 2 PWM_USEC(1024) PWM_POLARITY_NORMAL>; /* Playback 3 P0.00 */
+		stemtape_led_side_mid1: stemtape_led_side_mid1 {
+			pwms = <&pwm3 2 PWM_USEC(1024) PWM_POLARITY_NORMAL>; /* P0.00 */
 		};
-		stemtape_led_p4: stemtape_led_p4 {
-			pwms = <&pwm3 3 PWM_USEC(1024) PWM_POLARITY_NORMAL>; /* Playback 4 P1.13 */
+		stemtape_led_side_play: stemtape_led_side_play {
+			pwms = <&pwm3 3 PWM_USEC(1024) PWM_POLARITY_NORMAL>; /* P1.13 */
 		};
 	};
 };
