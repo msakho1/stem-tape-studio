@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { MockSp1 } from "./mockSerial";
+import { MockSp1, type MockOptions } from "./mockSerial";
 import { Sp1Transport, Sp1Session } from "../protocol";
 import {
   prepareCanonicalSong,
@@ -115,8 +115,8 @@ describe("canonical stereo 24-bit song", () => {
   });
 });
 
-async function connect(opts: Parameters<typeof MockSp1.prototype.constructor>[0] = {}) {
-  const mock = new MockSp1(opts as never);
+async function connect(opts: MockOptions = {}) {
+  const mock = new MockSp1(opts);
   const io = new Sp1Transport(mock.port());
   const session = new Sp1Session(io);
   await session.handshake(4);
