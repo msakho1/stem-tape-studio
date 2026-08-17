@@ -212,8 +212,11 @@ describe("Stem Tape transport upload", () => {
     const stages: string[] = [];
     const out = await t.uploadSong({ slot: 1, song, onProgress: (p) => stages.push(p.stage) });
     expect(out.ok).toBe(true);
-    expect(out.hardwareVerified).toBe(false);
-    expect(out.detail).toMatch(/physical SP-1 upload not verified/);
+    expect(out.verification.deviceReadbackVerification).toBe(false);
+    expect(out.verification.physicalPlaybackVerification).toBe(false);
+    expect(out.outcome).toBe("committed");
+    expect(out.detail).toMatch(/no physical SP-1 involved/);
+
     expect(out.writtenBlocks).toBe(sectorsForFrames(song.frames) * 16);
     expect(out.verifiedBlocks).toBe(out.writtenBlocks);
     expect(stages).toContain("confirming");
