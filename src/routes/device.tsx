@@ -265,11 +265,7 @@ function DevicePage() {
       setResult(out);
       setPlaybackConfirmed(false);
       if (out.ok) {
-        say(
-          out.verification.deviceReadbackVerification
-            ? "Committed index re-read from the SP-1 and matched. Physical playback is still unconfirmed."
-            : "Simulated device: protocol sequence passed. No physical SP-1 was written.",
-        );
+        say(successLogWording(t.mode.kind));
       } else if (out.outcome === "unknown") {
         say(`Outcome unknown — ${out.detail}`);
       } else {
