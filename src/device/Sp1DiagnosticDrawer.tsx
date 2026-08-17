@@ -1,29 +1,36 @@
 /**
- * SP-1 DIAGNOSTIC — evidence-driven flight recorder.
+ * SP-1 DIAGNOSTIC — evidence-driven flight recorder UI.
  *
- * Collapsed by default. While closed it arms nothing: the trace ring is
- * disabled, no serial port is opened, no interval runs — UNLESS the user
- * explicitly started a capture, in which case an active-capture indicator and
- * a STOP control stay visible.
- *
- * It reports; it never corrects. No behavioural fix lives in this file, and it
- * never writes mixer or transport state.
+ * HARD RULES:
+ *  • This file RECONSTRUCTS NOTHING. Every trace record is written at its own
+ *    decision point (sp1Surface, webMidi, chordArbiter, commandTrace,
+ *    useAudioEngine, useDeviceSurface, firmwareConsole). The drawer only reads
+ *    the ring. It never drains a log, replays history or re-emits records.
+ *  • Collection and display are separate. STOP CAPTURE stops collection;
+ *    FREEZE VIEW only freezes what is shown.
+ *  • Closed drawer + no background capture = no interval, no DOM probe, no
+ *    trace subscription, no React work.
+ *  • It reports; it never corrects.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { LedFrame, SurfaceState } from "@/machine/surface";
 import { deriveLeds } from "@/machine/surface";
 import { GLOBAL_SCRUB_SPEEDS } from "@/audio/inertia";
-import { sp1Surface, type Sp1SurfaceEvent } from "@/audio/midi/sp1Surface";
 import { webMidi, type WebMidiState } from "@/audio/midi/webMidi";
+import { sp1Surface } from "@/audio/midi/sp1Surface";
 import type { ChordArbiter } from "@/machine/chordArbiter";
-import { trace, traceNow, type TraceRecord, type TraceStage } from "@/diagnostics/trace";
+import { trace, traceNow, type TraceRecord, type TraceStage, type TraceStats } from "@/diagnostics/trace";
 import {
   EXPECTED_ARTIFACT,
   firmwareConsole,
   type FirmwareConsoleState,
 } from "@/diagnostics/firmwareConsole";
+import { CURRENT_FIRMWARE_PROFILE, FIRMWARE_PROFILES } from "@/diagnostics/firmwareProfiles";
 import { BEHAVIOR_CONTRACT_VERSION, evaluateContract } from "@/diagnostics/contract";
+import { SEGMENT_DEFINITIONS, segmentRunner } from "@/diagnostics/segments";
+import { ledTransport, type LedTransportState } from "@/diagnostics/ledTransport";
+import { resolvePhysicalFrame, formatPhysicalFrame } from "@/diagnostics/physicalFrame";
 import {
   inspectPhysicalLeds,
   inspectWebOnlyIndicators,
@@ -60,17 +67,24 @@ const BUTTONS = [
 
 const STAGE_FILTERS: { key: string; stages: TraceStage[] }[] = [
   { key: "all", stages: [] },
-  { key: "serial", stages: ["serial.line"] },
-  { key: "midi", stages: ["midi.raw", "midi.recognized"] },
+  { key: "serial", stages: ["serial.raw", "serial.parsed"] },
+  { key: "midi", stages: ["midi.raw", "midi.device.recognized"] },
   { key: "decode", stages: ["surface.decoded"] },
   { key: "resync", stages: ["connection.resync", "surface.suppressed"] },
   { key: "held", stages: ["surface.held"] },
-  { key: "arbitration", stages: ["gesture.arbitration", "gesture.owner", "gesture.rejected"] },
-  { key: "commands", stages: ["command.surface", "command.audio"] },
+  {
+    key: "arbitration",
+    stages: ["gesture.candidate", "gesture.arbitration", "gesture.owner", "gesture.rejected"],
+  },
+  { key: "commands", stages: ["command.surface", "command.engine"] },
   { key: "ack", stages: ["engine.ack"] },
   { key: "state", stages: ["state.transport", "state.mixer", "state.fx"] },
-  { key: "led", stages: ["led.derived", "led.rendered"] },
+  { key: "led", stages: ["led.derived", "led.transmitted", "firmware.led.reported"] },
+  { key: "capture", stages: ["capture.control"] },
 ];
+
+/** Visible trace re-renders are bounded to 10 Hz, however fast events arrive. */
+const VIEW_REFRESH_MS = 100;
 
 interface Props {
   state: SurfaceState;
@@ -97,17 +111,14 @@ function LedRows({ rows }: { rows: LedInspectionRow[] }) {
               {l.index + 1}. {l.id}
             </span>
             <span className="text-[var(--ink-faint)]">
-              expected {l.expectedMode} · actual {l.actualMode} · {l.brightness}
+              period {l.periodMs ?? "—"}ms · phase {l.phaseAnchor} · {l.animation}
             </span>
           </div>
-          <div className="text-[var(--ink-faint)]">
-            period {l.periodMs ?? "—"}ms · phase {l.phaseAnchor} · {l.animation} · m0 output{" "}
-            {l.m0Driven ? "implemented" : "UNRESOLVED"}
-          </div>
-          <div className="text-[var(--ink-faint)]">
-            owner: {l.owner} · p{l.priority}
-            {l.lostTo ? ` · lost to: ${l.lostTo}` : ""} · {l.source}
-          </div>
+          <div className="text-[var(--ink-faint)]">1 expected contract: {l.columnExpected}</div>
+          <div className="text-[var(--ink-faint)]">2 web logical: {l.columnWebLogical} · p{l.priority}</div>
+          <div className="text-[var(--ink-faint)]">3 rendered dom/css: {l.columnDom}</div>
+          <div className="text-[var(--ink-faint)]">4 transmitted/firmware: {l.columnTransmitted}</div>
+          <div className="text-[var(--ink-faint)]">physical observation: {l.physicalObservation}</div>
           {l.mismatch && (
             <div className="text-[var(--signal)]">
               mismatch: {l.mismatch}
@@ -122,155 +133,144 @@ function LedRows({ rows }: { rows: LedInspectionRow[] }) {
 
 export function Sp1DiagnosticDrawer({ state, leds, arbiter }: Props) {
   const [open, setOpen] = useState(false);
+  /** Background capture: keeps collecting while the drawer is closed. */
+  const [background, setBackground] = useState(false);
   const [capturing, setCapturing] = useState(false);
-  const [tick, setTick] = useState(0);
+  const [followLive, setFollowLive] = useState(true);
+  const [frozen, setFrozen] = useState(false);
+  const [verboseTransport, setVerboseTransport] = useState(false);
+  const [viewTick, setViewTick] = useState(0);
   const [console_, setConsole] = useState<FirmwareConsoleState>(() => firmwareConsole.snapshot());
   const [midi, setMidi] = useState<WebMidiState>(() => webMidi.snapshot());
-  const [rates, setRates] = useState({
-    raw: 0,
-    surface: 0,
-    reducer: 0,
-    engine: 0,
-    unmatched: 0,
-    duplicates: 0,
-    stale: 0,
-    suppressed: 0,
-    faderMsgs: 0,
-    faderCmds: 0,
-  });
+  const [led, setLed] = useState<LedTransportState>(() => ledTransport.snapshot());
   const [physicalRows, setPhysicalRows] = useState<LedInspectionRow[]>([]);
   const [webRows, setWebRows] = useState<LedInspectionRow[]>([]);
   const [filter, setFilter] = useState("all");
   const [copied, setCopied] = useState<string | null>(null);
+  const [stats, setStats] = useState<TraceStats>(() => trace.stats());
+  const [segmentTick, setSegmentTick] = useState(0);
+  const [frozenRecords, setFrozenRecords] = useState<TraceRecord[] | null>(null);
 
-  const counters = useRef({ unmatched: 0, duplicates: 0, stale: 0, faderMsgs: 0 });
-  const faders = useRef<number[]>([0, 0, 0, 0]);
-  const battery = useRef<number | null>(null);
-  const held = useRef<Set<string>>(new Set());
-  const arbSeen = useRef(0);
+  const traceRef = useRef<HTMLPreElement | null>(null);
+  /** Cumulative counters survive a quiet last second. */
+  const totals = useRef({ raw: 0, surface: 0, reducer: 0, engine: 0, faderMsgs: 0, faderCmds: 0 });
 
-  const active = open || capturing;
+  const active = open || (background && capturing);
 
-  // ---- arm / disarm -------------------------------------------------------
+  // ---- collection ---------------------------------------------------------
+  const startCapture = useCallback(() => {
+    trace.startCapture();
+    setCapturing(true);
+    setStats(trace.stats());
+  }, []);
+
+  const stopCapture = useCallback(() => {
+    trace.stopCapture();
+    setCapturing(false);
+    setStats(trace.stats());
+  }, []);
+
+  // Opening the drawer arms capture; closing it stops capture unless the user
+  // explicitly asked for background capture.
   useEffect(() => {
-    if (!active) {
-      trace.disable();
-      void firmwareConsole.disconnect();
+    if (open) {
+      if (!trace.enabled) startCapture();
       return;
     }
-    trace.enable();
-    trace.record("state.transport", "diagnostic capture armed");
-    const offSurface = sp1Surface.subscribe((ev: Sp1SurfaceEvent) => {
-      trace.beginCorrelation();
-      if (ev.type === "fader") {
-        counters.current.faderMsgs += 1;
-        faders.current[ev.index] = ev.value;
-        trace.record(
-          "surface.decoded",
-          `FADER ${ev.index + 1} → ${(ev.value * 100).toFixed(0)}% (CC${20 + ev.index} / 0x${(20 + ev.index).toString(16).toUpperCase()})`,
-          { index: ev.index, value: ev.value },
-          ev.timestampMs,
-        );
-        return;
-      }
-      if (ev.type === "battery") {
-        battery.current = ev.value;
-        trace.record("surface.decoded", `battery CC24 (0x18) = ${ev.value}`, { value: ev.value }, ev.timestampMs);
-        return;
-      }
-      if (ev.type === "down") {
-        if (held.current.has(ev.control)) counters.current.duplicates += 1;
-        held.current.add(ev.control);
-      } else if (!held.current.delete(ev.control)) {
-        counters.current.unmatched += 1;
-        trace.record("connection.resync", `unmatched release ${ev.control} — baseline or replayed state`, {
-          control: ev.control,
-        }, ev.timestampMs);
-      }
-      trace.record(
-        "surface.decoded",
-        `${ev.control.toUpperCase()} ${ev.type === "down" ? "DOWN" : "UP"}`,
-        { control: ev.control, device: ev.deviceName },
-        ev.timestampMs,
-      );
-      trace.record("surface.held", `held: ${[...held.current].join(" + ") || "none"}`, {
-        held: [...held.current],
-      }, ev.timestampMs);
-    });
+    if (!background) {
+      trace.stopCapture();
+      setCapturing(false);
+      void firmwareConsole.disconnect();
+    }
+  }, [open, background, startCapture]);
+
+  useEffect(() => {
+    ledTransport.verboseTransport = verboseTransport;
+  }, [verboseTransport]);
+
+  // ---- subscriptions (only while the panel is active) ---------------------
+  useEffect(() => {
+    if (!active) return;
     const offMidi = webMidi.onStateChange(setMidi);
     const offConsole = firmwareConsole.subscribe(setConsole);
+    const offLed = ledTransport.subscribe(setLed);
+    const offSeg = segmentRunner.subscribe(() => setSegmentTick((n) => n + 1));
     return () => {
-      offSurface();
       offMidi();
       offConsole();
-      trace.disable();
-      void firmwareConsole.disconnect();
+      offLed();
+      offSeg();
     };
   }, [active]);
 
-  // ---- 4 Hz sampler: rates, arbitration ingestion, LED probe --------------
+  // ---- bounded view refresh (10 Hz max) -----------------------------------
   useEffect(() => {
     if (!open) return;
-    let last = { raw: 0, surf: 0, red: 0, eng: 0, fad: 0 };
     const id = window.setInterval(() => {
-      const list = trace.list();
-      const count = (fn: (r: TraceRecord) => boolean) => list.filter(fn).length;
-      const raw = count((r) => r.stage === "midi.raw");
-      const surf = count((r) => r.stage === "surface.decoded");
-      const red = count((r) => r.stage === "command.surface");
-      const eng = count((r) => r.stage === "command.audio" || r.stage === "engine.ack");
-      const fad = count((r) => r.stage === "command.surface" && /volume|fader/i.test(r.label));
-      setRates({
-        raw: Math.max(0, (raw - last.raw) * 4),
-        surface: Math.max(0, (surf - last.surf) * 4),
-        reducer: Math.max(0, (red - last.red) * 4),
-        engine: Math.max(0, (eng - last.eng) * 4),
-        unmatched: counters.current.unmatched,
-        duplicates: counters.current.duplicates,
-        stale: counters.current.stale,
-        suppressed: count((r) => r.stage === "surface.suppressed" || r.stage === "connection.resync"),
-        faderMsgs: counters.current.faderMsgs,
-        faderCmds: fad,
-      });
-      last = { raw, surf, red, eng, fad };
-
-      // Arbitration decisions are captured by the arbiter AT the decision
-      // point; this only drains its log into the ring in order.
-      const log = arbiter.log;
-      const fresh = log.slice(0, Math.max(0, log.length - arbSeen.current)).reverse();
-      arbSeen.current = log.length;
-      for (const rec of fresh) {
-        trace.beginGesture();
-        trace.record("gesture.arbitration", `${rec.controls.join(" + ")} → ${rec.intent}`, {
-          detail: rec.detail,
-          suppressed: rec.suppressed,
-        });
-        if (rec.intent === "none") {
-          trace.record("gesture.rejected", `suppressed ${rec.suppressed.join(" + ") || "(all)"}`, {
-            detail: rec.detail,
-          });
-        } else {
-          trace.record("gesture.owner", `owner ${rec.intent}`, { detail: rec.detail });
-        }
-        trace.endGesture();
-      }
-
-      const now = traceNow();
-      // Trace of surface commands is captured once at the dispatcher boundary
-      // (diagnostics/commandTrace); the drawer never re-records them.
-      const dom = probeDom();
-      // deriveLeds re-run 1 s ahead exposes one-shot windows that never expire.
-      const expected = deriveLeds(state, now + 1000);
-      setPhysicalRows(inspectPhysicalLeds(leds, expected, dom));
-      setWebRows(inspectWebOnlyIndicators(leds, expected, dom));
-      trace.record("led.derived", `physical frame: ${PHYSICAL_LED_COUNT} leds`);
-      setTick((t) => t + 1);
-    }, 250);
+      setStats(trace.stats());
+      if (!frozen) setViewTick((t) => t + 1);
+    }, VIEW_REFRESH_MS);
     return () => window.clearInterval(id);
-  }, [open, arbiter, leds, state]);
+  }, [open, frozen]);
+
+  // ---- LED inspector probe (1 Hz, view-only, writes no trace records) -----
+  useEffect(() => {
+    if (!open) return;
+    const probe = () => {
+      const dom = probeDom();
+      const expected = deriveLeds(state, traceNow() + 1000);
+      const tx = { transmitted: ledTransport.snapshot().lastFrame, firmwareReported: null };
+      setPhysicalRows(inspectPhysicalLeds(leds, expected, dom, {}, tx));
+      setWebRows(inspectWebOnlyIndicators(leds, expected, dom));
+    };
+    probe();
+    const id = window.setInterval(probe, 1000);
+    return () => window.clearInterval(id);
+  }, [open, leds, state]);
+
+  // ---- cumulative + per-second rates, read from the ring's own stats ------
+  const [rates, setRates] = useState({ raw: 0, surface: 0, reducer: 0, engine: 0 });
+  useEffect(() => {
+    if (!open) return;
+    let last = { raw: 0, surf: 0, red: 0, eng: 0 };
+    const id = window.setInterval(() => {
+      const by = trace.stats().byStage;
+      const raw = by["midi.raw"] ?? 0;
+      const surf = by["surface.decoded"] ?? 0;
+      const red = by["command.surface"] ?? 0;
+      const eng = (by["command.engine"] ?? 0) + (by["engine.ack"] ?? 0);
+      totals.current = {
+        ...totals.current,
+        raw: Math.max(totals.current.raw, raw),
+        surface: Math.max(totals.current.surface, surf),
+        reducer: Math.max(totals.current.reducer, red),
+        engine: Math.max(totals.current.engine, eng),
+      };
+      setRates({
+        raw: Math.max(0, raw - last.raw),
+        surface: Math.max(0, surf - last.surf),
+        reducer: Math.max(0, red - last.red),
+        engine: Math.max(0, eng - last.eng),
+      });
+      last = { raw, surf, red, eng };
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [open]);
+
+  const heldControls = state.pressed as unknown as string[];
+  /** Last hardware fader positions, kept separate from mixer gain. */
+  const [hardwareFaders, setHardwareFaders] = useState<(number | null)[]>([null, null, null, null]);
+  useEffect(() => {
+    if (!active) return;
+    return sp1Surface.subscribe((ev) => {
+      if (ev.type !== "fader") return;
+      setHardwareFaders((prev) => prev.map((v, i) => (i === ev.index ? ev.value : v)));
+    });
+  }, [active]);
 
   const snapshot: StateSnapshot = useMemo(
     () => ({
+      webPowered: state.power === "on",
       playing: state.playing,
       globalLoop: state.globalLoop.active ? (state.globalLoop.latched ? "latched" : "momentary") : "off",
       loopDivision: state.globalLoop.division,
@@ -293,19 +293,23 @@ export function Sp1DiagnosticDrawer({ state, leds, arbiter }: Props) {
           .filter(([, slot]) => slot.latched)
           .map(([name]) => `${i + 1}:${name}`),
       ),
-      mutes: state.tracks.map((t) => t.content === "muted"),
-      solos: state.perf.tracks.map((t, i) => `${i + 1}${t.soloed ? "S" : ""}${t.linked ? "L" : ""}`),
-      heldControls: [...held.current],
-      arbitrationOwner: arbiter.log[0]?.intent ?? "none",
-      faders: state.tracks.map((t) => t.volume),
+      muted: state.tracks.map((t) => t.content === "muted"),
+      soloed: state.perf.tracks.map((t) => t.soloed),
+      linked: state.perf.tracks.map((t) => t.linked),
+      heldControls: [...heldControls],
+      arbitrationOwner: arbiter.currentOwner(),
+      faderHardware: hardwareFaders,
+      mixerGain: state.tracks.map((t) => t.volume),
       faderPickup: "not implemented — engine gain follows hardware CC immediately (no baseline, no arming, no crossing)",
       buttons: Object.fromEntries(BUTTONS.map((b) => [b, state.pressed.includes(b)])),
     }),
-    // tick keeps the held-set / arbiter refs live without extra state writes
-    [state, arbiter, tick],
+    [state, arbiter, heldControls, hardwareFaders],
   );
 
-  const contract = useMemo(() => evaluateContract(state), [state, tick]);
+  const contract = useMemo(
+    () => evaluateContract(state, (id) => segmentRunner.resultFor(id)),
+    [state, segmentTick],
+  );
 
   const eventRates: EventRates = useMemo(
     () => ({
@@ -313,42 +317,61 @@ export function Sp1DiagnosticDrawer({ state, leds, arbiter }: Props) {
       surfaceEventsPerSec: rates.surface,
       reducerCommandsPerSec: rates.reducer,
       engineCommandsPerSec: rates.engine,
-      unmatchedReleases: rates.unmatched,
-      duplicatePresses: rates.duplicates,
-      staleEvents: rates.stale,
-      suppressed: rates.suppressed,
-      faderMessages: rates.faderMsgs,
-      faderReducerCommands: rates.faderCmds,
+      cumulativeRawMidi: totals.current.raw,
+      cumulativeSurfaceEvents: totals.current.surface,
+      cumulativeReducerCommands: totals.current.reducer,
+      cumulativeEngineCommands: totals.current.engine,
+      coalesced: stats.coalesced,
+      dropped: stats.dropped,
+      generated: stats.generated,
     }),
-    [rates],
+    [rates, stats],
   );
 
   const report = useCallback((): DiagnosticReport => {
-    const midiIn = midi.devices[0] ?? null;
+    // ONE immutable point-in-time snapshot. Continued capture cannot mutate it.
+    const snap = trace.snapshot();
+    const midiIn = midi.devices.find((d) => /STEM TAPE SP-1/i.test(d.name)) ?? midi.devices[0] ?? null;
     const observation: Record<string, ObservationKind> = {
       "serial console lines": console_.lineCount > 0 ? "browser-observed" : "not-observed",
       "midi input": midiIn ? "browser-observed" : "not-observed",
-      "physical led state": "not-observed",
+      "physical led illumination": "not-observed",
       "logical led derivation": "browser-observed",
+      "transmitted led frames": led.commits > 0 ? "browser-observed" : "not-observed",
       "behaviour contract expectations": "not-observed",
       "firmware serial content": console_.lineCount > 0 ? "browser-observed" : "not-observed",
-      "track 1/4 resync sequence": "mocked",
       "physical side-row playback index": "not-observed",
     };
     return buildReport({
       contractVersion: BEHAVIOR_CONTRACT_VERSION,
       generatedAt: new Date().toISOString(),
       expectedArtifact: EXPECTED_ARTIFACT,
+      firmwareProfiles: FIRMWARE_PROFILES.map((p) => ({ ...p })),
       midiContract: { rows: SP1_MIDI_CONTRACT, warning: SP1_NOTATION_WARNING },
       ledModel: M0_LED_COVERAGE,
       device: {
         midiInputName: midiIn?.name ?? null,
         midiInputId: midiIn?.id ?? null,
-        midiOutputName: null,
+        midiOutputName: led.outputName,
+        midiOutputId: led.outputId,
         midiState: midi.status,
         consoleState: console_.status,
-        reportedFirmwareVersion: console_.reportedVersion,
+        // NEVER back-filled from expected metadata.
+        reportedFirmwareVersion: console_.status === "connected" ? console_.reportedVersion : null,
         capabilities: M0_CAPABILITIES as Record<string, string>,
+      },
+      ledTransport: {
+        status: led.status,
+        protocolVersion: led.protocolVersion,
+        capabilityQuerySent: led.capabilityQuerySent,
+        leaseActive: led.leaseActive,
+        commitSequence: led.commitSequence,
+        commits: led.commits,
+        heartbeats: led.heartbeats,
+        stagedMessages: led.stagedMessages,
+        lastFrame: led.lastFrame,
+        candidateOutputs: led.candidateOutputs,
+        error: led.error,
       },
       firmware: {
         watchdog: console_.watchdog,
@@ -360,28 +383,32 @@ export function Sp1DiagnosticDrawer({ state, leds, arbiter }: Props) {
       },
       state: snapshot,
       rates: eventRates,
-      trace: trace.list(),
+      captureStats: snap.stats,
+      trace: snap.records,
       contract,
+      reproductions: segmentRunner.all(),
       physicalLeds: physicalRows,
       webOnlyIndicators: webRows,
+      // A failure exists ONLY for a reproduction that actually ran and failed.
       failures: contract
-        .filter((c) => c.status === "missing" || c.status === "conflicting" || c.status === "partial")
+        .filter((c) => c.reproductionStatus === "failed")
         .map((c) => ({
           id: c.id,
-          lastGoodStage: c.observed ? "reducer state observed" : "command emitted",
-          firstDivergence: c.notes ?? c.firstDivergence ?? "no LED derivation for this state",
+          segmentId: c.segmentId,
+          lastGoodStage: segmentRunner.resultFor(c.id)?.lastSuccessfulStage ?? "none",
+          firstDivergence: c.reproductionFirstDivergence ?? "unknown",
           category: c.firstDivergence ?? null,
           expected: c.expectedLedSummary,
           actual: c.observed ?? "not derivable from reducer state",
           requiresHardware: c.provenance === "PHYSICAL_OBSERVATION" || c.provenance === "M0_DIAGNOSTIC_ONLY",
-          observation: (c.observed ? "browser-observed" : "not-observed") as ObservationKind,
+          observation: c.observationSource === "live-hardware" ? "physically-observed" : c.observationSource === "browser-injection" ? "browser-observed" : c.observationSource === "mocked" ? "mocked" : "not-observed",
         })),
       unverified: contract
         .filter((c) => c.status === "unverified" || c.provenance === "UNVERIFIED")
         .map((c) => `${c.id}: ${c.citation.title}`),
       observation,
     });
-  }, [midi, console_, snapshot, eventRates, contract, physicalRows, webRows]);
+  }, [midi, console_, led, snapshot, eventRates, contract, physicalRows, webRows]);
 
   const doCopy = useCallback(async () => {
     try {
@@ -404,11 +431,30 @@ export function Sp1DiagnosticDrawer({ state, leds, arbiter }: Props) {
   }, [report]);
 
   const activeFilter = STAGE_FILTERS.find((f) => f.key === filter) ?? STAGE_FILTERS[0]!;
-  const recent: TraceRecord[] = trace
-    .recent(200)
+  const liveRecords = useMemo(() => {
+    void viewTick;
+    return trace.recent(200);
+  }, [viewTick]);
+  const shown = (frozen ? (frozenRecords ?? liveRecords) : liveRecords)
     .filter((r) => activeFilter.stages.length === 0 || activeFilter.stages.includes(r.stage))
-    .slice(0, 80);
-  const t0 = recent[recent.length - 1]?.t ?? 0;
+    .slice(0, 120);
+  const t0 = shown[shown.length - 1]?.t ?? 0;
+
+  // Follow Live off: never move the user's scroll position.
+  useEffect(() => {
+    if (!followLive || frozen || !traceRef.current) return;
+    traceRef.current.scrollTop = 0;
+  }, [followLive, frozen, viewTick]);
+
+  const toggleFreeze = useCallback(() => {
+    setFrozen((f) => {
+      if (!f) setFrozenRecords(trace.recent(200));
+      else setFrozenRecords(null);
+      return !f;
+    });
+  }, []);
+
+  const currentSegment = segmentRunner.current();
 
   return (
     <div className="mt-4 border-t border-[var(--bench-line)] pt-3" data-testid="sp1-diagnostic">
@@ -422,13 +468,13 @@ export function Sp1DiagnosticDrawer({ state, leds, arbiter }: Props) {
         {open ? "▾" : "▸"} sp-1 diagnostic
       </button>
 
-      {!open && capturing && (
+      {!open && capturing && background && (
         <div
           className="mt-1 flex items-center justify-between border border-[var(--signal)] px-2 py-1 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--signal)]"
           data-testid="capture-indicator"
         >
-          <span>● capture running · {trace.size()}/500</span>
-          <button type="button" data-testid="stop-capture" onClick={() => setCapturing(false)}>
+          <span>● background capture · {stats.stored}/500</span>
+          <button type="button" data-testid="stop-capture" onClick={stopCapture}>
             stop capture
           </button>
         </div>
@@ -436,20 +482,106 @@ export function Sp1DiagnosticDrawer({ state, leds, arbiter }: Props) {
 
       {open && (
         <div className="mt-2 space-y-3 font-mono text-[10px] leading-relaxed" data-testid="sp1-diagnostic-body">
+          {/* ---------- capture controls ---------- */}
+          <section className="border border-[var(--bench-line)] p-2" data-testid="capture-controls">
+            <p className="text-[var(--signal)]">capture</p>
+            <div className="mt-1 flex flex-wrap gap-1">
+              <button
+                type="button"
+                data-testid="start-capture"
+                onClick={startCapture}
+                className="border border-[var(--bench-line)] px-2 py-1 uppercase tracking-[0.14em]"
+              >
+                start capture
+              </button>
+              <button
+                type="button"
+                data-testid="stop-capture"
+                onClick={stopCapture}
+                className="border border-[var(--bench-line)] px-2 py-1 uppercase tracking-[0.14em]"
+              >
+                stop capture
+              </button>
+              <button
+                type="button"
+                data-testid="clear-capture"
+                onClick={() => {
+                  trace.clear();
+                  setFrozenRecords(null);
+                  setStats(trace.stats());
+                }}
+                className="border border-[var(--bench-line)] px-2 py-1 uppercase tracking-[0.14em]"
+              >
+                clear
+              </button>
+              <button
+                type="button"
+                data-testid="follow-live"
+                onClick={() => setFollowLive((v) => !v)}
+                className={`border px-2 py-1 uppercase tracking-[0.14em] ${followLive ? "border-[var(--signal)] text-[var(--signal)]" : "border-[var(--bench-line)]"}`}
+              >
+                follow live {followLive ? "on" : "off"}
+              </button>
+              <button
+                type="button"
+                data-testid="freeze-view"
+                onClick={toggleFreeze}
+                className={`border px-2 py-1 uppercase tracking-[0.14em] ${frozen ? "border-[var(--signal)] text-[var(--signal)]" : "border-[var(--bench-line)]"}`}
+              >
+                {frozen ? "resume view" : "freeze view"}
+              </button>
+              <button
+                type="button"
+                data-testid="verbose-led-transport"
+                onClick={() => setVerboseTransport((v) => !v)}
+                className={`border px-2 py-1 uppercase tracking-[0.14em] ${verboseTransport ? "border-[var(--signal)] text-[var(--signal)]" : "border-[var(--bench-line)]"}`}
+              >
+                verbose led transport {verboseTransport ? "on" : "off"}
+              </button>
+              <button
+                type="button"
+                data-testid="background-capture"
+                onClick={() => setBackground((v) => !v)}
+                className={`border px-2 py-1 uppercase tracking-[0.14em] ${background ? "border-[var(--signal)] text-[var(--signal)]" : "border-[var(--bench-line)]"}`}
+              >
+                keep capturing when collapsed {background ? "on" : "off"}
+              </button>
+            </div>
+            <Row k="capture" v={stats.running ? `running · id ${stats.captureId}` : "stopped"} />
+            <Row k="view" v={frozen ? "frozen" : "live"} />
+            <Row k="records stored" v={`${stats.stored}/${stats.capacity}`} />
+            <Row k="records generated" v={stats.generated} />
+            <Row k="dropped by rollover" v={stats.dropped} />
+            <Row k="coalesced" v={stats.coalesced} />
+            <Row k="capture duration" v={`${(stats.durationMs / 1000).toFixed(1)}s`} />
+          </section>
+
           {/* ---------- device ---------- */}
           <section className="border border-[var(--bench-line)] p-2">
             <p className="text-[var(--signal)]">device</p>
             <Row k="midi input" v={midi.devices[0]?.name ?? "none"} />
             <Row k="midi input id" v={midi.devices[0]?.id ?? "—"} />
-            <Row k="midi output" v="none (M0 exposes no host→device path)" />
+            <Row k="matching midi output" v={led.outputName ?? "none"} />
+            <Row k="midi output id" v={led.outputId ?? "—"} />
             <Row k="midi state" v={midi.status} />
-            <Row k="sp-1 recognition" v={midi.devices[0]?.name ? "matched by name (case-insensitive, suffixes allowed)" : "no port"} />
             <Row k="firmware console" v={console_.status} />
-            <Row k="reported banner" v={console_.reportedVersion ?? "not reported"} />
-            <Row k="usb identity" v={`VID ${EXPECTED_ARTIFACT.usbVendorId} · PID ${EXPECTED_ARTIFACT.usbProductId}`} />
-            <p className="mt-2 text-[var(--ink-faint)]">expected artifact metadata — not verified device identity</p>
+            <Row
+              k="reported firmware"
+              v={console_.status === "connected" ? (console_.reportedVersion ?? "not reported") : "unknown (console closed)"}
+            />
+            <p className="mt-2 text-[var(--ink-faint)]">
+              expected artifact metadata — never verified device identity
+            </p>
             {Object.entries(EXPECTED_ARTIFACT).map(([k, v]) => (
               <Row key={k} k={k} v={<span className="break-all">{v}</span>} />
+            ))}
+            <p className="mt-2 text-[var(--ink-faint)]">profile registry</p>
+            {FIRMWARE_PROFILES.map((p) => (
+              <Row
+                key={p.id}
+                k={`${p.id}${p.id === CURRENT_FIRMWARE_PROFILE.id ? " (current)" : ""}`}
+                v={`${p.firmwareBanner} · led protocol v${p.ledProtocolVersion} · ${p.status}`}
+              />
             ))}
             <p className="mt-2 text-[var(--ink-faint)]">capabilities</p>
             {Object.entries(M0_CAPABILITIES).map(([k, v]) => (
@@ -471,22 +603,40 @@ export function Sp1DiagnosticDrawer({ state, leds, arbiter }: Props) {
               >
                 disconnect
               </button>
-              <button
-                type="button"
-                data-testid="toggle-capture"
-                onClick={() => setCapturing((v) => !v)}
-                className="border border-[var(--bench-line)] px-2 py-1 uppercase tracking-[0.14em] hover:text-[var(--signal)]"
-              >
-                {capturing ? "stop capture" : "keep capturing when collapsed"}
-              </button>
             </div>
-            <Row k="last valid serial line" v={console_.lineCount ? `#${console_.lineCount}` : "none"} />
             {console_.error && <Row k="serial parse/connect error" v={console_.error} />}
-            {!console_.supported && (
-              <p className="mt-1 text-[var(--ink-faint)]">
-                web serial unavailable in this browser — MIDI control continues without the console
-              </p>
+          </section>
+
+          {/* ---------- host LED link ---------- */}
+          <section className="border border-[var(--bench-line)] p-2" data-testid="led-transport">
+            <p className="text-[var(--signal)]">host→device led link · channel 16 · protocol v1</p>
+            <Row k="midi input connected" v={led.inputConnected ? "yes" : "no"} />
+            <Row k="matching output found" v={led.candidateOutputs.length > 0 ? `${led.candidateOutputs.length}` : "no"} />
+            <Row k="capability query sent" v={led.capabilityQuerySent ? "yes (CC91=0)" : "no"} />
+            <Row
+              k="protocol-v1 response"
+              v={led.protocolVersion === 1 ? "received (CC91=1)" : led.protocolVersion === 0 ? "legacy / none" : "pending"}
+            />
+            <Row k="led lease" v={led.leaseActive ? "active" : "inactive"} />
+            <Row k="link status" v={led.status} />
+            <Row k="commit sequence" v={led.commitSequence} />
+            <Row k="commits / heartbeats" v={`${led.commits} / ${led.heartbeats}`} />
+            <Row k="staged cc messages" v={led.stagedMessages} />
+            <Row k="last transmitted frame" v={led.lastFrame ? led.lastFrame.join(" ") : "none"} />
+            {led.candidateOutputs.length > 1 && (
+              <div className="mt-1 flex flex-wrap gap-1">
+                {led.candidateOutputs.map((o) => (
+                  <span key={o.id} className="border border-[var(--bench-line)] px-1">
+                    {o.name}
+                  </span>
+                ))}
+              </div>
             )}
+            {led.error && <Row k="transmission error" v={led.error} />}
+            <p className="mt-1 text-[var(--ink-faint)]">
+              a transmitted frame proves only that the browser attempted transmission — never that the firmware
+              committed or that an LED is visibly lit
+            </p>
           </section>
 
           {/* ---------- midi contract reference ---------- */}
@@ -494,7 +644,11 @@ export function Sp1DiagnosticDrawer({ state, leds, arbiter }: Props) {
             <p className="text-[var(--signal)]">expected m0 midi contract · channel 1</p>
             <p className="text-[var(--ink-faint)]">{SP1_NOTATION_WARNING}</p>
             {SP1_MIDI_CONTRACT.map((r) => (
-              <Row key={`${r.kind}${r.dec}`} k={`${r.kind === "note" ? "note" : "CC"} ${r.dec} (${r.hex})`} v={`${r.name}${r.note ? ` · ${r.note}` : ""}`} />
+              <Row
+                key={`${r.kind}${r.dec}`}
+                k={`${r.kind === "note" ? "note" : "CC"} ${r.dec} (${r.hex})`}
+                v={`${r.name}${r.note ? ` · ${r.note}` : ""}`}
+              />
             ))}
             {SP1_BUTTON_PHASES.map((p) => (
               <p key={p} className="text-[var(--ink-faint)]">
@@ -503,88 +657,120 @@ export function Sp1DiagnosticDrawer({ state, leds, arbiter }: Props) {
             ))}
           </section>
 
-          {/* ---------- live physical state ---------- */}
+          {/* ---------- live state ---------- */}
           <section className="border border-[var(--bench-line)] p-2">
-            <p className="text-[var(--signal)]">live physical state</p>
-            <Row k="buttons (10)" v={BUTTONS.map((b) => (state.pressed.includes(b) ? "1" : "0")).join("")} />
-            <Row k="faders" v={faders.current.map((f) => f.toFixed(2)).join(" ")} />
-            <Row k="battery CC24" v={battery.current ?? "—"} />
-            <Row k="fader pickup" v={snapshot.faderPickup} />
-            <Row k="raw midi /s" v={rates.raw} />
-            <Row k="surface events /s" v={rates.surface} />
-            <Row k="reducer commands /s" v={rates.reducer} />
-            <Row k="engine commands /s" v={rates.engine} />
-            <Row k="fader messages (total)" v={rates.faderMsgs} />
-            <Row k="fader reducer commands" v={rates.faderCmds} />
-            <Row k="unmatched releases" v={rates.unmatched} />
-            <Row k="duplicate presses" v={rates.duplicates} />
-            <Row k="baseline/resync suppressed" v={rates.suppressed} />
-            <Row k="stale events" v={rates.stale} />
-            <Row k="AIN0 / AIN1" v={`${console_.ain0 ?? "—"} / ${console_.ain1 ?? "—"}`} />
-            <Row k="decoded mask" v={console_.decodedMask ?? "—"} />
-            <Row k="stable mask" v={console_.stableMask ?? "—"} />
-            <Row k="unmeasured count" v={console_.unmeasured ?? "—"} />
-            <Row k="held controls" v={[...held.current].join(" + ") || "none"} />
-            {rates.raw > 40 && <p className="text-[var(--signal)]">excessive idle fader activity ({rates.raw}/s)</p>}
-            {rates.faderMsgs > 0 && rates.faderCmds > 0 && (
-              <p className="text-[var(--signal)]">
-                fader traffic is changing mixer state with no pickup ownership ({rates.faderCmds} reducer commands)
-              </p>
-            )}
-            {held.current.size > 0 && rates.surface === 0 && (
-              <p className="text-[var(--signal)]">possible stuck control: {[...held.current].join(" + ")}</p>
-            )}
-          </section>
-
-          {/* ---------- transport & gestures ---------- */}
-          <section className="border border-[var(--bench-line)] p-2">
-            <p className="text-[var(--signal)]">transport, mixer &amp; gestures</p>
+            <p className="text-[var(--signal)]">live state</p>
+            <Row k="web power" v={snapshot.webPowered ? "on" : "off"} />
             <Row k="transport" v={snapshot.playing ? "playing" : "stopped"} />
+            <Row k="buttons (10)" v={BUTTONS.map((b) => (state.pressed.includes(b) ? "1" : "0")).join("")} />
+            <Row k="mixer gain" v={snapshot.mixerGain.map((f) => f.toFixed(2)).join(" ")} />
+            <Row
+              k="fader hardware position"
+              v={snapshot.faderHardware.map((f) => (f === null ? "—" : f.toFixed(2))).join(" ")}
+            />
+            <Row k="fader pickup" v={snapshot.faderPickup} />
+            <Row k="muted" v={snapshot.muted.map((m) => (m ? "M" : "-")).join("")} />
+            <Row k="soloed" v={snapshot.soloed.map((m) => (m ? "S" : "-")).join("")} />
+            <Row k="linked" v={snapshot.linked.map((m) => (m ? "L" : "-")).join("")} />
             <Row k="global loop" v={`${snapshot.globalLoop} · 1/${snapshot.loopDivision}`} />
             <Row
               k="scrub"
               v={`${snapshot.scrubDirection} · level ${snapshot.scrubSpeedLevel} (${snapshot.scrubMultiplier}×) · ${snapshot.scrubLatched ? "latched" : "momentary"}`}
             />
             <Row k="inertia" v={snapshot.inertia} />
-            <Row k="active stem" v={snapshot.activeStem} />
-            <Row k="track gains" v={snapshot.faders.map((f) => f.toFixed(2)).join(" ")} />
-            <Row k="mutes" v={snapshot.mutes.map((m) => (m ? "M" : "-")).join("")} />
-            <Row k="solo / link" v={snapshot.solos.join(" ")} />
             <Row k="fx overlay" v={snapshot.fxOverlay ? `open · ${snapshot.fxScope}` : "closed"} />
             <Row k="fx bank" v={snapshot.fxBank + 1} />
             <Row k="fx momentary" v={snapshot.fxMomentary.join(", ") || "none"} />
             <Row k="fx latched" v={snapshot.fxLatched.join(", ") || "none"} />
-            <Row k="arbitration owner" v={snapshot.arbitrationOwner} />
+            <Row k="arbitration owner" v={snapshot.arbitrationOwner ?? "idle (no gesture owns arbitration)"} />
+            <Row k="raw midi /s · cumulative" v={`${rates.raw} · ${totals.current.raw}`} />
+            <Row k="surface events /s · cumulative" v={`${rates.surface} · ${totals.current.surface}`} />
+            <Row k="reducer commands /s · cumulative" v={`${rates.reducer} · ${totals.current.reducer}`} />
+            <Row k="engine commands /s · cumulative" v={`${rates.engine} · ${totals.current.engine}`} />
+            <Row k="AIN0 / AIN1" v={`${console_.ain0 ?? "—"} / ${console_.ain1 ?? "—"}`} />
+            <Row k="decoded / stable mask" v={`${console_.decodedMask ?? "—"} / ${console_.stableMask ?? "—"}`} />
+          </section>
+
+          {/* ---------- reproductions ---------- */}
+          <section className="border border-[var(--bench-line)] p-2" data-testid="reproductions">
+            <p className="text-[var(--signal)]">
+              named reproductions {currentSegment ? `· running ${currentSegment.name}` : ""}
+            </p>
+            <div className="mt-1 flex flex-wrap gap-1">
+              {SEGMENT_DEFINITIONS.map((d) => (
+                <button
+                  key={d.id}
+                  type="button"
+                  data-segment={d.id}
+                  onClick={() =>
+                    segmentRunner.begin(
+                      d,
+                      `playing=${state.playing} loop=${state.globalLoop.active} scrub=${state.globalScrub}`,
+                      "live-hardware",
+                    )
+                  }
+                  className="border border-[var(--bench-line)] px-1 uppercase tracking-[0.12em]"
+                >
+                  begin: {d.name}
+                </button>
+              ))}
+              {currentSegment && (
+                <button
+                  type="button"
+                  data-testid="end-reproduction"
+                  onClick={() =>
+                    segmentRunner.end(
+                      `playing=${state.playing} loop=${state.globalLoop.active} scrub=${state.globalScrub}`,
+                    )
+                  }
+                  className="border border-[var(--signal)] px-1 uppercase tracking-[0.12em] text-[var(--signal)]"
+                >
+                  end reproduction
+                </button>
+              )}
+            </div>
+            {segmentRunner.all().map((r) => (
+              <Row
+                key={r.segmentId}
+                k={`${r.name} (${r.segmentId})`}
+                v={`${r.status} · ${r.observationSource}${r.firstMissingStage ? ` · first missing ${r.firstMissingStage}` : ""}`}
+              />
+            ))}
           </section>
 
           {/* ---------- physical LED inspector ---------- */}
           <section className="border border-[var(--bench-line)] p-2" data-testid="physical-led-inspector">
             <p className="text-[var(--signal)]">
               physical sp-1 frame · {physicalRows.length || PHYSICAL_LED_COUNT} leds (4 track + 4 side/status) ·
-              electrical gpio coverage {M0_LED_COVERAGE.electricalCoverage} · stem tape behaviour mapping{" "}
-              {M0_LED_COVERAGE.behaviorCoverage} · host→device feedback {M0_LED_COVERAGE.hostToDeviceLedFeedback}
+              electrical gpio coverage {M0_LED_COVERAGE.electricalCoverage} · host→device feedback{" "}
+              {M0_LED_COVERAGE.hostToDeviceLedFeedback}
+            </p>
+            <p className="text-[var(--ink-faint)]">
+              resolved frame: {formatPhysicalFrame(resolvePhysicalFrame(leds))}
             </p>
             <LedRows rows={physicalRows} />
           </section>
 
           <section className="border border-[var(--bench-line)] p-2" data-testid="web-only-indicators">
             <p className="text-[var(--signal)]">
-              web-only interface indicators — not physical sp-1 leds (the `••` marks and the red play triangle are
-              printed artwork)
+              web-only interface indicators — not physical sp-1 leds and never transmitted (the `••` marks and the red
+              play triangle are printed artwork)
             </p>
             <LedRows rows={webRows} />
           </section>
 
           {/* ---------- contract ---------- */}
           <section className="border border-[var(--bench-line)] p-2" data-testid="behavior-contract">
-            <p className="text-[var(--signal)]">behaviour contract · {BEHAVIOR_CONTRACT_VERSION}</p>
+            <p className="text-[var(--signal)]">behaviour contract · {BEHAVIOR_CONTRACT_VERSION} · reference data</p>
             {contract.map((c) => (
               <div key={c.id} className="border-b border-[var(--bench-line)] py-1">
                 <div className="flex justify-between gap-2">
                   <span>
                     [{c.group}] {c.name}
                   </span>
-                  <span className="uppercase text-[var(--signal)]">{c.status}</span>
+                  <span className="uppercase text-[var(--signal)]">
+                    audit: {c.implementationStatus} · reproduction: {c.reproductionStatus}
+                  </span>
                 </div>
                 <div className="text-[var(--ink-faint)]">
                   from {c.initiatingState} · {c.sequence} · {c.timing}
@@ -594,13 +780,15 @@ export function Sp1DiagnosticDrawer({ state, leds, arbiter }: Props) {
                 </div>
                 <div className="text-[var(--ink-faint)]">leds: {c.expectedLedSummary}</div>
                 <div className="text-[var(--ink-faint)]">
-                  p{c.precedence}
-                  {c.competing.length ? ` vs ${c.competing.join(", ")}` : ""} · {c.provenance} ({c.confidence}) ·{" "}
-                  {c.citation.title} {c.citation.version} — {c.citation.locator} [{c.citation.evidence}]
+                  observation source: {c.observationSource}
+                  {c.segmentId ? ` · segment ${c.segmentId}` : ""} · {c.provenance} ({c.confidence}) ·{" "}
+                  {c.citation.title} {c.citation.version} — {c.citation.locator}
                 </div>
-                {c.observed && <div>observed: {c.observed}</div>}
-                {c.firstDivergence && <div className="text-[var(--signal)]">first divergence: {c.firstDivergence}</div>}
-                {c.notes && <div className="text-[var(--signal)]">{c.notes}</div>}
+                {c.observed && <div>observed state: {c.observed}</div>}
+                {c.reproductionFirstDivergence && (
+                  <div className="text-[var(--signal)]">first divergence: {c.reproductionFirstDivergence}</div>
+                )}
+                {c.notes && <div className="text-[var(--ink-faint)]">note: {c.notes}</div>}
               </div>
             ))}
           </section>
@@ -608,10 +796,10 @@ export function Sp1DiagnosticDrawer({ state, leds, arbiter }: Props) {
           {/* ---------- trace ---------- */}
           <section className="border border-[var(--bench-line)] p-2" data-testid="diagnostic-trace">
             <div className="flex items-center justify-between">
-              <p className="text-[var(--signal)]">trace · {trace.size()}/500</p>
-              <button type="button" onClick={() => trace.clear()} className="uppercase tracking-[0.14em]">
-                clear
-              </button>
+              <p className="text-[var(--signal)]">
+                trace · {stats.stored}/{stats.capacity} · {stats.running ? "capturing" : "stopped"} ·{" "}
+                {frozen ? "view frozen" : "view live"}
+              </p>
             </div>
             <div className="mt-1 flex flex-wrap gap-1">
               {STAGE_FILTERS.map((f) => (
@@ -625,11 +813,17 @@ export function Sp1DiagnosticDrawer({ state, leds, arbiter }: Props) {
                 </button>
               ))}
             </div>
-            <pre className="mt-1 max-h-56 overflow-auto whitespace-pre-wrap text-[9px] text-[var(--ink-dim)]">
-              {recent
+            <pre
+              ref={traceRef}
+              data-testid="trace-list"
+              className="mt-1 max-h-56 overflow-auto whitespace-pre-wrap text-[9px] text-[var(--ink-dim)]"
+            >
+              {shown
                 .map(
                   (r) =>
-                    `${(r.t - t0).toFixed(1)}ms ${r.corr ? `#${r.corr}` : "#-"}${r.gesture ? `/g${r.gesture}` : ""}  ${r.stage}  ${r.label}${r.detail ? ` — ${r.detail}` : ""}`,
+                    `${(r.t - t0).toFixed(1)}ms ${r.corr ? `#${r.corr}` : "#-"}${r.gesture ? `/g${r.gesture}` : ""}${
+                      typeof r.commandId === "number" ? `/c${r.commandId}` : ""
+                    }${r.causeId ? `/~${r.causeId}` : ""}  ${r.stage}  ${r.label}${r.detail ? ` — ${r.detail}` : ""}`,
                 )
                 .join("\n") || "no records yet"}
             </pre>

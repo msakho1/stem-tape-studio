@@ -13,6 +13,7 @@
  */
 
 import type { Control } from "@/device/geometry";
+import { trace } from "@/diagnostics/trace";
 
 /** Case-insensitive device recognition; suffixes such as "BLOCK 1" are allowed. */
 export function isSp1DeviceName(name: string | null | undefined): boolean {
@@ -175,7 +176,37 @@ export class Sp1SurfaceAdapter {
     if (this.held.size === 0) this.connectedName = null;
   }
 
+  /**
+   * Decode point. The record is written HERE, with the event's own timestamp,
+   * so a 1200 ms hold shows 1200 ms between its DOWN and UP records. Nothing
+   * downstream may reconstruct these from held state.
+   */
   private emit(ev: Sp1SurfaceEvent): void {
+    if (trace.enabled) {
+      const label =
+        ev.type === "fader"
+          ? `FADER ${ev.index + 1} → ${(ev.value * 100).toFixed(0)}% (CC${20 + ev.index} / 0x${(20 + ev.index).toString(16).toUpperCase()})`
+          : ev.type === "battery"
+            ? `battery CC24 (0x18) = ${ev.value}`
+            : `${ev.control.toUpperCase()} ${ev.type === "down" ? "DOWN" : "UP"}`;
+      trace.record(
+        "surface.decoded",
+        label,
+        {
+          ...(ev.type === "fader" ? { index: ev.index, value: ev.value } : {}),
+          ...(ev.type === "battery" ? { value: ev.value } : {}),
+          ...(ev.type === "down" || ev.type === "up" ? { control: ev.control, phase: ev.type } : {}),
+          source: "sp1-adapter",
+          device: ev.deviceName,
+        },
+        { t: ev.timestampMs },
+      );
+      if (ev.type === "down" || ev.type === "up") {
+        const all: Control[] = [];
+        for (const set of this.held.values()) all.push(...set);
+        trace.record("surface.held", `held: ${all.join(" + ") || "none"}`, { held: all }, { t: ev.timestampMs });
+      }
+    }
     for (const fn of this.listeners) fn(ev);
   }
 }

@@ -12,22 +12,29 @@ import { BEHAVIOR_CONTRACT_VERSION } from "./contract";
 import type { LedInspectionRow } from "./leds";
 import { M0_LED_COVERAGE, PHYSICAL_LED_COUNT, type DivergenceCategory, type ObservationKind } from "./physical";
 import { SP1_MIDI_CONTRACT, SP1_NOTATION_WARNING } from "./midiContract";
-import { formatTraceRow, type TraceRecord } from "./trace";
+import { formatTraceRow, type TraceRecord, type TraceStats } from "./trace";
+import type { FirmwareProfile } from "./firmwareProfiles";
+import type { ReproductionResult } from "./segments";
 
 export interface EventRates {
+  /** Last-one-second rates. A zero here never erases the cumulative counts. */
   rawMidiPerSec: number;
   surfaceEventsPerSec: number;
   reducerCommandsPerSec: number;
   engineCommandsPerSec: number;
-  unmatchedReleases: number;
-  duplicatePresses: number;
-  staleEvents: number;
-  suppressed: number;
-  faderMessages: number;
-  faderReducerCommands: number;
+  /** Cumulative counts for the whole capture. */
+  cumulativeRawMidi: number;
+  cumulativeSurfaceEvents: number;
+  cumulativeReducerCommands: number;
+  cumulativeEngineCommands: number;
+  coalesced: number;
+  dropped: number;
+  generated: number;
 }
 
 export interface StateSnapshot {
+  /** Web device power, kept strictly separate from transport playing/stopped. */
+  webPowered: boolean;
   playing: boolean;
   globalLoop: string;
   loopDivision: number;
@@ -42,17 +49,24 @@ export interface StateSnapshot {
   fxBank: number;
   fxMomentary: string[];
   fxLatched: string[];
-  mutes: boolean[];
-  solos: string[];
+  /** Three independent arrays. A label such as `1L` is never a solo state. */
+  muted: boolean[];
+  soloed: boolean[];
+  linked: boolean[];
   heldControls: string[];
-  arbitrationOwner: string;
-  faders: number[];
+  /** Null / idle when no gesture currently owns arbitration. */
+  arbitrationOwner: string | null;
+  /** Hardware fader position, separate from mixer gain. */
+  faderHardware: (number | null)[];
+  mixerGain: number[];
   faderPickup: string;
   buttons: Record<string, boolean>;
 }
 
 export interface FailureRecord {
   id: string;
+  /** Reproductions only: a static audit finding never produces a failure. */
+  segmentId: string | null;
   lastGoodStage: string;
   firstDivergence: string;
   category: DivergenceCategory | null;
@@ -62,16 +76,32 @@ export interface FailureRecord {
   observation: ObservationKind;
 }
 
+export interface LedTransportReport {
+  status: string;
+  protocolVersion: number | null;
+  capabilityQuerySent: boolean;
+  leaseActive: boolean;
+  commitSequence: number;
+  commits: number;
+  heartbeats: number;
+  stagedMessages: number;
+  lastFrame: number[] | null;
+  candidateOutputs: { id: string; name: string }[];
+  error: string | null;
+}
+
 export interface DiagnosticReport {
   contractVersion: string;
   generatedAt: string;
   expectedArtifact: typeof EXPECTED_ARTIFACT;
+  firmwareProfiles: FirmwareProfile[];
   midiContract: { rows: typeof SP1_MIDI_CONTRACT; warning: string };
   ledModel: typeof M0_LED_COVERAGE;
   device: {
     midiInputName: string | null;
     midiInputId: string | null;
     midiOutputName: string | null;
+    midiOutputId: string | null;
     midiState: string;
     consoleState: string;
     reportedFirmwareVersion: string | null;
@@ -85,10 +115,13 @@ export interface DiagnosticReport {
     stableMask: string | null;
     unmeasured: number | null;
   };
+  ledTransport: LedTransportReport;
   state: StateSnapshot | null;
   rates: EventRates;
+  captureStats: TraceStats;
   trace: TraceRecord[];
   contract: ContractResult[];
+  reproductions: ReproductionResult[];
   /** EXACTLY the eight physical SP-1 LEDs. */
   physicalLeds: LedInspectionRow[];
   /** Web-only indicators, never part of the physical frame. */
@@ -147,7 +180,7 @@ export function reportToText(r: DiagnosticReport): string {
   lines.push("");
   lines.push("DEVICE");
   lines.push(`  midi input: ${r.device.midiInputName ?? "none"} (${r.device.midiInputId ?? "-"})`);
-  lines.push(`  midi output: ${r.device.midiOutputName ?? "none"}`);
+  lines.push(`  midi output: ${r.device.midiOutputName ?? "none"} (${r.device.midiOutputId ?? "-"})`);
   lines.push(`  midi state: ${r.device.midiState}`);
   lines.push(`  firmware console: ${r.device.consoleState}`);
   lines.push(`  reported firmware banner: ${r.device.reportedFirmwareVersion ?? "not reported"}`);
@@ -158,6 +191,23 @@ export function reportToText(r: DiagnosticReport): string {
   lines.push(`  AIN0=${r.firmware.ain0 ?? "-"} AIN1=${r.firmware.ain1 ?? "-"}`);
   lines.push(`  decoded=${r.firmware.decodedMask ?? "-"} stable=${r.firmware.stableMask ?? "-"} unmeasured=${r.firmware.unmeasured ?? "-"}`);
   lines.push("");
+  lines.push("FIRMWARE PROFILE REGISTRY (expected metadata, never device identity)");
+  for (const p of r.firmwareProfiles) {
+    lines.push(`  ${p.status === "current" ? "*" : " "} ${p.id}: ${p.firmwareBanner} · led protocol v${p.ledProtocolVersion} · sha256 ${p.binarySha256}`);
+  }
+  lines.push("");
+  lines.push("HOST→DEVICE LED LINK (channel 16, protocol v1)");
+  lines.push(`  ${JSON.stringify(r.ledTransport)}`);
+  lines.push("");
+  lines.push("CAPTURE");
+  lines.push(`  ${JSON.stringify(r.captureStats)}`);
+  lines.push("");
+  lines.push("REPRODUCTIONS");
+  if (r.reproductions.length === 0) lines.push("  none run — every contract entry is reference data only");
+  for (const rep of r.reproductions) {
+    lines.push(`  ${rep.segmentId} ${rep.name}: ${rep.status} · ${rep.observationSource} · ${rep.detail ?? ""}`);
+  }
+  lines.push("");
   lines.push("STATE");
   lines.push(`  ${r.state ? JSON.stringify(r.state) : "no state"}`);
   lines.push("");
@@ -165,10 +215,15 @@ export function reportToText(r: DiagnosticReport): string {
   lines.push(`  ${JSON.stringify(r.rates)}`);
   lines.push("");
   lines.push(`PHYSICAL LED COMPARISON (${r.physicalLeds.length} of ${PHYSICAL_LED_COUNT})`);
+  lines.push("  columns: 1 expected contract | 2 web logical | 3 rendered DOM/CSS | 4 transmitted/firmware");
   for (const l of r.physicalLeds) {
-    lines.push(
-      `  ${l.id.padEnd(16)} expected ${l.expectedMode.padEnd(20)} actual ${l.actualMode.padEnd(20)} ${l.animation} · m0-driven=${l.m0Driven} · ${l.owner}${l.mismatch ? ` · MISMATCH: ${l.mismatch}` : ""}`,
-    );
+    lines.push(`  ${l.id}`);
+    lines.push(`      1 expected:    ${l.columnExpected}`);
+    lines.push(`      2 web logical: ${l.columnWebLogical}`);
+    lines.push(`      3 rendered:    ${l.columnDom}`);
+    lines.push(`      4 transmitted: ${l.columnTransmitted}`);
+    lines.push(`      physical observation: ${l.physicalObservation}`);
+    if (l.mismatch) lines.push(`      MISMATCH: ${l.mismatch}`);
   }
   lines.push("");
   lines.push("WEB-ONLY INDICATORS — NOT PART OF THE 8-LED PHYSICAL FRAME");
@@ -178,14 +233,20 @@ export function reportToText(r: DiagnosticReport): string {
   lines.push("");
   lines.push("BEHAVIOUR CONTRACT");
   for (const c of r.contract) {
-    lines.push(`  [${c.status}] ${c.group} · ${c.name} · ${c.provenance} (${c.confidence})`);
+    lines.push(
+      `  [audit ${c.implementationStatus} · reproduction ${c.reproductionStatus} · source ${c.observationSource}] ${c.group} · ${c.name} · ${c.provenance} (${c.confidence})`,
+    );
     lines.push(`      source: ${c.citation.title} ${c.citation.version} — ${c.citation.locator} (${c.citation.evidence})`);
     lines.push(`      from: ${c.initiatingState} | seq: ${c.sequence} | timing: ${c.timing}`);
     lines.push(`      owner: ${c.expectedOwner} | command: ${c.expectedCommand} | engine: ${c.expectedEngineResult}`);
     lines.push(`      leds: ${c.expectedLedSummary}`);
     lines.push(`      precedence ${c.precedence}${c.competing.length ? ` · competing: ${c.competing.join(", ")}` : ""}`);
     if (c.observed) lines.push(`      observed: ${c.observed}`);
-    if (c.firstDivergence) lines.push(`      first divergence: ${c.firstDivergence}`);
+    if (c.reproductionFirstDivergence) {
+      lines.push(`      first divergence (observed): ${c.reproductionFirstDivergence}`);
+    } else if (c.firstDivergence) {
+      lines.push(`      audit divergence category (NOT an observed failure): ${c.firstDivergence}`);
+    }
     if (c.notes) lines.push(`      note: ${c.notes}`);
   }
   lines.push("");

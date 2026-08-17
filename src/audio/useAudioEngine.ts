@@ -136,6 +136,14 @@ export function useAudioEngine(commands: AudioCommand[]) {
           const result = await engine.unlock();
           setUnlockNote(result.detail);
         }
+        if (trace.enabled) {
+          trace.record(
+            "command.engine",
+            `${cmd.type}`,
+            { id: cmd.id, payload: cmd.payload as unknown },
+            { commandId: cmd.id },
+          );
+        }
         let ack = engine.execute(cmd);
         // Heads entry retries EXACTLY once behind a fresh resume: on mobile the
         // first unlock can still be settling when the triple-tap completes, and
@@ -146,7 +154,12 @@ export function useAudioEngine(commands: AudioCommand[]) {
           if (retry.ok) ack = engine.execute(cmd);
         }
         if (trace.enabled) {
-          trace.record("engine.ack", `${ack.type} → ${ack.status}`, { id: ack.id, detail: ack.detail });
+          trace.record(
+            "engine.ack",
+            `${ack.type} → ${ack.status}`,
+            { id: ack.id, accepted: ack.status !== "rejected", reason: ack.detail, detail: ack.detail },
+            { commandId: ack.id, causeId: "engine" },
+          );
         }
         setAcks((prev) => [ack, ...prev].slice(0, 60));
         setStatus(engine.status());

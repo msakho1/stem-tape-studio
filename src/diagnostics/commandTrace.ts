@@ -26,10 +26,12 @@ export class SurfaceCommandTracer {
       if (c.id <= this.watermark) continue;
       this.watermark = c.id;
       n++;
-      this.ring.record("command.surface", `emit ${c.type}`, {
-        id: c.id,
-        payload: c.payload as unknown,
-      }, c.t);
+      this.ring.record(
+        "command.surface",
+        `emit ${c.type}`,
+        { id: c.id, type: c.type, payload: c.payload as unknown },
+        { t: c.t, commandId: c.id },
+      );
     }
     return n;
   }

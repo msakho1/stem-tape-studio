@@ -37,6 +37,9 @@ import type { StemMidiEvent } from "@/audio/midi/contract";
 import { FaderSessionManager, type FaderIndex } from "@/input/faderSessions";
 import { installDiagnostics, publishArbiter, publishSurface, publishTapLatency } from "@/lib/diagnostics";
 import { surfaceCommandTracer } from "@/diagnostics/commandTrace";
+import { trace } from "@/diagnostics/trace";
+import { formatPhysicalFrame, resolvePhysicalFrame } from "@/diagnostics/physicalFrame";
+import { ledTransport } from "@/diagnostics/ledTransport";
 
 
 
@@ -152,6 +155,60 @@ export function useDeviceSurface() {
   useEffect(() => {
     surfaceCommandTracer.capture(state.commands);
   }, [state.commands]);
+
+  /**
+   * State transitions. Recorded only when the observed value actually changes,
+   * with the command responsible (the newest command in this reducer result).
+   */
+  useEffect(() => {
+    const cause = state.commands[state.commands.length - 1];
+    const opts = cause ? { commandId: cause.id } : {};
+    trace.recordIfChanged(
+      "state.transport",
+      `${state.playing}|${state.globalLoop.active}|${state.globalLoop.latched}|${state.globalScrub}|${state.scrubLatched}|${state.scrubSpeed}`,
+      "state.transport",
+      `playing=${state.playing} loop=${state.globalLoop.active ? (state.globalLoop.latched ? "latched" : "momentary") : "off"} scrub=${state.globalScrub}${state.scrubLatched ? " latched" : ""} speed=${state.scrubSpeed + 1}`,
+      {
+        playing: state.playing,
+        loopActive: state.globalLoop.active,
+        loopLatched: state.globalLoop.latched,
+        scrub: state.globalScrub,
+        scrubLatched: state.scrubLatched,
+        scrubSpeed: state.scrubSpeed,
+        causedBy: cause?.type ?? null,
+      },
+      opts,
+    );
+    trace.recordIfChanged(
+      "state.mixer",
+      state.tracks.map((t) => `${t.volume.toFixed(3)}:${t.content}`).join("|") +
+        state.perf.tracks.map((t) => `${t.soloed ? "S" : ""}${t.linked ? "L" : ""}`).join("|"),
+      "state.mixer",
+      `gains ${state.tracks.map((t) => t.volume.toFixed(2)).join(" ")}`,
+      {
+        gains: state.tracks.map((t) => t.volume),
+        muted: state.tracks.map((t) => t.content === "muted"),
+        soloed: state.perf.tracks.map((t) => t.soloed),
+        linked: state.perf.tracks.map((t) => t.linked),
+        causedBy: cause?.type ?? null,
+      },
+      opts,
+    );
+    trace.recordIfChanged(
+      "state.fx",
+      `${state.perf.fxOverlay}|${state.perf.fxScope}|${state.bank}|${state.perf.activeStem}`,
+      "state.fx",
+      `overlay=${state.perf.fxOverlay ? state.perf.fxScope : "closed"} bank=${state.bank + 1} stem=${state.perf.activeStem + 1}`,
+      {
+        overlay: state.perf.fxOverlay,
+        scope: state.perf.fxScope,
+        bank: state.bank,
+        activeStem: state.perf.activeStem,
+        causedBy: cause?.type ?? null,
+      },
+      opts,
+    );
+  }, [state]);
 
   /** Which fader layer is live (FN = chop window, HEADS = scrub, else volume). */
   const layerRef = useRef<{ fn: boolean; heads: boolean }>({ fn: false, heads: false });
@@ -870,6 +927,54 @@ export function useDeviceSurface() {
   }, []);
 
   const leds = useMemo(() => deriveLeds(state), [state]);
+
+  /**
+   * Authoritative resolved PHYSICAL frame → trace + physical sink.
+   *
+   * Runs regardless of whether the diagnostic drawer is open. `led.derived` is
+   * recorded ONLY when the semantic frame changes, so idle polling adds
+   * nothing to the ring, and the transport re-sends nothing for an unchanged
+   * frame (the heartbeat alone holds the lease).
+   */
+  useEffect(() => {
+    const resolved = resolvePhysicalFrame(leds);
+    trace.recordIfChanged(
+      "led.derived",
+      resolved.signature,
+      "led.derived",
+      formatPhysicalFrame(resolved),
+      {
+        leds: resolved.leds.map((l) => ({
+          index: l.index,
+          id: l.id,
+          mode: l.pattern,
+          value: l.value,
+          owner: l.owner,
+          priority: l.priority,
+          periodMs: l.periodMs,
+          animated: l.animated,
+          phaseAnchor: l.animated ? "css-arbitrary" : "none",
+        })),
+        values: resolved.values,
+      },
+      { causeId: "led.derive" },
+    );
+    ledTransport.present(resolved);
+  }, [leds]);
+
+  // Release the host LED lease when the tab goes away; the 1 s firmware lease
+  // expiry is the fallback when we never get to run.
+  useEffect(() => {
+    const release = () => ledTransport.release("page hidden/unload");
+    window.addEventListener("pagehide", release);
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") release();
+    });
+    return () => {
+      window.removeEventListener("pagehide", release);
+      release();
+    };
+  }, []);
   const observed = useMemo(() => observedRows(state, leds), [state, leds]);
 
   /**

@@ -12,6 +12,7 @@
 import { allNotesOffEvent, normalizeMidiBytes, type StemMidiEvent } from "./contract";
 import { isSp1DeviceName, sp1Surface } from "./sp1Surface";
 import { trace } from "@/diagnostics/trace";
+import { ledTransport, CC_CAPABILITY, type MidiOutLike } from "@/diagnostics/ledTransport";
 
 
 type MidiPort = {
@@ -21,8 +22,10 @@ type MidiPort = {
   type: "input" | "output";
   onmidimessage?: ((e: { data: Uint8Array; timeStamp: number }) => void) | null;
 };
+type MidiOutPort = MidiPort & { send: (bytes: number[]) => void };
 type MidiAccess = {
   inputs: Map<string, MidiPort>;
+  outputs?: Map<string, MidiOutPort>;
   onstatechange: ((e: { port: MidiPort }) => void) | null;
 };
 
@@ -32,6 +35,7 @@ export type WebMidiState = {
   supported: boolean;
   status: "idle" | "requesting" | "connected" | "denied" | "unsupported";
   devices: { id: string; name: string }[];
+  outputs: { id: string; name: string }[];
   error: string | null;
 };
 
@@ -44,6 +48,7 @@ export class WebMidiAdapter {
     supported: typeof navigator !== "undefined" && "requestMIDIAccess" in navigator,
     status: typeof navigator !== "undefined" && "requestMIDIAccess" in navigator ? "idle" : "unsupported",
     devices: [],
+    outputs: [],
     error: null,
   };
 
@@ -59,7 +64,11 @@ export class WebMidiAdapter {
   }
 
   snapshot(): WebMidiState {
-    return { ...this.state, devices: this.state.devices.map((d) => ({ ...d })) };
+    return {
+      ...this.state,
+      devices: this.state.devices.map((d) => ({ ...d })),
+      outputs: this.state.outputs.map((d) => ({ ...d })),
+    };
   }
 
   /** Must be called from a user gesture. */
@@ -115,24 +124,47 @@ export class WebMidiAdapter {
         }),
       );
     }
-    this.publish({ devices });
+    // Output discovery is INDEPENDENT of input IDs: hosts mint separate IDs per
+    // direction, so the LED transport matches on normalized product identity.
+    const outs: MidiOutLike[] = [];
+    access.outputs?.forEach((port) => {
+      if (port.state !== "connected") return;
+      const name = port.name ?? "MIDI output";
+      outs.push({ id: port.id, name, send: (bytes) => port.send(bytes) });
+    });
+    const sp1Input = devices.find((d) => isSp1DeviceName(d.name)) ?? null;
+    ledTransport.setInput(sp1Input?.name ?? null);
+    ledTransport.offerOutputs(outs);
+    if (sp1Input && outs.length > 0) ledTransport.queryCapability();
+    this.publish({ devices, outputs: outs.map((o) => ({ id: o.id, name: o.name })) });
   }
 
   private handle(port: MidiPort, e: { data: Uint8Array; timeStamp: number }): void {
     const name = port.name ?? "MIDI input";
+    // Every inbound message opens a NEW input correlation, at the moment the
+    // browser delivered it. Downstream stages inherit this ID.
     if (trace.enabled) {
-      trace.record("midi.raw", `bytes ${[...e.data].map((b) => b.toString(16).padStart(2, "0")).join(" ")}`, {
-        bytes: [...e.data],
-        device: name,
-      });
+      trace.beginCorrelation();
+      const bytes = [...e.data];
+      trace.record(
+        "midi.raw",
+        `${bytes.map((b) => b.toString(16).padStart(2, "0")).join(" ")} (${bytes.join(" ")})`,
+        { inputId: port.id, device: name, hex: bytes.map((b) => `0x${b.toString(16).padStart(2, "0")}`), dec: bytes },
+        Number.isFinite(e.timeStamp) ? { sourceT: e.timeStamp } : {},
+      );
     }
     // The physical Stem Tape SP-1 is a control surface, not an instrument: its
     // messages are consumed here and never reach the cue-learning system.
     if (isSp1DeviceName(name)) {
+      // Host LED protocol capability answers are transport, not surface input.
+      if ((e.data[0]! & 0xf0) === 0xb0 && e.data[1] === CC_CAPABILITY) {
+        ledTransport.handleDeviceCc(e.data[1]!, e.data[2] ?? 0);
+        return;
+      }
       const consumed = sp1Surface.handleBytes(e.data, { id: port.id, name }, e.timeStamp);
       if (trace.enabled) {
         trace.record(
-          consumed ? "midi.recognized" : "surface.suppressed",
+          consumed ? "midi.device.recognized" : "surface.suppressed",
           consumed ? `SP-1 message accepted (${name})` : `SP-1 device, message outside contract`,
           { device: name, bytes: [...e.data] },
         );

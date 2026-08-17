@@ -64,10 +64,20 @@ export function isPhysicalLedId(id: string): id is PhysicalLedId {
 /** Outputs the audited M0 LED driver actually writes: all eight. */
 export const M0_IMPLEMENTED_LED_OUTPUTS: readonly PhysicalLedId[] = [...PHYSICAL_LED_IDS] as const;
 
-/** Runtime host→device LED capability. Never hardcoded as permanently false. */
-export type HostLedFeedback = "unsupported-by-audited-build" | "advertised" | "unknown";
+/**
+ * Runtime host→device LED capability.
+ *
+ * The CURRENT audited profile (M0 v1.1.2) implements LED protocol v1, but the
+ * capability of the CONNECTED device is only ever established by the CC91
+ * handshake — never by this constant.
+ */
+export type HostLedFeedback =
+  | "unsupported-by-audited-build"
+  | "expected-protocol-v1-pending-handshake"
+  | "advertised"
+  | "unknown";
 
-export const M0_HOST_LED_FEEDBACK: HostLedFeedback = "unsupported-by-audited-build";
+export const M0_HOST_LED_FEEDBACK: HostLedFeedback = "expected-protocol-v1-pending-handshake";
 
 export const M0_LED_COVERAGE = {
   physicalLeds: PHYSICAL_LED_COUNT,
