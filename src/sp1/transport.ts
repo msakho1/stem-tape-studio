@@ -216,16 +216,34 @@ export class StemTapeTransport {
   }
 
   /** Continuation blocks first, flush, then the block holding magic + generation, flush. */
-  private async commitIndex(index: StemTapeIndex): Promise<void> {
+  private async commitIndex(index: StemTapeIndex, onStage?: (s: string) => void): Promise<Uint8Array> {
     const session = this.session;
+    const authoritativeImage = buildStemIndex(index, true);
     await session.lock.run(async () => {
+      // 8/9. Metadata first with the validity magic zeroed: a half-written index
+      // can never look valid.
       const pending = splitIndexBlocks(buildStemIndex(index, false));
       for (let i = 1; i < pending.length; i++) await session.writeBlock(i, pending[i]!);
+      await session.writeBlock(0, pending[0]!);
+      // 10. Inherited 'F' flush.
       await session.flush();
-      const authoritative = splitIndexBlocks(buildStemIndex(index, true));
-      await session.writeBlock(0, authoritative[0]!);
+      // 11. Re-read and verify the uncommitted metadata before the magic goes out.
+      onStage?.("verifying uncommitted metadata");
+      for (let i = 0; i < pending.length; i++) {
+        const back = await session.readBlock(i);
+        const want = pending[i]!;
+        for (let j = 0; j < want.length; j++) {
+          if (back[j] !== want[j]) throw new Error(`metadata read-back mismatch in index block ${i}, byte ${j}`);
+        }
+      }
+      // 12. Validity magic last.
+      onStage?.("writing the validity magic");
+      this.magicAttempted = true;
+      await session.writeBlock(0, splitIndexBlocks(authoritativeImage)[0]!);
+      // 13. Flush again.
       await session.flush();
     });
+    return authoritativeImage;
   }
 
   private async writeWithRetry(blk: number, data: Uint8Array, counter: { retries: number }) {
@@ -290,6 +308,12 @@ export class StemTapeTransport {
     const report = (stage: UploadStage, fraction: number, detail: string) =>
       args.onProgress?.({ stage, fraction, detail });
     const counter = { retries: 0 };
+    const started = Date.now();
+    this.magicAttempted = false;
+    let songSha256 = "";
+    let indexSha256 = "";
+    let sectorCount = 0;
+    let totalBlocks = 0;
     let written = 0;
     let verified = 0;
     let failure: { operation: string; block: number } | undefined;
@@ -308,6 +332,12 @@ export class StemTapeTransport {
       report("preparing", 0.05, "encoding logical sectors");
       const sectors = encodeSong(song);
       const need = sectorsForFrames(song.frames);
+      sectorCount = sectors.length;
+      songSha256 = await sha256Hex(sectors);
+
+      // 1/2. Re-query and revalidate capabilities immediately before any write.
+      report("capacity", 0.08, "re-checking device capabilities before writing");
+      await this.revalidate(need);
       report("capacity", 0.1, `${need} of ${c.sectorsPerSong} sectors per song slot`);
       if (need > c.sectorsPerSong) {
         throw new Error(`song needs ${need} logical sectors; this slot holds ${c.sectorsPerSong}`);
@@ -321,7 +351,7 @@ export class StemTapeTransport {
       }
 
       // 6. Audio through the unchanged 512-byte block primitive.
-      const totalBlocks = sectors.length * BLOCKS_PER_SECTOR;
+      totalBlocks = sectors.length * BLOCKS_PER_SECTOR;
       for (let s = 0; s < sectors.length; s++) {
         const blocks = sectorToBlocks(sectors[s]!);
         for (let k = 0; k < BLOCKS_PER_SECTOR; k++) {
@@ -400,7 +430,8 @@ export class StemTapeTransport {
         ),
       };
       report("committing", 0.96, "authoritative index block written last");
-      await this.commitIndex(next);
+      const indexImage = await this.commitIndex(next, (d) => report("metadata", 0.95, d));
+      indexSha256 = await sha256Hex([indexImage]);
 
       // 13/14. Re-read the committed index and confirm the slot matches.
       report("confirming", 0.98, "re-reading the committed index");
@@ -420,33 +451,66 @@ export class StemTapeTransport {
         e.downbeatFrame === Math.round(song.metadata.downbeatSeconds * SAMPLE_RATE);
       if (!matches) throw new Error("the committed index did not match after re-read");
 
-      const hardwareVerified = this.mode.kind === "physical";
+      const physical = this.mode.kind === "physical";
       report(
         "complete",
         1,
-        hardwareVerified
-          ? "Committed and re-read on hardware."
-          : "Mock device: protocol smoke passed. Physical SP-1 upload NOT verified.",
+        physical
+          ? "Committed index re-read from the SP-1 and matched."
+          : "Simulated device: protocol sequence passed. No physical SP-1 was written.",
       );
       return {
         ok: true,
-        detail: hardwareVerified
+        outcome: "committed",
+        detail: physical
           ? "Upload committed and independently re-read on the SP-1."
-          : "Mock protocol smoke passed · physical SP-1 upload not verified",
+          : "Simulated protocol run passed · no physical SP-1 involved",
         writtenBlocks: written,
         verifiedBlocks: verified,
+        totalBlocks,
+        bytesWritten: written * BLOCK_BYTES,
+        sectorCount,
         retries: counter.retries,
-        hardwareVerified,
+        elapsedMs: Date.now() - started,
+        songSha256,
+        indexSha256,
+        stemChecksums,
+        songChecksum,
+        verification: {
+          simulatedVerification: !physical,
+          deviceReadbackVerification: physical,
+          physicalPlaybackVerification: false,
+        },
+        failure: undefined,
       };
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
+      // Only a failure that happened after the magic may have reached the device
+      // is unknown. Everything earlier leaves the previous song authoritative.
+      const outcome: UploadOutcome = this.magicAttempted ? "unknown" : "failed";
       return {
         ok: false,
-        detail,
+        outcome,
+        detail:
+          outcome === "unknown"
+            ? `${detail} — the validity magic may already have been written. Outcome unknown: reconnect to verify.`
+            : `${detail} — no validity magic was sent, so the previously committed song remains active.`,
         writtenBlocks: written,
         verifiedBlocks: verified,
+        totalBlocks,
+        bytesWritten: written * BLOCK_BYTES,
+        sectorCount,
         retries: counter.retries,
-        hardwareVerified: false,
+        elapsedMs: Date.now() - started,
+        songSha256,
+        indexSha256,
+        stemChecksums: [],
+        songChecksum: 0,
+        verification: {
+          simulatedVerification: false,
+          deviceReadbackVerification: false,
+          physicalPlaybackVerification: false,
+        },
         failure,
       };
     }
