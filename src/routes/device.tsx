@@ -172,6 +172,8 @@ function DevicePage() {
     async (name: StemSlotName, file: File) => {
       setFiles((f) => ({ ...f, [name]: file }));
       setSong(null);
+      setSongSha(null);
+      setResult(null);
       const sniff = sniffHeader(await file.slice(0, 65536).arrayBuffer());
       const ac = new AudioContext();
       try {
@@ -220,6 +222,7 @@ function DevicePage() {
         },
       );
       setSong(result);
+      setSongSha(await sha256Hex(encodeSong(result)));
       if (result.lengthSpreadSeconds > 0.001) {
         say(
           `Stem lengths differ by ${fmtSecs(result.lengthSpreadSeconds)} — shorter stems were padded with digital silence to the longest.`,
@@ -367,6 +370,23 @@ function DevicePage() {
   }, []);
 
   const connected = !!songs && !!description;
+  const requiredSectors = song ? sectorsForFrames(song.frames) : 0;
+  const capacityOk = !!description && requiredSectors > 0 && requiredSectors <= description.sectorsPerSong;
+  const anyWriteOccurred = !!result && result.writtenBlocks > 0;
+  const stageIndex = result ? 4 : busy && progress ? 3 : song ? 2 : allFour ? 1 : connected ? 1 : 0;
+  const nextStep = !connected
+    ? "Next: connect a Stem Tape SP-1 over USB."
+    : !allFour
+      ? "Next: add four synchronised stem files."
+      : !song
+        ? "Next: confirm BPM and beat zero, then prepare the song."
+        : !result
+          ? "Next: review the prepared song and start the transfer."
+          : result.outcome === "committed"
+            ? "Next: confirm physical playback on the SP-1."
+            : result.outcome === "unknown"
+              ? "Next: reconnect and resolve the unknown outcome."
+              : "Next: fix the reported problem and retry safely.";
   const stemRows = useMemo(
     () =>
       STEM_ORDER.map((name) => ({
@@ -409,6 +429,35 @@ function DevicePage() {
       </header>
 
       <main className="mx-auto w-full max-w-[860px] px-4 pb-24 pt-6 md:px-8">
+        <nav className="st-section" aria-label="Uploader stages" data-testid="stages">
+          <ol className="flex flex-wrap gap-x-5 gap-y-2 font-mono text-[11px] uppercase tracking-[0.16em]">
+            {STAGE_NAMES.map((name, i) => (
+              <li
+                key={name}
+                data-testid={`stage-${i + 1}`}
+                data-active={stageIndex === i ? "" : undefined}
+                className={stageIndex === i ? "text-[var(--ink)]" : stageIndex > i ? "text-[var(--ink-dim)]" : "text-[var(--ink-faint)]"}
+              >
+                {i + 1} · {name}
+              </li>
+            ))}
+          </ol>
+          <p className="mt-2 font-mono text-[12px] text-[var(--ink-dim)]" data-testid="next-step">{nextStep}</p>
+          <div className="mt-2 flex flex-wrap gap-3 font-mono text-[11px]">
+            {mockMode && (
+              <span className="border border-[var(--bench-line)] px-2 py-[2px] text-[var(--ink)]" data-testid="simulated-badge">
+                SIMULATED DEVICE — nothing is written to hardware
+              </span>
+            )}
+            <span data-testid="write-state" className="text-[var(--ink-dim)]">
+              {anyWriteOccurred ? "a write has occurred on this device" : "no data has been written"}
+            </span>
+            <span data-testid="safe-to-disconnect" className="text-[var(--ink-dim)]">
+              {busy ? "do NOT disconnect: an operation is in progress" : "safe to disconnect"}
+            </span>
+          </div>
+        </nav>
+
         <section className="st-section" data-testid="write-lock">
           <p className="st-section__title">{verdict.writable ? "compatibility negotiated" : "physical uploads locked"}</p>
           <p className="font-mono text-[13px] leading-relaxed text-[var(--ink-dim)]">{verdict.summary}</p>
