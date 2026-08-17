@@ -616,12 +616,30 @@ jobs:
           echo "report written: audit/persistence-audit.md"
 
       - name: STRICT persistence safety gate (fail-closed)
+        # stemtape-player is NOT stemtape-m0: this target's entire purpose is
+        # to durably persist validated 4-stem songs to eMMC, so m0_safety_
+        # gate.py's blanket "no eMMC write capability may be linked" property
+        # is the wrong gate here -- it fails on the exact capability this
+        # milestone requires (confirmed by a real CI run: emmc_write_blocks
+        # legitimately linked). stemtape_player_safety_gate.py is a
+        # DIFFERENT, still strictly fail-closed gate, scoped to this target:
+        # every other forbidden category (internal-flash, NVMC, UICR/
+        # APPROTECT, any OTHER disk/filesystem/NVS subsystem, MCUboot) stays
+        # exactly as forbidden as it is for stemtape-m0, and eMMC writes are
+        # allowed ONLY when proven -- by real call-site/brace-depth tracing,
+        # evidence printed below -- to be either unmodified classic Tape
+        # Looper persistence behavior (matched call-for-call against the
+        # untouched firmware/src/main.c baseline) or newly reachable only
+        # after st_stem_validate_commit(...) has returned ST_STEM_OK.
+        # m0_safety_gate.py itself is untouched and still strictly applied,
+        # unchanged, to the stemtape-m0 job below.
         working-directory: ${{ github.workspace }}/project
         run: |
           set -euo pipefail
           set +e
-          python3 .github/scripts/m0_safety_gate.py \
+          python3 .github/scripts/stemtape_player_safety_gate.py \
             audit/nm.txt audit/objdump-d.txt build-stemtape-player/zephyr/.config \
+            firmware/src/main.c \
             audit/safety-gate.md 2>&1 | tee audit/safety-gate.txt
           gate_rc=${PIPESTATUS[0]}
           set -e
@@ -674,7 +692,11 @@ jobs:
           cp .github/scripts/m0_image_assertions.py \
              .github/scripts/m0_assertions_selftest.py \
              .github/scripts/m0_persistence_audit.py \
-             .github/scripts/m0_safety_gate.py audit/src/workflow/
+             .github/scripts/stemtape_player_safety_gate.py audit/src/workflow/
+          # the classic Tape Looper baseline the safety gate diffs eMMC
+          # write call sites against (see the gate's own module docstring).
+          mkdir -p audit/src/classic-baseline
+          cp firmware/src/main.c audit/src/classic-baseline/
           cp docs/stem-tape-transfer-v1.md docs/stem-tape-transfer-v1-fixtures.json audit/src/docs/ 2>/dev/null || true
           if [ -f audit/stemtape_player.bin ]; then
             stat -c '%n %s bytes' audit/stemtape_player.bin | tee -a "$GITHUB_STEP_SUMMARY"
