@@ -8,6 +8,7 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { SupportButton } from "@/components/SupportButton";
+import { sniffHeader } from "@/audio/format";
 import { Sp1Transport, Sp1Session, BAUD_RATE, type SerialLikePort } from "@/sp1/protocol";
 import {
   parseMeta,
