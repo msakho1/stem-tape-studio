@@ -2432,11 +2432,18 @@ static void xfer_service(void)
 		} else {
 			st_stem_commit_t sc;
 			bool readable = true;
-			enum { ZBURST = 16u };     /* 16 blocks (8 KB) per read-back burst --
-						     * matches this file's own 8KB internal-page
-						     * alignment note on TRACK_BLOCKS, not a single-
-						     * block loop (which would be needlessly slow
-						     * for a real song's worth of blocks). */
+			/* STEM TAPE: 4 blocks (2 KB) per read-back burst -- not a
+			 * single-block loop (needlessly slow for a real song's
+			 * worth of blocks), but also deliberately NOT the
+			 * originally-chosen 16 blocks (8 KB): this nRF52840
+			 * target's RAM is tight (the classic looper's own
+			 * pring/g_rring ring buffers already claim most of it),
+			 * and an 8 KB static burst buffer here overflowed RAM by
+			 * 1620 bytes in CI (region `RAM' overflowed by 1620
+			 * bytes) -- a real, measured constraint, not a guess. 4
+			 * blocks keeps the burst read meaningfully faster than
+			 * single-block while comfortably fitting. */
+			enum { ZBURST = 4u };
 			static uint8_t zbuf[ZBURST * EMMC_BLOCK_SIZE];
 
 			sc.present_mask = 0;
