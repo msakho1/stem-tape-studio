@@ -84,7 +84,19 @@ FORBIDDEN_SYMBOLS = [
      r"NVMC_CONFIG_WEN|nvmc_"),
     ("UICR write / access protection",
      r"NRF_UICR->\s*\w+\s*=|UICR->APPROTECT|APPROTECT\s*=|"
-     r"nrf_uicr_write|CTRLAP|ctrl_ap|DISABLE_APPROTECT|ENABLE_APPROTECT"),
+     # (?<!pin) excludes exactly one confirmed false positive, found by a
+     # real CI run of this gate: Zephyr's own generic pinctrl subsystem
+     # function `pinctrl_apply_state()` (drivers/pinctrl/pinctrl_nrf.c,
+     # linked in by CONFIG_PINCTRL=y for ADC/UART/etc. pin muxing on every
+     # target that uses a devicetree &pinctrl node -- nothing to do with
+     # UICR or the Cortex-M CTRL-AP debug port) happens to contain the
+     # literal substring "ctrl_ap" purely by coincidence: "pin" + "CTRL_AP"
+     # + "ply_state". Evidence: nm.txt line
+     # "00034af6 0000001e t pinctrl_apply_state.isra.0". The lookbehind
+     # narrowly excludes only this one collision -- CTRLAP (no underscore)
+     # and every other ctrl_ap-shaped identifier not immediately preceded
+     # by "pin" still fails the gate exactly as before.
+     r"nrf_uicr_write|CTRLAP|(?<!pin)ctrl_ap|DISABLE_APPROTECT|ENABLE_APPROTECT"),
     ("non-driver eMMC write / other disk / SD subsystem write",
      r"disk_access_write|disk_access_ioctl|sdmmc_|"
      r"\bemmc_(?!write_blocks\b)\w*write\w*\b|"
