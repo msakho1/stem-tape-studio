@@ -21,8 +21,8 @@ import { parseCapabilities, readOnlyVerdict, type CompatibilityVerdict } from "@
 import { StemTapeTransport, type DeviceSongSlot, type UploadProgress, type UploadResult } from "@/sp1/transport";
 import { buildReceipt } from "@/sp1/receipt";
 import {
+  interruptedWording,
   outcomeWording,
-  resolveWording,
   simulatedRowWording,
   successLogWording,
   writeStateWording,
