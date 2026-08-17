@@ -6,4 +6,10 @@ project(stemtape-m0)
 # one the SP-1 looper application uses.
 include(${ZEPHYR_BASE}/samples/subsys/usb/common/common.cmake)
 
-target_sources(app PRIVATE src/main.c)
+target_sources(app PRIVATE
+	src/main.c
+	src/led_duty.c
+	src/led_frame.c
+	src/led_midi.c
+	src/led_render.c
+)

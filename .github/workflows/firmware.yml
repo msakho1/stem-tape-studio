@@ -245,6 +245,24 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: LED Feedback Protocol v1 host tests (no Zephyr/nRF toolchain)
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          cc -std=c11 -Wall -Wextra -Ifirmware/stemtape/src \
+            firmware/stemtape/src/led_duty.c \
+            firmware/stemtape/src/led_frame.c \
+            firmware/stemtape/src/led_midi.c \
+            firmware/stemtape/tests/test_led.c \
+            -o audit/test_led
+          ./audit/test_led | tee audit/led-selftest.txt
+          {
+            echo '### M0 LED Feedback Protocol v1 host tests'
+            echo '```text'
+            grep -E '^\[|^LED SELF-TEST' audit/led-selftest.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Image assertions (origin, bounds, storage, UICR, entry, vectors, size, BIN identity)
         working-directory: ${{ github.workspace }}/project
         run: |
@@ -306,7 +324,7 @@ jobs:
           cp "$B/.config" audit/config.txt
           cp build-stemtape/CMakeCache.txt audit/
           cp build-stemtape/compile_commands.json audit/ 2>/dev/null || true
-          mkdir -p audit/src/stemtape audit/src/board audit/src/workflow
+          mkdir -p audit/src/stemtape audit/src/board audit/src/workflow audit/src/docs
           cp -r firmware/stemtape/. audit/src/stemtape/
           cp -r firmware/boards/teenageengineering/stem_player/. audit/src/board/
           cp firmware/west.yml audit/src/
@@ -315,6 +333,7 @@ jobs:
              .github/scripts/m0_assertions_selftest.py \
              .github/scripts/m0_persistence_audit.py \
              .github/scripts/m0_safety_gate.py audit/src/workflow/
+          cp docs/stem-tape-led-feedback-v1.md audit/src/docs/ 2>/dev/null || true
           stat -c '%n %s bytes' audit/stemtape_m0.bin | tee -a "$GITHUB_STEP_SUMMARY"
           cat audit/sha256.txt | tee -a "$GITHUB_STEP_SUMMARY"
 

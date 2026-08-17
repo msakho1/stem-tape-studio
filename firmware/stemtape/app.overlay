@@ -1,10 +1,107 @@
 #include <zephyr/dt-bindings/adc/adc.h>
 #include <zephyr/dt-bindings/adc/nrf-saadc.h>
+#include <zephyr/dt-bindings/pinctrl/nrf-pinctrl.h>
+#include <zephyr/dt-bindings/pwm/pwm.h>
 
 /* M0 has no audio path: disable the board's UAC2 speaker function so the
  * device enumerates as MIDI + CDC only. */
 &uac2_speaker {
 	status = "disabled";
+};
+
+/* ---- LED Feedback Protocol v1: hardware PWM2/PWM3 physical LED rows -----
+ * The Tape Looper board file deliberately omits PWM LED nodes ("PWM owning
+ * those pins would fight" its raw-GPIO row driver) — see
+ * boards/teenageengineering/stem_player/stem_player.dts. M0 is a different
+ * app target that never builds the looper's GPIO LED code, so it is safe to
+ * enable PWM2/PWM3 here, at the app-overlay level only; the Tape Looper
+ * target and its board usage are untouched.
+ *
+ * Pin map + PWM2 (track row) / PWM3 (playback row) split + 1024 us period is
+ * the proven layout from bnjreece/feldd-sp1-firmware's app.overlay
+ * (MIT-licensed, hardware-tested on this same board), cross-checked against
+ * timknapen/SP-1-dev's stemplayer_pins.h. See led_protocol.h for the full
+ * index/GPIO table and citation. Channel order below MUST match
+ * led_render.c's led_pwm[] array index for index. */
+&pinctrl {
+	stemtape_pwm2_default: stemtape_pwm2_default {
+		group1 {
+			psels = <NRF_PSEL(PWM_OUT0, 0, 29)>,  /* Track 1 P0.29 */
+				<NRF_PSEL(PWM_OUT1, 0, 26)>,  /* Track 2 P0.26 */
+				<NRF_PSEL(PWM_OUT2, 1, 15)>,  /* Track 3 P1.15 */
+				<NRF_PSEL(PWM_OUT3, 1, 14)>;  /* Track 4 P1.14 */
+		};
+	};
+	stemtape_pwm2_sleep: stemtape_pwm2_sleep {
+		group1 {
+			psels = <NRF_PSEL(PWM_OUT0, 0, 29)>, <NRF_PSEL(PWM_OUT1, 0, 26)>,
+				<NRF_PSEL(PWM_OUT2, 1, 15)>, <NRF_PSEL(PWM_OUT3, 1, 14)>;
+			low-power-enable;
+		};
+	};
+	stemtape_pwm3_default: stemtape_pwm3_default {
+		group1 {
+			psels = <NRF_PSEL(PWM_OUT0, 0, 1)>,   /* Playback 1 P0.01 */
+				<NRF_PSEL(PWM_OUT1, 1, 12)>,  /* Playback 2 P1.12 */
+				<NRF_PSEL(PWM_OUT2, 0, 0)>,   /* Playback 3 P0.00 */
+				<NRF_PSEL(PWM_OUT3, 1, 13)>;  /* Playback 4 P1.13 */
+		};
+	};
+	stemtape_pwm3_sleep: stemtape_pwm3_sleep {
+		group1 {
+			psels = <NRF_PSEL(PWM_OUT0, 0, 1)>, <NRF_PSEL(PWM_OUT1, 1, 12)>,
+				<NRF_PSEL(PWM_OUT2, 0, 0)>, <NRF_PSEL(PWM_OUT3, 1, 13)>;
+			low-power-enable;
+		};
+	};
+};
+
+&pwm2 {
+	status = "okay";
+	pinctrl-0 = <&stemtape_pwm2_default>;
+	pinctrl-1 = <&stemtape_pwm2_sleep>;
+	pinctrl-names = "default", "sleep";
+};
+&pwm3 {
+	status = "okay";
+	pinctrl-0 = <&stemtape_pwm3_default>;
+	pinctrl-1 = <&stemtape_pwm3_sleep>;
+	pinctrl-names = "default", "sleep";
+};
+
+/ {
+	/* pwm-leds container (gold-BSP / feldd pattern): gives each child's
+	 * `pwms` property the binding PWM_DT_SPEC_GET() needs. led_render.c
+	 * drives the channels directly via pwm_set_pulse_dt(), so
+	 * CONFIG_LED_PWM is intentionally NOT enabled — this node exists only
+	 * to make the eight devicetree handles resolvable. */
+	stemtape_leds: stemtape-leds {
+		compatible = "pwm-leds";
+		stemtape_led_t1: stemtape_led_t1 {
+			pwms = <&pwm2 0 PWM_USEC(1024) PWM_POLARITY_NORMAL>; /* Track 1 P0.29 */
+		};
+		stemtape_led_t2: stemtape_led_t2 {
+			pwms = <&pwm2 1 PWM_USEC(1024) PWM_POLARITY_NORMAL>; /* Track 2 P0.26 */
+		};
+		stemtape_led_t3: stemtape_led_t3 {
+			pwms = <&pwm2 2 PWM_USEC(1024) PWM_POLARITY_NORMAL>; /* Track 3 P1.15 */
+		};
+		stemtape_led_t4: stemtape_led_t4 {
+			pwms = <&pwm2 3 PWM_USEC(1024) PWM_POLARITY_NORMAL>; /* Track 4 P1.14 */
+		};
+		stemtape_led_p1: stemtape_led_p1 {
+			pwms = <&pwm3 0 PWM_USEC(1024) PWM_POLARITY_NORMAL>; /* Playback 1 P0.01 */
+		};
+		stemtape_led_p2: stemtape_led_p2 {
+			pwms = <&pwm3 1 PWM_USEC(1024) PWM_POLARITY_NORMAL>; /* Playback 2 P1.12 */
+		};
+		stemtape_led_p3: stemtape_led_p3 {
+			pwms = <&pwm3 2 PWM_USEC(1024) PWM_POLARITY_NORMAL>; /* Playback 3 P0.00 */
+		};
+		stemtape_led_p4: stemtape_led_p4 {
+			pwms = <&pwm3 3 PWM_USEC(1024) PWM_POLARITY_NORMAL>; /* Playback 4 P1.13 */
+		};
+	};
 };
 
 / {

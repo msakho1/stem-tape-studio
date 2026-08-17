@@ -4,14 +4,19 @@ Raw USB-MIDI control surface for the Teenage Engineering × Kanye West SP-1.
 
 The device enumerates as a **class-compliant USB MIDI device** (USB MIDI 2.0
 class, MIDI 1.0 channel-voice messages) plus the usual CDC ACM console. It
-transmits **physical state only**. There is no looper, no chord detection, no
-tap/hold discrimination and no musical LED feedback on the device: the host
-(the Stem Tape web app) owns all interpretation.
+transmits **physical state only**. There is no looper, no chord detection and
+no tap/hold discrimination on the device. As of v1.1.0 it also *displays*
+physical LED brightness — see "LED Feedback Protocol v1" below — but it never
+decides *what* to display: blink/breathe/pulse/chase/precedence semantics are
+resolved entirely by the host (the Stem Tape web app), which owns all
+interpretation and sends an already-resolved brightness frame.
 
 ## Reused unchanged from the SP-1 Tape Looper firmware (`firmware/`)
 
 - board definition `boards/teenageengineering/stem_player`
-- LED pin map + always-dim soft-PWM renderer (zero-latency TIMER3 ISR)
+- LED pin map and electrical brightness ceilings (52 µs track / 66 µs
+  playback) — the *renderer* itself is no longer the looper's soft-PWM
+  TIMER3 ISR; see "LED Feedback Protocol v1" below
 - BTN_COM ladder rail, 2× oversampled ADC read, verified voltage bands
 - fader ADC channels and ±8-count deadband
 - power button P0.27, 2.5 s hold-to-power-off with LED countdown, SYSTEM_OFF
@@ -106,6 +111,22 @@ automatic flashing.
 
 Two quick flashes of all four track LEDs (90 ms on / 110 ms off) distinguish
 Stem Tape M0 from the stock looper at power-on.
+
+## LED Feedback Protocol v1 (v1.1.0)
+
+Eight independently dimmable physical LEDs (4 track + 4 playback/side),
+driven by hardware PWM2/PWM3 — no software-PWM loop, no LED ISR. The host
+stages and atomically commits an 8-value 0–127 brightness frame over MIDI
+channel 16 (existing channel-1 surface controls are untouched) under a
+1000 ms lease; a stale frame is cleared automatically if the host goes
+away. Full protocol table, sequence/wrap rules, brightness-to-duty mapping
+and a TypeScript constants block for the web team:
+**[`docs/stem-tape-led-feedback-v1.md`](../../docs/stem-tape-led-feedback-v1.md)**.
+
+Safety precedence is unconditional: DFU escape, fatal/reset, the
+FUNCTION power-off countdown and the boot signature above always override
+any host frame. See `firmware/stemtape/src/led_protocol.h`,
+`led_frame.h`/`.c`, `led_midi.h`/`.c` and `led_render.h`/`.c`.
 
 ## Building
 
