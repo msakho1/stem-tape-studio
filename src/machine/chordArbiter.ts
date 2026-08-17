@@ -473,6 +473,9 @@ export class ChordArbiter {
   private onCancel(control: Control) {
     // Precedence 1 — safety. A lost pointer releases every claim on it.
     this.down.delete(control);
+    // Arbitration ownership is momentary: with nothing held, no gesture owns
+    // arbitration and the diagnostic must report idle, not the last winner.
+    if (this.down.size === 0) this.owner = null;
     this.holdFired.delete(control);
     this.clearMacro(control);
     this.clearSoloLink(control);
@@ -487,6 +490,9 @@ export class ChordArbiter {
   private onUp(control: Control, t: number) {
     const downAt = this.down.get(control);
     this.down.delete(control);
+    // Arbitration ownership is momentary: with nothing held, no gesture owns
+    // arbitration and the diagnostic must report idle, not the last winner.
+    if (this.down.size === 0) this.owner = null;
     const { fxOverlay, activeStem } = this.view();
     const heldMs = downAt == null ? 0 : t - downAt;
 
