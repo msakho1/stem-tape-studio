@@ -262,7 +262,7 @@ describe("Stem Tape transport upload", () => {
     const song = await prep([FRAMES_PER_SECTOR * 2]);
     const out = await t.uploadSong({ slot: 0, song });
     expect(out.ok).toBe(false);
-    expect(out.detail).toMatch(/logical sectors/);
+    expect(out.detail).toMatch(/sufficient capacity/);
   });
 
   it("deletes a committed slot and bumps the generation", async () => {
