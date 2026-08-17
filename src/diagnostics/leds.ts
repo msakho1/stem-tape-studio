@@ -111,6 +111,31 @@ export interface LedInspectionRow {
   domClass: string | null;
   mismatch: string | null;
   divergence: DivergenceCategory | null;
+
+  // ---- the four strictly separate columns --------------------------------
+  /** 1. Expected contract state. */
+  columnExpected: string;
+  /** 2. Web LOGICAL LED state (reducer-derived). */
+  columnWebLogical: string;
+  /** 3. Rendered DOM/CSS state. NEVER labelled physical. */
+  columnDom: string;
+  /** 4. Last MIDI frame transmitted / firmware-reported value. */
+  columnTransmitted: string;
+  /**
+   * Stays `unknown` unless a human records a physical observation or firmware
+   * reports its committed frame. Even that proves PWM command state, not
+   * human-visible illumination.
+   */
+  physicalObservation: "unknown" | "firmware-reported (PWM command, not illumination)" | "human-observed";
+}
+
+export interface TransmittedLedView {
+  /** Eight MIDI values last transmitted by the host, or null when none. */
+  transmitted: number[] | null;
+  /** Eight values the firmware reported as committed over CDC, if any. */
+  firmwareReported: number[] | null;
+  /** Human-recorded physical observations, per physical index. */
+  humanObserved?: Partial<Record<number, string>>;
 }
 
 const SOURCE: Record<string, string> = {
@@ -172,6 +197,7 @@ function inspectOne(
   expected: LedFrame,
   byId: Map<LedId, DomLedProbe>,
   lostTo: Partial<Record<LedId, string>>,
+  tx: TransmittedLedView = { transmitted: null, firmwareReported: null },
 ): LedInspectionRow {
   const a: LedState = actual[id];
   const e: LedState = expected[id];
@@ -194,7 +220,22 @@ function inspectOne(
   }
   const physical = (PHYSICAL_LED_IDS as readonly string[]).includes(id);
   const m0Driven = (M0_IMPLEMENTED_LED_OUTPUTS as readonly string[]).includes(id);
+  const physIndex = PHYSICAL_LED_IDS.indexOf(id as PhysicalLedId);
+  const sent = physical && physIndex >= 0 ? (tx.transmitted?.[physIndex] ?? null) : null;
+  const reported = physical && physIndex >= 0 ? (tx.firmwareReported?.[physIndex] ?? null) : null;
+  const human = physical && physIndex >= 0 ? (tx.humanObserved?.[physIndex] ?? null) : null;
   return {
+    columnExpected: `${modeOf(e.pattern)} (${e.pattern})`,
+    columnWebLogical: `${modeOf(a.pattern)} (${a.pattern}) · owner ${a.reason}`,
+    columnDom: rendered ? `class ${rendered}${probe?.animationName ? ` · anim ${probe.animationName}` : ""}` : "not rendered / not probed",
+    columnTransmitted: physical
+      ? `${sent === null ? "not transmitted" : `midi ${sent}`}${reported === null ? "" : ` · firmware committed ${reported}`}`
+      : "web-only indicator — never transmitted",
+    physicalObservation: human
+      ? "human-observed"
+      : reported !== null
+        ? "firmware-reported (PWM command, not illumination)"
+        : "unknown",
     id,
     index,
     physical,
@@ -234,10 +275,11 @@ export function inspectPhysicalLeds(
   expected: LedFrame,
   dom: DomLedProbe[],
   lostTo: Partial<Record<LedId, string>> = {},
+  tx: TransmittedLedView = { transmitted: null, firmwareReported: null },
 ): LedInspectionRow[] {
   const byId = new Map(dom.map((d) => [d.id, d]));
   return PHYSICAL_LED_IDS.map((id, index) =>
-    inspectOne(id as LedId, index, actual, expected, byId, lostTo),
+    inspectOne(id as LedId, index, actual, expected, byId, lostTo, tx),
   );
 }
 
