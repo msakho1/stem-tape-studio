@@ -8,13 +8,19 @@ include(${ZEPHYR_BASE}/samples/subsys/usb/common/common.cmake)
 # Looper (firmware/src/main.c, firmware/src/sp1_emmc.c) -- see main.c's
 # provenance banner.
 #
-# STEM TAPE PHASE 1 (safe read-only player): src/st_crc32.c and
-# src/st_stem_validate.c -- the validated-commit CRC/gate modules -- are NOT
-# linked into this target. Phase 1 has no write path for them to gate (the
-# 'Z' verb is removed; 'W'/'F'/'X' are all read-only-safe -- see main.c).
-# They remain real, host-tested modules (see tests/test_stemtape_player.c)
-# and return to this target's link in Phase 2, behind a real, validated
-# write path -- they are NOT presented as linked/production code until then.
+# GATE 1: src/st_midi_queue.c is the pure, host-testable USB-MIDI receive
+# decode + bounded event queue (see st_midi_queue.h). main.c's real
+# rx_packet_cb is a thin adapter that calls st_midi_decode_ump32() on the
+# incoming UMP word -- the SAME function tests/test_stemtape_player.c
+# exercises on the host -- so this is genuinely linked, not a parallel
+# unwired module.
+#
+# src/st_crc32.c and src/st_stem_validate.c -- the validated-commit
+# CRC/gate modules -- are NOT YET linked into this target; Gate 1 (USB
+# audio + MIDI) has no write path for them to gate. 'W'/'F'/'X' remain
+# read-only-safe (see main.c). They return to this target's link in
+# Gate 2 (real song transfer), behind a real, validated write path -- they
+# are NOT presented as linked/production code until then.
 #
 # NOT included here (compiled only into tests/test_stemtape_player.c's host
 # test binary, not into this firmware target): led_duty.c/led_render.c/
@@ -29,6 +35,7 @@ include(${ZEPHYR_BASE}/samples/subsys/usb/common/common.cmake)
 target_sources(app PRIVATE
 	src/main.c
 	src/sp1_emmc.c
+	src/st_midi_queue.c
 )
 
 # See firmware/CMakeLists.txt's identical note: the batchbuf/meta-block code

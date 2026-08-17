@@ -400,15 +400,17 @@ jobs:
           if-no-files-found: error
 
   stemtape-player:
-    # Stem Tape Player -- PHASE 1: a safe, read-only four-stem player derived
-    # from the golden Tape Looper (firmware/stemtape_player). Same board/
-    # Zephyr revision/SDK as the other two targets. No Zephyr patch needed:
-    # this phase has no UAC2 audio-input class at all (CONFIG_USBD_AUDIO2_
-    # CLASS=n), so the UAC2 Windows-feedback patch the `build` job applies
-    # is not required here. Storage fails closed -- no format-fresh, no
-    # metadata/settings persistence, no raw 'W' write, no recording -- see
-    # main.c's PHASE 1 comments for the exhaustive removal list. Phase 2
-    # reintroduces recording and a validated write path.
+    # Stem Tape Player -- GATE 1: USB audio PLAYBACK (not recording) restored
+    # via UAC2, plus class-compliant incoming USB-MIDI 2.0 for KO II pad cue
+    # control, on top of the safe, read-only four-stem player derived from
+    # the golden Tape Looper (firmware/stemtape_player). Same board/Zephyr
+    # revision/SDK as the other two targets. The UAC2 Windows-feedback patch
+    # the `build` job applies is required again here (CONFIG_USBD_AUDIO2_
+    # CLASS=y). Storage still fails closed -- no format-fresh, no metadata/
+    # settings persistence, no raw 'W' write, no recording, no route from
+    # USB audio or MIDI into eMMC -- see main.c's comments and the strict
+    # persistence safety gate below for the exhaustive removal list. Gate 2
+    # reintroduces a real, validated 4-stem song transfer write path.
     runs-on: ubuntu-latest
     steps:
       - name: Checkout project
@@ -437,6 +439,7 @@ jobs:
           test -f firmware/stemtape_player/CMakeLists.txt
           test -f firmware/stemtape_player/src/main.c
           test -f firmware/stemtape_player/app.overlay
+          test -f firmware/patches/uac2-windows-fs-feedback.patch
           test -f firmware/west.yml
           test -d firmware/boards/teenageengineering/stem_player
           west topdir
@@ -458,6 +461,17 @@ jobs:
           cp firmware/west.yml                audit/west.yml
           ( cd zephyr && git rev-parse HEAD && cat VERSION ) > audit/zephyr-revision.txt
           west list -f '{name} {path} {revision} {url}' > audit/west-modules.txt
+
+      - name: Apply documented Zephyr patch (UAC2 Windows FS-feedback workaround)
+        # GATE 1 restores the UAC2 playback class to this target (see
+        # prj.conf: CONFIG_USBD_AUDIO2_CLASS=y), so the same patch the
+        # golden `build` job applies to its Zephyr tree is required here too
+        # -- main.c's feedback regulator references uac2_fs_fb_windows_fmt,
+        # exactly like the classic looper.
+        working-directory: ${{ github.workspace }}/project/zephyr
+        run: |
+          set -eux
+          git apply --verbose ../firmware/patches/uac2-windows-fs-feedback.patch
 
       - name: Build (west build -p always -b stem_player firmware/stemtape_player)
         working-directory: ${{ github.workspace }}/project
@@ -575,6 +589,7 @@ jobs:
             firmware/stemtape_player/src/st_gesture.c \
             firmware/stemtape_player/src/st_scrub.c \
             firmware/stemtape_player/src/st_led_pattern.c \
+            firmware/stemtape_player/src/st_midi_queue.c \
             firmware/stemtape_player/tests/test_stemtape_player.c \
             -lm -o audit/test_stemtape_player
           ./audit/test_stemtape_player | tail -c 4000 | tee audit/stemtape-player-selftest.txt
@@ -640,6 +655,19 @@ jobs:
               echo "present: $1"
             fi
           }
+          # Same as check(), but for required DATA/BSS objects (a ring
+          # buffer, a memory slab, a `const struct device *const` pointer)
+          # rather than functions -- nm marks these with a type letter
+          # other than t/T (e.g. b/B/d/D/r/R), so check()'s text-only
+          # pattern would never match them even when genuinely linked.
+          check_any() {
+            if ! grep -qE " [a-zA-Z] ${1}\$" audit/nm.txt; then
+              echo "MISSING required linked symbol: $1" >&2
+              missing=1
+            else
+              echo "present: $1"
+            fi
+          }
           # storage read path (write is checked ABSENT below)
           check emmc_read_blocks
           check emmc_cache_flush
@@ -654,11 +682,30 @@ jobs:
           # MIDI clock output thread
           check midi_thread
           check main
+          # GATE 1: USB audio PLAYBACK path (received audio -> normal output,
+          # never storage) -- real callbacks/buffer genuinely linked, not
+          # just a symbol name: see the USB descriptor assertion step below
+          # for interface/endpoint-level proof.
+          check_any usb_audio_ring
+          check_any uac2_rx_slab
+          check_any uac2_dev
+          check uac2_terminal_update_cb
+          check uac2_data_recv_cb
+          # GATE 1: incoming USB-MIDI receive path (KO II cue control)
+          check_any midi_dev
+          check midi_rx_packet_cb
+          check midi_ready_cb
+          check midi_service
+          check st_midi_decode_ump32
+          check st_midi_queue_push
 
-          # PHASE 1 REQUIRED-ABSENT: any of these appearing in the final ELF
-          # (any nm symbol type -- function OR data/bss) means recording,
-          # UAC2 audio input, or a raw persistent-write capability leaked
-          # back into the link, which this phase must never allow.
+          # REQUIRED-ABSENT: any of these appearing in the final ELF (any nm
+          # symbol type -- function OR data/bss) means recording, overdub,
+          # a live capture-to-storage path, or a raw persistent-write
+          # capability outside the validated commit path leaked back into
+          # the link, which this target must never allow. Restoring UAC2
+          # playback and USB-MIDI receive (GATE 1) is explicitly NOT
+          # recording -- these stay forbidden exactly as in Phase 1.
           absent() {
             if grep -qE "[[:space:]]${1}\$" audit/nm.txt; then
               echo "FORBIDDEN symbol present in final ELF: $1" >&2
@@ -668,19 +715,17 @@ jobs:
             fi
           }
           # eMMC/index write primitives -- meta_write_blocks() is removed
-          # from src/main.c entirely (no definition left to link); prefer
-          # emmc_write_blocks() (defined in sp1_emmc.c, the shared driver)
-          # to be dead-code-eliminated for having zero remaining callers.
-          absent emmc_write_blocks
+          # from src/main.c entirely (no definition left to link); this
+          # gate does not forbid emmc_write_blocks() itself (Gate 2 will
+          # legitimately need it for the validated song-commit path) --
+          # see the STRICT persistence safety gate step below, which proves
+          # every eMMC write call site instead of forbidding the symbol.
           absent meta_write_blocks
-          # UAC2 audio input + its buffers
-          absent usb_audio_ring
-          absent uac2_rx_slab
-          absent uac2_dev
-          absent uac2_terminal_update_cb
-          absent uac2_data_recv_cb
-          # the live-input record ring (32 KB) -- removed from src/main.c
+          # the live-input record ring (32 KB) and any recording/overdub
+          # state -- must never come back, with or without USB audio.
           absent g_rring
+          absent g_record_arm
+          absent g_overdub
 
           if [ "$missing" -ne 0 ]; then
             echo "one or more required runtime symbols are missing, or one or more forbidden symbols are present, in the final ELF" >&2
@@ -698,14 +743,6 @@ jobs:
           CFG=build-stemtape-player/zephyr/.config
           test -f "$CFG"
           fail=0
-          expect_unset() {
-            if grep -qE "^$1=y\$" "$CFG"; then
-              echo "::error::$1=y in the effective config (must be disabled in Phase 1)"
-              fail=1
-            else
-              echo "confirmed disabled: $1"
-            fi
-          }
           expect_set() {
             if ! grep -qE "^$1=y\$" "$CFG"; then
               echo "::error::$1 is not =y in the effective config (required)"
@@ -714,7 +751,8 @@ jobs:
               echo "confirmed enabled: $1"
             fi
           }
-          expect_unset CONFIG_USBD_AUDIO2_CLASS
+          expect_set   CONFIG_USBD_AUDIO2_CLASS
+          expect_set   CONFIG_USBD_MIDI2_CLASS
           expect_set   CONFIG_USBD_CDC_ACM_CLASS
           expect_set   CONFIG_I2S
           expect_set   CONFIG_ADC
@@ -723,7 +761,28 @@ jobs:
           if [ "$fail" -ne 0 ]; then
             exit 1
           fi
-          echo "effective configuration matches the Phase 1 requirements"
+          echo "effective configuration matches the Gate 1 requirements"
+
+      - name: USB descriptor assertion (fail-closed)
+        # A symbol name alone is not proof: this proves the actual
+        # descriptor material (not just callback glue) and its enabling
+        # devicetree topology are compiled into the final image. See
+        # .github/scripts/stemtape_player_usb_descriptor_assertions.py's
+        # own docstring for exactly what's checked and why.
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/stemtape_player_usb_descriptor_assertions.py \
+            audit/nm.txt \
+            build-stemtape-player/zephyr/zephyr.elf \
+            build-stemtape-player/zephyr/zephyr.dts \
+            audit/usb-descriptor-assertion.md | tee audit/usb-descriptor-assertion.txt
+          {
+            echo '### Stem Tape Player USB descriptor assertion'
+            echo '```text'
+            cat audit/usb-descriptor-assertion.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Persistent-memory and power audit report (descriptive)
         working-directory: ${{ github.workspace }}/project
@@ -810,7 +869,8 @@ jobs:
           cp .github/scripts/m0_image_assertions.py \
              .github/scripts/m0_assertions_selftest.py \
              .github/scripts/m0_persistence_audit.py \
-             .github/scripts/stemtape_player_safety_gate.py audit/src/workflow/
+             .github/scripts/stemtape_player_safety_gate.py \
+             .github/scripts/stemtape_player_usb_descriptor_assertions.py audit/src/workflow/
           # the classic Tape Looper baseline the safety gate diffs eMMC
           # write call sites against (see the gate's own module docstring).
           mkdir -p audit/src/classic-baseline

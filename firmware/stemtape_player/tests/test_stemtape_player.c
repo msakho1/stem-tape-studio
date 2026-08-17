@@ -1,15 +1,20 @@
 /*
  * test_stemtape_player.c — Stem Tape standalone player: host-runnable tests
  * for every PURE module (st_crc32, st_transfer, st_storage_layout,
- * st_gesture, st_scrub, st_led_pattern).
+ * st_gesture, st_scrub, st_led_pattern, st_midi_queue).
  *
  *     cc -std=c11 -Wall -Wextra -I../src \
  *        ../src/st_crc32.c ../src/st_transfer.c ../src/st_gesture.c \
- *        ../src/st_scrub.c ../src/st_led_pattern.c test_stemtape_player.c \
- *        -lm -o test_stemtape_player && ./test_stemtape_player
+ *        ../src/st_scrub.c ../src/st_led_pattern.c ../src/st_midi_queue.c \
+ *        test_stemtape_player.c -lm -o test_stemtape_player && \
+ *        ./test_stemtape_player
  *
  * Same self-checking pattern as firmware/stemtape/tests/test_led.c: [OK]/
  * [FAIL] per assertion, nonzero exit on any failure.
+ *
+ * GATE 1's st_midi_queue tests (test_midi_*) drive the SAME two functions
+ * (st_midi_decode_ump32(), st_midi_queue_push()/pop()) that main.c's real
+ * USB-MIDI rx_packet_cb calls -- see st_midi_queue.h's header comment.
  */
 
 #include <math.h>
@@ -20,6 +25,7 @@
 #include "st_fx_catalog.h"
 #include "st_gesture.h"
 #include "st_led_pattern.h"
+#include "st_midi_queue.h"
 #include "st_scrub.h"
 #include "st_sector_codec.h"
 #include "st_stem_validate.h"
@@ -1320,6 +1326,314 @@ static void test_stem_validate_fixture_corrupt_set_rejected(void)
 	      "real st_crc32_compute(), is rejected by the real st_stem_validate_commit()");
 }
 
+/* ========================================================================
+ * st_midi_queue — GATE 1: incoming USB-MIDI (Universal MIDI Packet) decode
+ * + bounded event queue, exercised the SAME way main.c's real rx_packet_cb
+ * does (st_midi_decode_ump32() on ump.data[0], then st_midi_queue_push()),
+ * per the directive's "inject real USB MIDI packets into the same parser
+ * and event queue used by firmware" requirement.
+ * ======================================================================== */
+
+/* Builds one raw 32-bit UMP word, bit-for-bit the way a real class-
+ * compliant MIDI 1.0 Channel Voice message arrives packed in UMP (Zephyr
+ * v4.3.0 <zephyr/audio/midi.h> UMP_MT/UMP_MIDI_COMMAND/UMP_MIDI_CHANNEL/
+ * UMP_MIDI1_P1/UMP_MIDI1_P2 macros) -- see st_midi_queue.h's header
+ * comment. `group` is a UMP Group (0-15); st_midi_decode_ump32() does not
+ * use it (this codebase has exactly one incoming MIDI cable/group), so
+ * tests exercise a couple of different group values to prove that's true
+ * rather than assumed. */
+static uint32_t mk_ump32(uint8_t group, uint8_t command, uint8_t channel,
+			  uint8_t p1, uint8_t p2)
+{
+	uint32_t mt = 0x02u; /* UMP_MT_MIDI1_CHANNEL_VOICE */
+	uint32_t status = (uint32_t)((command & 0x0Fu) << 4) | (channel & 0x0Fu);
+
+	return (mt << 28) | ((uint32_t)(group & 0x0Fu) << 24) |
+	       (status << 16) | ((uint32_t)(p1 & 0x7Fu) << 8) | (uint32_t)(p2 & 0x7Fu);
+}
+
+static void test_midi_decode_note_on(void)
+{
+	st_midi_event_t ev;
+	uint32_t word = mk_ump32(0, 0x9u, 3, 60, 100);
+
+	CHECK(st_midi_decode_ump32(word, &ev) == true,
+	      "a real UMP Note On word decodes");
+	CHECK(ev.kind == ST_MIDI_EVT_NOTE_ON, "decoded kind is NOTE_ON");
+	CHECK(ev.channel == 3, "decoded channel matches the packed value (3)");
+	CHECK(ev.note == 60, "decoded note matches the packed value (60)");
+	CHECK(ev.velocity == 100, "decoded velocity matches the packed value (100)");
+}
+
+static void test_midi_decode_note_on_velocity_zero_is_note_off(void)
+{
+	st_midi_event_t ev;
+	/* Per docs/FIRMWARE_CONTRACT_V1.md section 6: a Note On with velocity
+	 * 0 normalizes to Note Off -- a real, common MIDI 1.0 running-status
+	 * convention many controllers (and bridges) use in place of an
+	 * explicit Note Off. */
+	uint32_t word = mk_ump32(0, 0x9u, 9, 42, 0);
+
+	CHECK(st_midi_decode_ump32(word, &ev) == true,
+	      "a Note On with velocity 0 still decodes");
+	CHECK(ev.kind == ST_MIDI_EVT_NOTE_OFF,
+	      "velocity-0 Note On normalizes to NOTE_OFF");
+	CHECK(ev.channel == 9, "channel is preserved across the normalization");
+	CHECK(ev.note == 42, "note number is preserved across the normalization");
+}
+
+static void test_midi_decode_explicit_note_off(void)
+{
+	st_midi_event_t ev;
+	uint32_t word = mk_ump32(0, 0x8u, 0, 127, 64);
+
+	CHECK(st_midi_decode_ump32(word, &ev) == true,
+	      "an explicit UMP Note Off word decodes");
+	CHECK(ev.kind == ST_MIDI_EVT_NOTE_OFF, "decoded kind is NOTE_OFF");
+	CHECK(ev.channel == 0, "decoded channel matches the packed value (0)");
+	CHECK(ev.note == 127, "decoded note matches the packed value (127)");
+}
+
+static void test_midi_decode_all_notes_off_cc123(void)
+{
+	st_midi_event_t ev;
+	uint32_t word = mk_ump32(0, 0xBu, 5, 123, 0);
+
+	CHECK(st_midi_decode_ump32(word, &ev) == true,
+	      "Control Change 123 (All Notes Off) decodes");
+	CHECK(ev.kind == ST_MIDI_EVT_ALL_NOTES_OFF, "decoded kind is ALL_NOTES_OFF");
+	CHECK(ev.channel == 5, "decoded channel matches the packed value (5)");
+
+	/* All Notes Off must be recognized regardless of its (unused, by
+	 * convention 0) CC value byte. */
+	word = mk_ump32(0, 0xBu, 5, 123, 77);
+	CHECK(st_midi_decode_ump32(word, &ev) == true,
+	      "CC123 decodes as ALL_NOTES_OFF regardless of its data-byte value");
+	CHECK(ev.kind == ST_MIDI_EVT_ALL_NOTES_OFF,
+	      "decoded kind is still ALL_NOTES_OFF with a non-zero CC value byte");
+}
+
+static void test_midi_decode_drops_other_control_changes(void)
+{
+	st_midi_event_t ev;
+	uint32_t word;
+	int i, tested = 0;
+
+	memset(&ev, 0xAA, sizeof(ev)); /* poison: must stay untouched on drop */
+	for (i = 0; i < 128; i++) {
+		if (i == 123) {
+			continue; /* CC123 is the one CC that's accepted */
+		}
+		word = mk_ump32(0, 0xBu, 1, (uint8_t)i, 64);
+		if (st_midi_decode_ump32(word, &ev)) {
+			CHECK(0, "CC %d must be dropped, not decoded", i);
+		}
+		tested++;
+	}
+	CHECK(tested == 127, "all 127 non-123 Control Change numbers were exercised");
+}
+
+static void test_midi_decode_drops_non_note_message_types(void)
+{
+	st_midi_event_t ev;
+	uint32_t word;
+
+	/* Polyphonic Key Pressure (0xA), Program Change (0xC), Channel
+	 * Pressure (0xD), Pitch Bend (0xE) -- all real MIDI 1.0 Channel
+	 * Voice commands, all outside this contract's accepted set (see
+	 * docs/FIRMWARE_CONTRACT_V1.md section 6: only noteOn/noteOff/
+	 * allNotesOff are accepted; everything else, including these, is
+	 * dropped). */
+	uint8_t commands[] = { 0xAu, 0xCu, 0xDu, 0xEu };
+	size_t i;
+
+	for (i = 0; i < sizeof(commands) / sizeof(commands[0]); i++) {
+		word = mk_ump32(0, commands[i], 2, 60, 60);
+		CHECK(st_midi_decode_ump32(word, &ev) == false,
+		      "MIDI command 0x%X is dropped (not decoded)", commands[i]);
+	}
+}
+
+static void test_midi_decode_drops_non_midi1_channel_voice_message_type(void)
+{
+	st_midi_event_t ev;
+	uint32_t word;
+
+	/* Utility (MT 0x0), System Real Time (MT 0x1), SysEx7 (MT 0x3),
+	 * MIDI2 Channel Voice (MT 0x4) -- even a byte pattern that would
+	 * otherwise look like a Note On in the lower 24 bits must be dropped
+	 * if the Message Type nibble isn't MIDI1 Channel Voice (0x2). This
+	 * codebase never enables UMP Stream / MIDI2 CV negotiation (see
+	 * main.c's USB-MIDI wiring comment), so only MT 0x2 is meaningful
+	 * here. */
+	uint8_t mts[] = { 0x0u, 0x1u, 0x3u, 0x4u, 0xFu };
+	size_t i;
+
+	for (i = 0; i < sizeof(mts) / sizeof(mts[0]); i++) {
+		word = (mts[i] << 28) | (0x9u << 20) | (3u << 16) | (60u << 8) | 100u;
+		CHECK(st_midi_decode_ump32(word, &ev) == false,
+		      "Message Type 0x%X is dropped even with Note-On-shaped lower bits",
+		      mts[i]);
+	}
+}
+
+static void test_midi_decode_preserves_arbitrary_channel_and_note(void)
+{
+	/* Per the directive: "do not hardcode particular KO II pad notes" --
+	 * cue identity is whatever (channel, note) actually arrives. Sweeps
+	 * every real channel and a representative spread of note numbers
+	 * (not a fixed KO II layout) to prove nothing narrows the accepted
+	 * range. */
+	uint8_t ch, note;
+	uint8_t notes[] = { 0, 1, 35, 36, 44, 60, 96, 126, 127 };
+	size_t ni;
+
+	for (ch = 0; ch < 16; ch++) {
+		for (ni = 0; ni < sizeof(notes) / sizeof(notes[0]); ni++) {
+			st_midi_event_t ev;
+			uint32_t word;
+
+			note = notes[ni];
+			word = mk_ump32((uint8_t)(ch & 0x0Fu), 0x9u, ch, note, 100);
+			CHECK(st_midi_decode_ump32(word, &ev) == true,
+			      "channel %u note %u decodes", ch, note);
+			CHECK(ev.channel == ch && ev.note == note,
+			      "channel %u note %u round-trip exactly (got ch=%u note=%u)",
+			      ch, note, ev.channel, ev.note);
+		}
+	}
+}
+
+static void test_midi_queue_fifo_order(void)
+{
+	st_midi_queue_t q;
+	st_midi_event_t in[5], out;
+	int i;
+
+	st_midi_queue_init(&q);
+	for (i = 0; i < 5; i++) {
+		in[i].kind = ST_MIDI_EVT_NOTE_ON;
+		in[i].channel = 0;
+		in[i].note = (uint8_t)(20 + i);
+		in[i].velocity = 100;
+		st_midi_queue_push(&q, &in[i]);
+	}
+	CHECK(q.count == 5, "queue holds all 5 pushed events");
+	for (i = 0; i < 5; i++) {
+		CHECK(st_midi_queue_pop(&q, &out) == true, "pop %d succeeds", i);
+		CHECK(out.note == in[i].note,
+		      "pop %d returns events in FIFO order (expected note %u, got %u)",
+		      i, in[i].note, out.note);
+	}
+	CHECK(st_midi_queue_pop(&q, &out) == false, "popping an empty queue fails");
+	CHECK(q.count == 0, "queue count is 0 after draining");
+}
+
+static void test_midi_queue_overflow_drops_oldest(void)
+{
+	st_midi_queue_t q;
+	st_midi_event_t ev, out;
+	uint32_t i;
+	const uint32_t n = ST_MIDI_QUEUE_CAPACITY + 7u;
+
+	st_midi_queue_init(&q);
+	for (i = 0; i < n; i++) {
+		ev.kind = ST_MIDI_EVT_NOTE_ON;
+		ev.channel = 1;
+		ev.note = (uint8_t)(i % 128u);
+		ev.velocity = 100;
+		st_midi_queue_push(&q, &ev);
+	}
+	CHECK(q.count == ST_MIDI_QUEUE_CAPACITY,
+	      "queue never grows past its fixed capacity (%u)", ST_MIDI_QUEUE_CAPACITY);
+	CHECK(q.dropped == (n - ST_MIDI_QUEUE_CAPACITY),
+	      "dropped counter reflects exactly the events that didn't fit (%u)",
+	      n - ST_MIDI_QUEUE_CAPACITY);
+	/* the documented overflow policy is "drop the OLDEST": the first
+	 * event still in the queue must be the (n - CAPACITY)'th one pushed,
+	 * not the very first. */
+	CHECK(st_midi_queue_pop(&q, &out) == true, "pop after overflow succeeds");
+	CHECK(out.note == (uint8_t)((n - ST_MIDI_QUEUE_CAPACITY) % 128u),
+	      "the oldest surviving event is exactly the (n-capacity)th pushed "
+	      "(got note %u)", out.note);
+}
+
+static void test_midi_queue_clear_preserves_dropped_counter(void)
+{
+	st_midi_queue_t q;
+	st_midi_event_t ev;
+	uint32_t i;
+	uint32_t dropped_before;
+
+	st_midi_queue_init(&q);
+	for (i = 0; i < ST_MIDI_QUEUE_CAPACITY + 3u; i++) {
+		ev.kind = ST_MIDI_EVT_NOTE_ON;
+		ev.channel = 0;
+		ev.note = 1;
+		ev.velocity = 1;
+		st_midi_queue_push(&q, &ev);
+	}
+	dropped_before = q.dropped;
+	CHECK(dropped_before == 3u, "3 events were dropped before clear()");
+	st_midi_queue_clear(&q);
+	CHECK(q.count == 0, "clear() empties the queue");
+	CHECK(q.dropped == dropped_before,
+	      "clear() does not reset the lifetime `dropped` diagnostic counter");
+}
+
+static void test_midi_pipeline_ump_word_to_queue_round_trip(void)
+{
+	/* The exact two-step pipeline main.c's real rx_packet_cb runs:
+	 * st_midi_decode_ump32() on the incoming UMP word, then
+	 * st_midi_queue_push() of the decoded event -- proving the SAME
+	 * parser and event queue used by firmware, driven end-to-end by a
+	 * synthetic but byte-for-byte real USB-MIDI packet. */
+	st_midi_queue_t q;
+	st_midi_event_t decoded, popped;
+	uint32_t word;
+
+	st_midi_queue_init(&q);
+
+	/* KO II pad press: Note On channel 2, note 44, velocity 127. (44 is
+	 * a plausible, not hardcoded/assumed, pad note -- this test proves
+	 * the pipeline preserves whatever arrives, not that 44 is special.) */
+	word = mk_ump32(0, 0x9u, 2, 44, 127);
+	CHECK(st_midi_decode_ump32(word, &decoded) == true,
+	      "pipeline step 1: incoming UMP word decodes");
+	st_midi_queue_push(&q, &decoded);
+	CHECK(st_midi_queue_pop(&q, &popped) == true,
+	      "pipeline step 2: decoded event pops back out of the queue");
+	CHECK(popped.kind == ST_MIDI_EVT_NOTE_ON && popped.channel == 2 &&
+	      popped.note == 44 && popped.velocity == 127,
+	      "the event that reaches the consumer is exactly what the wire sent "
+	      "(kind=%d channel=%u note=%u velocity=%u)",
+	      popped.kind, popped.channel, popped.note, popped.velocity);
+
+	/* KO II pad release: Note Off channel 2, note 44 -- same pipeline. */
+	word = mk_ump32(0, 0x8u, 2, 44, 0);
+	CHECK(st_midi_decode_ump32(word, &decoded) == true,
+	      "pipeline step 1 (release): incoming UMP word decodes");
+	st_midi_queue_push(&q, &decoded);
+	CHECK(st_midi_queue_pop(&q, &popped) == true,
+	      "pipeline step 2 (release): decoded event pops back out");
+	CHECK(popped.kind == ST_MIDI_EVT_NOTE_OFF && popped.channel == 2 && popped.note == 44,
+	      "the release event also reaches the consumer intact "
+	      "(kind=%d channel=%u note=%u)", popped.kind, popped.channel, popped.note);
+
+	/* USB reset / disconnect / lost connection -> firmware pushes a
+	 * synthetic ALL_NOTES_OFF (see main.c's midi_ready_cb()) -- proves
+	 * the same queue carries that safety event through identically. */
+	decoded.kind = ST_MIDI_EVT_ALL_NOTES_OFF;
+	decoded.channel = 0;
+	decoded.note = 0;
+	decoded.velocity = 0;
+	st_midi_queue_push(&q, &decoded);
+	CHECK(st_midi_queue_pop(&q, &popped) == true,
+	      "a synthetic disconnect ALL_NOTES_OFF pops out of the same queue");
+	CHECK(popped.kind == ST_MIDI_EVT_ALL_NOTES_OFF,
+	      "the disconnect event's kind survives the round trip");
+}
+
 int main(void)
 {
 	RUN(test_crc32);
@@ -1378,6 +1692,19 @@ int main(void)
 	RUN(test_led_fx_latch_flash_restores_prior_state);
 	RUN(test_led_scrub_chase_direction);
 	RUN(test_led_transfer_pattern);
+
+	RUN(test_midi_decode_note_on);
+	RUN(test_midi_decode_note_on_velocity_zero_is_note_off);
+	RUN(test_midi_decode_explicit_note_off);
+	RUN(test_midi_decode_all_notes_off_cc123);
+	RUN(test_midi_decode_drops_other_control_changes);
+	RUN(test_midi_decode_drops_non_note_message_types);
+	RUN(test_midi_decode_drops_non_midi1_channel_voice_message_type);
+	RUN(test_midi_decode_preserves_arbitrary_channel_and_note);
+	RUN(test_midi_queue_fifo_order);
+	RUN(test_midi_queue_overflow_drops_oldest);
+	RUN(test_midi_queue_clear_preserves_dropped_counter);
+	RUN(test_midi_pipeline_ump_word_to_queue_round_trip);
 
 	printf("\n");
 	printf("%d distinct test cases, %d assertion checks\n", g_test_cases, g_checks);

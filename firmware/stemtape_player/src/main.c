@@ -90,13 +90,26 @@
 #include <zephyr/drivers/i2c.h>
 #include <zephyr/drivers/i2s.h>
 #include <zephyr/usb/usbd.h>
+#include <zephyr/usb/class/usbd_uac2.h>
+#include <zephyr/usb/class/usbd_midi2.h>
+#include <zephyr/audio/midi.h>
 #include <zephyr/sys/ring_buffer.h>
 #include <sample_usbd.h>
+#include "st_midi_queue.h"
 
-/* STEM TAPE PHASE 1: no <zephyr/usb/class/usbd_uac2.h> include and no
- * uac2_fs_fb_windows_fmt extern -- this image has no UAC2 audio class at all
- * (CONFIG_USBD_AUDIO2_CLASS=n, see prj.conf), so there is no Full-Speed
- * explicit-feedback wire format to negotiate. */
+/* GATE 1: USB audio input is restored (UAC2 receive -> live mix, exactly the
+ * classic looper's own path) and USB MIDI receive is new (KO II pad cue
+ * control via a standalone MIDI bridge -- see st_midi_queue.h). Neither
+ * feeds a recording ring; there is no recording in this firmware (see the
+ * PHASE 1 notes throughout this file, still true: hold-to-record, overdub,
+ * and every eMMC write they drove remain removed). */
+
+/* From the patched Zephyr UAC2 class (zephyr-patches/): selects the Full-Speed
+ * explicit-feedback wire format at runtime. false = 3-byte Q10.14 (USB spec —
+ * what Apple hosts require), true = 4-byte Q16.16 (what Microsoft's
+ * usbaudio2.sys requires). The two are mutually incompatible per host, so the
+ * main loop auto-negotiates: see the feedback-format watchdog in main(). */
+extern bool uac2_fs_fb_windows_fmt;
 #include <soc.h>
 #include <math.h>
 #include <string.h>
@@ -667,10 +680,25 @@ static void fill_block(int16_t *s)
 	memset(s, 0, BLK_FRAMES * 2 * sizeof(int16_t));
 }
 
-/* STEM TAPE PHASE 1: Milestone 3 (USB-C audio in / UAC2) is removed for this
- * phase -- no usb_audio_ring, no g_usb_streaming, no UAC2 class at all
- * (CONFIG_USBD_AUDIO2_CLASS=n, see prj.conf). Phase 2 reintroduces UAC2
- * input behind a real, validated write path. */
+/* ================== USB-C audio in (UAC2) — GATE 1: PLAYBACK ONLY ========
+ * The host streams 48 kHz / 16-bit / stereo PCM into the SP-1 over a USB
+ * isochronous OUT endpoint. The UAC2 data callback (USB thread) pushes those
+ * 16-bit frames into this lock-free SPSC ring; audio_thread's mixer (below)
+ * drains the ring and mixes it live under the four playback stems. This is
+ * the classic looper's own proven UAC2 receive path, UNCHANGED. What is
+ * DELIBERATELY not restored: the classic looper's decimator-into-g_rring
+ * capture path and everything downstream of it (hold-to-record arming,
+ * overdub, PASS 1's rec-ring-to-flash write) -- none of that exists in this
+ * firmware; there is no code path from usb_audio_ring to eMMC, anywhere. */
+#define USB_FRAME_BYTES   4u                 /* 2 ch * 16-bit */
+#define USB_RING_FRAMES   4096u              /* ~85 ms -- the proven working value */
+/* Target ring fill (frames, ~21 ms). Used both as the prebuffer target before
+ * the consumer starts draining a freshly-enabled stream, and as the feedback
+ * regulator's setpoint, so the hand-off from prebuffering to draining is smooth. */
+#define FB_SETPOINT       1024
+RING_BUF_DECLARE(usb_audio_ring, USB_RING_FRAMES * USB_FRAME_BYTES);
+
+static volatile bool g_usb_streaming;        /* host has enabled the UAC2 terminal */
 
 /* Diagnostics streamed over the CDC console (controls_diag): if the ring keeps
  * underrunning (drain faster than host delivers) or overflowing (host faster),
@@ -1262,12 +1290,40 @@ static inline int16_t soft_limit(int32_t x)
 __attribute__((optimize("O2")))
 static void looper_audio_block(int16_t *s)
 {
+	static int16_t tmp[BLK_FRAMES * 2];
 	if (g_xfer_mode) { memset(s, 0, BLK_BYTES); return; }   /* USB transfer: silence out */
-	/* STEM TAPE PHASE 1: there is no UAC2 audio input in this phase (see
-	 * usb_audio_start()) -- the classic looper's usb_audio_ring pull,
-	 * prebuffer gate, and fill-watermark diagnostics are removed. PASS A's
-	 * per-frame `live` sample (below) is always silence now instead of
-	 * being read from a USB ring that will never have data. */
+	/* GATE 1: restored, unchanged from the classic looper. PREBUFFER: do not
+	 * start draining a freshly-(re)enabled stream until the ring holds
+	 * FB_SETPOINT frames -- the feedback regulator over-delivers to fill it
+	 * in ~20 ms. Without this gate the consumer races the empty ring and the
+	 * first moments of every host play start dribble out as choppy fragments. */
+	static bool primed;
+	/* SCHED-LOCKED cluster: the mixer is PREEMPT(0), so the COOP USB threads
+	 * can preempt it mid-ring_buf_get -- and the terminal-toggle callback
+	 * resets this ring (documented unsafe against a concurrent get). The
+	 * lock (~tens of us) restores exactly the atomicity the old COOP(7)
+	 * mixer had for this cluster; USB ISO service only needs to preempt the
+	 * ~ms-scale MIX work below, never this copy. */
+	k_sched_lock();
+	if (!g_usb_streaming)
+		primed = false;
+	else if (!primed &&
+		 ring_buf_size_get(&usb_audio_ring) >= FB_SETPOINT * USB_FRAME_BYTES)
+		primed = true;
+	if (primed) {
+		/* diag: usb-in ring fill watermarks. */
+		int32_t _uf = (int32_t)(ring_buf_size_get(&usb_audio_ring) / USB_FRAME_BYTES);
+		if (_uf < g_usb_lowat) g_usb_lowat = _uf;
+		if (_uf > (int32_t)g_usb_hiwat) g_usb_hiwat = (uint32_t)_uf;
+	}
+	uint32_t bytes = primed ?
+		ring_buf_get(&usb_audio_ring, (uint8_t *)tmp, sizeof(tmp)) : 0;
+	k_sched_unlock();
+	uint32_t got = bytes / USB_FRAME_BYTES;
+	if (primed && got < BLK_FRAMES) {
+		g_ring_underruns++;
+		g_zero_pad += BLK_FRAMES - got;   /* silence frames injected */
+	}
 
 	/* FAILSAFE — exactly one recorder. Every block, find the single ARMED/REC
 	 * track and make g_rec_track the one source of truth; if a second recorder
@@ -1718,7 +1774,8 @@ static void looper_audio_block(int16_t *s)
 	static uint16_t fracb[BLK_FRAMES];
 	static int32_t  mix32[BLK_FRAMES];
 	for (uint32_t f = 0; f < BLK_FRAMES; f++) {
-		int32_t live = 0;      /* STEM TAPE PHASE 1: no UAC2 input -- always silence */
+		int32_t live = (f < got)
+			? (((int32_t)tmp[2 * f] + (int32_t)tmp[2 * f + 1]) >> 1) : 0;
 
 		/* (the first take is started immediately by the press handler above, and
 		 * overdubs are started on the next beat by the wrap logic below) */
@@ -1732,31 +1789,15 @@ static void looper_audio_block(int16_t *s)
 			g_pphase += step;
 			while (g_pphase >= 65536u) {
 				g_pphase -= 65536u;
-				/* Decimate the live input to the current tape rate.
-				 * >1x (frames_since==0, a 2nd+ emit in one input frame):
-				 * HOLD the current sample instead of emitting a zero — the
-				 * old zero-stuffing was the metallic aliasing/bitcrush. 1x:
-				 * the one accumulated sample. <1x: average the frames. */
-				int16_t lsamp;
-				if (g_frames_since == 0u)      lsamp = (int16_t)live;
-				else if (g_frames_since == 1u) lsamp = (int16_t)g_dec_acc;
-				else if (g_frames_since < 65536u)
-					lsamp = (int16_t)((int32_t)g_dec_acc /
-							  (int32_t)g_frames_since); /* hw SDIV, bit-identical */
-				else lsamp = (int16_t)(g_dec_acc / (int64_t)g_frames_since);
+				/* GATE 1: this used to also decimate the live input to the
+				 * current tape rate into `lsamp` for recording capture.
+				 * There is no recording in this firmware -- g_dec_acc/
+				 * g_frames_since still accumulate above (mix32[f]=live is
+				 * the real, playing-through UAC2 monitor sample) purely to
+				 * stay bit-identical to the classic looper's tick-advance
+				 * timing; they are reset here every tick same as before,
+				 * just with no per-tick sample ever extracted from them. */
 				g_dec_acc = 0; g_frames_since = 0;
-
-				/* STEM TAPE PHASE 1: hold-to-record ARM-watch and the live-input
-				 * capture-into-g_rring pipeline are removed for this phase -- there
-				 * is no UAC2 audio input to capture (see usb_audio_start()) and no
-				 * recording-arm trigger (see main()'s HOLD-ARM gesture), so
-				 * g_rec_track can never be >= 0 here. `live` (this block's decimated
-				 * live-monitor sample) is always 0 with usb_audio_ring removed;
-				 * mix32[f] = live above is left as-is (adds a provable zero) rather
-				 * than touched, to keep PASS A's shared transport-advance code
-				 * (g_consume_pos/MIDI clock, right below) untouched. Phase 2
-				 * reintroduces recording behind real UAC2 input and a validated
-				 * write path. */
 
 				g_consume_pos++;
 				/* MIDI 24-PPQN clock: a cheap per-sample COUNTER (the divisor
@@ -3075,21 +3116,299 @@ static void audio_init(void)
 	tas2505_configure();
 }
 
-/* STEM TAPE PHASE 1: the UAC2 explicit-feedback software regulator and
- * every UAC2 application callback (terminal_update_cb/get_recv_buf/
- * data_recv_cb/buf_release_cb/feedback_cb/sof_cb, sp1_uac2_ops,
- * uac2_rx_slab, uac2_dev) are removed -- this phase has no UAC2 audio-
- * input class at all (CONFIG_USBD_AUDIO2_CLASS=n, see prj.conf), so
- * there is nothing for them to serve. Phase 2 reintroduces UAC2 input
- * behind a real, validated write path. */
+/* ---- UAC2 explicit feedback: software regulator (v1) ------------------------
+ * The host needs to know how fast the SP-1 actually consumes samples. The SP-1
+ * I2S bus runs at exactly 48000 Hz (codec-mastered); reporting the nominal rate
+ * would make the host over-deliver and overflow the ring. Nordic only ships a
+ * hardware feedback measurement for the nRF5340 (it needs an I2S FRAMESTART
+ * event the nRF52840 lacks), so we regulate in software, reporting a USB Q10.14
+ * "samples per SOF" value (1.0 sample = 1<<14 in the low 24 bits). */
+#define FB_FRAC        14
+#define FB_TRUE        ((uint32_t)(((uint64_t)I2S_TRUE_HZ << FB_FRAC) / 1000u))
+#define FB_MIN         (FB_TRUE - (1u << FB_FRAC))
+#define FB_MAX         (FB_TRUE + (1u << FB_FRAC))
+#define FILL_Q         8
+#define FILL_EMA_SHIFT 6
+#define FB_KP          3
 
-/* Bring up the USB device (CDC console only) on device_next. STEM TAPE PHASE 1:
- * no UAC2 audio class in this image (CONFIG_USBD_AUDIO2_CLASS=n, see
- * prj.conf) -- there is no uac2_dev/ops to register; sample_usbd_init_device()
- * composes whatever classes the effective Kconfig actually enables. */
+static atomic_t g_fb_value = ATOMIC_INIT(FB_TRUE);
+static int32_t  g_fill_avg;
+static volatile bool g_fb_running;
+
+static void feedback_reset(void)
+{
+	g_fill_avg = 0;
+	atomic_set(&g_fb_value, (atomic_val_t)FB_TRUE);
+}
+
+static void feedback_update(void)
+{
+	g_sof_cnt++;
+	int frames = (int)(ring_buf_size_get(&usb_audio_ring) / USB_FRAME_BYTES);
+
+	g_fill_avg += (((int32_t)frames << FILL_Q) - g_fill_avg) >> FILL_EMA_SHIFT;
+	int err = (g_fill_avg >> FILL_Q) - FB_SETPOINT;
+
+	int32_t fb = (int32_t)FB_TRUE - err * FB_KP;
+	if (fb > (int32_t)FB_MAX) {
+		fb = (int32_t)FB_MAX;
+	} else if (fb < (int32_t)FB_MIN) {
+		fb = (int32_t)FB_MIN;
+	}
+
+	atomic_set(&g_fb_value, (atomic_val_t)fb);
+}
+
+/* ---- UAC2 application callbacks --------------------------------------------
+ * POOL DEPTH IS LOAD-BEARING: if uac2_get_recv_buf has no buffer for an
+ * isochronous OUT interval, that packet is LOST FOREVER (ISO never retries).
+ * 32 buffers = ~32 ms of cushion. */
+#define UAC2_IN_TERMINAL_ID  UAC2_ENTITY_ID(DT_NODELABEL(in_terminal))
+#define UAC2_MAX_PKT         ((48 + 1) * USB_FRAME_BYTES)
+K_MEM_SLAB_DEFINE_STATIC(uac2_rx_slab, ROUND_UP(UAC2_MAX_PKT, UDC_BUF_GRANULARITY),
+			 32, UDC_BUF_ALIGN);
+
+static const struct device *const uac2_dev =
+	DEVICE_DT_GET(DT_NODELABEL(uac2_speaker));
+
+static void uac2_terminal_update_cb(const struct device *dev, uint8_t terminal,
+				    bool enabled, bool microframes, void *user_data)
+{
+	ARG_UNUSED(dev); ARG_UNUSED(microframes); ARG_UNUSED(user_data);
+
+	if (terminal != UAC2_IN_TERMINAL_ID) {
+		return;
+	}
+
+	if (enabled) {
+		k_sched_lock();
+		ring_buf_reset(&usb_audio_ring);
+		k_sched_unlock();
+		feedback_reset();
+		g_fb_running = true;
+		g_usb_streaming = true;
+	} else {
+		g_usb_streaming = false;
+		g_fb_running = false;
+	}
+}
+
+static void *uac2_get_recv_buf(const struct device *dev, uint8_t terminal,
+			       uint16_t size, void *user_data)
+{
+	ARG_UNUSED(dev); ARG_UNUSED(user_data);
+	void *buf = NULL;
+
+	if (terminal == UAC2_IN_TERMINAL_ID && g_usb_streaming) {
+		__ASSERT_NO_MSG(size <= UAC2_MAX_PKT);
+		uint32_t _free = k_mem_slab_num_free_get(&uac2_rx_slab);
+		if (_free < g_rx_slab_min) g_rx_slab_min = _free;
+		if (k_mem_slab_alloc(&uac2_rx_slab, &buf, K_NO_WAIT) != 0) {
+			buf = NULL;
+			g_rx_nobuf++;
+		}
+	}
+
+	return buf;
+}
+
+static void uac2_data_recv_cb(const struct device *dev, uint8_t terminal,
+			      void *buf, uint16_t size, void *user_data)
+{
+	ARG_UNUSED(dev); ARG_UNUSED(terminal); ARG_UNUSED(user_data);
+
+	if (g_usb_streaming && size) {
+		g_usb_pkts++;
+		g_usb_frames += size / USB_FRAME_BYTES;
+		if (ring_buf_space_get(&usb_audio_ring) >= size) {
+			(void)ring_buf_put(&usb_audio_ring, (const uint8_t *)buf, size);
+		} else {
+			g_ring_overflows++;
+		}
+	}
+
+	k_mem_slab_free(&uac2_rx_slab, buf);
+}
+
+static void uac2_buf_release_cb(const struct device *dev, uint8_t terminal,
+				void *buf, void *user_data)
+{
+	/* The SP-1 never sends audio to the host, so this is never called. */
+	ARG_UNUSED(dev); ARG_UNUSED(terminal); ARG_UNUSED(buf); ARG_UNUSED(user_data);
+}
+
+static uint32_t uac2_feedback_cb(const struct device *dev, uint8_t terminal,
+				 void *user_data)
+{
+	ARG_UNUSED(dev); ARG_UNUSED(terminal); ARG_UNUSED(user_data);
+	return (uint32_t)atomic_get(&g_fb_value);
+}
+
+static void uac2_sof_cb(const struct device *dev, void *user_data)
+{
+	ARG_UNUSED(dev); ARG_UNUSED(user_data);
+	if (g_fb_running) {
+		feedback_update();
+	}
+}
+
+static struct uac2_ops sp1_uac2_ops = {
+	.sof_cb             = uac2_sof_cb,
+	.terminal_update_cb = uac2_terminal_update_cb,
+	.get_recv_buf       = uac2_get_recv_buf,
+	.data_recv_cb       = uac2_data_recv_cb,
+	.buf_release_cb     = uac2_buf_release_cb,
+	.feedback_cb        = uac2_feedback_cb,
+};
+
+/* ---- USB MIDI 2.0 (receive-only) application callbacks --------------------
+ * GATE 1: KO II pad events arrive here (via a standalone MIDI bridge acting
+ * as USB host to the SP-1's class-compliant USB-MIDI device port -- this
+ * device never becomes a USB host itself). No outgoing MIDI, no MIDI clock;
+ * only Note On/Off + All Notes Off are decoded (st_midi_decode_ump32(), the
+ * SAME real decoder host-tested in tests/test_stemtape_player.c against
+ * synthetic UMP words -- this callback just unwraps the real Zephyr
+ * struct midi_ump into its first 32-bit word and calls it). Cue LEARNING and
+ * AUDITION (Gate 3) are not implemented yet; this gate's real, working
+ * scope is: reception, decoding, a bounded queue, and a minimal held-note
+ * tracker (g_midi_held[]) that already gives correct, testable behavior for
+ * "which pad(s) are currently down" -- the exact substrate Gate 3 needs. */
+#define USB_MIDI_DT_NODE DT_NODELABEL(usb_midi)
+static const struct device *const midi_dev = DEVICE_DT_GET(USB_MIDI_DT_NODE);
+
+static st_midi_queue_t g_midi_rx_q;
+
+/* Bounded "currently held" set -- channel:note identity per
+ * docs/FIRMWARE_CONTRACT_V1.md §6. 8 concurrent pads is generous for a
+ * single KO II (16 pads, but simultaneous physical presses are limited by
+ * hand count) and bounds this table's cost the same way ST_MIDI_QUEUE_
+ * CAPACITY bounds the raw event queue. */
+#define MIDI_HELD_MAX 8u
+struct midi_held_note { uint8_t channel; uint8_t note; bool active; };
+static struct midi_held_note g_midi_held[MIDI_HELD_MAX];
+static volatile uint8_t g_midi_held_count;
+/* diag: most recent event, for controls_diag() visibility (Gate 5 CDC diag). */
+static volatile uint8_t g_midi_last_channel = 0xFFu;
+static volatile uint8_t g_midi_last_note;
+static volatile uint8_t g_midi_last_kind; /* st_midi_evt_kind_t */
+
+static void midi_held_add(uint8_t channel, uint8_t note)
+{
+	for (uint32_t i = 0; i < MIDI_HELD_MAX; i++) {
+		if (g_midi_held[i].active && g_midi_held[i].channel == channel &&
+		    g_midi_held[i].note == note) {
+			return; /* already held (duplicate Note On): no-op */
+		}
+	}
+	for (uint32_t i = 0; i < MIDI_HELD_MAX; i++) {
+		if (!g_midi_held[i].active) {
+			g_midi_held[i].active = true;
+			g_midi_held[i].channel = channel;
+			g_midi_held[i].note = note;
+			g_midi_held_count++;
+			return;
+		}
+	}
+	/* table full: a real, bounded, silently-ignored overflow (matches the
+	 * event queue's own "never grow, never block" policy) -- the pad
+	 * physically can't be tracked as held, but nothing corrupts. */
+}
+
+static void midi_held_remove(uint8_t channel, uint8_t note)
+{
+	for (uint32_t i = 0; i < MIDI_HELD_MAX; i++) {
+		if (g_midi_held[i].active && g_midi_held[i].channel == channel &&
+		    g_midi_held[i].note == note) {
+			g_midi_held[i].active = false;
+			if (g_midi_held_count > 0) g_midi_held_count--;
+			return;
+		}
+	}
+	/* unmatched Note Off (no corresponding held note): deterministic no-op */
+}
+
+static void midi_held_clear_all(void)
+{
+	for (uint32_t i = 0; i < MIDI_HELD_MAX; i++) {
+		g_midi_held[i].active = false;
+	}
+	g_midi_held_count = 0;
+}
+
+/* Drains g_midi_rx_q and updates the held-note table. Called once per
+ * main()'s ~8 ms control-loop pass (see main(), same cadence as every other
+ * control-surface poll) -- single consumer, matching the queue's documented
+ * single-producer/single-consumer contract. */
+static void midi_service(void)
+{
+	st_midi_event_t ev;
+
+	while (st_midi_queue_pop(&g_midi_rx_q, &ev)) {
+		g_midi_last_channel = ev.channel;
+		g_midi_last_note = ev.note;
+		g_midi_last_kind = (uint8_t)ev.kind;
+		switch (ev.kind) {
+		case ST_MIDI_EVT_NOTE_ON:
+			midi_held_add(ev.channel, ev.note);
+			break;
+		case ST_MIDI_EVT_NOTE_OFF:
+			midi_held_remove(ev.channel, ev.note);
+			break;
+		case ST_MIDI_EVT_ALL_NOTES_OFF:
+			midi_held_clear_all();
+			break;
+		}
+	}
+}
+
+static void midi_rx_packet_cb(const struct device *dev, const struct midi_ump ump)
+{
+	ARG_UNUSED(dev);
+	st_midi_event_t ev;
+
+	if (st_midi_decode_ump32(ump.data[0], &ev)) {
+		st_midi_queue_push(&g_midi_rx_q, &ev);
+	}
+}
+
+static void midi_ready_cb(const struct device *dev, const bool ready)
+{
+	ARG_UNUSED(dev);
+	if (!ready) {
+		/* USB reset/disconnect/interface disabled: the same All-Notes-Off
+		 * event that a real CC123 would produce, through the SAME queue --
+		 * one mechanism, not a special case. Cancels any held pad state
+		 * (and, once Gate 3 lands, any active cue audition) safely. */
+		st_midi_event_t anof = { .kind = ST_MIDI_EVT_ALL_NOTES_OFF,
+					  .channel = 0, .note = 0, .velocity = 0 };
+		st_midi_queue_push(&g_midi_rx_q, &anof);
+	}
+}
+
+static const struct usbd_midi_ops sp1_midi_ops = {
+	.rx_packet_cb = midi_rx_packet_cb,
+	.ready_cb     = midi_ready_cb,
+};
+
+/* Bring up the composite USB device (UAC2 audio + USB-MIDI 2.0 + CDC console)
+ * on device_next. set_ops MUST precede usbd_enable for every class or its
+ * init fails. */
 static void usb_audio_start(void)
 {
 	struct usbd_context *usbd;
+
+	if (!device_is_ready(uac2_dev)) {
+		printk("uac2 device not ready\n");
+		return;
+	}
+	if (!device_is_ready(midi_dev)) {
+		printk("usb-midi device not ready\n");
+		return;
+	}
+
+	st_midi_queue_init(&g_midi_rx_q);
+	usbd_uac2_set_ops(uac2_dev, &sp1_uac2_ops, NULL);
+	usbd_midi_set_ops(midi_dev, &sp1_midi_ops);
 
 	usbd = sample_usbd_init_device(NULL);
 	if (usbd == NULL) {
@@ -3242,11 +3561,7 @@ static void controls_diag(void)
 		_uplast = _upnow;
 		int32_t _ulw = g_usb_lowat;
 		if (_ulw == 0x7FFFFFFF) _ulw = -1;
-		/* STEM TAPE PHASE 1: no UAC2 feedback regulator exists in this
-		 * phase (see the removed feedback-regulator block above) --
-		 * report the honest "no feedback loop" value rather than a
-		 * stale/undefined one. */
-		int _fbd = 0;
+		int _fbd = (int)((int32_t)atomic_get(&g_fb_value) - (int32_t)FB_TRUE);
 		printk("EMMC48 wus=%u/%u rus=%u sus=%u bto=%u low=%dms hiw=%ums gl=%u iwf=%u aus=%u rr=%x flt=%x@%x hi=%u,%u uu=%u uo=%u up=%u ufl=%d,%u fb=%d ec=%02x,%02x,%02x,%02x,%02x,%02x,%02x,%02x,%02x\n",
 		       (unsigned)emmc_dbg_wr_busy_us_max, (unsigned)emmc_dbg_wr_busy_us_peak,
 		       (unsigned)emmc_dbg_rd_wait_us_max, (unsigned)emmc_dbg_switch_busy_us_max,
@@ -3529,9 +3844,7 @@ static void led_service(void)
 	 * live host-presence gate flickered the chase mid-session whenever the
 	 * player closed the stream between songs / on pause. */
 	static int ever_streamed;
-	/* STEM TAPE PHASE 1: no UAC2 input exists to stream, so ever_streamed
-	 * can never become true -- the standby chase below is simply the
-	 * permanent "nothing loaded/active yet" indication in this phase. */
+	if (g_usb_streaming) ever_streamed = 1;
 
 	show_song_leds();                              /* status row = current song */
 
@@ -4194,9 +4507,40 @@ int main(void)
 			feed_wdt();      /* the diag print path can be slow; never starve the WDT */
 		}
 
-		/* STEM TAPE PHASE 1: USB feedback-format auto-negotiation is removed
-		 * -- there is no UAC2 stream in this phase to negotiate a feedback
-		 * format for. */
+		/* USB FEEDBACK-FORMAT AUTO-NEGOTIATION. Windows and Apple disagree
+		 * about the Full-Speed feedback value format (4-byte Q16.16 vs the
+		 * spec's 3-byte Q10.14) and each kills or cripples the stream when
+		 * fed the other's. The wrong choice always shows up the same way:
+		 * the host holds the stream OPEN but delivers (almost) nothing, so
+		 * the mixer stitches silence (g_zero_pad counts it). If more than
+		 * half of each 100 ms window is stitched silence for ~400 ms
+		 * straight, flip the format and let the host try again — the flip
+		 * repeats until data flows, so the device converges on whatever
+		 * the connected host actually parses, on every OS. A closed
+		 * stream never pads, so this can't fire from mere silence. */
+		{
+			static int64_t fb_probe_t;
+			static uint32_t fb_zp_last;
+			static int fb_starve_streak;
+			if (fb_probe_t == 0) {
+				fb_probe_t = now;
+				fb_zp_last = g_zero_pad;
+			} else if (now - fb_probe_t >= 100) {
+				fb_probe_t = now;
+				uint32_t zpn = g_zero_pad;
+				uint32_t d = zpn - fb_zp_last;
+				fb_zp_last = zpn;
+				if (d >= (LOOP_RATE / 20u)) {   /* >50% of the window */
+					if (++fb_starve_streak >= 4) {
+						uac2_fs_fb_windows_fmt =
+							!uac2_fs_fb_windows_fmt;
+						fb_starve_streak = 0;
+					}
+				} else {
+					fb_starve_streak = 0;
+				}
+			}
+		}
 
 		/* (track LEDs are driven by the looper beat clock below) */
 
@@ -4307,6 +4651,7 @@ int main(void)
 						else
 							jump_to_slot(bank);
 					}
+					midi_service();
 					led_service();           /* live song display mid-hold */
 					k_msleep(25);
 					continue;                /* track held: combo owns the button */
@@ -4356,6 +4701,7 @@ int main(void)
 						}
 						g_chop_req = 1;           /* engine: snap to it */
 					}
+					midi_service();
 					led_service();
 					k_msleep(25);
 					continue;                 /* chord owns the button */
@@ -4369,6 +4715,7 @@ int main(void)
 				 * dates from the original FUNCTION-down, so the 2.5 s
 				 * power-off would otherwise fire). The FUNCTION press is
 				 * spent; it ends cleanly on release below. */
+				midi_service();
 				led_service();
 				k_msleep(25);
 				continue;
@@ -4386,6 +4733,7 @@ int main(void)
 					tap_n = 0;
 					combo_seen = 1;      /* spend the press */
 				}
+				midi_service();
 				led_service();
 				k_msleep(25);
 				continue;
@@ -4936,6 +5284,7 @@ int main(void)
 				}
 			}
 
+			midi_service();         /* drain USB-MIDI queue, update held-note table */
 			led_service();         /* one owner: song row + track row + standby */
 			feed_wdt();
 			k_msleep(8);
