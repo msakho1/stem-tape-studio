@@ -82,7 +82,7 @@ function DevicePage() {
   }, []);
 
   useEffect(() => {
-    setSupported(typeof navigator !== "undefined" && "serial" in navigator);
+    setSupported(typeof navigator !== "undefined" && !!(navigator as Navigator & { serial?: unknown }).serial);
   }, []);
 
   const layout = sessionRef.current?.layout ?? null;
