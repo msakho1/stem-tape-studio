@@ -20,6 +20,13 @@ import { prepareCanonicalSong, type CanonicalSong } from "@/sp1/song";
 import { parseCapabilities, readOnlyVerdict, type CompatibilityVerdict } from "@/sp1/compatibility";
 import { StemTapeTransport, type DeviceSongSlot, type UploadProgress, type UploadResult } from "@/sp1/transport";
 import { buildReceipt } from "@/sp1/receipt";
+import {
+  outcomeWording,
+  resolveWording,
+  simulatedRowWording,
+  successLogWording,
+  writeStateWording,
+} from "@/sp1/wording";
 import { sectorsForFrames, BLOCKS_PER_SECTOR, PHYSICAL_BLOCK_BYTES, SECTOR_BYTES, SAMPLE_RATE } from "@/sp1/stemTapeFormat";
 import { sha256Hex } from "@/sp1/digest";
 import { encodeSong } from "@/sp1/sector";
@@ -101,7 +108,12 @@ function DevicePage() {
   }, [say]);
 
   const connect = useCallback(async () => {
-    const injected = (globalThis as { __SP1_MOCK_PORT__?: SerialLikePort }).__SP1_MOCK_PORT__;
+    // The in-process mock port exists for development and automated smoke
+    // checks only. Production builds never look at it, so a published page
+    // cannot be pushed into "simulated device" mode from the console.
+    const injected = import.meta.env.DEV
+      ? (globalThis as { __SP1_MOCK_PORT__?: SerialLikePort }).__SP1_MOCK_PORT__
+      : undefined;
     const nav = navigator as Navigator & { serial?: { requestPort(): Promise<SerialLikePort> } };
     if (!injected && !nav.serial) return;
     let port: SerialLikePort;
@@ -253,11 +265,7 @@ function DevicePage() {
       setResult(out);
       setPlaybackConfirmed(false);
       if (out.ok) {
-        say(
-          out.verification.deviceReadbackVerification
-            ? "Committed index re-read from the SP-1 and matched. Physical playback is still unconfirmed."
-            : "Simulated device: protocol sequence passed. No physical SP-1 was written.",
-        );
+        say(successLogWording(t.mode.kind));
       } else if (out.outcome === "unknown") {
         say(`Outcome unknown — ${out.detail}`);
       } else {
@@ -282,13 +290,7 @@ function DevicePage() {
         songChecksum: result.songChecksum || 0,
       });
       setResult({ ...result, outcome, ok: outcome === "committed" });
-      say(
-        outcome === "committed"
-          ? "Reconnect check: the committed index matches this song. It is stored on the device."
-          : outcome === "failed"
-            ? "Reconnect check: the song was NOT committed. The previous song is still active."
-            : "Reconnect check: still unresolved. The index could not be read.",
-      );
+      say(resolveWording(t.mode.kind, outcome));
       await refresh();
     } finally {
       setBusy(false);
@@ -452,7 +454,7 @@ function DevicePage() {
               </span>
             )}
             <span data-testid="write-state" className="text-[var(--ink-dim)]">
-              {anyWriteOccurred ? "a write has occurred on this device" : "no data has been written"}
+              {writeStateWording(mockMode ? "mock" : "physical", anyWriteOccurred)}
             </span>
             <span data-testid="safe-to-disconnect" className="text-[var(--ink-dim)]">
               {busy ? "do NOT disconnect: an operation is in progress" : "safe to disconnect"}
@@ -720,15 +722,12 @@ function DevicePage() {
           <section className="st-section" data-testid="verify">
             <p className="st-section__title">5 · verify</p>
             <p className="font-mono text-[13px] leading-relaxed text-[var(--ink-dim)]" data-testid="outcome">
-              {result.outcome === "committed"
-                ? "Committed. The device index now points at this song."
-                : result.outcome === "failed"
-                  ? `Not committed — ${result.detail.replace(/\.$/, "")}. The slot still holds whatever it held before, so retrying is safe.`
-                  : `Outcome unknown — ${result.detail.replace(/\.$/, "")}. Reconnect the SP-1 and resolve it below before assuming anything.`}
+              {outcomeWording(mockMode ? "mock" : "physical", result)}
             </p>
             <ul className="mt-3 grid gap-1 font-mono text-[12px]" data-testid="verification">
               <li data-testid="v-simulated">
-                {result.verification.simulatedVerification ? "ok  " : "no  "}simulated verification (mock protocol run)
+                {result.verification.simulatedVerification ? "ok  " : "no  "}
+                {simulatedRowWording(mockMode ? "mock" : "physical")}
               </li>
               <li data-testid="v-readback">
                 {result.verification.deviceReadbackVerification ? "ok  " : "no  "}device readback verification
