@@ -1152,3 +1152,23 @@
 .sp1-illustration[data-gesture="rocker-click"][data-active-controls~="rocker"] [data-control="rocker"] {
   animation: sp1-rocker-click 2200ms ease-out infinite;
 }
+
+/* ---- SP-1 companion uploader (route /device) ---- */
+.st-btn {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink);
+  background: transparent;
+  border: 1px solid var(--bench-line);
+  padding: 6px 10px;
+  cursor: pointer;
+}
+.st-btn:hover:not(:disabled) { border-color: var(--signal); }
+.st-btn:disabled { color: var(--ink-faint); cursor: not-allowed; opacity: 0.6; }
+.st-input {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  color: var(--ink);
+}

@@ -40,6 +40,9 @@ function AboutPage() {
               <Link to="/shop" className="st-tab">
                 shop
               </Link>
+              <Link to="/device" className="st-tab">
+                uploader
+              </Link>
               <span className="st-tab" data-on>
                 about
               </span>
@@ -64,6 +67,9 @@ function AboutPage() {
             </Link>
             <Link to="/shop" className="st-tab">
               shop
+            </Link>
+            <Link to="/device" className="st-tab">
+              uploader
             </Link>
             <span className="st-tab" data-on>
               about

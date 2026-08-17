@@ -77,6 +77,9 @@ function ShopPage() {
             <Link to="/" className="st-tab">
               instrument
             </Link>
+            <Link to="/device" className="st-tab">
+              uploader
+            </Link>
             <Link to="/about" className="st-tab">
               about
             </Link>
