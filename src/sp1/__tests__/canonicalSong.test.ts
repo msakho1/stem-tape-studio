@@ -1,7 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { MockSp1 } from "./mockSerial";
 import { Sp1Transport, Sp1Session } from "../protocol";
-import { parseMeta, metaBlockCount } from "../meta";
 import {
   prepareCanonicalSong,
   assertCanonicalSong,
@@ -11,9 +10,10 @@ import {
   CANONICAL_SAMPLE_RATE,
   type CanonicalSong,
 } from "../song";
-import { legacyVerdict, negotiate, LOCK_NOTICE } from "../compatibility";
-import { LegacyProvisionalTransport, MutationLockedError, portIsMock } from "../transport";
-import { GENERATED_PROTOCOL } from "../generatedProtocol";
+import { evaluate, parseCapabilities, readOnlyVerdict, READ_ONLY_NOTICE } from "../compatibility";
+import { ReadOnlyDeviceError, StemTapeTransport } from "../transport";
+import { CAP_FLAG, FRAMES_PER_SECTOR, REQUIRED_CAP_FLAGS, SECTOR_BYTES, sectorsForFrames } from "../stemTapeFormat";
+import { blocksToSector, decodeSectors, encodeSong, readSectorHeader, sectorToBlocks } from "../sector";
 
 const STEMS = ["vocal", "drums", "bass", "instrument"] as const;
 
@@ -115,89 +115,162 @@ describe("canonical stereo 24-bit song", () => {
   });
 });
 
-describe("fail-closed compatibility", () => {
-  it("has no generated protocol package yet", () => {
-    expect(GENERATED_PROTOCOL).toBeNull();
-  });
+async function connect(opts: Parameters<typeof MockSp1.prototype.constructor>[0] = {}) {
+  const mock = new MockSp1(opts as never);
+  const io = new Sp1Transport(mock.port());
+  const session = new Sp1Session(io);
+  await session.handshake(4);
+  const raw = await session.queryCapabilities(400);
+  const caps = raw ? parseCapabilities(raw) : null;
+  return { mock, session, caps, t: new StemTapeTransport(session, caps, { kind: "mock" }) };
+}
 
-  it("classic SP1XFER alone cannot unlock writes", () => {
-    const v = legacyVerdict();
-    expect(v.physicalMutationAllowed).toBe(false);
-    expect(v.summary).toBe(LOCK_NOTICE);
-    expect(v.requirements.filter((r) => r.satisfied)).toHaveLength(0);
-  });
+describe("logical 8 KiB sector mapping", () => {
+  it("maps one sector onto sixteen ascending 512-byte blocks and round-trips", async () => {
+    const song = await prep([FRAMES_PER_SECTOR * 2 + 7]);
+    const sectors = encodeSong(song);
+    expect(sectors.length).toBe(sectorsForFrames(song.frames));
+    expect(sectors[0]!.length).toBe(SECTOR_BYTES);
+    const blocks = sectorToBlocks(sectors[0]!);
+    expect(blocks).toHaveLength(16);
+    expect(blocks.every((b) => b.length === 512)).toBe(true);
+    expect(Array.from(blocksToSector(blocks))).toEqual(Array.from(sectors[0]!));
 
-  it("a partial capability response stays read-only", () => {
-    const v = negotiate({
-      deviceIdentity: "STEM TAPE SP-1",
-      protocolVersion: "stem-tape-transfer/1",
-      storageLayoutVersion: "stem-tape-storage/1",
-      formatIdentifier: "pcm-s24le-48000-2ch",
-      capabilities: {
-        stereo48k24bit: true,
-        fourStems: true,
-        transactionalCommit: true,
-        resume: true,
-        metadata: true,
-        metadataBpm: false, // missing BPM storage
-        metadataDownbeat: false,
-        safeInitialise: true,
-      },
-      addressUnits: { sectorBytes: 4096, transportChunkBytes: 512, resumeUnit: "sector" },
-      maxTransferBytes: 65536,
-      libraryGeneration: 3,
-      songCapacity: 8,
-    });
-    expect(v.physicalMutationAllowed).toBe(false);
-    expect(v.requirements.find((r) => r.id === "metadata")!.satisfied).toBe(false);
+    const decodedSong = decodeSectors(sectors, song.frames);
+    for (let t = 0; t < 4; t++) {
+      expect(checksum32(decodedSong.stems[t]!)).toBe(song.stems[t]!.checksum);
+    }
+    const h = readSectorHeader(sectors[2]!);
+    expect(h.firstFrame).toBe(FRAMES_PER_SECTOR * 2);
+    expect(h.frameCount).toBe(7);
+    expect(decodedSong.bpm).toBeCloseTo(120, 6);
   });
 });
 
-describe("transport mutation lock", () => {
-  async function transport(kind: "mock" | "physical") {
-    const mock = new MockSp1();
-    const port = mock.port();
-    const io = new Sp1Transport(port);
-    const session = new Sp1Session(io);
-    const layout = await session.handshake(4);
-    const raw = await session.readBlock(0);
-    const joined =
-      metaBlockCount(layout) === 1
-        ? raw
-        : (() => {
-            const j = new Uint8Array(1024);
-            j.set(raw, 0);
-            return j;
-          })();
-    const m = parseMeta(joined, layout);
-    return { mock, port, t: new LegacyProvisionalTransport(session, m, { kind }, legacyVerdict()) };
-  }
-
-  it("a physical device is read-only for every mutating operation", async () => {
-    const { t, mock } = await transport("physical");
-    expect(t.mutationLocked).toBe(true);
-    expect(t.provisional).toBe(true);
-    const song = await prep([256, 256, 256, 256]);
-    await expect(t.initialiseLibrary()).rejects.toThrow(MutationLockedError);
-    await expect(t.writeSong({ slot: 0, song })).rejects.toThrow(MutationLockedError);
-    await expect(t.deleteSong(0)).rejects.toThrow(MutationLockedError);
-    expect(mock.writes).toBe(0);
-    expect(mock.flushes).toBe(0);
-    await expect(t.listSongs()).resolves.toHaveLength(8);
+describe("fail-closed compatibility", () => {
+  it("SP1XFER alone cannot unlock writes", () => {
+    const v = readOnlyVerdict();
+    expect(v.writable).toBe(false);
+    expect(v.summary).toBe(READ_ONLY_NOTICE);
+    expect(v.requirements.filter((r: { satisfied: boolean }) => r.satisfied)).toHaveLength(0);
   });
 
-  it("mock transport writes and reports mock-only verification language", async () => {
-    const { t } = await transport("mock");
-    expect(t.mutationLocked).toBe(false);
-    const song = await prep([256, 256, 256, 256]);
-    const out = await t.writeSong({ slot: 0, song });
+  it("stock Tape Looper firmware never answers the capability query", async () => {
+    const { caps, t, mock } = await connect();
+    expect(caps).toBeNull();
+    expect(mock.capQueries).toBe(1);
+    expect(t.writable).toBe(false);
+  });
+
+  it("a missing capability flag keeps the device read-only", async () => {
+    const { t } = await connect({ stemTape: true, capFlags: REQUIRED_CAP_FLAGS & ~CAP_FLAG.BPM_DOWNBEAT });
+    expect(t.writable).toBe(false);
+    expect(t.verdict.requirements.find((r) => r.id === "metadata")!.satisfied).toBe(false);
+    const song = await prep([256]);
+    await expect(t.uploadSong({ slot: 0, song })).rejects.toThrow(ReadOnlyDeviceError);
+    await expect(t.initialiseLibrary()).rejects.toThrow(ReadOnlyDeviceError);
+    await expect(t.deleteSong(0)).rejects.toThrow(ReadOnlyDeviceError);
+  });
+
+  it("a mismatched format version is refused", () => {
+    const v = evaluate({
+      firmwareId: 0x53544657,
+      protoMajor: 1,
+      protoMinor: 0,
+      formatMajor: 9,
+      formatMinor: 0,
+      flags: REQUIRED_CAP_FLAGS,
+      sampleRate: 48000,
+      songSlots: 8,
+      indexBlocks: 4,
+      libraryBase: 16,
+      sectorsPerSong: 8,
+      generation: 0,
+    });
+    expect(v.writable).toBe(false);
+    expect(v.requirements.find((r) => r.id === "format")!.satisfied).toBe(false);
+  });
+});
+
+describe("Stem Tape transport upload", () => {
+  it("refuses to write before the index is explicitly initialised", async () => {
+    const { t } = await connect({ stemTape: true });
+    expect(t.writable).toBe(true);
+    await t.readIndex();
+    expect(t.indexInitialised).toBe(false);
+    const song = await prep([256]);
+    const out = await t.uploadSong({ slot: 0, song });
+    expect(out.ok).toBe(false);
+    expect(out.detail).toMatch(/initialize it explicitly/);
+  });
+
+  it("commits audio, verifies by read-back and re-reads the index", async () => {
+    const { t, mock } = await connect({ stemTape: true });
+    await t.initialiseLibrary();
+    expect(t.indexInitialised).toBe(true);
+    const song = await prep([FRAMES_PER_SECTOR + 40]);
+    const stages: string[] = [];
+    const out = await t.uploadSong({ slot: 1, song, onProgress: (p) => stages.push(p.stage) });
     expect(out.ok).toBe(true);
-    expect(out.detail).toBe("Mock protocol smoke passed");
-    expect(out.durableCommitAcknowledged).toBe(false);
-    expect(out.independentReReadMatches).toBe(false);
+    expect(out.hardwareVerified).toBe(false);
+    expect(out.detail).toMatch(/physical SP-1 upload not verified/);
+    expect(out.writtenBlocks).toBe(sectorsForFrames(song.frames) * 16);
+    expect(out.verifiedBlocks).toBe(out.writtenBlocks);
+    expect(stages).toContain("confirming");
+    expect(mock.flushes).toBeGreaterThanOrEqual(2);
+
+    const songs = await t.listSongs();
+    expect(songs[1]!.occupied).toBe(true);
+    expect(songs[1]!.title).toBe("T");
+    expect(songs[1]!.bpm).toBeCloseTo(120, 3);
+    expect(songs[0]!.occupied).toBe(false);
   });
 
-  it("a real serial port cannot claim mock status", () => {
-    expect(portIsMock({} as never)).toBe(false);
+  it("retries a NAKed block and still verifies", async () => {
+    const { mock, t } = await connect({ stemTape: true });
+    await t.initialiseLibrary();
+    const base = 16 + 1 * 8 * 16;
+    mock.blocks.clear();
+    const m2 = mock as unknown as { opts: { failWriteOnce?: number[] } };
+    m2.opts.failWriteOnce = [base + 3];
+    await t.initialiseLibrary();
+    const song = await prep([256]);
+    const out = await t.uploadSong({ slot: 1, song });
+    expect(out.ok).toBe(true);
+    expect(out.retries).toBeGreaterThan(0);
+  });
+
+  it("keeps the previous index authoritative when writing is interrupted", async () => {
+    const { t, mock } = await connect({ stemTape: true });
+    await t.initialiseLibrary();
+    const before = (await t.readIndex())!.generation;
+    const song = await prep([FRAMES_PER_SECTOR * 2]);
+    const out = await t.uploadSong({ slot: 0, song, signal: { aborted: true } });
+    expect(out.ok).toBe(false);
+    expect(mock.writes).toBeGreaterThanOrEqual(0);
+    const after = await t.readIndex();
+    expect(after!.generation).toBe(before);
+    expect(after!.songs[0]!.committed).toBe(false);
+  });
+
+  it("refuses a song larger than the reported slot capacity", async () => {
+    const { t } = await connect({ stemTape: true, sectorsPerSong: 1 });
+    await t.initialiseLibrary();
+    const song = await prep([FRAMES_PER_SECTOR * 2]);
+    const out = await t.uploadSong({ slot: 0, song });
+    expect(out.ok).toBe(false);
+    expect(out.detail).toMatch(/logical sectors/);
+  });
+
+  it("deletes a committed slot and bumps the generation", async () => {
+    const { t } = await connect({ stemTape: true });
+    await t.initialiseLibrary();
+    const song = await prep([256]);
+    await t.uploadSong({ slot: 2, song });
+    const gen = (await t.readIndex())!.generation;
+    await t.deleteSong(2);
+    const idx = (await t.readIndex())!;
+    expect(idx.songs[2]!.committed).toBe(false);
+    expect(idx.generation).toBe(gen + 1);
   });
 });
