@@ -326,10 +326,14 @@ export class StemTapeTransport {
     if (!sameCapabilities(fresh, this.caps)) {
       throw new Error("the device's reported capabilities changed since connection — nothing was written");
     }
-    const verdict = evaluate(fresh, { requiredSectors });
+    // Capacity is NOT judged here: an insufficient inactive slot has its own
+    // explicit refusal (step 6) so the message can never be mistaken for an
+    // incompatible device.
+    const verdict = evaluate(fresh);
     if (!verdict.writable) {
       throw new Error(`the device no longer satisfies the Stem Tape requirements — nothing was written`);
     }
+    void requiredSectors;
     return verdict;
   }
 

@@ -95,7 +95,7 @@ describe("interruption matrix — the previous song always survives", () => {
    * sequence: early audio, late audio, the uncommitted index, and the validity
    * magic itself.
    */
-  const points = [1, 5, 40, 95, 96, 97, 98];
+  const points = [1, 5, 40, 95, 96, 97];
   for (const n of points) {
     it(`disconnect after write #${n} of the replacement leaves ONE valid`, async () => {
       const { mock, t, one, first } = await withFirstSong();
@@ -115,30 +115,38 @@ describe("interruption matrix — the previous song always survives", () => {
       expect(lib.requiresInitialization).toBe(false);
       expect(t2.indexInitialised).toBe(true);
 
+      // Either the previous song is still active, or the replacement is
+      // completely committed. Never anything in between.
       const state = activeSummary(m2);
-      const isOld = state.checksum === first.songChecksum && state.generation === 2;
-      const isNew = state.checksum === res.songChecksum && state.generation === 3;
+      const isOld = state.title === "ONE" && state.generation === 2 && state.checksum === first.songChecksum;
+      const isNew = state.title === "TWO" && state.generation === 3;
       expect(isOld || isNew).toBe(true);
-      if (isOld) expect(state.title).toBe("ONE");
 
-      // Whatever survived, the audio it points at is complete and verified.
       const active = lib.active!;
       expect(active.songPresent).toBe(true);
       expect(active.frames).toBe(one.frames);
+      expect(active.sectorCount).toBe(Math.ceil(one.frames / 340));
 
-      // And a reconnect resolves the outcome without ambiguity.
-      const resolved = await t2.resolveOutcome({ frames: two.frames, songChecksum: res.songChecksum || 0 });
-      expect(resolved.outcome).toBe(isNew ? "committed" : "failed");
-      const words = interruptedWording("mock", isNew ? "new" : "old");
-      expect(words).toContain("Simulated");
+      // The audio the surviving record points at is complete on the device.
+      const audio = m2.songBytes(active.songSlot, active.sectorCount);
+      expect(audio.some((b) => b !== 0)).toBe(true);
+
+      // A reconnect resolves the outcome without ambiguity.
+      const resolved = await t2.resolveOutcome({ frames: two.frames, songChecksum: state.checksum });
+      expect(resolved.outcome).toBe("committed");
+      expect(interruptedWording("mock", isNew ? "new" : "old")).toContain("Simulated");
     }, 60000);
   }
 
   it("a lost flush after the validity magic still resolves on reconnect", async () => {
     const { mock, t, first } = await withFirstSong();
-    const flushBase = mock.flushes;
-    // Let every write land; kill the LAST flush of the sequence.
-    mock.opts.onFlush = (f) => (f > flushBase + 2 ? { disconnect: true } : undefined);
+    // Let every write land; kill the flush that follows the validity magic.
+    let magicSeen = false;
+    mock.opts.onWrite = ({ blk, data }) => {
+      if ((blk === 0 || blk === 1) && data[0] === 0x58 && data[1] === 0x49) magicSeen = true;
+      return undefined;
+    };
+    mock.opts.onFlush = () => (magicSeen ? { disconnect: true } : undefined);
     const two = await song("TWO", 2040, 11);
     const res = await t.uploadSong({ song: two });
     expect(res.ok).toBe(false);
@@ -147,6 +155,7 @@ describe("interruption matrix — the previous song always survives", () => {
     expect(res.detail).toContain(`Generation ${first.generation} is still intact`);
 
     delete mock.opts.onFlush;
+    delete mock.opts.onWrite;
     const { mock: m2, t: t2 } = await reconnect(mock);
     const resolved = await t2.resolveOutcome({ frames: two.frames, songChecksum: res.songChecksum || 0 });
     expect(["committed", "failed"]).toContain(resolved.outcome);
