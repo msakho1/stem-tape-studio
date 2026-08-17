@@ -454,7 +454,7 @@ function DevicePage() {
               </span>
             )}
             <span data-testid="write-state" className="text-[var(--ink-dim)]">
-              {anyWriteOccurred ? "a write has occurred on this device" : "no data has been written"}
+              {writeStateWording(mockMode ? "mock" : "physical", anyWriteOccurred)}
             </span>
             <span data-testid="safe-to-disconnect" className="text-[var(--ink-dim)]">
               {busy ? "do NOT disconnect: an operation is in progress" : "safe to disconnect"}
@@ -722,15 +722,12 @@ function DevicePage() {
           <section className="st-section" data-testid="verify">
             <p className="st-section__title">5 · verify</p>
             <p className="font-mono text-[13px] leading-relaxed text-[var(--ink-dim)]" data-testid="outcome">
-              {result.outcome === "committed"
-                ? "Committed. The device index now points at this song."
-                : result.outcome === "failed"
-                  ? `Not committed — ${result.detail.replace(/\.$/, "")}. The slot still holds whatever it held before, so retrying is safe.`
-                  : `Outcome unknown — ${result.detail.replace(/\.$/, "")}. Reconnect the SP-1 and resolve it below before assuming anything.`}
+              {outcomeWording(mockMode ? "mock" : "physical", result)}
             </p>
             <ul className="mt-3 grid gap-1 font-mono text-[12px]" data-testid="verification">
               <li data-testid="v-simulated">
-                {result.verification.simulatedVerification ? "ok  " : "no  "}simulated verification (mock protocol run)
+                {result.verification.simulatedVerification ? "ok  " : "no  "}
+                {simulatedRowWording(mockMode ? "mock" : "physical")}
               </li>
               <li data-testid="v-readback">
                 {result.verification.deviceReadbackVerification ? "ok  " : "no  "}device readback verification
