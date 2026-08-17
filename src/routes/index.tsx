@@ -369,7 +369,7 @@ function LabPage() {
               )}
             </div>
 
-            <Sp1DiagnosticDrawer state={state} leds={leds} arbiter={arbiter} />
+            <Sp1DiagnosticDrawer state={state} leds={leds} arbiter={arbiter} sp1={sp1Leds} />
           </section>
 
           {/* ---------- project rail ---------- */}

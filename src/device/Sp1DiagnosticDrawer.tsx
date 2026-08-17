@@ -148,6 +148,14 @@ export function Sp1DiagnosticDrawer({ state, leds, arbiter, sp1 }: Props) {
   const [midi, setMidi] = useState<WebMidiState>(() => webMidi.snapshot());
   const [led, setLed] = useState<LedTransportState>(() => ledTransport.snapshot());
   const [physicalRows, setPhysicalRows] = useState<LedInspectionRow[]>([]);
+  /**
+   * The authoritative resolved frame. When the surface hook passes its live
+   * handle we read the SAME sampled frame the DOM and the MIDI sink saw;
+   * otherwise we resolve once for display only.
+   */
+  const authoritative = sp1
+    ? sp1.sample()
+    : resolveSp1LedFrame(sp1LedStateFrom(state, typeof performance !== "undefined" ? performance.now() : 0), 0);
   const [webRows, setWebRows] = useState<LedInspectionRow[]>([]);
   const [filter, setFilter] = useState("all");
   const [copied, setCopied] = useState<string | null>(null);
@@ -759,7 +767,7 @@ export function Sp1DiagnosticDrawer({ state, leds, arbiter, sp1 }: Props) {
           <section className="border border-[var(--bench-line)] p-2" data-testid="led-parity">
             <p className="text-[var(--signal)]">
               led parity · resolveSp1LedFrame (single engine) · transmitted{" "}
-              {transportState.lastFrame ? transportState.lastFrame.join(",") : "none"} · link {transportState.status}
+              {led.lastFrame ? led.lastFrame.join(",") : "none"} · link {led.status}
             </p>
             {authoritative.leds.map((l) => {
               const el =
@@ -767,7 +775,7 @@ export function Sp1DiagnosticDrawer({ state, leds, arbiter, sp1 }: Props) {
                   ? null
                   : document.querySelector<SVGGElement>(`[data-led="${l.id}"] .st-led__core`);
               const domOpacity = el ? (el as unknown as SVGElement).style.opacity || "—" : "—";
-              const sent = transportState.lastFrame?.[l.index] ?? null;
+              const sent = led.lastFrame?.[l.index] ?? null;
               return (
                 <div key={l.id} className="border-b border-[var(--bench-line)] py-0.5">
                   <div className="flex justify-between gap-2">
