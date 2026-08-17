@@ -18,7 +18,11 @@ import { Sp1Transport, Sp1Session, BAUD_RATE, type SerialLikePort } from "@/sp1/
 import { bpmFromTaps, STEM_ORDER, STEM_LABEL, type StemSlotName } from "@/sp1/prepare";
 import { prepareCanonicalSong, type CanonicalSong } from "@/sp1/song";
 import { parseCapabilities, readOnlyVerdict, type CompatibilityVerdict } from "@/sp1/compatibility";
-import { StemTapeTransport, type DeviceSongSlot, type UploadProgress } from "@/sp1/transport";
+import { StemTapeTransport, type DeviceSongSlot, type UploadProgress, type UploadResult } from "@/sp1/transport";
+import { buildReceipt } from "@/sp1/receipt";
+import { sectorsForFrames, BLOCKS_PER_SECTOR, PHYSICAL_BLOCK_BYTES, SECTOR_BYTES, SAMPLE_RATE } from "@/sp1/stemTapeFormat";
+import { sha256Hex } from "@/sp1/digest";
+import { encodeSong } from "@/sp1/sector";
 
 export const Route = createFileRoute("/device")({
   component: DevicePage,
@@ -62,6 +66,10 @@ function DevicePage() {
   const [progress, setProgress] = useState<{ stage: string; fraction: number; detail: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [uninitialised, setUninitialised] = useState(false);
+  const [result, setResult] = useState<UploadResult | null>(null);
+  const [playbackConfirmed, setPlaybackConfirmed] = useState(false);
+  const [songSha, setSongSha] = useState<string | null>(null);
+  const [showTech, setShowTech] = useState(false);
   const [sourceRates, setSourceRates] = useState<Partial<Record<StemSlotName, number | null>>>({});
   const [title, setTitle] = useState("");
   const [artist, setArtist] = useState("");
@@ -237,15 +245,18 @@ function DevicePage() {
     setBusy(true);
     try {
       const out = await t.uploadSong({ slot, song, signal: abortRef.current, onProgress: setProgress });
+      setResult(out);
+      setPlaybackConfirmed(false);
       if (out.ok) {
         say(
-          out.hardwareVerified
-            ? "Upload verified on hardware."
-            : "Mock protocol smoke passed · Physical SP-1 upload not verified.",
+          out.verification.deviceReadbackVerification
+            ? "Committed index re-read from the SP-1 and matched. Physical playback is still unconfirmed."
+            : "Simulated device: protocol sequence passed. No physical SP-1 was written.",
         );
+      } else if (out.outcome === "unknown") {
+        say(`Outcome unknown — ${out.detail}`);
       } else {
         say(`Upload stopped: ${out.detail}`);
-        say("Nothing was committed — the slot still holds whatever it held before. You can retry safely.");
       }
       await refresh();
     } catch (e) {
@@ -254,6 +265,49 @@ function DevicePage() {
       setBusy(false);
     }
   }, [refresh, say, slot, song]);
+
+  const resolveUnknown = useCallback(async () => {
+    const t = transportRef.current;
+    if (!t || !song || !result) return;
+    setBusy(true);
+    try {
+      const outcome = await t.resolveOutcome({
+        slot,
+        frames: song.frames,
+        songChecksum: result.songChecksum || 0,
+      });
+      setResult({ ...result, outcome, ok: outcome === "committed" });
+      say(
+        outcome === "committed"
+          ? "Reconnect check: the committed index matches this song. It is stored on the device."
+          : outcome === "failed"
+            ? "Reconnect check: the song was NOT committed. The previous song is still active."
+            : "Reconnect check: still unresolved. The index could not be read.",
+      );
+      await refresh();
+    } finally {
+      setBusy(false);
+    }
+  }, [refresh, result, say, slot, song]);
+
+  const downloadReceipt = useCallback(() => {
+    const t = transportRef.current;
+    if (!t || !song || !result) return;
+    const receipt = buildReceipt({
+      song,
+      result,
+      caps: t.caps,
+      slot,
+      mode: t.mode.kind,
+      physicalPlaybackConfirmed: playbackConfirmed,
+    });
+    const url = URL.createObjectURL(new Blob([JSON.stringify(receipt, null, 2)], { type: "application/json" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `stem-tape-receipt-${Date.now()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [playbackConfirmed, result, slot, song]);
 
   const initialiseIndex = useCallback(async () => {
     const t = transportRef.current;
