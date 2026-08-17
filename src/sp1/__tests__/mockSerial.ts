@@ -196,7 +196,13 @@ export class MockSp1 {
 
   /** Simulated power-cycle / rescan: same storage, fresh connection state. */
   reboot(): MockSp1 {
-    const next = new MockSp1({ ...this.opts, onWrite: undefined, onFlush: undefined, onRead: undefined, disconnectAfterWrites: undefined, failWriteOnce: undefined });
+    const clean: MockOptions = { ...this.opts };
+    delete clean.onWrite;
+    delete clean.onFlush;
+    delete clean.onRead;
+    delete clean.disconnectAfterWrites;
+    delete clean.failWriteOnce;
+    const next = new MockSp1(clean);
     next.blocks = this.blocks;
     return next;
   }
