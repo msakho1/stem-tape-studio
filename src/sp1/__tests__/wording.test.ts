@@ -45,6 +45,6 @@ describe("outcome wording", () => {
     );
     expect(writeStateWording("physical", true)).toBe("a write has occurred on this device");
     expect(successLogWording("physical")).toContain("re-read from the SP-1");
-    expect(resolveWording("physical", "committed")).toContain("stored on the device");
+    expect(resolveWording("physical", "committed")).toContain("committed and verified on the connected device");
   });
 });

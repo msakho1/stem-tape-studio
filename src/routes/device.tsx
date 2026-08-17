@@ -21,8 +21,8 @@ import { parseCapabilities, readOnlyVerdict, type CompatibilityVerdict } from "@
 import { StemTapeTransport, type DeviceSongSlot, type UploadProgress, type UploadResult } from "@/sp1/transport";
 import { buildReceipt } from "@/sp1/receipt";
 import {
+  interruptedWording,
   outcomeWording,
-  resolveWording,
   simulatedRowWording,
   successLogWording,
   writeStateWording,
@@ -261,7 +261,7 @@ function DevicePage() {
     abortRef.current = { aborted: false };
     setBusy(true);
     try {
-      const out = await t.uploadSong({ slot, song, signal: abortRef.current, onProgress: setProgress });
+      const out = await t.uploadSong({ song, signal: abortRef.current, onProgress: setProgress });
       setResult(out);
       setPlaybackConfirmed(false);
       if (out.ok) {
@@ -284,13 +284,18 @@ function DevicePage() {
     if (!t || !song || !result) return;
     setBusy(true);
     try {
-      const outcome = await t.resolveOutcome({
-        slot,
+      const resolved = await t.resolveOutcome({
         frames: song.frames,
         songChecksum: result.songChecksum || 0,
       });
+      const outcome = resolved.outcome;
       setResult({ ...result, outcome, ok: outcome === "committed" });
-      say(resolveWording(t.mode.kind, outcome));
+      say(
+        `${interruptedWording(
+          t.mode.kind,
+          outcome === "committed" ? "new" : outcome === "failed" ? "old" : outcome === "corrupt" ? "corrupt" : "pending",
+        )} ${resolved.detail}`,
+      );
       await refresh();
     } finally {
       setBusy(false);
@@ -530,8 +535,8 @@ function DevicePage() {
           <section className="st-section" data-testid="uninitialised">
             <p className="st-section__title">song index not initialised</p>
             <p className="font-mono text-[13px] leading-relaxed text-[var(--ink-dim)]">
-              This SP-1's index block does not carry a recognised magic, so no song list can be read. Initialisation
-              is disabled for physical devices.
+              Neither index slot holds a valid STIX v2 record, so no song list can be read. This is blank or corrupt
+              storage — an interrupted upload never lands here, because the previous generation always survives.
             </p>
             <button
               className="st-btn mt-3"
@@ -666,8 +671,8 @@ function DevicePage() {
               at {song.metadata.downbeatSeconds}s. Four stems, 48 kHz stereo 24-bit.
             </p>
             <p className="mt-1 font-mono text-[12px] text-[var(--ink-dim)]" data-testid="capacity">
-              {requiredSectors} sectors of {description ? description.sectorsPerSong : "?"} available in song slot{" "}
-              {slot + 1} · {capacityOk ? "fits" : "does NOT fit — shorten the song"}
+              {requiredSectors} sectors of {description ? description.sectorsPerSong : "?"} available in the inactive
+              staging slot · {capacityOk ? "fits" : "does NOT fit — no data will be written"}
             </p>
             <button className="st-btn mt-3" onClick={() => setShowTech((v) => !v)} data-testid="tech-toggle">
               {showTech ? "Hide technical detail" : "Show technical detail"}
