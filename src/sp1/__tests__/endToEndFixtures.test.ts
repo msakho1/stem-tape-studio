@@ -81,10 +81,10 @@ describe("four real WAV fixtures, end to end", () => {
     expect(song.audioBytes).toBe(350208);
     // 44.1 kHz sources were resampled, mono sources duplicated, all padded to N.
     const pad = Object.fromEntries(song.stems.map((s) => [s.name, s.padFrames]));
-    expect(pad.vocal).toBe(0);
-    expect(pad.drums).toBe(14592 - Math.ceil((13000 / 44100) * 48000));
-    expect(pad.bass).toBe(592);
-    expect(pad.instrument).toBe(14592 - Math.ceil((11025 / 44100) * 48000));
+    expect(pad["vocal"]).toBe(0);
+    expect(pad["drums"]).toBe(14592 - Math.ceil((13000 / 44100) * 48000));
+    expect(pad["bass"]).toBe(592);
+    expect(pad["instrument"]).toBe(14592 - Math.ceil((11025 / 44100) * 48000));
     expect(() => assertCanonicalSong(song)).not.toThrow();
   });
 
