@@ -357,4 +357,225 @@ jobs:
           path: project/audit/**
           if-no-files-found: error
 
+  stemtape-player:
+    # Standalone four-stem player release skeleton (firmware/stemtape_player).
+    # Same board/Zephyr revision/SDK as the other two targets; no Zephyr
+    # patch needed (USB audio is not yet enabled in this target -- see its
+    # README's "Deferred" section).
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: project
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Set up Zephyr v4.3.1 + SDK 0.17.4 (arm-zephyr-eabi only)
+        uses: zephyrproject-rtos/action-zephyr-setup@be8136a8bba01580485d98b7ad2d32477c36a49a  # v1.0.15
+        with:
+          base-path: project
+          app-path: firmware
+          toolchains: arm-zephyr-eabi
+          sdk-version: 0.17.4
+
+      - name: Path preflight
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -eux
+          test -d zephyr
+          test -f firmware/stemtape_player/CMakeLists.txt
+          test -f firmware/stemtape_player/src/main.c
+          test -f firmware/stemtape_player/app.overlay
+          test -f firmware/west.yml
+          test -d firmware/boards/teenageengineering/stem_player
+          west topdir
+
+      - name: Provenance preflight (clean tree, frozen manifest, toolchain versions)
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          mkdir -p audit
+          git status --porcelain=v1 --untracked-files=no > audit/git-status.txt
+          if [ -s audit/git-status.txt ]; then
+            echo "tracked Git tree is dirty:" >&2
+            cat audit/git-status.txt >&2
+            exit 1
+          fi
+          git rev-parse HEAD                > audit/git-commit.txt
+          git log -1 --stat                 > audit/git-log-head.txt
+          west manifest --freeze            > audit/west-manifest-freeze.yml
+          cp firmware/west.yml                audit/west.yml
+          ( cd zephyr && git rev-parse HEAD && cat VERSION ) > audit/zephyr-revision.txt
+          west list -f '{name} {path} {revision} {url}' > audit/west-modules.txt
+
+      - name: Build (west build -p always -b stem_player firmware/stemtape_player)
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euxo pipefail
+          mkdir -p audit
+          west build -p always -b stem_player firmware/stemtape_player -d build-stemtape-player \
+            -- -DBOARD_ROOT="$GITHUB_WORKSPACE/project/firmware" \
+               -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            2>&1 | tee audit/build.log
+
+      - name: Collect toolchain analysis
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          CACHE=build-stemtape-player/CMakeCache.txt
+          test -f "$CACHE"
+
+          cmv() { sed -n "s|^$1:[^=]*=||p" "$CACHE" | tail -n1; }
+
+          OBJDUMP="$(cmv CMAKE_OBJDUMP)"
+          SIZE="$(cmv CMAKE_SIZE_UTIL)"
+          NM="$(cmv CMAKE_NM)"
+          READELF="$(cmv CMAKE_READELF)"
+          OBJCOPY="$(cmv CMAKE_OBJCOPY)"
+
+          if [ -z "$OBJDUMP" ]; then
+            echo "CMAKE_OBJDUMP missing from $CACHE" >&2
+            exit 1
+          fi
+          BINDIR="$(dirname "$OBJDUMP")"
+          BASE="$(basename "$OBJDUMP")"
+          PREFIX="${BASE%objdump}"
+          [ -n "$SIZE" ]    || SIZE="$BINDIR/${PREFIX}size"
+          [ -n "$NM" ]      || NM="$BINDIR/${PREFIX}nm"
+          [ -n "$READELF" ] || READELF="$BINDIR/${PREFIX}readelf"
+          [ -n "$OBJCOPY" ] || OBJCOPY="$BINDIR/${PREFIX}objcopy"
+
+          for t in "$SIZE" "$OBJDUMP" "$NM" "$READELF" "$OBJCOPY"; do
+            if [ ! -x "$t" ]; then
+              echo "resolved binutils executable not found or not executable: $t" >&2
+              exit 1
+            fi
+          done
+
+          {
+            echo "CMAKE_SIZE_UTIL = $SIZE"
+            echo "CMAKE_OBJDUMP   = $OBJDUMP"
+            echo "CMAKE_NM        = $NM"
+            echo "CMAKE_READELF   = $READELF"
+            echo "CMAKE_OBJCOPY   = $OBJCOPY"
+            echo "compiler        = $("$(cmv CMAKE_C_COMPILER)" --version | head -n1)"
+          } | tee audit/tool-paths.txt
+
+          echo "$BINDIR" >> "$GITHUB_PATH"
+
+          set -x
+          B=build-stemtape-player/zephyr
+          cp "$B/zephyr.bin" "$B/stemtape_player.bin"
+          "$SIZE" -A -x "$B/zephyr.elf"          > audit/size.txt
+          "$SIZE" "$B/zephyr.elf"               >> audit/size.txt
+          "$OBJDUMP" -h "$B/zephyr.elf"          > audit/objdump-h.txt
+          "$OBJDUMP" -d "$B/zephyr.elf"          > audit/objdump-d.txt
+          "$NM" -n -S "$B/zephyr.elf"            > audit/nm.txt
+          "$READELF" -W -S -l -h "$B/zephyr.elf" > audit/readelf.txt
+
+      - name: Stem Tape Player host tests (no Zephyr/nRF toolchain)
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          cc -std=c11 -Wall -Wextra -Ifirmware/stemtape_player/src \
+            firmware/stemtape_player/src/st_crc32.c \
+            firmware/stemtape_player/src/st_transfer.c \
+            firmware/stemtape_player/src/st_gesture.c \
+            firmware/stemtape_player/src/st_scrub.c \
+            firmware/stemtape_player/src/st_led_pattern.c \
+            firmware/stemtape_player/tests/test_stemtape_player.c \
+            -lm -o audit/test_stemtape_player
+          ./audit/test_stemtape_player | tail -c 4000 | tee audit/stemtape-player-selftest.txt
+          {
+            echo '### Stem Tape Player host tests'
+            echo '```text'
+            tail -n 20 audit/stemtape-player-selftest.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Image assertions (origin, bounds, storage, UICR, entry, vectors, size, BIN identity)
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          CACHE=build-stemtape-player/CMakeCache.txt
+          cmv() { sed -n "s|^$1:[^=]*=||p" "$CACHE" | tail -n1; }
+          READELF="$(cmv CMAKE_READELF)"; OBJCOPY="$(cmv CMAKE_OBJCOPY)"
+          OBJDUMP="$(cmv CMAKE_OBJDUMP)"; BINDIR="$(dirname "$OBJDUMP")"
+          PREFIX="$(basename "$OBJDUMP")"; PREFIX="${PREFIX%objdump}"
+          [ -n "$READELF" ] || READELF="$BINDIR/${PREFIX}readelf"
+          [ -n "$OBJCOPY" ] || OBJCOPY="$BINDIR/${PREFIX}objcopy"
+          python3 .github/scripts/m0_image_assertions.py \
+            build-stemtape-player/zephyr/zephyr.elf \
+            build-stemtape-player/zephyr/stemtape_player.bin \
+            --readelf "$READELF" --objcopy "$OBJCOPY" | tee audit/image-assertions.txt
+          {
+            echo '### Stem Tape Player image assertions'
+            echo '```text'
+            grep -E '^\[(PASS|FAIL)\]|^ALL IMAGE' audit/image-assertions.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Persistent-memory and power audit report (descriptive)
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/m0_persistence_audit.py \
+            audit/nm.txt audit/persistence-audit.md > /dev/null
+          echo "report written: audit/persistence-audit.md"
+
+      - name: STRICT persistence safety gate (fail-closed)
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          set +e
+          python3 .github/scripts/m0_safety_gate.py \
+            audit/nm.txt audit/objdump-d.txt build-stemtape-player/zephyr/.config \
+            audit/safety-gate.md 2>&1 | tee audit/safety-gate.txt
+          gate_rc=${PIPESTATUS[0]}
+          set -e
+          {
+            echo '### Stem Tape Player strict persistence safety gate'
+            echo '```text'
+            cat audit/safety-gate.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$gate_rc"
+
+      - name: Hashes and sources
+        if: ${{ always() }}
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euxo pipefail
+          B=build-stemtape-player/zephyr
+          git diff                      > audit/git-diff.txt
+          ( cd "$B" && sha256sum stemtape_player.bin zephyr.bin zephyr.elf zephyr.hex 2>/dev/null || true ) \
+            > audit/sha256.txt
+          cp "$B/stemtape_player.bin" "$B/zephyr.elf" "$B/zephyr.map" "$B/zephyr.dts" audit/
+          cp "$B/.config" audit/config.txt
+          cp build-stemtape-player/CMakeCache.txt audit/
+          cp build-stemtape-player/compile_commands.json audit/ 2>/dev/null || true
+          mkdir -p audit/src/stemtape_player audit/src/board audit/src/workflow audit/src/docs
+          cp -r firmware/stemtape_player/. audit/src/stemtape_player/
+          cp -r firmware/boards/teenageengineering/stem_player/. audit/src/board/
+          cp firmware/west.yml audit/src/
+          cp .github/workflows/firmware.yml audit/src/workflow/
+          cp .github/scripts/m0_image_assertions.py \
+             .github/scripts/m0_assertions_selftest.py \
+             .github/scripts/m0_persistence_audit.py \
+             .github/scripts/m0_safety_gate.py audit/src/workflow/
+          cp docs/stem-tape-transfer-v1.md docs/stem-tape-transfer-v1-fixtures.json audit/src/docs/ 2>/dev/null || true
+          stat -c '%n %s bytes' audit/stemtape_player.bin | tee -a "$GITHUB_STEP_SUMMARY"
+          cat audit/sha256.txt | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload stemtape-player-audit
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: stemtape-player-audit
+          path: project/audit/**
+          if-no-files-found: error
 
