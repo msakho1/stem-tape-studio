@@ -16,14 +16,15 @@ import { parseCapabilities } from "../compatibility";
 import { StemTapeTransport } from "../transport";
 import { prepareCanonicalSong, assertCanonicalSong, checksum32 } from "../song";
 import { encodeSong } from "../sector";
-import { parseStemIndex } from "../stemIndex";
+import { parseIndexRecord, validateIndexRecord } from "../stemIndex";
 import {
   BLOCKS_PER_SECTOR,
   FRAMES_PER_SECTOR,
   INDEX_MAGIC,
   PHYSICAL_BLOCK_BYTES,
   SECTOR_BYTES,
-  indexBlockCount,
+  SLOT_A,
+  SLOT_B,
   sectorsForFrames,
 } from "../stemTapeFormat";
 
@@ -102,7 +103,7 @@ describe("four real WAV fixtures, end to end", () => {
     for (const s of sectors) expect(s.length).toBe(SECTOR_BYTES);
 
     rec.op("--upload--");
-    const res = await t.uploadSong({ slot: 1, song });
+    const res = await t.uploadSong({ song });
 
     expect(res.ok).toBe(true);
     expect(res.outcome).toBe("committed");
@@ -120,9 +121,15 @@ describe("four real WAV fixtures, end to end", () => {
       physicalPlaybackVerification: false,
     });
 
+    // The first upload after initialization stages into song slot A.
+    expect(res.targetSongSlot).toBe(SLOT_A);
+    expect(res.targetIndexSlot).toBe(SLOT_B);
+    expect(res.generation).toBe(2);
+    expect(res.previousGeneration).toBe(1);
+
     // Device memory equals the encoded sectors, byte for byte.
     const caps = t.caps!;
-    const base = caps.libraryBase + 1 * caps.sectorsPerSong * BLOCKS_PER_SECTOR;
+    const base = caps.song[SLOT_A].start;
     const deviceAudio = new Uint8Array(43 * SECTOR_BYTES);
     for (let i = 0; i < 688; i++) deviceAudio.set(mock.block(base + i), i * PHYSICAL_BLOCK_BYTES);
     const encoded = new Uint8Array(43 * SECTOR_BYTES);
@@ -130,14 +137,15 @@ describe("four real WAV fixtures, end to end", () => {
     const digest = (u: Uint8Array) => createHash("sha256").update(u).digest("hex");
     expect(digest(deviceAudio)).toBe(digest(encoded));
 
-    // The index the device holds names this song and carries the metadata.
-    const idxBlocks = indexBlockCount(caps.songSlots);
-    const rawIndex = new Uint8Array(idxBlocks * PHYSICAL_BLOCK_BYTES);
-    for (let i = 0; i < idxBlocks; i++) rawIndex.set(mock.block(i), i * PHYSICAL_BLOCK_BYTES);
-    expect(new DataView(rawIndex.buffer).getUint32(0, true)).toBe(INDEX_MAGIC);
-    const idx = parseStemIndex(rawIndex, caps.songSlots)!;
-    const entry = idx.songs[1]!;
-    expect(entry.committed).toBe(true);
+    // The committed index record the device holds names this song.
+    const idxBlocks = 1;
+    const rawIndex = mock.block(caps.index[SLOT_B].start);
+    expect(new DataView(rawIndex.buffer, rawIndex.byteOffset).getUint32(0, true)).toBe(INDEX_MAGIC);
+    const entry = parseIndexRecord(rawIndex);
+    expect(validateIndexRecord(entry, SLOT_B, { song: caps.song, index: caps.index }).valid).toBe(true);
+    expect(entry.songPresent).toBe(true);
+    expect(entry.songSlot).toBe(SLOT_A);
+    expect(entry.generation).toBe(2);
     expect(entry.title).toBe(META.title);
     expect(entry.artist).toBe(META.artist);
     expect(entry.bpm).toBe(META.bpm);
@@ -147,7 +155,10 @@ describe("four real WAV fixtures, end to end", () => {
     expect(entry.bitDepth).toBe(24);
     expect(entry.sectorCount).toBe(43);
     expect(entry.stemChecksums).toEqual(song.stems.map((s) => s.checksum));
-    expect(idx.songs[0]!.committed).toBe(false);
+    // The previous generation is untouched in the other index slot.
+    const other = parseIndexRecord(mock.block(caps.index[SLOT_A].start));
+    expect(other.generation).toBe(1);
+    expect(other.songPresent).toBe(false);
 
     // Checksums recomputed from the device bytes match the prepared stems.
     expect(res.stemChecksums).toEqual(song.stems.map((s) => s.checksum));
@@ -166,7 +177,7 @@ describe("four real WAV fixtures, end to end", () => {
     // 688 audio + 3 continuation index blocks + index block 0 (magic zeroed) + magic block 0
     expect(writes.length).toBe(688 + idxBlocks + 1);
     const lastWrite = writes.at(-1)!;
-    expect(lastWrite.slice(0, 10)).toBe("5700000000"); // block 0
+    expect(lastWrite.slice(0, 10)).toBe("5701000000"); // index slot B = block 1
     expect(lastWrite.slice(10, 18)).toBe("58495453"); // 'STIX' LE
     // Nothing but a flush and confirmation reads follow the magic write.
     const afterMagic = uploadTx.slice(uploadTx.lastIndexOf(lastWrite) + 1);
@@ -178,18 +189,19 @@ describe("four real WAV fixtures, end to end", () => {
     const { song } = await prepared();
     const mock = new MockSp1({ stemTape: true, sectorsPerSong: SECTORS_PER_SONG });
     const { t } = await connect(mock, new Recorder());
-    await t.uploadSong({ slot: 0, song });
+    await t.uploadSong({ song });
     await t.readIndex();
     const songs = await t.listSongs();
-    expect(songs[0]).toMatchObject({
-      index: 0,
+    expect(songs[SLOT_A]).toMatchObject({
+      name: "A",
       occupied: true,
+      active: true,
       title: META.title,
       artist: META.artist,
       frames: 14592,
       sectorCount: 43,
     });
-    expect(songs[0]!.durationSeconds).toBeCloseTo(0.304, 3);
+    expect(songs[SLOT_A]!.durationSeconds).toBeCloseTo(0.304, 3);
     expect(songs.filter((s) => s.occupied)).toHaveLength(1);
   }, 60000);
 });
