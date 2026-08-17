@@ -392,7 +392,27 @@ jobs:
           test -f firmware/stemtape_player/app.overlay
           test -f firmware/west.yml
           test -d firmware/boards/teenageengineering/stem_player
+          test -f firmware/patches/uac2-windows-fs-feedback.patch
           west topdir
+
+      - name: Apply documented Zephyr patch
+        # STEM TAPE: src/main.c is now a real derivative of the Tape Looper
+        # (see its provenance banner) and carries over that file's
+        # `extern bool uac2_fs_fb_windows_fmt;` USB Full-Speed UAC2 feedback
+        # auto-negotiation (main.c:100, used at the feedback-format watchdog
+        # around main.c:5027) UNCHANGED. That symbol is not part of stock
+        # Zephyr v4.3.1 -- it is DEFINED by this exact patch inside
+        # subsys/usb/device_next/class/usbd_uac2.c (see the patch's own
+        # diff). This target previously never needed the patch because its
+        # placeholder main.c never enabled USB audio at all; the same "build"
+        # job (classic looper) above already applies this identical patch
+        # for the identical reason. Without it, linking main.c fails with
+        # "undefined reference to `uac2_fs_fb_windows_fmt`" -- a real CI
+        # failure this exact omission caused (see commit history).
+        working-directory: ${{ github.workspace }}/project/zephyr
+        run: |
+          set -eux
+          git apply --verbose ../firmware/patches/uac2-windows-fs-feedback.patch
 
       - name: Provenance preflight (clean tree, frozen manifest, toolchain versions)
         working-directory: ${{ github.workspace }}/project
