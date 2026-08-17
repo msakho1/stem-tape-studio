@@ -29,6 +29,7 @@ import {
 import { describeMidiBytes, SP1_MIDI_CONTRACT } from "../midiContract";
 import { decodeSp1Message } from "@/audio/midi/sp1Surface";
 import { redact, reportToText, type DiagnosticReport } from "../report";
+import { FIRMWARE_PROFILES } from "../firmwareProfiles";
 import type { LedFrame, LedPattern } from "@/machine/surface";
 
 const BANNER = "Stem Tape M0 v1.0.0  diagnostic target: USB MIDI2 + CDC ACM, no UAC2, eMMC never touched";
@@ -439,12 +440,14 @@ describe("report redaction and export", () => {
       contractVersion: BEHAVIOR_CONTRACT_VERSION,
       generatedAt: "2026-01-01T00:00:00.000Z",
       expectedArtifact: EXPECTED_ARTIFACT,
+      firmwareProfiles: [...FIRMWARE_PROFILES],
       midiContract: { rows: SP1_MIDI_CONTRACT, warning: "decimal CC20-23" },
       ledModel: M0_LED_COVERAGE,
       device: {
         midiInputName: "STEM TAPE SP-1",
         midiInputId: "in-1",
         midiOutputName: null,
+        midiOutputId: null,
         midiState: "ready",
         consoleState: "idle",
         reportedFirmwareVersion: null,
@@ -458,26 +461,43 @@ describe("report redaction and export", () => {
         stableMask: null,
         unmeasured: null,
       },
+      ledTransport: {
+        status: "no-input",
+        protocolVersion: null,
+        capabilityQuerySent: false,
+        leaseActive: false,
+        commitSequence: 0,
+        commits: 0,
+        heartbeats: 0,
+        stagedMessages: 0,
+        lastFrame: null,
+        candidateOutputs: [],
+        error: null,
+      },
       state: null,
       rates: {
         rawMidiPerSec: 0,
         surfaceEventsPerSec: 0,
         reducerCommandsPerSec: 0,
         engineCommandsPerSec: 0,
-        unmatchedReleases: 0,
-        duplicatePresses: 0,
-        staleEvents: 0,
-        suppressed: 0,
-        faderMessages: 0,
-        faderReducerCommands: 0,
+        cumulativeRawMidi: 0,
+        cumulativeSurfaceEvents: 0,
+        cumulativeReducerCommands: 0,
+        cumulativeEngineCommands: 0,
+        coalesced: 0,
+        dropped: 0,
+        generated: 0,
       },
+      captureStats: new TraceRing(10).stats(),
       trace: [],
       contract: evaluateContract(null),
+      reproductions: [],
       physicalLeds: inspectPhysicalLeds(frame({}), frame({}), []),
       webOnlyIndicators: inspectWebOnlyIndicators(frame({}), frame({}), []),
       failures: [
         {
           id: "fx.flash",
+          segmentId: "fx-flash#1",
           lastGoodStage: "command emitted",
           firstDivergence: "flash never expires",
           category: "timing/clock missing",
@@ -494,7 +514,7 @@ describe("report redaction and export", () => {
     expect(text).toContain("physical SP-1 LEDs: 8 (4 Track LEDs + 4 side/status LEDs)");
     expect(text).toContain("electrical GPIO coverage (audited M0 driver): 8/8");
     expect(text).toContain("Stem Tape behaviour mapping coverage: partial");
-    expect(text).toContain("host→device LED feedback: unsupported-by-audited-build");
+    expect(text).toContain("host→device LED feedback: expected-protocol-v1-pending-handshake");
     const physicalSection = text.slice(
       text.indexOf("PHYSICAL LED COMPARISON"),
       text.indexOf("WEB-ONLY INDICATORS"),
@@ -503,7 +523,7 @@ describe("report redaction and export", () => {
     expect(physicalSection).not.toContain("play-indicator");
     expect(text).toContain("WEB-ONLY INDICATORS — NOT PART OF THE 8-LED PHYSICAL FRAME");
     expect(text).toContain("CC    20 (0x14) Fader 1");
-    expect(text).toContain("[timing/clock missing]");
+    expect(text).toContain("audit divergence category (NOT an observed failure)");
     expect(text).toContain("PHYSICAL LED COMPARISON (8 of 8)");
   });
 });
