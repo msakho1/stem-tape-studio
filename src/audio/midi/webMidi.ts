@@ -12,7 +12,7 @@
 import { allNotesOffEvent, normalizeMidiBytes, type StemMidiEvent } from "./contract";
 import { isSp1DeviceName, sp1Surface } from "./sp1Surface";
 import { trace } from "@/diagnostics/trace";
-import { ledTransport, CC_CAPABILITY } from "@/diagnostics/ledTransport";
+import { ledTransport, CC_CAPABILITY, type MidiOutLike } from "@/diagnostics/ledTransport";
 
 
 type MidiPort = {
