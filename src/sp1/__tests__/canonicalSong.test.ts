@@ -176,16 +176,27 @@ describe("fail-closed compatibility", () => {
     const v = evaluate({
       firmwareId: 0x53544657,
       protoMajor: 1,
-      protoMinor: 0,
+      protoMinor: 1,
       formatMajor: 9,
       formatMinor: 0,
       flags: REQUIRED_CAP_FLAGS,
       sampleRate: 48000,
-      songSlots: 8,
-      indexBlocks: 4,
-      libraryBase: 16,
-      sectorsPerSong: 8,
-      generation: 0,
+      blockSize: 512,
+      sectorBytes: 8192,
+      alignment: 512,
+      deviceBlocks: 4096,
+      song: [
+        { start: 16, blocks: 128 },
+        { start: 144, blocks: 128 },
+      ],
+      index: [
+        { start: 0, blocks: 1 },
+        { start: 1, blocks: 1 },
+      ],
+      activeIndexSlot: 0,
+      activeSongSlot: 0,
+      activeGeneration: 0,
+      stixVersion: 2,
     });
     expect(v.writable).toBe(false);
     expect(v.requirements.find((r) => r.id === "format")!.satisfied).toBe(false);
@@ -199,23 +210,25 @@ describe("Stem Tape transport upload", () => {
     await t.readIndex();
     expect(t.indexInitialised).toBe(false);
     const song = await prep([256]);
-    const out = await t.uploadSong({ slot: 0, song });
+    const out = await t.uploadSong({ song });
     expect(out.ok).toBe(false);
     expect(out.detail).toMatch(/initialize it explicitly/);
   });
 
-  it("commits audio, verifies by read-back and re-reads the index", async () => {
+  it("commits audio, verifies by read-back and re-reads both index slots", async () => {
     const { t, mock } = await connect({ stemTape: true });
     await t.initialiseLibrary();
     expect(t.indexInitialised).toBe(true);
     const song = await prep([FRAMES_PER_SECTOR + 40]);
     const stages: string[] = [];
-    const out = await t.uploadSong({ slot: 1, song, onProgress: (p) => stages.push(p.stage) });
+    const out = await t.uploadSong({ song, onProgress: (p) => stages.push(p.stage) });
     expect(out.ok).toBe(true);
     expect(out.verification.deviceReadbackVerification).toBe(false);
     expect(out.verification.physicalPlaybackVerification).toBe(false);
     expect(out.outcome).toBe("committed");
     expect(out.detail).toMatch(/no physical SP-1 involved/);
+    expect(out.generation).toBe(2);
+    expect(out.previousGeneration).toBe(1);
 
     expect(out.writtenBlocks).toBe(sectorsForFrames(song.frames) * 16);
     expect(out.verifiedBlocks).toBe(out.writtenBlocks);
@@ -223,57 +236,57 @@ describe("Stem Tape transport upload", () => {
     expect(mock.flushes).toBeGreaterThanOrEqual(2);
 
     const songs = await t.listSongs();
-    expect(songs[1]!.occupied).toBe(true);
-    expect(songs[1]!.title).toBe("T");
-    expect(songs[1]!.bpm).toBeCloseTo(120, 3);
-    expect(songs[0]!.occupied).toBe(false);
+    const active = songs.find((s) => s.active)!;
+    expect(active.occupied).toBe(true);
+    expect(active.title).toBe("T");
+    expect(active.bpm).toBeCloseTo(120, 3);
+    expect(songs.filter((s) => s.occupied)).toHaveLength(1);
   });
 
   it("retries a NAKed block and still verifies", async () => {
-    const { mock, t } = await connect({ stemTape: true });
-    await t.initialiseLibrary();
-    const base = 16 + 1 * 8 * 16;
-    mock.blocks.clear();
-    const m2 = mock as unknown as { opts: { failWriteOnce?: number[] } };
-    m2.opts.failWriteOnce = [base + 3];
+    const { mock, t } = await connect({ stemTape: true, failWriteOnce: [16 + 3] });
     await t.initialiseLibrary();
     const song = await prep([256]);
-    const out = await t.uploadSong({ slot: 1, song });
+    const out = await t.uploadSong({ song });
     expect(out.ok).toBe(true);
     expect(out.retries).toBeGreaterThan(0);
+    expect(mock.activeLibrary().generation).toBe(2);
   });
 
-  it("keeps the previous index authoritative when writing is interrupted", async () => {
-    const { t, mock } = await connect({ stemTape: true });
+  it("keeps the previous generation authoritative when writing is interrupted", async () => {
+    const { t } = await connect({ stemTape: true });
     await t.initialiseLibrary();
     const before = (await t.readIndex())!.generation;
     const song = await prep([FRAMES_PER_SECTOR * 2]);
-    const out = await t.uploadSong({ slot: 0, song, signal: { aborted: true } });
+    const out = await t.uploadSong({ song, signal: { aborted: true } });
     expect(out.ok).toBe(false);
-    expect(mock.writes).toBeGreaterThanOrEqual(0);
     const after = await t.readIndex();
     expect(after!.generation).toBe(before);
-    expect(after!.songs[0]!.committed).toBe(false);
+    expect(after!.requiresInitialization).toBe(false);
   });
 
-  it("refuses a song larger than the reported slot capacity", async () => {
-    const { t } = await connect({ stemTape: true, sectorsPerSong: 1 });
+  it("refuses a song larger than the inactive staging slot and writes nothing", async () => {
+    const { t, mock } = await connect({ stemTape: true, sectorsPerSong: 1 });
     await t.initialiseLibrary();
+    const writesBefore = mock.writes;
     const song = await prep([FRAMES_PER_SECTOR * 2]);
-    const out = await t.uploadSong({ slot: 0, song });
+    const out = await t.uploadSong({ song });
     expect(out.ok).toBe(false);
-    expect(out.detail).toMatch(/sufficient capacity/);
+    expect(out.detail).toMatch(/Insufficient safe staging capacity/);
+    expect(out.detail).toMatch(/No data was written/);
+    expect(mock.writes).toBe(writesBefore);
   });
 
-  it("deletes a committed slot and bumps the generation", async () => {
+  it("deletes the active song by committing a song-free next generation", async () => {
     const { t } = await connect({ stemTape: true });
     await t.initialiseLibrary();
     const song = await prep([256]);
-    await t.uploadSong({ slot: 2, song });
+    await t.uploadSong({ song });
     const gen = (await t.readIndex())!.generation;
-    await t.deleteSong(2);
-    const idx = (await t.readIndex())!;
-    expect(idx.songs[2]!.committed).toBe(false);
-    expect(idx.generation).toBe(gen + 1);
+    await t.deleteSong();
+    const lib = (await t.readIndex())!;
+    expect(lib.active!.songPresent).toBe(false);
+    expect(lib.generation).toBe(gen + 1);
+    expect(lib.requiresInitialization).toBe(false);
   });
 });
