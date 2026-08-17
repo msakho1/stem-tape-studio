@@ -3,9 +3,10 @@
  *
  * One requestAnimationFrame ticker samples the authoritative resolver. The DOM
  * and the physical MIDI sink read the SAME sampled frame, so phase can never
- * diverge. The ticker only runs while at least one resolved LED is animated,
- * and it never re-renders React on animation ticks: brightness is written
- * straight to the SVG cores through refs.
+ * diverge. The ticker runs only while at least one resolved LED is animated
+ * (finite one-shots included, so they expire on the clock rather than waiting
+ * for a re-render), and it never re-renders React on animation ticks:
+ * brightness is written straight to the SVG cores.
  *
  * Semantic frames (mode/owner/precedence changes) are traced and transmitted
  * once. Animation samples are coalesced by the transport, never traced
@@ -26,21 +27,21 @@ import {
 
 const nowMs = () => (typeof performance !== "undefined" ? performance.now() : Date.now());
 
-function writeDom(frame: ResolvedPhysicalLedFrame): void {
+export function writeSp1LedDom(frame: ResolvedPhysicalLedFrame): void {
   if (typeof document === "undefined") return;
   for (const led of frame.leds) {
     const el = document.querySelector<SVGGElement>(`[data-led="${led.id}"]`);
     const core = el?.querySelector<SVGElement>(".st-led__core");
-    if (!core) continue;
+    if (!core || !el) continue;
     core.style.opacity = String(Math.round((led.brightness / 127) * 1000) / 1000);
-    if (el!.getAttribute("data-led-mode") !== led.mode) el!.setAttribute("data-led-mode", led.mode);
+    if (el.getAttribute("data-led-mode") !== led.mode) el.setAttribute("data-led-mode", led.mode);
   }
 }
 
 export interface Sp1LedFrameHandle {
   /** Latest SEMANTIC frame — stable across animation ticks. */
   frame: ResolvedPhysicalLedFrame;
-  /** Reads the live sampled frame without subscribing to it. */
+  /** Live sampled frame, without subscribing a component to every tick. */
   sample: () => ResolvedPhysicalLedFrame;
 }
 
@@ -52,18 +53,17 @@ export function useSp1LedFrame(state: SurfaceState): Sp1LedFrameHandle {
   stateRef.current = state;
   const sigRef = useRef<string | null>(null);
   const latest = useRef(semantic);
+  const rafRef = useRef(0);
+  const originRef = useRef(nowMs());
 
   useEffect(() => {
-    let raf = 0;
     let stopped = false;
-    const t0 = nowMs();
 
-    const tick = () => {
-      if (stopped) return;
+    const step = () => {
       const t = nowMs();
-      const frame = resolveSp1LedFrame(sp1LedStateFrom(stateRef.current, t), t - t0);
+      const frame = resolveSp1LedFrame(sp1LedStateFrom(stateRef.current, t), t - originRef.current);
       latest.current = frame;
-      writeDom(frame);
+      writeSp1LedDom(frame);
 
       if (frame.signature !== sigRef.current) {
         sigRef.current = frame.signature;
@@ -73,16 +73,24 @@ export function useSp1LedFrame(state: SurfaceState): Sp1LedFrameHandle {
       } else if (frame.animated) {
         ledTransport.presentAnimationFrame(frame.values);
       }
-
-      raf = frame.animated || true ? requestAnimationFrame(tick) : 0;
+      return frame.animated;
     };
 
-    if (typeof requestAnimationFrame === "function") raf = requestAnimationFrame(tick);
+    const loop = () => {
+      if (stopped) return;
+      rafRef.current = step() && typeof requestAnimationFrame === "function" ? requestAnimationFrame(loop) : 0;
+    };
+
+    // Recompute on every state change; keep ticking only while animated.
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    loop();
+
     return () => {
       stopped = true;
-      if (raf) cancelAnimationFrame(raf);
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      rafRef.current = 0;
     };
-  }, []);
+  }, [state]);
 
   return { frame: semantic, sample: () => latest.current };
 }
