@@ -141,7 +141,7 @@ export function useAudioEngine(commands: AudioCommand[]) {
             "command.engine",
             `${cmd.type}`,
             { id: cmd.id, payload: cmd.payload as unknown },
-            { commandId: cmd.id, t: undefined },
+            { commandId: cmd.id },
           );
         }
         let ack = engine.execute(cmd);

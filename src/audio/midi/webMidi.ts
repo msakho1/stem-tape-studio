@@ -150,7 +150,7 @@ export class WebMidiAdapter {
         "midi.raw",
         `${bytes.map((b) => b.toString(16).padStart(2, "0")).join(" ")} (${bytes.join(" ")})`,
         { inputId: port.id, device: name, hex: bytes.map((b) => `0x${b.toString(16).padStart(2, "0")}`), dec: bytes },
-        { sourceT: Number.isFinite(e.timeStamp) ? e.timeStamp : undefined },
+        Number.isFinite(e.timeStamp) ? { sourceT: e.timeStamp } : {},
       );
     }
     // The physical Stem Tape SP-1 is a control surface, not an instrument: its
