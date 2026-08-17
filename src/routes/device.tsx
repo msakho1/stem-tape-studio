@@ -3,32 +3,29 @@
  *
  * Scope guard: this route is not an instrument, MIDI surface, LED simulator or
  * diagnostic dashboard. It connects, lists slots, prepares four stems locally
- * and performs one transactional upload with read-back verification.
+ * and (when a compatible device is negotiated) performs one transactional
+ * upload.
+ *
+ * This route constructs NO command bytes, block addresses, index bytes or CRC
+ * records. Everything device-specific lives behind StemTapeDeviceTransport.
+ * Physical mutation is locked; only in-process mock ports can write.
  */
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { SupportButton } from "@/components/SupportButton";
 import { sniffHeader } from "@/audio/format";
 import { Sp1Transport, Sp1Session, BAUD_RATE, type SerialLikePort } from "@/sp1/protocol";
+import { parseMeta, metaBlockCount, type Sp1Meta } from "@/sp1/meta";
+import { bpmFromTaps, STEM_ORDER, STEM_LABEL, type StemSlotName } from "@/sp1/prepare";
+import { prepareCanonicalSong, type CanonicalSong } from "@/sp1/song";
+import { LOCK_NOTICE, legacyVerdict, type CompatibilityVerdict } from "@/sp1/compatibility";
 import {
-  parseMeta,
-  buildMeta,
-  metaBlockCount,
-  capacity,
-  blocksToSeconds,
-  trackAudioBlocks,
-  type Sp1Meta,
-} from "@/sp1/meta";
-import {
-  prepareFourStems,
-  validatePackage,
-  bpmFromTaps,
-  STEM_ORDER,
-  STEM_LABEL,
-  type PrepareResult,
-  type StemSlotName,
-} from "@/sp1/prepare";
-import { uploadSong, deleteSlot, type UploadProgress } from "@/sp1/upload";
+  LegacyProvisionalTransport,
+  portIsMock,
+  type DeviceSongSlot,
+  type StemTapeDeviceTransport,
+} from "@/sp1/transport";
+import { type UploadProgress } from "@/sp1/upload";
 
 export const Route = createFileRoute("/device")({
   component: DevicePage,
@@ -38,12 +35,12 @@ export const Route = createFileRoute("/device")({
       {
         name: "description",
         content:
-          "Load four stems onto a Stem Tape SP-1 over USB. Everything is prepared in your browser: no account, no cloud, no upload of your audio.",
+          "Prepare four stems for a Stem Tape SP-1 in your browser: no account, no cloud, no upload of your audio. Physical transfer is locked until the firmware contract is final.",
       },
       { property: "og:title", content: "SP-1 Uploader — Stem Tape" },
       {
         property: "og:description",
-        content: "Connect the SP-1 over USB, choose a song slot, load four stems, verify and disconnect.",
+        content: "Connect the SP-1 over USB, prepare four stereo 24-bit stems locally, and inspect the song library.",
       },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary" },
@@ -61,11 +58,14 @@ function DevicePage() {
   const [supported, setSupported] = useState<boolean | null>(null);
   const [status, setStatus] = useState("Not connected");
   const [log, setLog] = useState<string[]>([]);
-  const [meta, setMeta] = useState<Sp1Meta | null>(null);
+  const [songs, setSongs] = useState<DeviceSongSlot[] | null>(null);
+  const [verdict, setVerdict] = useState<CompatibilityVerdict>(() => legacyVerdict());
+  const [mockMode, setMockMode] = useState(false);
+  const [description, setDescription] = useState<ReturnType<StemTapeDeviceTransport["describe"]> | null>(null);
   const [slot, setSlot] = useState(0);
   const [files, setFiles] = useState<Files>({});
   const [decoded, setDecoded] = useState<Decoded>({});
-  const [prepared, setPrepared] = useState<PrepareResult | null>(null);
+  const [song, setSong] = useState<CanonicalSong | null>(null);
   const [progress, setProgress] = useState<UploadProgress | null>(null);
   const [busy, setBusy] = useState(false);
   const [uninitialised, setUninitialised] = useState(false);
@@ -74,7 +74,7 @@ function DevicePage() {
   const [artist, setArtist] = useState("");
   const [bpm, setBpm] = useState("");
   const [downbeat, setDownbeat] = useState("0");
-  const sessionRef = useRef<Sp1Session | null>(null);
+  const transportRef = useRef<LegacyProvisionalTransport | null>(null);
   const abortRef = useRef({ aborted: false });
   const tapsRef = useRef<number[]>([]);
   const previewRef = useRef<HTMLAudioElement | null>(null);
@@ -87,29 +87,14 @@ function DevicePage() {
     setSupported(typeof navigator !== "undefined" && !!(navigator as Navigator & { serial?: unknown }).serial);
   }, []);
 
-  const layout = sessionRef.current?.layout ?? null;
-  const cap = layout && meta ? capacity(layout, meta) : null;
-
   const refresh = useCallback(async () => {
-    const session = sessionRef.current;
-    if (!session?.layout) return;
-    const n = metaBlockCount(session.layout);
-    const parsedRaw = await session.lock.run(async () => {
-      const b0 = await session.readBlock(0);
-      if (n === 1) return b0;
-      const b1 = await session.readBlock(1);
-      const joined = new Uint8Array(1024);
-      joined.set(b0, 0);
-      joined.set(b1, 512);
-      return joined;
-    });
-    const m = parseMeta(parsedRaw, session.layout);
-    setMeta(m);
-    const bad = m.magic !== session.layout.magic;
+    const t = transportRef.current;
+    if (!t) return;
+    setSongs(await t.listSongs());
+    setDescription(t.describe());
+    const bad = !t.indexMatchesFirmware;
     setUninitialised(bad);
-    if (bad) {
-      say("This SP-1's song index is uninitialised or written by different firmware. Nothing was changed.");
-    }
+    if (bad) say("This SP-1's song index is uninitialised or written by different firmware. Nothing was changed.");
   }, [say]);
 
   const connect = useCallback(async () => {
@@ -128,47 +113,68 @@ function DevicePage() {
       await port.open({ baudRate: BAUD_RATE });
       const io = new Sp1Transport(port);
       const session = new Sp1Session(io);
-      sessionRef.current = session;
       try {
         await port.setSignals?.({ dataTerminalReady: true, requestToSend: true });
       } catch { /* optional */ }
       say("Port open at 115200 baud. Entering transfer mode…");
       const l = await session.handshake(40, (n) => setStatus(`Connecting (attempt ${n})…`));
-      say(`Connected: ${l.numSlots} song slots × ${l.ntrk} tracks, ${l.sampleRate / 1000} kHz, ${l.blockSize}-byte blocks.`);
-      setStatus("Connected to SP-1");
+
+      // Answering SP1XFER! proves only that an SP-1-class device is listening.
+      // No generated Stem Tape protocol package, so the verdict fails closed.
+      const v = legacyVerdict();
+      setVerdict(v);
+      const isMock = !!injected || portIsMock(port);
+      setMockMode(isMock);
+
+      const n = metaBlockCount(l);
+      const raw = await session.lock.run(async () => {
+        const b0 = await session.readBlock(0);
+        if (n === 1) return b0;
+        const b1 = await session.readBlock(1);
+        const joined = new Uint8Array(1024);
+        joined.set(b0, 0);
+        joined.set(b1, 512);
+        return joined;
+      });
+      const meta: Sp1Meta = parseMeta(raw, l);
+      transportRef.current = new LegacyProvisionalTransport(session, meta, { kind: isMock ? "mock" : "physical" }, v);
+
+      say(`Connected: ${l.numSlots} song slots reported, ${l.sampleRate / 1000} kHz.`);
+      say(
+        isMock
+          ? "Mock transport in use — writes are permitted against the in-process fixture only."
+          : `Physical device: ${LOCK_NOTICE}`,
+      );
+      setStatus("Connected (read-only)");
       await refresh();
       session.startKeepalive();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       say(`Could not reach the SP-1: ${msg}`);
       setStatus("Not connected");
-      await sessionRef.current?.io.close();
-      sessionRef.current = null;
-      setMeta(null);
+      await transportRef.current?.disconnect().catch(() => {});
+      transportRef.current = null;
+      setSongs(null);
+      setDescription(null);
     } finally {
       setBusy(false);
     }
   }, [refresh, say]);
 
   const disconnect = useCallback(async () => {
-    const session = sessionRef.current;
-    if (!session) return;
-    session.stopKeepalive();
-    await session.exit();
-    await session.io.close();
-    sessionRef.current = null;
-    setMeta(null);
+    const t = transportRef.current;
+    if (!t) return;
+    await t.disconnect();
+    transportRef.current = null;
+    setSongs(null);
+    setDescription(null);
     setStatus("Not connected");
     say("Exited transfer mode and released the port. The SP-1 has resumed.");
   }, [say]);
 
   useEffect(() => {
     return () => {
-      const session = sessionRef.current;
-      if (session) {
-        session.stopKeepalive();
-        void session.io.close();
-      }
+      void transportRef.current?.disconnect().catch(() => {});
     };
   }, []);
 
@@ -177,9 +183,7 @@ function DevicePage() {
   const setStem = useCallback(
     async (name: StemSlotName, file: File) => {
       setFiles((f) => ({ ...f, [name]: file }));
-      setPrepared(null);
-      // Source rate comes from the container header; the decode context rate is
-      // the browser's, not the file's, so it must never be reported as such.
+      setSong(null);
       const sniff = sniffHeader(await file.slice(0, 65536).arrayBuffer());
       const ac = new AudioContext();
       try {
@@ -207,76 +211,78 @@ function DevicePage() {
   }, [files]);
 
   const allFour = STEM_ORDER.every((n) => decoded[n]);
+  const bpmValue = Number(bpm);
+  const downbeatValue = Number(downbeat);
+  const metadataComplete = Number.isFinite(bpmValue) && bpmValue > 0 && Number.isFinite(downbeatValue) && downbeatValue >= 0;
 
   const prepare = useCallback(async () => {
-    const l = sessionRef.current?.layout;
-    if (!l || !allFour) return;
+    if (!allFour) return;
+    if (!metadataComplete) {
+      say("BPM and beat zero are required: Gate, Delay and loops are tempo-locked, so they are not optional notes.");
+      return;
+    }
     setBusy(true);
     setProgress({ stage: "decoding", fraction: 1, detail: "sources decoded locally" });
     try {
-      const res = await prepareFourStems(
+      const result = await prepareCanonicalSong(
         STEM_ORDER.map((n) => ({ name: n, filename: files[n]!.name, buffer: decoded[n]! })),
         {
-          deviceRate: l.sampleRate,
-          maxBlocks: l.trackBlocks,
+          metadata: { title, artist, bpm: bpmValue, downbeatSeconds: downbeatValue },
           onStage: (stage, fraction) =>
             setProgress({ stage: stage as UploadProgress["stage"], fraction, detail: stage }),
         },
       );
-      const check = validatePackage(res);
-      if (!check.ok) {
-        say(`Package validation failed: ${check.detail}`);
-        setPrepared(null);
-        return;
-      }
-      setPrepared(res);
-      if (res.lengthSpreadSeconds > 0.001) {
+      setSong(result);
+      if (result.lengthSpreadSeconds > 0.001) {
         say(
-          `Stem lengths differ by ${fmtSecs(res.lengthSpreadSeconds)} — shorter stems were padded with digital silence to the longest.`,
+          `Stem lengths differ by ${fmtSecs(result.lengthSpreadSeconds)} — shorter stems were padded with digital silence to the longest.`,
         );
       }
-      if (res.truncated) say(`One stem exceeded this SP-1's per-track region and was clamped to ${res.blocks} blocks.`);
-      say(`Prepared: ${check.detail}`);
-      setProgress({ stage: "checksumming", fraction: 1, detail: check.detail });
+      const detail = `${result.frames} frames · stereo 24-bit @ 48 kHz · ${result.audioBytes} audio bytes (${fmtBytes(result.audioBytes)})`;
+      say(`Prepared: ${detail}`);
+      setProgress({ stage: "checksumming", fraction: 1, detail });
+    } catch (e) {
+      setSong(null);
+      say(`Preparation failed: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setBusy(false);
     }
-  }, [allFour, decoded, files, say]);
+  }, [allFour, artist, bpmValue, decoded, downbeatValue, files, metadataComplete, say, title]);
+
+  const mutationLocked = !transportRef.current || transportRef.current.mutationLocked;
 
   const startUpload = useCallback(async () => {
-    const session = sessionRef.current;
-    if (!session || !meta || !prepared) return;
+    const t = transportRef.current;
+    if (!t || !song) return;
     abortRef.current = { aborted: false };
     setBusy(true);
-    session.stopKeepalive();
-    const out = await uploadSong({
-      session,
-      meta,
-      slot,
-      stems: prepared.stems,
-      signal: abortRef.current,
-      onProgress: setProgress,
-    });
-    say(out.ok ? out.detail : `Upload stopped: ${out.detail}`);
-    if (!out.ok) say("Nothing was committed — the slot still holds whatever it held before. You can retry safely.");
-    await refresh();
-    session.startKeepalive();
-    setBusy(false);
-  }, [meta, prepared, refresh, say, slot]);
+    try {
+      const out = await t.writeSong({ slot, song, signal: abortRef.current, onProgress: setProgress });
+      if (out.ok) {
+        say(
+          out.durableCommitAcknowledged && out.independentReReadMatches
+            ? "Upload verified on hardware."
+            : "Mock protocol smoke passed · Physical SP-1 upload not verified.",
+        );
+      } else {
+        say(`Upload stopped: ${out.detail}`);
+        say("Nothing was committed — the slot still holds whatever it held before. You can retry safely.");
+      }
+      await refresh();
+    } catch (e) {
+      say(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [refresh, say, slot, song]);
 
   const initialiseIndex = useCallback(async () => {
-    const session = sessionRef.current;
-    if (!session?.layout || !meta) return;
+    const t = transportRef.current;
+    if (!t) return;
     if (!confirm("Write a fresh, empty song index to this SP-1? Existing songs become unreachable.")) return;
     setBusy(true);
     try {
-      await session.lock.run(async () => {
-        const fresh = parseMeta(new Uint8Array(metaBlockCount(session.layout!) * 512), session.layout!);
-        const mb = buildMeta(fresh, session.layout!);
-        if (metaBlockCount(session.layout!) === 2) await session.writeBlock(1, mb.slice(512, 1024));
-        await session.writeBlock(0, mb.slice(0, 512));
-        await session.flush();
-      });
+      await t.initialiseLibrary();
       say("Song index initialised — every slot is empty.");
       await refresh();
     } catch (e) {
@@ -284,16 +290,16 @@ function DevicePage() {
     } finally {
       setBusy(false);
     }
-  }, [meta, refresh, say]);
+  }, [refresh, say]);
 
   const removeSlot = useCallback(
     async (index: number) => {
-      const session = sessionRef.current;
-      if (!session || !meta) return;
+      const t = transportRef.current;
+      if (!t) return;
       if (!confirm(`Delete song ${index + 1} from the SP-1? Its four tracks become unreachable.`)) return;
       setBusy(true);
       try {
-        await deleteSlot(session, meta, index);
+        await t.deleteSong(index);
         say(`Deleted song ${index + 1}.`);
         await refresh();
       } catch (e) {
@@ -302,13 +308,11 @@ function DevicePage() {
         setBusy(false);
       }
     },
-    [meta, refresh, say],
+    [refresh, say],
   );
 
   const verifySlot = useCallback(
     async (index: number) => {
-      const session = sessionRef.current;
-      if (!session || !session.layout) return;
       setBusy(true);
       try {
         await refresh();
@@ -329,16 +333,16 @@ function DevicePage() {
     if (v) setBpm(String(v));
   }, []);
 
-  const connected = !!meta && !!layout;
+  const connected = !!songs && !!description;
   const stemRows = useMemo(
     () =>
       STEM_ORDER.map((name) => ({
         name,
         file: files[name],
         buf: decoded[name],
-        out: prepared?.stems.find((s) => s.name === name),
+        out: song?.stems.find((s) => s.name === name),
       })),
-    [decoded, files, prepared],
+    [decoded, files, song],
   );
 
   return (
@@ -365,13 +369,26 @@ function DevicePage() {
             </svg>
             <div>
               <p className="font-mono text-xl tracking-tight text-[var(--ink)]">SP-1 uploader</p>
-              <p className="font-mono text-[11px] text-[var(--ink-dim)]">connect · four stems · verify · disconnect</p>
+              <p className="font-mono text-[11px] text-[var(--ink-dim)]">connect · four stems · prepare · inspect</p>
             </div>
           </Link>
         </div>
       </header>
 
       <main className="mx-auto w-full max-w-[860px] px-4 pb-24 pt-6 md:px-8">
+        <section className="st-section" data-testid="write-lock">
+          <p className="st-section__title">physical uploads locked</p>
+          <p className="font-mono text-[13px] leading-relaxed text-[var(--ink-dim)]">{LOCK_NOTICE}</p>
+          <ul className="mt-3 grid gap-1 font-mono text-[11px] text-[var(--ink-faint)]">
+            {verdict.requirements.map((r) => (
+              <li key={r.id} data-testid={`req-${r.id}`}>
+                {r.satisfied ? "ok  " : "no  "}
+                {r.label} · {r.detail}
+              </li>
+            ))}
+          </ul>
+        </section>
+
         {supported === false && (
           <section className="st-section" data-testid="unsupported">
             <p className="st-section__title">this browser cannot talk to the SP-1</p>
@@ -399,19 +416,30 @@ function DevicePage() {
               Disconnect
             </button>
             <span className="font-mono text-[12px] text-[var(--ink-dim)]" data-testid="status">{status}</span>
+            {connected && (
+              <span className="font-mono text-[11px] text-[var(--ink-faint)]" data-testid="mode">
+                {mockMode ? "mock transport" : "physical device · read-only"}
+              </span>
+            )}
           </div>
-          {connected && layout && cap && (
+          {connected && description && (
             <dl className="mt-3 grid grid-cols-2 gap-x-6 gap-y-1 font-mono text-[12px] text-[var(--ink-dim)] md:grid-cols-3">
-              <div>device · <span className="text-[var(--ink)]">Stem Tape SP-1</span></div>
-              <div>protocol · <span className="text-[var(--ink)]">SP1XFER block v1</span></div>
-              <div>audio · <span className="text-[var(--ink)]">{layout.sampleRate / 1000} kHz mono int16</span></div>
-              <div>slots · <span className="text-[var(--ink)]" data-testid="slots">{layout.numSlots}</span></div>
+              <div>device · <span className="text-[var(--ink)]">{description.deviceName}</span></div>
+              <div>protocol · <span className="text-[var(--ink)]">{description.protocol}</span></div>
+              <div>device format · <span className="text-[var(--ink)]">{description.formatIdentifier}</span></div>
+              <div>slots reported · <span className="text-[var(--ink)]" data-testid="slots">{description.slots}</span></div>
               <div>
-                used · <span className="text-[var(--ink)]">{fmtBytes(cap.usedBlocks * 512)}</span> of{" "}
-                {fmtBytes(cap.totalBlocks * 512)}
+                used · <span className="text-[var(--ink)]">{fmtBytes(description.usedBytes)}</span> of{" "}
+                {fmtBytes(description.totalBytes)}
               </div>
-              <div>per track · <span className="text-[var(--ink)]">{fmtSecs(cap.perTrackSeconds)}</span></div>
+              <div>per track · <span className="text-[var(--ink)]">{fmtSecs(description.perTrackSeconds)}</span></div>
             </dl>
+          )}
+          {connected && description?.provisional && (
+            <p className="mt-2 font-mono text-[11px] text-[var(--ink-faint)]" data-testid="provisional">
+              Legacy/provisional adapter: every storage figure above is device-reported through the classic block
+              protocol and is not the Stem Tape storage contract.
+            </p>
           )}
         </section>
 
@@ -419,14 +447,13 @@ function DevicePage() {
           <section className="st-section" data-testid="uninitialised">
             <p className="st-section__title">song index not initialised</p>
             <p className="font-mono text-[13px] leading-relaxed text-[var(--ink-dim)]">
-              This SP-1's index block does not carry this firmware's magic, so no song list can be read. Initialising
-              writes one empty index (all slots marked empty) and flushes it. Any songs currently on the device become
-              unreachable and their audio blocks are overwritten by later uploads. Nothing is initialised automatically.
+              This SP-1's index block does not carry a recognised magic, so no song list can be read. Initialisation
+              is disabled for physical devices.
             </p>
             <button
               className="st-btn mt-3"
               data-testid="initialise"
-              disabled={busy}
+              disabled={busy || mutationLocked}
               onClick={() => void initialiseIndex()}
             >
               Initialise song index
@@ -435,42 +462,38 @@ function DevicePage() {
         )}
 
         {/* library */}
-        {connected && meta && layout && (
+        {connected && songs && (
           <section className="st-section">
             <p className="st-section__title">2 · song slots</p>
             <div className="grid gap-2">
-              {meta.slots.map((s, i) => {
-                const occupied = s.present.some((p) => !!p);
-                const secs = blocksToSeconds(trackAudioBlocks(s, 0), layout.sampleRate);
-                return (
-                  <div
-                    key={i}
-                    className={`flex flex-wrap items-center gap-3 border border-[var(--bench-line)] px-3 py-2 font-mono text-[12px] ${
-                      slot === i ? "bg-[var(--bench-raise,transparent)]" : ""
-                    }`}
-                    data-testid={`slot-${i}`}
-                  >
-                    <label className="flex items-center gap-2">
-                      <input type="radio" name="slot" checked={slot === i} onChange={() => setSlot(i)} />
-                      <span className="text-[var(--ink)]">song {i + 1}</span>
-                    </label>
-                    <span className="text-[var(--ink-dim)]" data-testid={`slot-${i}-state`}>
-                      {occupied ? `occupied · ${fmtSecs(secs)} · ${fmtBytes((s.trkLen[0] || 0) * 4 * 512)}` : "empty"}
-                    </span>
-                    <span className="ml-auto flex gap-2">
-                      <button className="st-btn" disabled={busy} onClick={() => void verifySlot(i)}>Verify</button>
-                      <button className="st-btn" disabled={busy || !occupied} onClick={() => void removeSlot(i)}>
-                        Delete
-                      </button>
-                    </span>
-                  </div>
-                );
-              })}
+              {songs.map((s) => (
+                <div
+                  key={s.index}
+                  className={`flex flex-wrap items-center gap-3 border border-[var(--bench-line)] px-3 py-2 font-mono text-[12px] ${
+                    slot === s.index ? "bg-[var(--bench-raise,transparent)]" : ""
+                  }`}
+                  data-testid={`slot-${s.index}`}
+                >
+                  <label className="flex items-center gap-2">
+                    <input type="radio" name="slot" checked={slot === s.index} onChange={() => setSlot(s.index)} />
+                    <span className="text-[var(--ink)]">song {s.index + 1}</span>
+                  </label>
+                  <span className="text-[var(--ink-dim)]" data-testid={`slot-${s.index}-state`}>
+                    {s.occupied ? `occupied · ${fmtSecs(s.durationSeconds)} · ${fmtBytes(s.bytes)}` : "empty"}
+                  </span>
+                  <span className="ml-auto flex gap-2">
+                    <button className="st-btn" disabled={busy} onClick={() => void verifySlot(s.index)}>Verify</button>
+                    <button
+                      className="st-btn"
+                      disabled={busy || !s.occupied || mutationLocked}
+                      onClick={() => void removeSlot(s.index)}
+                    >
+                      Delete
+                    </button>
+                  </span>
+                </div>
+              ))}
             </div>
-            <p className="mt-2 font-mono text-[11px] text-[var(--ink-faint)]">
-              The SP-1 index carries no title, artist, BPM or downbeat field — song details you enter below stay on
-              this device only.
-            </p>
           </section>
         )}
 
@@ -506,9 +529,9 @@ function DevicePage() {
                 {buf && (
                   <p className="text-[var(--ink-dim)]" data-testid={`info-${name}`}>
                     {file?.name} · {sourceRates[name] ?? buf.sampleRate} Hz · {buf.numberOfChannels} ch · {fmtSecs(buf.duration)}
-                    {out ? ` · out ${fmtBytes(out.outputBytes)} · peak ${(out.peak * 100).toFixed(0)}%` : ""}
+                    {out ? ` · out ${out.pcm24.length} B stereo 24-bit · peak ${(out.peak * 100).toFixed(0)}%` : ""}
                     {out?.clipped ? " · CLIPPING" : ""}
-                    {out && out.padSamples > 0 ? " · padded with silence" : ""}
+                    {out && out.padFrames > 0 ? " · padded with silence" : ""}
                   </p>
                 )}
               </div>
@@ -526,27 +549,33 @@ function DevicePage() {
             </label>
             <label className="flex items-center gap-2">
               <span className="w-[72px] text-[var(--ink-dim)]">bpm</span>
-              <input className="st-input w-24 border border-[var(--bench-line)] bg-transparent px-2 py-1" value={bpm} onChange={(e) => setBpm(e.target.value)} />
+              <input className="st-input w-24 border border-[var(--bench-line)] bg-transparent px-2 py-1" data-testid="bpm" value={bpm} onChange={(e) => setBpm(e.target.value)} />
               <button className="st-btn" onClick={tap} data-testid="tap">Tap tempo</button>
             </label>
             <label className="flex items-center gap-2">
               <span className="w-[72px] text-[var(--ink-dim)]">beat zero</span>
-              <input className="st-input w-24 border border-[var(--bench-line)] bg-transparent px-2 py-1" value={downbeat} onChange={(e) => setDownbeat(e.target.value)} />
+              <input className="st-input w-24 border border-[var(--bench-line)] bg-transparent px-2 py-1" data-testid="downbeat" value={downbeat} onChange={(e) => setDownbeat(e.target.value)} />
               <span className="text-[var(--ink-faint)]">seconds</span>
             </label>
           </div>
           <p className="mt-2 font-mono text-[11px] text-[var(--ink-faint)]">
-            The transfer contract has no metadata block for these values, so nothing is invented on the wire: the
-            SP-1 derives its beat grid from the length of the first track in a song.
+            BPM and beat zero are required, not optional notes: Gate, Delay, loops and every other synchronised
+            behaviour are tempo-locked. A song is never reported ready if the negotiated firmware cannot store them.
           </p>
 
           <div className="mt-3 flex flex-wrap items-center gap-3">
-            <button className="st-btn" data-testid="prepare" disabled={!connected || !allFour || busy} onClick={() => void prepare()}>
+            <button
+              className="st-btn"
+              data-testid="prepare"
+              disabled={!allFour || !metadataComplete || busy}
+              onClick={() => void prepare()}
+            >
               Prepare stems
             </button>
-            {prepared && (
+            {song && (
               <span className="font-mono text-[12px] text-[var(--ink-dim)]" data-testid="prepared">
-                {prepared.blocks} blocks per track · {fmtSecs(blocksToSeconds(prepared.blocks, layout?.sampleRate ?? 48000))}
+                {song.frames} frames · 48 kHz stereo 24-bit · {song.audioBytes} B total ·{" "}
+                {fmtSecs(song.durationSeconds)}
               </span>
             )}
           </div>
@@ -556,13 +585,23 @@ function DevicePage() {
         <section className="st-section">
           <p className="st-section__title">4 · upload</p>
           <div className="flex flex-wrap items-center gap-3">
-            <button className="st-btn" data-testid="upload" disabled={!connected || !prepared || busy} onClick={() => void startUpload()}>
+            <button
+              className="st-btn"
+              data-testid="upload"
+              disabled={!connected || !song || busy || mutationLocked}
+              onClick={() => void startUpload()}
+            >
               Upload to song {slot + 1}
             </button>
             <button className="st-btn" data-testid="cancel" disabled={!busy} onClick={() => { abortRef.current.aborted = true; }}>
               Cancel
             </button>
           </div>
+          {mutationLocked && (
+            <p className="mt-2 font-mono text-[12px] text-[var(--ink-dim)]" data-testid="upload-locked">
+              {LOCK_NOTICE}
+            </p>
+          )}
           {progress && (
             <p className="mt-2 font-mono text-[12px] text-[var(--ink-dim)]" data-testid="progress">
               {progress.stage} · {Math.round(progress.fraction * 100)}% · {progress.detail}
