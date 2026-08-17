@@ -168,7 +168,10 @@ describe("four real WAV fixtures, end to end", () => {
     const lastWrite = writes.at(-1)!;
     expect(lastWrite.slice(0, 10)).toBe("5700000000"); // block 0
     expect(lastWrite.slice(10, 18)).toBe("58495453"); // 'STIX' LE
-    expect(uploadTx.at(-1)).toBe("46"); // final flush after the magic
+    // Nothing but a flush and confirmation reads follow the magic write.
+    const afterMagic = uploadTx.slice(uploadTx.lastIndexOf(lastWrite) + 1);
+    expect(afterMagic[0]).toBe("46");
+    expect(afterMagic.every((h) => h === "46" || h.startsWith("52"))).toBe(true);
   }, 60000);
 
   it("listSongs reports the uploaded slot from the device index only", async () => {
