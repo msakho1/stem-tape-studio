@@ -228,8 +228,8 @@ export class LegacyProvisionalTransport implements StemTapeDeviceTransport {
       meta: this.meta,
       slot: args.slot,
       stems: this.toLegacyStems(args.song),
-      signal: args.signal,
-      onProgress: args.onProgress,
+      ...(args.signal ? { signal: args.signal } : {}),
+      ...(args.onProgress ? { onProgress: args.onProgress } : {}),
     });
     return {
       ok: out.ok,
