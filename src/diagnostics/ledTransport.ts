@@ -267,7 +267,7 @@ export class PhysicalLedTransport {
    * (the heartbeat alone keeps the lease). Changed frames stage only the
    * changed indices; the first takeover stages all eight.
    */
-  present(resolved: ResolvedPhysicalFrame): "sent" | "unchanged" | "blocked" {
+  present(resolved: TransmittableFrame): "sent" | "unchanged" | "blocked" {
     if (!this.canTransmit()) return "blocked";
     const out = this.out!;
     const values = resolved.values;
@@ -294,7 +294,7 @@ export class PhysicalLedTransport {
       });
       trace.record(
         "led.transmitted",
-        `${formatPhysicalFrame(resolved)} staged=${changed.length}${first ? " (full takeover)" : ""} commit=${seq}`,
+        `${formatFrame(resolved)} staged=${changed.length}${first ? " (full takeover)" : ""} commit=${seq}`,
         { staged: changed, values: [...values], commitSequence: seq, channel: 16 },
         { causeId: "led.frame" },
       );
