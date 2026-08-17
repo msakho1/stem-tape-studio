@@ -1,113 +1,21 @@
 #include <zephyr/dt-bindings/adc/adc.h>
 #include <zephyr/dt-bindings/adc/nrf-saadc.h>
 #include <zephyr/dt-bindings/pinctrl/nrf-pinctrl.h>
-#include <zephyr/dt-bindings/pwm/pwm.h>
 
-/* This release skeleton does not yet enable USB at all (see main.c's
- * "DEFERRED" note) -- the board's UAC2 speaker function is left at its
- * default state, ready for the real audio engine to claim it in the next
- * integration pass, rather than disabled here as M0 does. */
-
-/* ---- Local LED semantic renderer: hardware PWM2/PWM3 physical LED rows --
- * The Tape Looper board file deliberately omits PWM LED nodes ("PWM owning
- * those pins would fight" its raw-GPIO row driver) — see
- * boards/teenageengineering/stem_player/stem_player.dts. M0 is a different
- * app target that never builds the looper's GPIO LED code, so it is safe to
- * enable PWM2/PWM3 here, at the app-overlay level only; the Tape Looper
- * target and its board usage are untouched.
- *
- * Pin map + PWM2 (Track row) / PWM3 (side row) split + 1024 us period is
- * the proven layout from bnjreece/feldd-sp1-firmware's app.overlay
- * (MIT-licensed, hardware-tested on this same board), cross-checked against
- * timknapen/SP-1-dev's stemplayer_pins.h. See led_protocol.h for the full
- * index/GPIO table, citation, and the caveat that the PLAY-end/FUNCTION-end
- * direction of the side row is a best-effort inference pending hardware
- * sweep confirmation — that inference affects ONLY which node label
- * led_render.c's led_pwm[] array assigns to which protocol index; the psel
- * pin numbers and pwms channel numbers below are the fixed, proven
- * electrical wiring and are unaffected by it. */
-&pinctrl {
-	stemtape_pwm2_default: stemtape_pwm2_default {
-		group1 {
-			psels = <NRF_PSEL(PWM_OUT0, 0, 29)>,  /* Track 1 P0.29 */
-				<NRF_PSEL(PWM_OUT1, 0, 26)>,  /* Track 2 P0.26 */
-				<NRF_PSEL(PWM_OUT2, 1, 15)>,  /* Track 3 P1.15 */
-				<NRF_PSEL(PWM_OUT3, 1, 14)>;  /* Track 4 P1.14 */
-		};
-	};
-	stemtape_pwm2_sleep: stemtape_pwm2_sleep {
-		group1 {
-			psels = <NRF_PSEL(PWM_OUT0, 0, 29)>, <NRF_PSEL(PWM_OUT1, 0, 26)>,
-				<NRF_PSEL(PWM_OUT2, 1, 15)>, <NRF_PSEL(PWM_OUT3, 1, 14)>;
-			low-power-enable;
-		};
-	};
-	stemtape_pwm3_default: stemtape_pwm3_default {
-		group1 {
-			psels = <NRF_PSEL(PWM_OUT0, 0, 1)>,   /* side, P0.01 (nearest FUNCTION; see led_protocol.h) */
-				<NRF_PSEL(PWM_OUT1, 1, 12)>,  /* side, P1.12 (FUNCTION-side middle) */
-				<NRF_PSEL(PWM_OUT2, 0, 0)>,   /* side, P0.00 (PLAY-side middle) */
-				<NRF_PSEL(PWM_OUT3, 1, 13)>;  /* side, P1.13 (nearest PLAY; see led_protocol.h) */
-		};
-	};
-	stemtape_pwm3_sleep: stemtape_pwm3_sleep {
-		group1 {
-			psels = <NRF_PSEL(PWM_OUT0, 0, 1)>, <NRF_PSEL(PWM_OUT1, 1, 12)>,
-				<NRF_PSEL(PWM_OUT2, 0, 0)>, <NRF_PSEL(PWM_OUT3, 1, 13)>;
-			low-power-enable;
-		};
-	};
-};
-
-&pwm2 {
-	status = "okay";
-	pinctrl-0 = <&stemtape_pwm2_default>;
-	pinctrl-1 = <&stemtape_pwm2_sleep>;
-	pinctrl-names = "default", "sleep";
-};
-&pwm3 {
-	status = "okay";
-	pinctrl-0 = <&stemtape_pwm3_default>;
-	pinctrl-1 = <&stemtape_pwm3_sleep>;
-	pinctrl-names = "default", "sleep";
-};
-
-/ {
-	/* pwm-leds container (gold-BSP / feldd pattern): gives each child's
-	 * `pwms` property the binding PWM_DT_SPEC_GET() needs. led_render.c
-	 * drives the channels directly via pwm_set_pulse_dt(), so
-	 * CONFIG_LED_PWM is intentionally NOT enabled — this node exists only
-	 * to make the eight devicetree handles resolvable. Node labels name
-	 * the GPIO/electrical position (fixed, proven); led_render.c's
-	 * led_pwm[] array maps each to a protocol index (see led_protocol.h). */
-	stemtape_leds: stemtape-leds {
-		compatible = "pwm-leds";
-		stemtape_led_track1: stemtape_led_track1 {
-			pwms = <&pwm2 0 PWM_USEC(1024) PWM_POLARITY_NORMAL>; /* P0.29 */
-		};
-		stemtape_led_track2: stemtape_led_track2 {
-			pwms = <&pwm2 1 PWM_USEC(1024) PWM_POLARITY_NORMAL>; /* P0.26 */
-		};
-		stemtape_led_track3: stemtape_led_track3 {
-			pwms = <&pwm2 2 PWM_USEC(1024) PWM_POLARITY_NORMAL>; /* P1.15 */
-		};
-		stemtape_led_track4: stemtape_led_track4 {
-			pwms = <&pwm2 3 PWM_USEC(1024) PWM_POLARITY_NORMAL>; /* P1.14 */
-		};
-		stemtape_led_side_function: stemtape_led_side_function {
-			pwms = <&pwm3 0 PWM_USEC(1024) PWM_POLARITY_NORMAL>; /* P0.01 */
-		};
-		stemtape_led_side_mid2: stemtape_led_side_mid2 {
-			pwms = <&pwm3 1 PWM_USEC(1024) PWM_POLARITY_NORMAL>; /* P1.12 */
-		};
-		stemtape_led_side_mid1: stemtape_led_side_mid1 {
-			pwms = <&pwm3 2 PWM_USEC(1024) PWM_POLARITY_NORMAL>; /* P0.00 */
-		};
-		stemtape_led_side_play: stemtape_led_side_play {
-			pwms = <&pwm3 3 PWM_USEC(1024) PWM_POLARITY_NORMAL>; /* P1.13 */
-		};
-	};
-};
+/* STEM TAPE: src/main.c is now a real derivative of the Tape Looper (see
+ * its provenance banner) -- it drives the eight physical LEDs directly via
+ * raw GPIO register access (leds[]/track_leds[] + the soft-PWM timer ISR,
+ * NOT the Zephyr PWM peripheral), on exactly the same pins listed below.
+ * This overlay previously (superseded design, see git history) claimed
+ * those SAME pins for the hardware PWM2/PWM3 peripheral via pinctrl -- a
+ * real pin-ownership conflict with main.c's raw-GPIO driver, for the exact
+ * reason firmware/boards/teenageengineering/stem_player/stem_player.dts's
+ * own comment already documents: "PWM owning those pins would fight" the
+ * raw-GPIO row driver. That PWM2/PWM3 devicetree block (and the pwm-leds
+ * container that exposed it to led_render.c, also no longer built into
+ * this target -- see CMakeLists.txt) has been removed; this overlay now
+ * only carries the ADC channel setup, identical to firmware/app.overlay,
+ * which main.c's ladder_read()/adc_ladder[] actually depend on. */
 
 &adc {
 	channel@2 { reg = <2>; zephyr,gain = "ADC_GAIN_1_6"; zephyr,reference = "ADC_REF_INTERNAL";
@@ -124,9 +32,8 @@
 		zephyr,input-positive = <NRF_SAADC_AIN7>; zephyr,resolution = <12>; };   /* Fader 4 P0.31 */
 	channel@6 { reg = <6>; zephyr,gain = "ADC_GAIN_1_6"; zephyr,reference = "ADC_REF_INTERNAL";
 		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS, 20)>;
-		zephyr,input-positive = <NRF_SAADC_AIN4>; zephyr,resolution = <12>; };   /* Battery P0.28 */
+		zephyr,input-positive = <NRF_SAADC_AIN4>; zephyr,resolution = <12>; };   /* Battery level P0.28 (divider, per SP-1-dev wiki) */
 };
-
 &zephyr_user {
 	io-channels = <&adc 0>, <&adc 1>, <&adc 2>, <&adc 3>, <&adc 4>, <&adc 5>, <&adc 6>;
 };
