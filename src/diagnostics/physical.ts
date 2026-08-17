@@ -55,7 +55,7 @@ export const PHYSICAL_LED_COUNT = 8;
 
 /** The side row is multifunctional: battery, playback and status share it. */
 export const SIDE_ROW_NOTE =
-  "side-led-1..4 are one multifunctional battery / playback / status row; stock playback reuses one of these four and its physical index is UNVERIFIED";
+  "side-led-1..4 are one multifunctional battery / playback / status row. Physical index 4 (the side LED nearest PLAY) is the CONFIRMED stock playback indicator and is fully illuminated while a song plays; indices 5..7 carry loop division, FX bank and song-slot state";
 
 export function isPhysicalLedId(id: string): id is PhysicalLedId {
   return (PHYSICAL_LED_IDS as readonly string[]).includes(id);
@@ -106,7 +106,7 @@ export const M0_CAPABILITIES: Record<string, Capability | string> = {
   "physical LED GPIO coverage (electrical)": `${M0_IMPLEMENTED_LED_OUTPUTS.length}/${PHYSICAL_LED_COUNT}`,
   "Stem Tape behaviour mapping onto physical LEDs": "partial",
   "host→device physical LED feedback": M0_HOST_LED_FEEDBACK,
-  "side-row playback index": "unverified",
+  "side-row playback index": "confirmed — physical index 4, nearest PLAY",
   "unmeasured resistor-ladder chords": "present",
 };
 

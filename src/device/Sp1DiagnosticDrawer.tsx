@@ -32,7 +32,6 @@ import { SEGMENT_DEFINITIONS, segmentRunner } from "@/diagnostics/segments";
 import { resolveSp1LedFrame, sp1LedStateFrom, formatSp1Frame } from "@/leds/sp1LedEngine";
 import type { Sp1LedFrameHandle } from "@/leds/useSp1LedFrame";
 import { ledTransport, type LedTransportState } from "@/diagnostics/ledTransport";
-import { resolvePhysicalFrame, formatPhysicalFrame } from "@/diagnostics/physicalFrame";
 import {
   inspectPhysicalLeds,
   inspectWebOnlyIndicators,

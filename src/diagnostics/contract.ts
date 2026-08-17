@@ -19,7 +19,7 @@ import {
   type ExpectedPhysicalLedFrame,
 } from "./physical";
 
-export const BEHAVIOR_CONTRACT_VERSION = "sp1-behavior-contract/4.0.0";
+export const BEHAVIOR_CONTRACT_VERSION = "sp1-behavior-contract/5.0.0";
 
 export type Provenance =
   | "STOCK_SP1_DOCUMENTED"
