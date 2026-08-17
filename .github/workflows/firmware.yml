@@ -82,6 +82,48 @@ jobs:
           ls -l sp1_looper.bin
           sha256sum sp1_looper.bin | tee -a "$GITHUB_STEP_SUMMARY"
 
+      # GOLDEN TAPE LOOPER (fail-closed): the physical unit's currently-
+      # flashed binary was hashed off real hardware and confirmed byte-for-
+      # byte identical to this job's own build output. That pairing (real
+      # device <-> this exact CI build) is the hardware-proven baseline the
+      # whole Stem Tape effort is derived from -- this step guarantees the
+      # `firmware/` build stays pinned to it. It compares the FRESHLY
+      # GENERATED build/zephyr/sp1_looper.bin from this run, never a
+      # possibly-stale checked-in copy, and fails the job on any mismatch
+      # (size or hash). It does not alter any Tape Looper source, board
+      # file, patch, configuration, or compiler option.
+      - name: Assert golden Tape Looper binary (fail-closed)
+        working-directory: ${{ github.workspace }}/project/build/zephyr
+        run: |
+          set -euo pipefail
+          EXPECT_SIZE=96232
+          EXPECT_SHA256=5670391bbee6a3ebde2c0a15d35a2731faca8fdb165124efda91de6ba48c3a8d
+          ACTUAL_SIZE=$(stat -c '%s' sp1_looper.bin)
+          ACTUAL_SHA256=$(sha256sum sp1_looper.bin | awk '{print $1}')
+          {
+            echo '### Golden Tape Looper binary assertion'
+            echo '```text'
+            echo "expected size:   $EXPECT_SIZE"
+            echo "actual size:     $ACTUAL_SIZE"
+            echo "expected sha256: $EXPECT_SHA256"
+            echo "actual sha256:   $ACTUAL_SHA256"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          ok=1
+          if [ "$ACTUAL_SIZE" != "$EXPECT_SIZE" ]; then
+            echo "::error::sp1_looper.bin size $ACTUAL_SIZE != golden $EXPECT_SIZE"
+            ok=0
+          fi
+          if [ "$ACTUAL_SHA256" != "$EXPECT_SHA256" ]; then
+            echo "::error::sp1_looper.bin sha256 $ACTUAL_SHA256 != golden $EXPECT_SHA256"
+            ok=0
+          fi
+          if [ "$ok" -ne 1 ]; then
+            echo '### GOLDEN TAPE LOOPER ASSERTION FAILED -- build no longer matches the hardware-verified baseline' >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "golden Tape Looper binary confirmed: size and SHA-256 match the hardware-verified baseline"
+
       - name: Upload sp1_looper.bin
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
