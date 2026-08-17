@@ -20,6 +20,8 @@
  * therefore a real read-back byte compare over 'R'.
  */
 
+import { CAPS_BYTES, CAPS_TAG, CMD_CAPS } from "./stemTapeFormat";
+
 export const BAUD_RATE = 115200;
 export const SAMPLES_PER_BLOCK = 256;
 export const BLOCK_BYTES = 512;
