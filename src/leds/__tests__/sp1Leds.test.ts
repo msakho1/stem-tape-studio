@@ -82,8 +82,9 @@ describe("transport", () => {
   });
 
   it("stops illuminating index 4 when playback stops", () => {
-    const f = resolveSp1LedFrame(baseState({ playing: false }), 0);
-    expect(f.leds[PLAY_SIDE_INDEX]!.mode).not.toBe("solid");
+    const f = resolveSp1LedFrame(baseState({ playing: false, song: 1 }), 0);
+    expect(f.leds[PLAY_SIDE_INDEX]!.owner).not.toContain("transport");
+    expect(f.leds[PLAY_SIDE_INDEX]!.brightness).toBe(0);
   });
 });
 
