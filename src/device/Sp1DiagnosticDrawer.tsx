@@ -29,6 +29,8 @@ import {
 import { CURRENT_FIRMWARE_PROFILE, FIRMWARE_PROFILES } from "@/diagnostics/firmwareProfiles";
 import { BEHAVIOR_CONTRACT_VERSION, evaluateContract } from "@/diagnostics/contract";
 import { SEGMENT_DEFINITIONS, segmentRunner } from "@/diagnostics/segments";
+import { resolveSp1LedFrame, sp1LedStateFrom, formatSp1Frame } from "@/leds/sp1LedEngine";
+import type { Sp1LedFrameHandle } from "@/leds/useSp1LedFrame";
 import { ledTransport, type LedTransportState } from "@/diagnostics/ledTransport";
 import { resolvePhysicalFrame, formatPhysicalFrame } from "@/diagnostics/physicalFrame";
 import {
@@ -90,6 +92,8 @@ interface Props {
   state: SurfaceState;
   leds: LedFrame;
   arbiter: ChordArbiter;
+  /** Authoritative resolved physical frame from the single LED engine. */
+  sp1?: Sp1LedFrameHandle;
 }
 
 function Row({ k, v }: { k: string; v: React.ReactNode }) {
@@ -131,7 +135,7 @@ function LedRows({ rows }: { rows: LedInspectionRow[] }) {
   );
 }
 
-export function Sp1DiagnosticDrawer({ state, leds, arbiter }: Props) {
+export function Sp1DiagnosticDrawer({ state, leds, arbiter, sp1 }: Props) {
   const [open, setOpen] = useState(false);
   /** Background capture: keeps collecting while the drawer is closed. */
   const [background, setBackground] = useState(false);
@@ -746,9 +750,49 @@ export function Sp1DiagnosticDrawer({ state, leds, arbiter }: Props) {
               {M0_LED_COVERAGE.hostToDeviceLedFeedback}
             </p>
             <p className="text-[var(--ink-faint)]">
-              resolved frame: {formatPhysicalFrame(resolvePhysicalFrame(leds))}
+              resolved frame: {formatSp1Frame(authoritative)}
             </p>
             <LedRows rows={physicalRows} />
+          </section>
+
+          {/* ---------- authoritative LED parity ---------- */}
+          <section className="border border-[var(--bench-line)] p-2" data-testid="led-parity">
+            <p className="text-[var(--signal)]">
+              led parity · resolveSp1LedFrame (single engine) · transmitted{" "}
+              {transportState.lastFrame ? transportState.lastFrame.join(",") : "none"} · link {transportState.status}
+            </p>
+            {authoritative.leds.map((l) => {
+              const el =
+                typeof document === "undefined"
+                  ? null
+                  : document.querySelector<SVGGElement>(`[data-led="${l.id}"] .st-led__core`);
+              const domOpacity = el ? (el as unknown as SVGElement).style.opacity || "—" : "—";
+              const sent = transportState.lastFrame?.[l.index] ?? null;
+              return (
+                <div key={l.id} className="border-b border-[var(--bench-line)] py-0.5">
+                  <div className="flex justify-between gap-2">
+                    <span>
+                      [{l.index}] {l.name}
+                    </span>
+                    <span className="uppercase text-[var(--signal)]">
+                      {l.mode} · {l.brightness}/127
+                    </span>
+                  </div>
+                  <div className="text-[var(--ink-faint)]">
+                    owner {l.owner} · precedence {l.precedence} ({l.precedenceKey}) · period{" "}
+                    {l.periodMs ?? "—"} · phase {l.phaseAnchor} · {l.direction}
+                  </div>
+                  <div className="text-[var(--ink-faint)]">
+                    provenance {l.provenance} · lost-to {l.lostTo ?? "—"} · restores-to {l.restoreTo ?? "—"}
+                  </div>
+                  <div className="text-[var(--ink-faint)]">
+                    logical {Math.round((l.brightness / 127) * 1000) / 1000} · dom opacity {domOpacity} · transmitted{" "}
+                    {sent === null ? "not transmitted" : sent} ·{" "}
+                    {sent !== null && sent === l.brightness ? "parity" : "divergent/unsent"}
+                  </div>
+                </div>
+              );
+            })}
           </section>
 
           <section className="border border-[var(--bench-line)] p-2" data-testid="web-only-indicators">
