@@ -18,6 +18,7 @@ import type { LedFrame, SurfaceState } from "@/machine/surface";
 import { deriveLeds } from "@/machine/surface";
 import { GLOBAL_SCRUB_SPEEDS } from "@/audio/inertia";
 import { webMidi, type WebMidiState } from "@/audio/midi/webMidi";
+import { sp1Surface } from "@/audio/midi/sp1Surface";
 import type { ChordArbiter } from "@/machine/chordArbiter";
 import { trace, traceNow, type TraceRecord, type TraceStage, type TraceStats } from "@/diagnostics/trace";
 import {
@@ -257,10 +258,19 @@ export function Sp1DiagnosticDrawer({ state, leds, arbiter }: Props) {
   }, [open]);
 
   const heldControls = state.pressed as unknown as string[];
+  /** Last hardware fader positions, kept separate from mixer gain. */
+  const [hardwareFaders, setHardwareFaders] = useState<(number | null)[]>([null, null, null, null]);
+  useEffect(() => {
+    if (!active) return;
+    return sp1Surface.subscribe((ev) => {
+      if (ev.type !== "fader") return;
+      setHardwareFaders((prev) => prev.map((v, i) => (i === ev.index ? ev.value : v)));
+    });
+  }, [active]);
 
   const snapshot: StateSnapshot = useMemo(
     () => ({
-      webPowered: state.powered,
+      webPowered: state.power === "on",
       playing: state.playing,
       globalLoop: state.globalLoop.active ? (state.globalLoop.latched ? "latched" : "momentary") : "off",
       loopDivision: state.globalLoop.division,
@@ -288,12 +298,12 @@ export function Sp1DiagnosticDrawer({ state, leds, arbiter }: Props) {
       linked: state.perf.tracks.map((t) => t.linked),
       heldControls: [...heldControls],
       arbitrationOwner: arbiter.currentOwner(),
-      faderHardware: [...(led.lastFrame ? [] : [])].length ? [] : state.tracks.map(() => null),
+      faderHardware: hardwareFaders,
       mixerGain: state.tracks.map((t) => t.volume),
       faderPickup: "not implemented — engine gain follows hardware CC immediately (no baseline, no arming, no crossing)",
       buttons: Object.fromEntries(BUTTONS.map((b) => [b, state.pressed.includes(b)])),
     }),
-    [state, arbiter, heldControls, led.lastFrame],
+    [state, arbiter, heldControls, hardwareFaders],
   );
 
   const contract = useMemo(
@@ -347,7 +357,7 @@ export function Sp1DiagnosticDrawer({ state, leds, arbiter }: Props) {
         midiState: midi.status,
         consoleState: console_.status,
         // NEVER back-filled from expected metadata.
-        reportedFirmwareVersion: console_.status === "open" ? console_.reportedVersion : null,
+        reportedFirmwareVersion: console_.status === "connected" ? console_.reportedVersion : null,
         capabilities: M0_CAPABILITIES as Record<string, string>,
       },
       ledTransport: {
@@ -391,7 +401,7 @@ export function Sp1DiagnosticDrawer({ state, leds, arbiter }: Props) {
           expected: c.expectedLedSummary,
           actual: c.observed ?? "not derivable from reducer state",
           requiresHardware: c.provenance === "PHYSICAL_OBSERVATION" || c.provenance === "M0_DIAGNOSTIC_ONLY",
-          observation: c.observationSource,
+          observation: c.observationSource === "live-hardware" ? "physically-observed" : c.observationSource === "browser-injection" ? "browser-observed" : c.observationSource === "mocked" ? "mocked" : "not-observed",
         })),
       unverified: contract
         .filter((c) => c.status === "unverified" || c.provenance === "UNVERIFIED")
@@ -557,7 +567,7 @@ export function Sp1DiagnosticDrawer({ state, leds, arbiter }: Props) {
             <Row k="firmware console" v={console_.status} />
             <Row
               k="reported firmware"
-              v={console_.status === "open" ? (console_.reportedVersion ?? "not reported") : "unknown (console closed)"}
+              v={console_.status === "connected" ? (console_.reportedVersion ?? "not reported") : "unknown (console closed)"}
             />
             <p className="mt-2 text-[var(--ink-faint)]">
               expected artifact metadata — never verified device identity
@@ -654,6 +664,10 @@ export function Sp1DiagnosticDrawer({ state, leds, arbiter }: Props) {
             <Row k="transport" v={snapshot.playing ? "playing" : "stopped"} />
             <Row k="buttons (10)" v={BUTTONS.map((b) => (state.pressed.includes(b) ? "1" : "0")).join("")} />
             <Row k="mixer gain" v={snapshot.mixerGain.map((f) => f.toFixed(2)).join(" ")} />
+            <Row
+              k="fader hardware position"
+              v={snapshot.faderHardware.map((f) => (f === null ? "—" : f.toFixed(2))).join(" ")}
+            />
             <Row k="fader pickup" v={snapshot.faderPickup} />
             <Row k="muted" v={snapshot.muted.map((m) => (m ? "M" : "-")).join("")} />
             <Row k="soloed" v={snapshot.soloed.map((m) => (m ? "S" : "-")).join("")} />
