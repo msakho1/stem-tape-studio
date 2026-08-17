@@ -579,7 +579,17 @@ jobs:
           check emmc_write_blocks
           check emmc_cache_flush
           check meta_write_blocks
-          check xfer_service
+          # xfer_service() is NOT checked as a standalone symbol: it has
+          # exactly one, always-taken call site (inside streamer_thread()'s
+          # main loop, unconditionally under `#if SP1_XFER_ENABLE` which is
+          # `#define`d to 1, not gated on any Kconfig/build option), so -Os
+          # legitimately inlines it into streamer_thread() with no separate
+          # symbol left in nm -- confirmed by CI itself: it was reported
+          # "MISSING" the first time this gate ran on a real (non-RAM-
+          # overflowing) build, even though the same build's image
+          # assertions and every other check here passed. Reachability is
+          # proven instead by streamer_thread() being present (checked
+          # below) plus this single, unconditional call site in the source.
           check st_stem_validate_commit
           check st_crc32_update
           # cold-boot discovery + the shared-transport playback engine
@@ -624,18 +634,38 @@ jobs:
           exit "$gate_rc"
 
       - name: Hashes and sources
+        # STEM TAPE: made resilient to a FAILED build (this step already ran
+        # if: always(), but previously used bare `cp` under `set -e` for the
+        # final artifacts, so a failed link -- no zephyr.elf/.bin/.map --
+        # made THIS step also fail before it ever reached the source-tree
+        # copy, silently discarding the one thing most useful for debugging
+        # a failed build: build.log (already captured by the Build step's
+        # own `tee`) and, for a link failure specifically, the linker's own
+        # PARTIAL map (zephyr_pre0.map, produced even when the final
+        # zephyr_pre0.elf link fails -- see e.g. "region `RAM' overflowed").
+        # This does NOT change whether the build step itself passes or
+        # fails -- that verdict is untouched -- it only stops throwing away
+        # the evidence when it doesn't.
         if: ${{ always() }}
         working-directory: ${{ github.workspace }}/project
         run: |
-          set -euxo pipefail
+          set -uxo pipefail
           B=build-stemtape-player/zephyr
-          git diff                      > audit/git-diff.txt
+          git diff > audit/git-diff.txt
+          {
+            echo "build_succeeded=$( [ -f "$B/zephyr.elf" ] && echo 1 || echo 0 )"
+          } > audit/build-status.txt
+          cat audit/build-status.txt
           ( cd "$B" && sha256sum stemtape_player.bin zephyr.bin zephyr.elf zephyr.hex 2>/dev/null || true ) \
             > audit/sha256.txt
-          cp "$B/stemtape_player.bin" "$B/zephyr.elf" "$B/zephyr.map" "$B/zephyr.dts" audit/
-          cp "$B/.config" audit/config.txt
-          cp build-stemtape-player/CMakeCache.txt audit/
-          cp build-stemtape-player/compile_commands.json audit/ 2>/dev/null || true
+          # Best-effort per file: never let one missing artifact (e.g. a
+          # failed final link) discard everything else that DID get produced.
+          for f in stemtape_player.bin zephyr.elf zephyr.map zephyr.dts zephyr_pre0.map zephyr_pre0.elf; do
+            [ -f "$B/$f" ] && cp "$B/$f" audit/ || echo "audit: $f not present (expected on a failed build)"
+          done
+          [ -f "$B/.config" ] && cp "$B/.config" audit/config.txt
+          [ -f build-stemtape-player/CMakeCache.txt ] && cp build-stemtape-player/CMakeCache.txt audit/
+          [ -f build-stemtape-player/compile_commands.json ] && cp build-stemtape-player/compile_commands.json audit/
           mkdir -p audit/src/stemtape_player audit/src/board audit/src/workflow audit/src/docs
           cp -r firmware/stemtape_player/. audit/src/stemtape_player/
           cp -r firmware/boards/teenageengineering/stem_player/. audit/src/board/
@@ -646,8 +676,18 @@ jobs:
              .github/scripts/m0_persistence_audit.py \
              .github/scripts/m0_safety_gate.py audit/src/workflow/
           cp docs/stem-tape-transfer-v1.md docs/stem-tape-transfer-v1-fixtures.json audit/src/docs/ 2>/dev/null || true
-          stat -c '%n %s bytes' audit/stemtape_player.bin | tee -a "$GITHUB_STEP_SUMMARY"
-          cat audit/sha256.txt | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ -f audit/stemtape_player.bin ]; then
+            stat -c '%n %s bytes' audit/stemtape_player.bin | tee -a "$GITHUB_STEP_SUMMARY"
+            cat audit/sha256.txt | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "### stemtape-player: BUILD FAILED -- no final artifact"
+              echo '```text'
+              echo "zephyr.elf was not produced. See audit/build.log and, if present,"
+              echo "audit/zephyr_pre0.map for the linker's partial output."
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Upload stemtape-player-audit
         if: ${{ always() }}
