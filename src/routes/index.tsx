@@ -199,6 +199,9 @@ function LabPage() {
               <span className="st-tab" data-on>
                 instrument
               </span>
+              <Link to="/device" className="st-tab">
+                uploader
+              </Link>
               <Link to="/about" className="st-tab">
                 about
               </Link>
