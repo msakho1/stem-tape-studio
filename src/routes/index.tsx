@@ -78,6 +78,7 @@ function LabPage() {
   const {
     state,
     leds,
+    sp1Leds,
     observed,
     ready,
     powerHoldMs,
