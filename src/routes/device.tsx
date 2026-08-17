@@ -11,6 +11,7 @@ import { SupportButton } from "@/components/SupportButton";
 import { Sp1Transport, Sp1Session, BAUD_RATE, type SerialLikePort } from "@/sp1/protocol";
 import {
   parseMeta,
+  buildMeta,
   metaBlockCount,
   capacity,
   blocksToSeconds,
@@ -66,6 +67,7 @@ function DevicePage() {
   const [prepared, setPrepared] = useState<PrepareResult | null>(null);
   const [progress, setProgress] = useState<UploadProgress | null>(null);
   const [busy, setBusy] = useState(false);
+  const [uninitialised, setUninitialised] = useState(false);
   const [title, setTitle] = useState("");
   const [artist, setArtist] = useState("");
   const [bpm, setBpm] = useState("");
@@ -101,13 +103,14 @@ function DevicePage() {
     });
     const m = parseMeta(parsedRaw, session.layout);
     setMeta(m);
-    if (m.magic !== session.layout.magic) {
+    const bad = m.magic !== session.layout.magic;
+    setUninitialised(bad);
+    if (bad) {
       say("This SP-1's song index is uninitialised or written by different firmware. Nothing was changed.");
     }
   }, [say]);
 
   const connect = useCallback(async () => {
-    console.log("[sp1] connect clicked", typeof (globalThis as { __SP1_MOCK_PORT__?: unknown }).__SP1_MOCK_PORT__);
     const injected = (globalThis as { __SP1_MOCK_PORT__?: SerialLikePort }).__SP1_MOCK_PORT__;
     const nav = navigator as Navigator & { serial?: { requestPort(): Promise<SerialLikePort> } };
     if (!injected && !nav.serial) return;
@@ -256,6 +259,28 @@ function DevicePage() {
     setBusy(false);
   }, [meta, prepared, refresh, say, slot]);
 
+  const initialiseIndex = useCallback(async () => {
+    const session = sessionRef.current;
+    if (!session?.layout || !meta) return;
+    if (!confirm("Write a fresh, empty song index to this SP-1? Existing songs become unreachable.")) return;
+    setBusy(true);
+    try {
+      await session.lock.run(async () => {
+        const fresh = parseMeta(new Uint8Array(metaBlockCount(session.layout!) * 512), session.layout!);
+        const mb = buildMeta(fresh, session.layout!);
+        if (metaBlockCount(session.layout!) === 2) await session.writeBlock(1, mb.slice(512, 1024));
+        await session.writeBlock(0, mb.slice(0, 512));
+        await session.flush();
+      });
+      say("Song index initialised — every slot is empty.");
+      await refresh();
+    } catch (e) {
+      say(`Initialisation failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  }, [meta, refresh, say]);
+
   const removeSlot = useCallback(
     async (index: number) => {
       const session = sessionRef.current;
@@ -384,6 +409,25 @@ function DevicePage() {
             </dl>
           )}
         </section>
+
+        {connected && uninitialised && (
+          <section className="st-section" data-testid="uninitialised">
+            <p className="st-section__title">song index not initialised</p>
+            <p className="font-mono text-[13px] leading-relaxed text-[var(--ink-dim)]">
+              This SP-1's index block does not carry this firmware's magic, so no song list can be read. Initialising
+              writes one empty index (all slots marked empty) and flushes it. Any songs currently on the device become
+              unreachable and their audio blocks are overwritten by later uploads. Nothing is initialised automatically.
+            </p>
+            <button
+              className="st-btn mt-3"
+              data-testid="initialise"
+              disabled={busy}
+              onClick={() => void initialiseIndex()}
+            >
+              Initialise song index
+            </button>
+          </section>
+        )}
 
         {/* library */}
         {connected && meta && layout && (
