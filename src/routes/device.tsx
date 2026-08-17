@@ -723,8 +723,8 @@ function DevicePage() {
               {result.outcome === "committed"
                 ? "Committed. The device index now points at this song."
                 : result.outcome === "failed"
-                  ? `Not committed — ${result.detail}. The slot still holds whatever it held before, so retrying is safe.`
-                  : `Outcome unknown — ${result.detail}. Reconnect the SP-1 and resolve it below before assuming anything.`}
+                  ? `Not committed — ${result.detail.replace(/\.$/, "")}. The slot still holds whatever it held before, so retrying is safe.`
+                  : `Outcome unknown — ${result.detail.replace(/\.$/, "")}. Reconnect the SP-1 and resolve it below before assuming anything.`}
             </p>
             <ul className="mt-3 grid gap-1 font-mono text-[12px]" data-testid="verification">
               <li data-testid="v-simulated">
