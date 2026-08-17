@@ -20,6 +20,13 @@ import { prepareCanonicalSong, type CanonicalSong } from "@/sp1/song";
 import { parseCapabilities, readOnlyVerdict, type CompatibilityVerdict } from "@/sp1/compatibility";
 import { StemTapeTransport, type DeviceSongSlot, type UploadProgress, type UploadResult } from "@/sp1/transport";
 import { buildReceipt } from "@/sp1/receipt";
+import {
+  outcomeWording,
+  resolveWording,
+  simulatedRowWording,
+  successLogWording,
+  writeStateWording,
+} from "@/sp1/wording";
 import { sectorsForFrames, BLOCKS_PER_SECTOR, PHYSICAL_BLOCK_BYTES, SECTOR_BYTES, SAMPLE_RATE } from "@/sp1/stemTapeFormat";
 import { sha256Hex } from "@/sp1/digest";
 import { encodeSong } from "@/sp1/sector";
@@ -101,7 +108,12 @@ function DevicePage() {
   }, [say]);
 
   const connect = useCallback(async () => {
-    const injected = (globalThis as { __SP1_MOCK_PORT__?: SerialLikePort }).__SP1_MOCK_PORT__;
+    // The in-process mock port exists for development and automated smoke
+    // checks only. Production builds never look at it, so a published page
+    // cannot be pushed into "simulated device" mode from the console.
+    const injected = import.meta.env.DEV
+      ? (globalThis as { __SP1_MOCK_PORT__?: SerialLikePort }).__SP1_MOCK_PORT__
+      : undefined;
     const nav = navigator as Navigator & { serial?: { requestPort(): Promise<SerialLikePort> } };
     if (!injected && !nav.serial) return;
     let port: SerialLikePort;
