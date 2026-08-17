@@ -686,13 +686,28 @@ jobs:
           # never storage) -- real callbacks/buffer genuinely linked, not
           # just a symbol name: see the USB descriptor assertion step below
           # for interface/endpoint-level proof.
+          #
+          # uac2_dev / midi_dev themselves are NOT checked here (confirmed
+          # missing from nm.txt by a real CI run, not anticipated): each is
+          # `static const struct device *const` initialized to
+          # DEVICE_DT_GET(...), a link-time-constant address that is never
+          # address-taken elsewhere in this file -- -Os legitimately
+          # constant-propagates that address into every call site and
+          # leaves no standalone data symbol, the exact same class of
+          # elimination this gate's own comment above already documents
+          # for trk_blk()/xfer_service(). Reachability is proven instead by
+          # the retained functions that take/pass the device pointer:
+          # device_is_ready()/usbd_uac2_set_ops()/usbd_midi_set_ops() calls
+          # inside usb_audio_start(), and the *_cb functions below (each
+          # declared `(const struct device *dev, ...)` and registered by
+          # address in sp1_uac2_ops/sp1_midi_ops, which the USB descriptor
+          # assertion step separately proves are wired to real, enabled
+          # devicetree instances).
           check_any usb_audio_ring
           check_any uac2_rx_slab
-          check_any uac2_dev
           check uac2_terminal_update_cb
           check uac2_data_recv_cb
           # GATE 1: incoming USB-MIDI receive path (KO II cue control)
-          check_any midi_dev
           check midi_rx_packet_cb
           check midi_ready_cb
           check midi_service
