@@ -91,8 +91,10 @@ describe("real event-time capture — no reconstruction", () => {
     trace.startCapture();
     const adapter = new Sp1SurfaceAdapter();
     const device = { id: "in-1", name: "STEM TAPE SP-1" };
-    adapter.handleBytes([0x90, 40, 127], device, 1_000);
-    adapter.handleBytes([0x80, 40, 0], device, 2_200);
+    // Timestamps must be in the past of the page clock: a live press is never stale.
+    const base = performance.now() - 30_000;
+    adapter.handleBytes([0x90, 40, 127], device, base);
+    adapter.handleBytes([0x80, 40, 0], device, base + 1_200);
     const decoded = body().filter((r) => r.stage === "surface.decoded");
     expect(decoded).toHaveLength(2);
     expect(decoded[1]!.t - decoded[0]!.t).toBeCloseTo(1200, 3);
@@ -104,7 +106,7 @@ describe("real event-time capture — no reconstruction", () => {
     trace.startCapture();
     const adapter = new Sp1SurfaceAdapter();
     const device = { id: "in-1", name: "STEM TAPE SP-1" };
-    let t = 0;
+    let t = performance.now() - 60_000;
     for (const note of [36, 37, 38]) {
       adapter.handleBytes([0x90, note, 127], device, t);
       t += 5_223;
@@ -203,7 +205,8 @@ describe("immutable export", () => {
     r.record("midi.raw", "one", { bytes: [1, 2, 3] });
     const snap = r.snapshot();
     r.record("midi.raw", "two");
-    (snap.records[0]!.data as Record<string, unknown>)["bytes"] = "tampered";
+    const copied = snap.records.find((x) => x.label === "one")!;
+    (copied.data as Record<string, unknown>)["bytes"] = "tampered";
     expect(snap.records.filter((x) => x.stage === "midi.raw")).toHaveLength(1);
     expect(r.list().find((x) => x.label === "one")!.data!["bytes"]).toEqual([1, 2, 3]);
   });
