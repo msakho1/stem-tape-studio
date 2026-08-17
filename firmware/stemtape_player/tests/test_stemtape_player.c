@@ -21,12 +21,14 @@
 #include "st_gesture.h"
 #include "st_led_pattern.h"
 #include "st_scrub.h"
+#include "st_sector_codec.h"
 #include "st_storage_layout.h"
 #include "st_transfer.h"
 #include "st_transfer_protocol.h"
 
 static int g_checks;
 static int g_failures;
+static int g_test_cases;
 
 #define CHECK(cond, ...) do { \
 		g_checks++; \
@@ -39,6 +41,13 @@ static int g_failures;
 			printf("  (%s:%d: %s)\n", __FILE__, __LINE__, #cond); \
 		} \
 	} while (0)
+
+/* One "distinct test case" per RUN(), reported separately from the raw
+ * assertion (CHECK) count in the final summary -- a test case may contain
+ * many CHECKs (e.g. one per field of a round-trip) or drive a bounded
+ * fixture loop internally and report one aggregated CHECK (see
+ * test_gesture_idle_zero_actions), but it is always counted once here. */
+#define RUN(fn) do { g_test_cases++; fn(); } while (0)
 
 /* ========================================================================
  * st_crc32
@@ -63,21 +72,22 @@ static void test_crc32(void)
 }
 
 /* ========================================================================
- * st_storage_layout
+ * st_storage_layout: explicit serializer + overflow-proof sizing
  * ======================================================================== */
 static void test_storage_layout(void)
 {
 	CHECK(ST_SECTOR_BYTES == 8192u, "sector size is the documented stock 8192 bytes");
 	CHECK(ST_STEM_COUNT == 4u, "exactly four stems");
 	CHECK(ST_CHANNELS_PER_STEM == 2u, "stereo, never downgraded to mono");
-	CHECK(ST_BYTES_PER_SAMPLE == 3u, "24-bit, never downgraded to 16-bit");
-	CHECK(ST_FRAME_BYTES == 24u, "frame = 4 stems * 2 ch * 3 bytes");
+	CHECK(ST_STORAGE_LAYOUT_VERSION == 2u, "layout is v2, the overflow-corrected version");
+	CHECK(ST_SECTOR_FRAME_CAPACITY == 340u,
+	      "sector frame capacity is the real documented SP-1 value, not a raw byte division");
 
 	uint32_t sectors = st_storage_song_sectors(ST_SAMPLE_RATE_HZ * 10u); /* 10 s */
 
-	CHECK(sectors == (uint32_t)((10ull * ST_SAMPLE_RATE_HZ * ST_FRAME_BYTES + ST_SECTOR_BYTES - 1u) /
-				     ST_SECTOR_BYTES),
-	      "song sector count matches the documented sector math");
+	CHECK(sectors == (uint32_t)(((uint64_t)10 * ST_SAMPLE_RATE_HZ + ST_SECTOR_FRAME_CAPACITY - 1u) /
+				     ST_SECTOR_FRAME_CAPACITY),
+	      "song sector count matches the real per-sector frame capacity, not ceil(bytes/8192)");
 
 	/* Capacity-detected slot count: NOT a hardcoded UI number. */
 	uint32_t cap_small = st_storage_compute_slot_capacity(ST_SONG_DATA_SECTOR0 + 1u, 180u);
@@ -86,13 +96,196 @@ static void test_storage_layout(void)
 
 	CHECK(cap_small == 0u, "a device with essentially no usable capacity reports zero slots");
 	CHECK(cap_big == ST_MAX_SLOTS, "a huge device clamps to ST_MAX_SLOTS, not an unbounded count");
-	CHECK(sizeof(st_library_header_t) > 0u, "library header struct is well-formed");
+
+	/* THE bug this version fixes: the v1 struct (sizeof ~11,288 bytes) was
+	 * crammed into a single 8192-byte sector reservation. Prove the worst
+	 * case (every slot populated) fits its reserved sectors, at runtime,
+	 * not just via the header's compile-time _Static_assert. */
+	uint32_t worst_case = st_library_header_serialized_size(ST_MAX_SLOTS);
+
+	CHECK(worst_case > 0u, "serialized size computes for the full slot count");
+	CHECK(worst_case <= (uint32_t)ST_LIBRARY_HEADER_SECTORS_PER_COPY * ST_SECTOR_BYTES,
+	      "worst-case serialized header fits its reserved sectors per copy (the v1 overflow, fixed)");
+
+	uint32_t block;
+
+	CHECK(st_storage_sector_to_block(0u, &block) && block == ST_STORAGE_BASE_BLOCK,
+	      "logical sector 0 maps to the proven safe base block");
+	CHECK(st_storage_sector_to_block(1u, &block) && block == ST_STORAGE_BASE_BLOCK + 16u,
+	      "logical sector 1 maps 16 physical 512-byte blocks past sector 0");
+
+	/* Serialize -> deserialize round trip, exercising every field type
+	 * (u32/u16/u8/char[]) and a real slot record, not a zeroed struct. */
+	static uint8_t buf[ST_LIBRARY_HEADER_SECTORS_PER_COPY * ST_SECTOR_BYTES];
+	st_library_header_t h;
+	st_library_header_t h2;
+
+	memset(&h, 0, sizeof(h));
+	h.generation = 7u;
+	h.slot_count = 2u;
+	h.current_slot = 1u;
+	h.slot[0].song_id_hash = 0xAABBCCDDu;
+	h.slot[0].frame_count = 123456u;
+	h.slot[0].stem_content_frames[0] = 100000u;
+	h.slot[0].stem_content_frames[1] = 123456u;
+	h.slot[0].stem_crc32[2] = 0xDEADBEEFu;
+	h.slot[0].bpm_q8 = (uint16_t)(128u << 8); /* 128.0 BPM in Q8.8 */
+	h.slot[0].downbeat_frame = 4800u;
+	h.slot[0].active_stem = ST_STEM_BASS;
+	strcpy(h.slot[0].title, "Test Song");
+	strcpy(h.slot[0].artist, "Test Artist");
+	h.slot[1].frame_count = 0u; /* empty slot */
+
+	uint32_t written = st_library_header_serialize(&h, buf, sizeof(buf));
+
+	CHECK(written == st_library_header_serialized_size(2u),
+	      "serialize returns exactly the computed size for 2 slots (compact, not ST_MAX_SLOTS)");
+	CHECK(written <= ST_LIBRARY_HEADER_SECTORS_PER_COPY * ST_SECTOR_BYTES,
+	      "a real 2-slot header comfortably fits the reserved sectors");
+
+	CHECK(st_library_header_deserialize(buf, written, &h2),
+	      "deserialize accepts what serialize just produced");
+	CHECK(h2.generation == 7u && h2.slot_count == 2u && h2.current_slot == 1u,
+	      "deserialized fixed fields match");
+	CHECK(h2.slot[0].song_id_hash == 0xAABBCCDDu && h2.slot[0].frame_count == 123456u,
+	      "deserialized slot 0 scalar fields match");
+	CHECK(h2.slot[0].stem_content_frames[1] == 123456u && h2.slot[0].stem_crc32[2] == 0xDEADBEEFu,
+	      "deserialized per-stem arrays match (independent length + checksum per stem)");
+	CHECK(h2.slot[0].bpm_q8 == (uint16_t)(128u << 8) && h2.slot[0].downbeat_frame == 4800u,
+	      "deserialized BPM/downbeat timing metadata matches");
+	CHECK(strcmp(h2.slot[0].title, "Test Song") == 0 && strcmp(h2.slot[0].artist, "Test Artist") == 0,
+	      "deserialized title/artist strings match");
+
+	/* Corruption is rejected, not silently accepted. */
+	uint8_t corrupt[64];
+
+	memcpy(corrupt, buf, sizeof(corrupt));
+	corrupt[0] ^= 0xFFu; /* wreck the magic */
+	CHECK(!st_library_header_deserialize(corrupt, written, &h2),
+	      "a corrupted magic is rejected");
+
+	memcpy(corrupt, buf, written < sizeof(corrupt) ? written : sizeof(corrupt));
+	if (written >= 40u) {
+		corrupt[39] ^= 0xFFu; /* flip a byte inside the first slot record */
+	}
+	CHECK(!st_library_header_deserialize(corrupt, written, &h2),
+	      "a corrupted slot record fails the header CRC and is rejected");
+
+	CHECK(st_library_header_serialize(&h, buf, ST_LIBRARY_HEADER_FIXED_BYTES) == 0u,
+	      "serialize fails closed (returns 0) rather than truncating into an undersized buffer");
+}
+
+/* ========================================================================
+ * st_sector_codec: the real, documented SP-1 sector encode/decode
+ * ======================================================================== */
+static void test_sector_codec_hand_built_fixture(void)
+{
+	static st_audio_frame_t frames[ST_SECTOR_FRAME_CAPACITY];
+	static uint8_t sector[ST_SECTOR_BYTES];
+	st_sector_reserved_t reserved;
+
+	memset(frames, 0, sizeof(frames));
+	memset(&reserved, 0, sizeof(reserved));
+
+	/* Frame 0 (logical sub-block 0, local frame 0), stem 0:
+	 * L = 0x112233, R = 0x445566.
+	 * Documented byte order: b0=Lmid, b1=LMSB, b2=RMSB, b3=Llsb, b4=Rlsb, b5=Rmid. */
+	frames[0].stem_l[0] = 0x112233;
+	frames[0].stem_r[0] = 0x445566;
+
+	/* Frame 85 (logical sub-block 1, local frame 0), stem 0: a second,
+	 * distinct marker used to prove the {0,2,1,3} PHYSICAL sub-block
+	 * order, not merely the byte packing within one sub-block. Both
+	 * values are kept < 0x800000 (positive in 24-bit two's complement) so
+	 * the fixture exercises the byte order, not the signed-clamp path. */
+	frames[85].stem_l[0] = 0x778899;
+	frames[85].stem_r[0] = 0x2ABBCC;
+
+	reserved.sync[0] = 0x0102u;
+	reserved.tempo[0] = 0x0304u;
+	reserved.led[0][0] = 0x11u;
+	reserved.led[0][1] = 0x22u;
+	reserved.led[0][2] = 0x33u;
+	reserved.led[0][3] = 0x44u;
+
+	st_sector_encode(frames, &reserved, sector);
+
+	/* Logical sub-block 0 -> physical slot 0 -> sector byte offset 0. */
+	uint8_t expect_frame0[6] = { 0x22, 0x11, 0x44, 0x33, 0x66, 0x55 };
+
+	CHECK(memcmp(sector, expect_frame0, 6) == 0,
+	      "hand-computed byte order for frame 0 stem 0 matches the documented spec exactly");
+
+	/* Logical sub-block 0's reserved 8 bytes sit at local offset 2040 (85 *
+	 * 24), which is also sector offset 2040 since sub-block 0 is physical
+	 * slot 0. */
+	uint8_t expect_reserved0[8] = { 0x02, 0x01, 0x04, 0x03, 0x11, 0x22, 0x33, 0x44 };
+
+	CHECK(memcmp(sector + 2040, expect_reserved0, 8) == 0,
+	      "reserved sync/tempo/LED bytes land at the documented sub-block-local offset 2040");
+
+	/* Logical sub-block 1 -> PHYSICAL slot 2 (ST_SUBBLOCK_PHYSICAL_ORDER =
+	 * {0,2,1,3}) -> sector byte offset 2 * 2048 = 4096, NOT the sequential
+	 * 2048 a naive implementation would use. This is the check that would
+	 * fail if the non-sequential physical order were ignored. */
+	uint8_t expect_frame85[6] = { 0x22, 0x11, 0x44, 0x33, 0x66, 0x55 };
+
+	/* frame 85, stem 0: L=0x778899 -> mid=0x88,MSB=0x77,lsb=0x99;
+	 * R=0x2ABBCC -> MSB=0x2A,mid=0xBB,lsb=0xCC. */
+	expect_frame85[0] = 0x88; /* L mid */
+	expect_frame85[1] = 0x77; /* L MSB */
+	expect_frame85[2] = 0x2A; /* R MSB */
+	expect_frame85[3] = 0x99; /* L lsb */
+	expect_frame85[4] = 0xCC; /* R lsb */
+	expect_frame85[5] = 0xBB; /* R mid */
+
+	CHECK(memcmp(sector + 4096, expect_frame85, 6) == 0,
+	      "logical sub-block 1 lands at PHYSICAL offset 4096 (order {0,2,1,3}), not sequential 2048");
+}
+
+static void test_sector_codec_round_trip(void)
+{
+	static st_audio_frame_t frames_in[ST_SECTOR_FRAME_CAPACITY];
+	static st_audio_frame_t frames_out[ST_SECTOR_FRAME_CAPACITY];
+	static uint8_t sector[ST_SECTOR_BYTES];
+	st_sector_reserved_t reserved_in, reserved_out;
+	uint32_t f, s;
+	bool all_match = true;
+
+	memset(&reserved_in, 0, sizeof(reserved_in));
+	for (f = 0; f < ST_SECTOR_FRAME_CAPACITY; f++) {
+		for (s = 0; s < ST_STEM_COUNT; s++) {
+			/* A deterministic, full-range pattern touching sign bits. */
+			frames_in[f].stem_l[s] = (int32_t)(((f * 37u + s * 101u) % 0x1000000u)) - 0x800000;
+			frames_in[f].stem_r[s] = (int32_t)(((f * 53u + s * 211u) % 0x1000000u)) - 0x800000;
+		}
+	}
+	reserved_in.sync[0] = 0xBEEFu;
+	reserved_in.tempo[2] = 0x1234u;
+	reserved_in.led[3][1] = 0x99u;
+
+	st_sector_encode(frames_in, &reserved_in, sector);
+	st_sector_decode(sector, frames_out, &reserved_out);
+
+	for (f = 0; f < ST_SECTOR_FRAME_CAPACITY && all_match; f++) {
+		for (s = 0; s < ST_STEM_COUNT; s++) {
+			if (frames_in[f].stem_l[s] != frames_out[f].stem_l[s] ||
+			    frames_in[f].stem_r[s] != frames_out[f].stem_r[s]) {
+				all_match = false;
+				break;
+			}
+		}
+	}
+	CHECK(all_match, "encode -> decode round trip is exact across all 340 frames * 4 stems, full sign range");
+	CHECK(reserved_out.sync[0] == 0xBEEFu && reserved_out.tempo[2] == 0x1234u &&
+	      reserved_out.led[3][1] == 0x99u,
+	      "reserved sync/tempo/LED metadata round-trips per sub-block");
 }
 
 /* ========================================================================
  * st_transfer: transactional begin/stage/verify/commit/abort
  * ======================================================================== */
-#define MOCK_SECTORS 64u
+#define MOCK_SECTORS 8u
 typedef struct {
 	uint8_t data[MOCK_SECTORS][ST_SECTOR_BYTES];
 	bool    written[MOCK_SECTORS];
@@ -125,12 +318,79 @@ static int mock_read(uint32_t sector, uint8_t out[ST_SECTOR_BYTES], void *ctx)
 	return 0;
 }
 
-static void fill_sector(uint8_t buf[ST_SECTOR_BYTES], uint8_t seed)
+/* Builds two real, decodable sectors (ST_SECTOR_FRAME_CAPACITY frames each)
+ * from a deterministic pattern, computes the matching whole-payload CRC and
+ * every per-stem CRC (mirroring exactly what st_xfer_verify() itself
+ * computes from the decoded samples), and fills in a ready-to-use
+ * st_xfer_song_meta_t. This replaces the old raw-garbage-byte fixture (which
+ * predates the codec and could never actually decode). */
+static void build_two_sector_fixture(uint8_t sec0[ST_SECTOR_BYTES], uint8_t sec1[ST_SECTOR_BYTES],
+				      st_xfer_song_meta_t *meta)
 {
-	uint32_t i;
+	static st_audio_frame_t frames0[ST_SECTOR_FRAME_CAPACITY];
+	static st_audio_frame_t frames1[ST_SECTOR_FRAME_CAPACITY];
+	st_sector_reserved_t reserved;
+	uint32_t f, s;
+	uint32_t payload_crc = ST_CRC32_INIT;
+	uint32_t stem_crc[ST_STEM_COUNT];
 
-	for (i = 0; i < ST_SECTOR_BYTES; i++) {
-		buf[i] = (uint8_t)(seed + i);
+	memset(&reserved, 0, sizeof(reserved));
+	for (s = 0; s < ST_STEM_COUNT; s++) {
+		stem_crc[s] = ST_CRC32_INIT;
+	}
+	for (f = 0; f < ST_SECTOR_FRAME_CAPACITY; f++) {
+		for (s = 0; s < ST_STEM_COUNT; s++) {
+			frames0[f].stem_l[s] = (int32_t)((f * 3u + s) % 8000u);
+			frames0[f].stem_r[s] = -frames0[f].stem_l[s];
+			frames1[f].stem_l[s] = (int32_t)((f * 5u + s) % 8000u);
+			frames1[f].stem_r[s] = -frames1[f].stem_l[s];
+		}
+	}
+	st_sector_encode(frames0, &reserved, sec0);
+	st_sector_encode(frames1, &reserved, sec1);
+
+	payload_crc = st_crc32_update(payload_crc, sec0, ST_SECTOR_BYTES);
+	payload_crc = st_crc32_update(payload_crc, sec1, ST_SECTOR_BYTES);
+	payload_crc ^= 0xFFFFFFFFu;
+
+	/* Per-stem CRC over every content frame across BOTH sectors (all
+	 * ST_SECTOR_FRAME_CAPACITY * 2 frames are "content" in this fixture). */
+	for (f = 0; f < ST_SECTOR_FRAME_CAPACITY; f++) {
+		for (s = 0; s < ST_STEM_COUNT; s++) {
+			uint8_t b[8];
+			int32_t l = frames0[f].stem_l[s], r = frames0[f].stem_r[s];
+
+			b[0] = (uint8_t)(l & 0xFF); b[1] = (uint8_t)((l >> 8) & 0xFF);
+			b[2] = (uint8_t)((l >> 16) & 0xFF); b[3] = (uint8_t)((l >> 24) & 0xFF);
+			b[4] = (uint8_t)(r & 0xFF); b[5] = (uint8_t)((r >> 8) & 0xFF);
+			b[6] = (uint8_t)((r >> 16) & 0xFF); b[7] = (uint8_t)((r >> 24) & 0xFF);
+			stem_crc[s] = st_crc32_update(stem_crc[s], b, 8u);
+		}
+	}
+	for (f = 0; f < ST_SECTOR_FRAME_CAPACITY; f++) {
+		for (s = 0; s < ST_STEM_COUNT; s++) {
+			uint8_t b[8];
+			int32_t l = frames1[f].stem_l[s], r = frames1[f].stem_r[s];
+
+			b[0] = (uint8_t)(l & 0xFF); b[1] = (uint8_t)((l >> 8) & 0xFF);
+			b[2] = (uint8_t)((l >> 16) & 0xFF); b[3] = (uint8_t)((l >> 24) & 0xFF);
+			b[4] = (uint8_t)(r & 0xFF); b[5] = (uint8_t)((r >> 8) & 0xFF);
+			b[6] = (uint8_t)((r >> 16) & 0xFF); b[7] = (uint8_t)((r >> 24) & 0xFF);
+			stem_crc[s] = st_crc32_update(stem_crc[s], b, 8u);
+		}
+	}
+
+	memset(meta, 0, sizeof(*meta));
+	meta->frame_count = ST_SECTOR_FRAME_CAPACITY * 2u;
+	meta->expected_crc32 = payload_crc;
+	meta->stem_present_mask = 0x0Fu;
+	meta->bpm_q8 = (uint16_t)(120u << 8);
+	meta->downbeat_frame = 0u;
+	strcpy(meta->title, "Fixture Song");
+	strcpy(meta->artist, "Fixture Artist");
+	for (s = 0; s < ST_STEM_COUNT; s++) {
+		meta->stem_content_frames[s] = meta->frame_count; /* full-length, no trailing silence */
+		meta->stem_crc32[s] = stem_crc[s] ^ 0xFFFFFFFFu;
 	}
 }
 
@@ -140,18 +400,13 @@ static void test_transfer_happy_path(void)
 	mock_storage_t m;
 	uint32_t resume;
 	uint8_t sec0[ST_SECTOR_BYTES], sec1[ST_SECTOR_BYTES];
-	uint32_t crc = ST_CRC32_INIT;
-	uint32_t frame_count = (ST_SECTOR_BYTES * 2u) / ST_FRAME_BYTES; /* exactly 2 sectors */
+	st_xfer_song_meta_t meta;
 
 	memset(&m, 0, sizeof(m));
 	st_xfer_txn_reset(&t);
-	fill_sector(sec0, 0x11u);
-	fill_sector(sec1, 0x22u);
-	crc = st_crc32_update(crc, sec0, ST_SECTOR_BYTES);
-	crc = st_crc32_update(crc, sec1, ST_SECTOR_BYTES);
-	crc ^= 0xFFFFFFFFu;
+	build_two_sector_fixture(sec0, sec1, &meta);
 
-	CHECK(st_xfer_begin(&t, 0, frame_count, crc, 0x0Fu, 16u, &resume) == ST_XFER_OK,
+	CHECK(st_xfer_begin(&t, 0, &meta, 16u, &resume) == ST_XFER_OK,
 	      "begin: accepted for a valid slot");
 	CHECK(resume == 0u, "fresh begin resumes from sector 0");
 
@@ -162,22 +417,50 @@ static void test_transfer_happy_path(void)
 				    mock_write, &m) == ST_XFER_OK,
 	      "stage sector 1: accepted");
 
-	CHECK(st_xfer_verify(&t, mock_read, &m) == ST_XFER_OK, "verify: full payload CRC matches");
+	CHECK(st_xfer_verify(&t, mock_read, &m) == ST_XFER_OK,
+	      "verify: whole-payload CRC AND all four independently-decoded per-stem CRCs match");
 	CHECK(st_xfer_commit_precheck(&t) == ST_XFER_OK, "commit precheck passes after a real verify");
 	CHECK(!t.open, "commit clears the transaction");
 
-	st_slot_meta_t meta;
+	st_slot_meta_t slot_meta;
 
 	st_xfer_txn_reset(&t);
-	(void)st_xfer_begin(&t, 2, frame_count, crc, 0x0Fu, 16u, &resume);
+	(void)st_xfer_begin(&t, 2, &meta, 16u, &resume);
 	(void)st_xfer_stage_sector(&t, 0, sec0, st_crc32_compute(sec0, ST_SECTOR_BYTES), mock_write, &m);
 	(void)st_xfer_stage_sector(&t, 1, sec1, st_crc32_compute(sec1, ST_SECTOR_BYTES), mock_write, &m);
 	(void)st_xfer_verify(&t, mock_read, &m);
-	CHECK(st_xfer_build_slot_meta(&t, 999u, &meta), "slot meta builds after a real verify");
-	CHECK(meta.frame_count == frame_count && meta.start_sector == 999u,
+	CHECK(st_xfer_build_slot_meta(&t, 999u, &slot_meta), "slot meta builds after a real verify");
+	CHECK(slot_meta.frame_count == meta.frame_count && slot_meta.start_sector == 999u,
 	      "committed slot meta carries the right frame count and start sector");
-	CHECK(meta.active_stem == ST_STEM_VOCAL && meta.scrub_speed_index == 1u,
+	CHECK(slot_meta.stem_crc32[2] == meta.stem_crc32[2] &&
+	      slot_meta.stem_content_frames[2] == meta.stem_content_frames[2],
+	      "committed slot meta carries the independent per-stem length + checksum");
+	CHECK(strcmp(slot_meta.title, "Fixture Song") == 0, "committed slot meta carries title/artist");
+	CHECK(slot_meta.active_stem == ST_STEM_VOCAL && slot_meta.scrub_speed_index == 1u,
 	      "a fresh upload gets firmware-default performance state, never stale carry-over");
+}
+
+static void test_transfer_wrong_stem_crc_rejected(void)
+{
+	st_xfer_txn_t t;
+	mock_storage_t m;
+	uint32_t resume;
+	uint8_t sec0[ST_SECTOR_BYTES], sec1[ST_SECTOR_BYTES];
+	st_xfer_song_meta_t meta;
+
+	memset(&m, 0, sizeof(m));
+	st_xfer_txn_reset(&t);
+	build_two_sector_fixture(sec0, sec1, &meta);
+	meta.stem_crc32[1] ^= 0xFFFFFFFFu; /* companion declared the WRONG crc for stem 1 */
+
+	(void)st_xfer_begin(&t, 0, &meta, 16u, &resume);
+	(void)st_xfer_stage_sector(&t, 0, sec0, st_crc32_compute(sec0, ST_SECTOR_BYTES), mock_write, &m);
+	(void)st_xfer_stage_sector(&t, 1, sec1, st_crc32_compute(sec1, ST_SECTOR_BYTES), mock_write, &m);
+
+	CHECK(st_xfer_verify(&t, mock_read, &m) == ST_XFER_ERR_PAYLOAD_CRC,
+	      "a wrong declared per-stem checksum fails verify even though the whole-payload CRC matches -- "
+	      "each stem's checksum is checked independently, not inferred from the others");
+	CHECK(!t.verified, "the transaction is not marked verified");
 }
 
 static void test_transfer_corrupt_sector_rejected(void)
@@ -185,14 +468,15 @@ static void test_transfer_corrupt_sector_rejected(void)
 	st_xfer_txn_t t;
 	mock_storage_t m;
 	uint32_t resume;
-	uint8_t sec[ST_SECTOR_BYTES];
+	uint8_t sec0[ST_SECTOR_BYTES], sec1[ST_SECTOR_BYTES];
+	st_xfer_song_meta_t meta;
 
 	memset(&m, 0, sizeof(m));
 	st_xfer_txn_reset(&t);
-	fill_sector(sec, 0x33u);
-	(void)st_xfer_begin(&t, 0, ST_SECTOR_BYTES / ST_FRAME_BYTES, 0xDEADBEEFu, 0x01u, 16u, &resume);
+	build_two_sector_fixture(sec0, sec1, &meta);
+	(void)st_xfer_begin(&t, 0, &meta, 16u, &resume);
 
-	st_xfer_result_t r = st_xfer_stage_sector(&t, 0, sec, 0x12345678u /* wrong crc */, mock_write, &m);
+	st_xfer_result_t r = st_xfer_stage_sector(&t, 0, sec0, 0x12345678u /* wrong crc */, mock_write, &m);
 
 	CHECK(r == ST_XFER_ERR_SECTOR_CRC, "a sector with a mismatched per-sector CRC is rejected");
 	CHECK(t.staged_through == 0u, "the rejected sector does not advance staged_through");
@@ -205,30 +489,31 @@ static void test_transfer_interrupted_upload_never_commits(void)
 	mock_storage_t m;
 	uint32_t resume;
 	uint8_t sec0[ST_SECTOR_BYTES], sec1[ST_SECTOR_BYTES];
-	uint32_t frame_count = (ST_SECTOR_BYTES * 2u) / ST_FRAME_BYTES;
+	st_xfer_song_meta_t meta;
 
 	memset(&m, 0, sizeof(m));
 	st_xfer_txn_reset(&t);
-	fill_sector(sec0, 0x44u);
-	fill_sector(sec1, 0x55u);
-	(void)st_xfer_begin(&t, 5, frame_count, 0xCAFEBABEu, 0x0Fu, 16u, &resume);
+	build_two_sector_fixture(sec0, sec1, &meta);
+	(void)st_xfer_begin(&t, 5, &meta, 16u, &resume);
 	(void)st_xfer_stage_sector(&t, 0, sec0, st_crc32_compute(sec0, ST_SECTOR_BYTES), mock_write, &m);
 	/* Connection "drops" before sector 1 and before any verify/commit. */
 
-	CHECK(st_xfer_commit_precheck(&t) == ST_XFER_ERR_NOT_VERIFIED,
+	CHECK(st_xfer_commit_precheck(&t) == ST_XFER_ERR_INTERRUPTED_COMMIT,
 	      "commit is refused when verify was never run -- an interrupted upload can never land");
 
 	/* Reconnect: RESUME with the identical tuple continues from sector 1. */
 	uint32_t resume2;
 
-	CHECK(st_xfer_begin(&t, 5, frame_count, 0xCAFEBABEu, 0x0Fu, 16u, &resume2) == ST_XFER_OK,
+	CHECK(st_xfer_begin(&t, 5, &meta, 16u, &resume2) == ST_XFER_OK,
 	      "re-sending the identical (slot, frame_count, crc) tuple resumes, not restarts");
 	CHECK(resume2 == 1u, "resume offset is exactly the sector after the last one confirmed staged");
 
 	/* A DIFFERENT tuple for the same slot discards the stale progress. */
 	uint32_t resume3;
+	st_xfer_song_meta_t meta_changed = meta;
 
-	(void)st_xfer_begin(&t, 5, frame_count + 1u, 0xCAFEBABEu, 0x0Fu, 16u, &resume3);
+	meta_changed.frame_count += 1u;
+	(void)st_xfer_begin(&t, 5, &meta_changed, 16u, &resume3);
 	CHECK(resume3 == 0u, "a changed tuple for the same slot starts fresh, discarding stale staging");
 }
 
@@ -236,9 +521,15 @@ static void test_transfer_abort_and_token(void)
 {
 	st_xfer_txn_t t;
 	uint32_t resume;
+	st_xfer_song_meta_t meta;
+
+	memset(&meta, 0, sizeof(meta));
+	meta.frame_count = 100u;
+	meta.expected_crc32 = 0x1u;
+	meta.stem_present_mask = 0x1u;
 
 	st_xfer_txn_reset(&t);
-	(void)st_xfer_begin(&t, 1, 100u, 0x1u, 0x1u, 16u, &resume);
+	(void)st_xfer_begin(&t, 1, &meta, 16u, &resume);
 	CHECK(t.open, "transaction open after begin");
 	st_xfer_abort(&t);
 	CHECK(!t.open, "abort closes the transaction");
@@ -255,15 +546,35 @@ static void test_transfer_bad_slot_and_oversize(void)
 {
 	st_xfer_txn_t t;
 	uint32_t resume;
+	st_xfer_song_meta_t meta;
+
+	memset(&meta, 0, sizeof(meta));
+	meta.frame_count = 100u;
+	meta.expected_crc32 = 0x1u;
+	meta.stem_present_mask = 0x1u;
 
 	st_xfer_txn_reset(&t);
-	CHECK(st_xfer_begin(&t, 20u, 100u, 0x1u, 0x1u, 16u, &resume) == ST_XFER_ERR_BAD_SLOT,
+	CHECK(st_xfer_begin(&t, 20u, &meta, 16u, &resume) == ST_XFER_ERR_BAD_SLOT,
 	      "a slot index >= total_slots is rejected");
 	/* A song comfortably longer than ST_MAX_SONG_SECONDS (which the
 	 * staging region is exactly sized for) unambiguously overflows it. */
-	CHECK(st_xfer_begin(&t, 0u, ST_SAMPLE_RATE_HZ * (ST_MAX_SONG_SECONDS + 60u),
-			     0x1u, 0x1u, 16u, &resume) == ST_XFER_ERR_TOO_LARGE,
+	meta.frame_count = ST_SAMPLE_RATE_HZ * (ST_MAX_SONG_SECONDS + 60u);
+	CHECK(st_xfer_begin(&t, 0u, &meta, 16u, &resume) == ST_XFER_ERR_TOO_LARGE,
 	      "a song too large for the staging region is rejected up front");
+
+	/* A stem declared longer than the shared frame_count is invalid
+	 * timing metadata, rejected up front rather than silently clamped. */
+	memset(&meta, 0, sizeof(meta));
+	meta.frame_count = 500u;
+	meta.stem_content_frames[0] = 501u;
+	CHECK(st_xfer_begin(&t, 0u, &meta, 16u, &resume) == ST_XFER_ERR_BAD_TIMING,
+	      "a per-stem content length exceeding the shared frame_count is rejected");
+
+	memset(&meta, 0, sizeof(meta));
+	meta.frame_count = 500u;
+	meta.downbeat_frame = 500u; /* must be < frame_count */
+	CHECK(st_xfer_begin(&t, 0u, &meta, 16u, &resume) == ST_XFER_ERR_BAD_TIMING,
+	      "a downbeat_frame at or past the end of the song is rejected");
 }
 
 /* ========================================================================
@@ -279,17 +590,31 @@ static void test_gesture_idle_zero_actions(void)
 {
 	st_gesture_state_t s;
 	st_cmd_batch_t out;
+	bool all_zero = true;
+	uint32_t first_bad_t = 0u;
 
 	st_gesture_reset(&s, 1000u);
-	/* Nothing touched for 60 real seconds: only tick calls, no edges. */
+	/* Nothing touched for 60 real seconds: only tick calls, no edges.
+	 * This is ONE distinct test case ("an untouched controller generates
+	 * exactly zero actions indefinitely") exercised over 12,000 ticks as
+	 * its fixture, not 12,000 separate test cases -- reported as a single
+	 * aggregated CHECK so the assertion count reflects distinct claims,
+	 * not loop iterations (per the "report test cases separately from
+	 * assertion executions" requirement). */
 	uint32_t t;
 
 	for (t = 1000u; t <= 61000u; t += 5u) {
 		st_gesture_process_tick(&s, t, &out);
-		CHECK(out.count == 0u, "idle tick at t=%u emits zero commands", t);
 		if (out.count != 0u) {
-			break; /* don't spam 12000 identical failures */
+			all_zero = false;
+			first_bad_t = t;
+			break;
 		}
+	}
+	CHECK(all_zero, "an untouched controller emits zero actions across 12,000 idle ticks (60s @ 5ms)%s",
+	      all_zero ? "" : " -- FIRST VIOLATION logged below");
+	if (!all_zero) {
+		printf("       first nonzero idle tick at t=%u\n", first_bad_t);
 	}
 }
 
@@ -787,46 +1112,58 @@ static void test_led_transfer_pattern(void)
 
 int main(void)
 {
-	test_crc32();
-	test_storage_layout();
-	test_transfer_happy_path();
-	test_transfer_corrupt_sector_rejected();
-	test_transfer_interrupted_upload_never_commits();
-	test_transfer_abort_and_token();
-	test_transfer_bad_slot_and_oversize();
+	RUN(test_crc32);
+	RUN(test_storage_layout);
+	RUN(test_sector_codec_hand_built_fixture);
+	RUN(test_sector_codec_round_trip);
+	RUN(test_transfer_happy_path);
+	RUN(test_transfer_wrong_stem_crc_rejected);
+	RUN(test_transfer_corrupt_sector_rejected);
+	RUN(test_transfer_interrupted_upload_never_commits);
+	RUN(test_transfer_abort_and_token);
+	RUN(test_transfer_bad_slot_and_oversize);
 
-	test_gesture_idle_zero_actions();
-	test_gesture_boot_baseline_not_input();
-	test_gesture_play_pause_tap();
-	test_gesture_global_loop_momentary_and_latch();
-	test_gesture_fx_scope_toggle_and_ownership();
-	test_gesture_fx_track_momentary_latch_unlatch();
-	test_gesture_scrub_grammar();
-	test_gesture_scrub_rocker_alone_never_unlatches();
-	test_gesture_scrub_owns_volume_never_master();
-	test_gesture_master_volume_default();
-	test_gesture_fader_jitter_and_pickup();
+	RUN(test_gesture_idle_zero_actions);
+	RUN(test_gesture_boot_baseline_not_input);
+	RUN(test_gesture_play_pause_tap);
+	RUN(test_gesture_global_loop_momentary_and_latch);
+	RUN(test_gesture_fx_scope_toggle_and_ownership);
+	RUN(test_gesture_fx_track_momentary_latch_unlatch);
+	RUN(test_gesture_scrub_grammar);
+	RUN(test_gesture_scrub_rocker_alone_never_unlatches);
+	RUN(test_gesture_scrub_owns_volume_never_master);
+	RUN(test_gesture_master_volume_default);
+	RUN(test_gesture_fader_jitter_and_pickup);
+	/* NOTE: solo/link/song-select/audition dispatch logic (st_gesture.c
+	 * track-press/release rewrite) and st_mixer.c were designed (see
+	 * st_gesture.h's updated header comment and st_cmd_id_t additions:
+	 * ST_CMD_TRACK_SOLO_TOGGLE, ST_CMD_TRACK_LINK_TOGGLE,
+	 * ST_CMD_TRACK_AUDITION_START/END, ST_CMD_SONG_BANK_JUMP,
+	 * ST_CMD_SONG_NEXT_IN_BANK) but NOT implemented before this codebase's
+	 * runtime approach was superseded (see README/report) -- no test call
+	 * here for functions that were never written. */
 
-	test_scrub_speeds();
-	test_scrub_forward_release_monotone_to_1x();
-	test_scrub_reverse_release_crosses_zero_continuously();
-	test_scrub_release_scales_with_span();
+	RUN(test_scrub_speeds);
+	RUN(test_scrub_forward_release_monotone_to_1x);
+	RUN(test_scrub_reverse_release_crosses_zero_continuously);
+	RUN(test_scrub_release_scales_with_span);
 
-	test_fx_catalog();
+	RUN(test_fx_catalog);
 
-	test_led_base_priority();
-	test_led_boot_flash_is_one_shot();
-	test_led_playing_side_and_battery_never_fabricated();
-	test_led_active_stem_and_status_distinguishable();
-	test_led_fx_latch_flash_restores_prior_state();
-	test_led_scrub_chase_direction();
-	test_led_transfer_pattern();
+	RUN(test_led_base_priority);
+	RUN(test_led_boot_flash_is_one_shot);
+	RUN(test_led_playing_side_and_battery_never_fabricated);
+	RUN(test_led_active_stem_and_status_distinguishable);
+	RUN(test_led_fx_latch_flash_restores_prior_state);
+	RUN(test_led_scrub_chase_direction);
+	RUN(test_led_transfer_pattern);
 
 	printf("\n");
+	printf("%d distinct test cases, %d assertion checks\n", g_test_cases, g_checks);
 	if (g_failures) {
 		printf("STEMTAPE PLAYER SELF-TEST FAILED (%d of %d checks failed)\n", g_failures, g_checks);
 		return 1;
 	}
-	printf("STEMTAPE PLAYER SELF-TEST PASSED (%d checks)\n", g_checks);
+	printf("STEMTAPE PLAYER SELF-TEST PASSED (%d test cases, %d checks)\n", g_test_cases, g_checks);
 	return 0;
 }

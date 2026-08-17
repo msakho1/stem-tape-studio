@@ -13,11 +13,36 @@
  * the task (global loop momentary/latch/release, STEM/GLOBAL FX scope
  * open/close, FX Track momentary/latch/unlatch, the full scrub latch
  * grammar, fader pickup/crossing, FUNCTION+Volume context arbitration) with
- * full rigor. Track mute/solo/link/song-selection is implemented as a
- * reasonable, clearly-scoped SUBSET of docs/FIRMWARE_CONTRACT_V1.md (a
- * 67-row contract built for a different, MIDI/Heads-mode-capable system) —
- * see the "SCOPED, NOT VERBATIM" comments below. This is a deliberate,
- * documented interpretation, not a silent guess.
+ * full rigor.
+ *
+ * Track mute/solo/audition/link/song-selection is now driven from the real
+ * rows in docs/firmware-contract-v1.json's tape layer, not a placeholder
+ * subset:
+ *   - bare Track tap                -> mute/unmute ("stop the take")
+ *                                       [contract: track.tap]
+ *   - PLAY + Track, < 700ms overlap -> solo toggle
+ *   - PLAY + Track, >= 700ms overlap -> link toggle
+ *                                       [contract: stem.solo / stem.link,
+ *                                        stemSoloLinkThresholdMs=700]
+ *   - FUNCTION + Track (first)      -> jump to that track's song bank
+ *   - FUNCTION + Track (repeat, same
+ *     track, FUNCTION still held)   -> next song within that bank
+ *                                       [contract: track.bank, "banks: jump
+ *                                        · tap again = next song"]
+ * Precedence note (explicit task text ranks above the JSON contract): the
+ * task's own text says "FUNCTION + Volume selects the previous/next active
+ * stem" — that is kept as FUNCTION+Volume (see fire_single_volume_action())
+ * even though the JSON contract's stem.select rows use PLAY+Volume instead;
+ * PLAY+Volume is intentionally left unmapped.
+ *
+ * Audition (holding a bare Track on a currently-muted stem to preview it
+ * unmuted while held, snapping back to muted on release) has NO row in
+ * docs/firmware-contract-v1.json under that name — the only "audition" hit
+ * is an unrelated Heads-mode "lane.audition" entry. This is therefore an
+ * INFERRED behavior, not a copied spec: a short tap (<=
+ * ST_GESTURE_BARE_TAP_MAX_MS) on a muted stem commits the unmute; a longer
+ * hold previews it without committing. Flagged here and in the firmware
+ * report, not silently presented as contract-verified.
  */
 
 #ifndef STEMTAPE_PLAYER_GESTURE_H_
@@ -59,14 +84,22 @@ typedef enum {
 	ST_CMD_PLAY_PAUSE_TOGGLE,
 	ST_CMD_POWER_OFF_REQUEST,   /* long FUNCTION hold -- see st_gesture_process_tick() */
 
-	/* mixer (SCOPED, NOT VERBATIM -- see header comment) */
+	/* mixer */
 	ST_CMD_FADER_LEVEL,             /* .stem, .value_q8 */
 	ST_CMD_MASTER_VOLUME_STEP,      /* .value_q8 = +1 or -1 (step direction) */
-	ST_CMD_TRACK_MUTE_TOGGLE,       /* .stem */
-	ST_CMD_TRACK_SOLO_TOGGLE,       /* .stem : tap-threshold outcome */
-	ST_CMD_TRACK_LINK_TOGGLE,       /* .stem : hold-threshold outcome */
+	ST_CMD_TRACK_MUTE_TOGGLE,       /* .stem : bare Track tap */
+	ST_CMD_TRACK_SOLO_TOGGLE,       /* .stem : PLAY+Track, overlap < 700ms */
+	ST_CMD_TRACK_LINK_TOGGLE,       /* .stem : PLAY+Track, overlap >= 700ms */
+	ST_CMD_TRACK_AUDITION_START,    /* .stem : bare Track held on a muted stem --
+					  * temporarily unmute for monitoring (INFERRED, see
+					  * st_gesture.h header note) */
+	ST_CMD_TRACK_AUDITION_END,      /* .stem : audition released, reverts to muted */
 	ST_CMD_STEM_SELECT_PREV,
 	ST_CMD_STEM_SELECT_NEXT,
+	ST_CMD_SONG_BANK_JUMP,          /* .stem = bank index : first FUNCTION+TrackN this
+					  * FUNCTION hold */
+	ST_CMD_SONG_NEXT_IN_BANK,       /* .stem = bank index : repeat FUNCTION+TrackN (same N)
+					  * while FUNCTION is still held */
 
 	/* global loop (task section 5) */
 	ST_CMD_LOOP_MOMENTARY_START,
@@ -155,10 +188,21 @@ typedef struct {
 	bool    scrub_latch_armed_this_hold;
 	uint8_t scrub_speed_index; /* 0..3, persists (caller is responsible for saving it) */
 
-	/* mixer (scoped subset) */
+	/* mixer */
 	uint8_t active_stem;
 	uint16_t fader_raw_last[4]; /* 0xFFFF = "never sampled" (pickup pending) */
 	bool     fader_picked_up[4];
+
+	/* track mute/solo/link/audition/song-select state, owned here so the
+	 * tap-vs-hold and audition-vs-toggle decisions can see current state
+	 * (mirrors playing/loop_latched/scrub_latched already being owned
+	 * locally) -- the audio engine mirrors these via the emitted commands. */
+	uint8_t  stem_mute_mask;
+	uint8_t  stem_solo_mask;
+	uint8_t  stem_link_mask;
+	bool     track_audition_active[4];
+	bool     track_play_chord[4];   /* true if PLAY was down when this Track was pressed */
+	uint8_t  song_bank_last_tapped; /* 0xFF = none yet this FUNCTION hold */
 
 	/* long FUNCTION hold -> power off, tracked by the caller via
 	 * st_gesture_process_tick() since it depends on wall-clock elapsed

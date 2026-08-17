@@ -32,6 +32,14 @@ typedef enum {
 	ST_XFER_ERR_READ_FAILED,
 	ST_XFER_ERR_BAD_TOKEN,
 	ST_XFER_ERR_TOO_LARGE,
+	ST_XFER_ERR_BAD_TIMING,        /* a stem_content_frames[i] > frame_count, or a
+					 * downbeat_frame >= frame_count */
+	ST_XFER_ERR_VERSION,           /* companion's declared protocol major != ours */
+	ST_XFER_ERR_FORMAT,            /* declared layout_version != ST_STORAGE_LAYOUT_VERSION */
+	ST_XFER_ERR_CAPACITY,          /* no free slot / device reports fewer usable sectors
+					 * than the staging region requires */
+	ST_XFER_ERR_INTERRUPTED_COMMIT,/* commit gate reached with a transaction that is open
+					 * but was left over from a prior, never-verified attempt */
 } st_xfer_result_t;
 
 /* Sector I/O, injected. Both return 0 on success, matching the classic
@@ -42,13 +50,32 @@ typedef enum {
 typedef int (*st_sector_write_fn)(uint32_t sector, const uint8_t data[ST_SECTOR_BYTES], void *ctx);
 typedef int (*st_sector_read_fn)(uint32_t sector, uint8_t out[ST_SECTOR_BYTES], void *ctx);
 
+/* Everything the companion must declare up front for a song -- explicit,
+ * independent per-stem length + checksum (task requirement: "Represent
+ * title, artist, BPM, downbeat/timing information, and the independent
+ * length and checksum of each of the four stems"), not inferred from the
+ * shared frame_count. */
+typedef struct {
+	uint32_t song_id_hash;
+	uint32_t frame_count;                       /* shared sector-grid length, all 4 stems */
+	uint32_t expected_crc32;                    /* whole-payload CRC over every staged
+						      * sector's raw encoded bytes, in order */
+	uint8_t  stem_present_mask;
+	uint32_t stem_content_frames[ST_STEM_COUNT]; /* per-stem REAL length, <= frame_count */
+	uint32_t stem_crc32[ST_STEM_COUNT];          /* per-stem CRC over that stem's decoded
+						      * L/R samples across its content frames
+						      * only (silence padding excluded) */
+	uint16_t bpm_q8;
+	uint32_t downbeat_frame;
+	char     title[32];
+	char     artist[32];
+} st_xfer_song_meta_t;
+
 typedef struct {
 	bool     open;
 	uint16_t slot;
-	uint32_t frame_count;
+	st_xfer_song_meta_t meta;
 	uint32_t total_sectors;      /* st_storage_song_sectors(frame_count) */
-	uint32_t expected_crc32;
-	uint8_t  stem_present_mask;
 	uint32_t staged_through;     /* highest sector index CONFIRMED staged (crc-checked), i.e. the resume point */
 	bool     verified;           /* K succeeded since the most recent S */
 } st_xfer_txn_t;
@@ -56,16 +83,17 @@ typedef struct {
 void st_xfer_txn_reset(st_xfer_txn_t *t);
 
 /*
- * B: begin or resume. `slot` must be < `total_slots`. `frame_count` must
- * fit ST_STAGING_SECTOR_COUNT or this fails with ST_XFER_ERR_TOO_LARGE
- * (staging can never overflow into the song-data region). Sending the
- * IDENTICAL (slot, frame_count, expected_crc32) tuple again while a
- * transaction for that slot is already open is a RESUME: `*resume_sector`
- * reports `staged_through` unchanged. A DIFFERENT tuple discards any prior
- * staging progress for that slot first (`*resume_sector` reports 0).
+ * B: begin or resume. `slot` must be < `total_slots`. `meta->frame_count`
+ * must fit ST_STAGING_SECTOR_COUNT or this fails with ST_XFER_ERR_TOO_LARGE
+ * (staging can never overflow into the song-data region). Each
+ * `meta->stem_content_frames[i]` must be <= `meta->frame_count` or this
+ * fails with ST_XFER_ERR_BAD_TIMING. Sending an IDENTICAL (slot, frame_count,
+ * expected_crc32) tuple again while a transaction for that slot is already
+ * open is a RESUME: `*resume_sector` reports `staged_through` unchanged. A
+ * DIFFERENT tuple discards any prior staging progress for that slot first
+ * (`*resume_sector` reports 0).
  */
-st_xfer_result_t st_xfer_begin(st_xfer_txn_t *t, uint16_t slot, uint32_t frame_count,
-				uint32_t expected_crc32, uint8_t stem_present_mask,
+st_xfer_result_t st_xfer_begin(st_xfer_txn_t *t, uint16_t slot, const st_xfer_song_meta_t *meta,
 				uint32_t total_slots, uint32_t *resume_sector);
 
 /*
@@ -83,12 +111,17 @@ st_xfer_result_t st_xfer_stage_sector(st_xfer_txn_t *t, uint32_t sector_index,
 
 /*
  * K: verify. Requires `staged_through == total_sectors` (every sector
- * staged). Reads every staged sector back through `read_fn` and checks the
- * running CRC-32 against `expected_crc32` from B — a real read-back of what
- * is actually on the media, not just what was in RAM before the write.
- * Only on a match does this set `verified = true`; ANY read failure or a
+ * staged). Reads every staged sector back through `read_fn`, checks the
+ * running whole-payload CRC-32 against `expected_crc32` from B — a real
+ * read-back of what is actually on the media, not just what was in RAM
+ * before the write — AND decodes every sector (st_sector_decode(), the real
+ * documented SP-1 codec) to independently accumulate each stem's CRC-32
+ * over exactly its declared `stem_content_frames[i]`, checked against
+ * `meta.stem_crc32[i]`. Only when the whole-payload CRC and all four
+ * per-stem CRCs match does this set `verified = true`; ANY read failure or
  * mismatch leaves it false and the transaction stays open (nothing is
- * committed either way).
+ * committed either way). Uses a bounded, non-stack (static) sector work
+ * buffer — see st_transfer.c — never an 8192-byte automatic/stack buffer.
  */
 st_xfer_result_t st_xfer_verify(st_xfer_txn_t *t, st_sector_read_fn read_fn, void *ctx);
 

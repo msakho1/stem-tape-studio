@@ -40,6 +40,7 @@ void st_gesture_reset(st_gesture_state_t *s, uint32_t now_ms)
 	s->fx_track_holding = 0xFFu;
 	s->scrub_speed_index = 1u; /* DEFAULT_SCRUB_SPEED_INDEX (st_scrub.h) */
 	s->active_stem = 0u;
+	s->song_bank_last_tapped = 0xFFu;
 	for (uint8_t i = 0; i < 4u; i++) {
 		s->fader_raw_last[i] = 0xFFFFu; /* pickup pending */
 	}
