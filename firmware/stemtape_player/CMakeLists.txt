@@ -10,6 +10,8 @@ target_sources(app PRIVATE
 	src/led_render.c
 	src/led_render_policy.c
 	src/st_crc32.c
+	src/st_storage_layout.c
+	src/st_sector_codec.c
 	src/st_transfer.c
 	src/st_gesture.c
 	src/st_scrub.c
