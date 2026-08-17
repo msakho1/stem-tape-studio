@@ -1,24 +1,72 @@
 /**
- * Fail-closed compatibility negotiation.
+ * Stem Tape compatibility gate.
  *
- * Answering the classic `SP1XFER!` handshake proves only that some SP-1-class
- * device is listening. It is NOT evidence of Stem Tape firmware. Physical
- * mutation requires every requirement below to be positively satisfied by the
- * firmware-generated protocol package; absent fields, unknown versions and
- * partial capability responses stay read-only.
+ * Answering the classic `SP1XFER!` magic proves only that an SP-1-class device
+ * with the Tape Looper transfer build is listening. It authorizes NOTHING here.
+ * Physical mutation requires the Stem Tape capability reply ('Q' -> "STCP") to
+ * positively report firmware identity, protocol version, storage-format
+ * version, four-stem/stereo/48 kHz/24-bit support, the index extension,
+ * BPM+downbeat metadata, storage boundaries and explicit-init support.
+ *
+ * Stock SP-1 and ordinary Tape Looper firmware are detected and remain
+ * READ-ONLY. Storage addresses are never guessed: every address below comes
+ * from the device's own reply.
  */
 
-import { GENERATED_PROTOCOL, type GeneratedHandshake } from "./generatedProtocol";
+import {
+  CAP_FLAG,
+  CAPS_OFF,
+  FORMAT_MAJOR,
+  PROTOCOL_MAJOR,
+  STEM_TAPE_FIRMWARE_ID,
+} from "./stemTapeFormat";
 
-export const LOCK_NOTICE =
-  "Firmware transfer compatibility is being finalized. Preview and stem preparation remain available; physical uploads are temporarily locked.";
+export const READ_ONLY_NOTICE =
+  "This device answers the Tape Looper transfer protocol but does not report Stem Tape firmware. It stays read-only: no initialization, no writes, no delete.";
 
-export const REQUIRED_DEVICE_IDENTITY = "STEM TAPE SP-1";
-export const REQUIRED_PROTOCOL_VERSION = "stem-tape-transfer/1";
-export const REQUIRED_STORAGE_LAYOUT_VERSION = "stem-tape-storage/1";
-export const REQUIRED_FORMAT_IDENTIFIER = "pcm-s24le-48000-2ch";
+export interface StemTapeCapabilities {
+  firmwareId: number;
+  protoMajor: number;
+  protoMinor: number;
+  formatMajor: number;
+  formatMinor: number;
+  flags: number;
+  sampleRate: number;
+  songSlots: number;
+  /** Blocks reserved for the index extension, starting at block 0. */
+  indexBlocks: number;
+  /** First physical block of song storage. Device-reported, never guessed. */
+  libraryBase: number;
+  /** Logical 8 KB sectors reserved per song slot. */
+  sectorsPerSong: number;
+  generation: number;
+}
 
-export interface CompatibilityRequirement {
+function get32(a: Uint8Array, o: number): number {
+  return ((a[o]! | (a[o + 1]! << 8) | (a[o + 2]! << 16)) >>> 0) + a[o + 3]! * 0x1000000;
+}
+function get16(a: Uint8Array, o: number): number {
+  return a[o]! | (a[o + 1]! << 8);
+}
+
+export function parseCapabilities(bytes: Uint8Array): StemTapeCapabilities {
+  return {
+    firmwareId: get32(bytes, CAPS_OFF.firmwareId),
+    protoMajor: get16(bytes, CAPS_OFF.protoMajor),
+    protoMinor: get16(bytes, CAPS_OFF.protoMinor),
+    formatMajor: get16(bytes, CAPS_OFF.formatMajor),
+    formatMinor: get16(bytes, CAPS_OFF.formatMinor),
+    flags: get32(bytes, CAPS_OFF.flags),
+    sampleRate: get32(bytes, CAPS_OFF.sampleRate),
+    songSlots: get32(bytes, CAPS_OFF.songSlots),
+    indexBlocks: get32(bytes, CAPS_OFF.indexBlocks),
+    libraryBase: get32(bytes, CAPS_OFF.libraryBase),
+    sectorsPerSong: get32(bytes, CAPS_OFF.sectorsPerSong),
+    generation: get32(bytes, CAPS_OFF.generation),
+  };
+}
+
+export interface Requirement {
   id: string;
   label: string;
   satisfied: boolean;
@@ -26,77 +74,54 @@ export interface CompatibilityRequirement {
 }
 
 export interface CompatibilityVerdict {
-  /** True only when every requirement is satisfied. Never true today. */
-  physicalMutationAllowed: boolean;
-  requirements: CompatibilityRequirement[];
+  /** True only when every requirement below is satisfied. */
+  writable: boolean;
+  requirements: Requirement[];
   summary: string;
+  /** Copy-on-write / staging support, reported by the device. */
+  staging: boolean;
 }
 
-export function negotiate(handshake: GeneratedHandshake | null): CompatibilityVerdict {
-  const h = handshake;
-  const cap = h?.capabilities;
-  const req = (id: string, label: string, satisfied: boolean, detail: string): CompatibilityRequirement => ({
+export function evaluate(caps: StemTapeCapabilities | null): CompatibilityVerdict {
+  const f = caps?.flags ?? 0;
+  const has = (bit: number) => (f & bit) !== 0;
+  const req = (id: string, label: string, satisfied: boolean, detail: string): Requirement => ({
     id,
     label,
-    satisfied: !!satisfied,
+    satisfied,
     detail,
   });
 
-  const requirements: CompatibilityRequirement[] = [
+  const requirements: Requirement[] = [
+    req("firmware", "Stem Tape firmware identity", caps?.firmwareId === STEM_TAPE_FIRMWARE_ID, caps ? `0x${(caps.firmwareId >>> 0).toString(16)}` : "no capability reply"),
+    req("protocol", "compatible transfer-protocol version", caps?.protoMajor === PROTOCOL_MAJOR, caps ? `${caps.protoMajor}.${caps.protoMinor}` : "not reported"),
+    req("format", "compatible storage-format version", caps?.formatMajor === FORMAT_MAJOR, caps ? `${caps.formatMajor}.${caps.formatMinor}` : "not reported"),
+    req("four-stems", "four-stem support", has(CAP_FLAG.FOUR_STEMS), has(CAP_FLAG.FOUR_STEMS) ? "yes" : "not reported"),
+    req("stereo", "stereo support", has(CAP_FLAG.STEREO), has(CAP_FLAG.STEREO) ? "yes" : "not reported"),
+    req("rate", "48 kHz support", has(CAP_FLAG.RATE_48K) && caps?.sampleRate === 48000, caps ? `${caps.sampleRate} Hz` : "not reported"),
+    req("depth", "24-bit support", has(CAP_FLAG.DEPTH_24), has(CAP_FLAG.DEPTH_24) ? "yes" : "not reported"),
+    req("index-ext", "index-extension support", has(CAP_FLAG.INDEX_EXTENSION), has(CAP_FLAG.INDEX_EXTENSION) ? "yes" : "not reported"),
+    req("metadata", "BPM / downbeat metadata support", has(CAP_FLAG.BPM_DOWNBEAT), has(CAP_FLAG.BPM_DOWNBEAT) ? "yes" : "not reported"),
     req(
-      "generated-protocol",
-      "firmware-generated protocol package",
-      GENERATED_PROTOCOL !== null,
-      GENERATED_PROTOCOL ? "present" : "absent — no golden fixtures to validate against",
+      "boundaries",
+      "reported storage boundaries",
+      !!caps && caps.songSlots > 0 && caps.indexBlocks > 0 && caps.libraryBase >= caps.indexBlocks && caps.sectorsPerSong > 0,
+      caps ? `${caps.songSlots} slots · index ${caps.indexBlocks} blk · base ${caps.libraryBase} · ${caps.sectorsPerSong} sectors/song` : "not reported",
     ),
-    req("identity", "exact Stem Tape device identity", h?.deviceIdentity === REQUIRED_DEVICE_IDENTITY, h?.deviceIdentity ?? "not reported"),
-    req("protocol-version", "compatible protocol version", h?.protocolVersion === REQUIRED_PROTOCOL_VERSION, h?.protocolVersion ?? "not reported"),
-    req(
-      "storage-layout",
-      "compatible storage-layout version",
-      h?.storageLayoutVersion === REQUIRED_STORAGE_LAYOUT_VERSION,
-      h?.storageLayoutVersion ?? "not reported",
-    ),
-    req("format", "stereo 48 kHz 24-bit support", h?.formatIdentifier === REQUIRED_FORMAT_IDENTIFIER && !!cap?.stereo48k24bit, h?.formatIdentifier ?? "not reported"),
-    req("four-stems", "four-stem support", !!cap?.fourStems, cap?.fourStems ? "yes" : "not reported"),
-    req(
-      "transaction",
-      "transaction and resume capability",
-      !!cap?.transactionalCommit && !!cap?.resume,
-      cap?.transactionalCommit ? "commit reported" : "not reported",
-    ),
-    req(
-      "metadata",
-      "metadata capability including BPM and downbeat",
-      !!cap?.metadata && !!cap?.metadataBpm && !!cap?.metadataDownbeat,
-      cap?.metadataBpm ? "bpm + downbeat storable" : "not reported",
-    ),
-    req(
-      "address-units",
-      "device-reported address units and transfer limits",
-      !!h?.addressUnits?.sectorBytes && !!h?.addressUnits?.transportChunkBytes && !!h?.maxTransferBytes,
-      h?.addressUnits ? `${h.addressUnits.sectorBytes} B sector` : "not reported",
-    ),
-    req("safe-init", "safe initialization capability", !!cap?.safeInitialise, cap?.safeInitialise ? "yes" : "not reported"),
-    req(
-      "generation",
-      "current library generation",
-      typeof h?.libraryGeneration === "number",
-      typeof h?.libraryGeneration === "number" ? String(h.libraryGeneration) : "not reported",
-    ),
+    req("explicit-init", "explicit-initialization support", has(CAP_FLAG.EXPLICIT_INIT), has(CAP_FLAG.EXPLICIT_INIT) ? "yes" : "not reported"),
   ];
 
-  const physicalMutationAllowed = requirements.every((r) => r.satisfied);
+  const writable = requirements.every((r) => r.satisfied);
   return {
-    physicalMutationAllowed,
+    writable,
     requirements,
-    summary: physicalMutationAllowed
-      ? "compatible Stem Tape firmware negotiated"
-      : LOCK_NOTICE,
+    staging: has(CAP_FLAG.STAGING_COW),
+    summary: writable
+      ? "Stem Tape firmware negotiated — writes enabled"
+      : READ_ONLY_NOTICE,
   };
 }
 
-/** A classic SP1XFER-only device: read-only, always. */
-export function legacyVerdict(): CompatibilityVerdict {
-  return negotiate(null);
+export function readOnlyVerdict(): CompatibilityVerdict {
+  return evaluate(null);
 }

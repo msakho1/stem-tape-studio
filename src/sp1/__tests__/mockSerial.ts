@@ -3,6 +3,16 @@
  * focused tests and by the browser smoke check.
  */
 import { put32, type SerialLikePort } from "../protocol";
+import {
+  CAP_FLAG,
+  CAPS_BYTES,
+  CAPS_OFF,
+  FORMAT_MAJOR,
+  PROTOCOL_MAJOR,
+  REQUIRED_CAP_FLAGS,
+  STEM_TAPE_FIRMWARE_ID,
+  indexBlockCount,
+} from "../stemTapeFormat";
 
 export interface MockOptions {
   numSlots?: number;
@@ -19,12 +29,19 @@ export interface MockOptions {
   failWriteOnce?: number[];
   /** Drop the connection after this many writes. */
   disconnectAfterWrites?: number;
+  /** Answer the Stem Tape 'Q' capability query. Stock devices stay silent. */
+  stemTape?: boolean;
+  /** Override the reported capability flags (defaults to the required set). */
+  capFlags?: number;
+  /** Logical 8 KiB sectors reserved per song slot. */
+  sectorsPerSong?: number;
 }
 
 export class MockSp1 {
   blocks = new Map<number, Uint8Array>();
   writes = 0;
   pings = 0;
+  capQueries = 0;
   flushes = 0;
   exits = 0;
   closedPort = false;
@@ -47,6 +64,9 @@ export class MockSp1 {
     banner: string | undefined;
     failWriteOnce: number[] | undefined;
     disconnectAfterWrites: number | undefined;
+    stemTape: boolean;
+    capFlags: number;
+    sectorsPerSong: number;
   };
 
   constructor(o: MockOptions = {}) {
@@ -61,6 +81,9 @@ export class MockSp1 {
       banner: o.banner,
       failWriteOnce: o.failWriteOnce,
       disconnectAfterWrites: o.disconnectAfterWrites,
+      stemTape: o.stemTape ?? false,
+      capFlags: o.capFlags ?? REQUIRED_CAP_FLAGS | CAP_FLAG.STAGING_COW,
+      sectorsPerSong: o.sectorsPerSong ?? 8,
     };
     if (this.opts.banner) this.push(new TextEncoder().encode(this.opts.banner));
   }
@@ -137,6 +160,27 @@ export class MockSp1 {
         }
         this.blocks.set(blk, data);
         this.push(new Uint8Array([0x77]));
+        continue;
+      }
+      if (cmd === 0x51) {
+        this.inbox = b.slice(1);
+        this.capQueries++;
+        if (!this.opts.stemTape) continue; // stock firmware: no reply at all
+        const caps = new Uint8Array(CAPS_BYTES);
+        put32(caps, CAPS_OFF.firmwareId, STEM_TAPE_FIRMWARE_ID);
+        caps[CAPS_OFF.protoMajor] = PROTOCOL_MAJOR;
+        caps[CAPS_OFF.formatMajor] = FORMAT_MAJOR;
+        put32(caps, CAPS_OFF.flags, this.opts.capFlags);
+        put32(caps, CAPS_OFF.sampleRate, 48000);
+        put32(caps, CAPS_OFF.songSlots, this.opts.numSlots);
+        put32(caps, CAPS_OFF.indexBlocks, indexBlockCount(this.opts.numSlots));
+        put32(caps, CAPS_OFF.libraryBase, this.opts.slot0);
+        put32(caps, CAPS_OFF.sectorsPerSong, this.opts.sectorsPerSong);
+        put32(caps, CAPS_OFF.generation, 0);
+        const reply = new Uint8Array(4 + CAPS_BYTES);
+        reply.set(new TextEncoder().encode("STCP"));
+        reply.set(caps, 4);
+        this.push(reply);
         continue;
       }
       if (cmd === 0x46) {

@@ -20,6 +20,8 @@
  * therefore a real read-back byte compare over 'R'.
  */
 
+import { CAPS_BYTES, CAPS_TAG, CMD_CAPS } from "./stemTapeFormat";
+
 export const BAUD_RATE = 115200;
 export const SAMPLES_PER_BLOCK = 256;
 export const BLOCK_BYTES = 512;
@@ -269,7 +271,36 @@ export class Sp1Session {
     if (this.keepalive) clearInterval(this.keepalive);
     this.keepalive = null;
   }
+
+  /**
+   * Stem Tape capability query ('Q'). This command does NOT exist in the Tape
+   * Looper protocol: stock firmware simply never answers, which is exactly the
+   * fail-closed signal the compatibility gate needs. Returns the raw
+   * capability payload following the "STCP" tag, or null on silence.
+   */
+  async queryCapabilities(timeoutMs = 700): Promise<Uint8Array | null> {
+    return this.lock.run(async () => {
+      try {
+        this.io.drain();
+        await this.io.write(new Uint8Array([CMD_CAPS]));
+        const deadline = Date.now() + timeoutMs;
+        const win: number[] = [];
+        while (Date.now() < deadline) {
+          const b = (await this.io.read(1, Math.max(40, deadline - Date.now())))[0]!;
+          win.push(b);
+          if (win.length > 4) win.shift();
+          if (win.length === 4 && String.fromCharCode(...win) === CAPS_TAG) {
+            return await this.io.read(CAPS_BYTES, 1000);
+          }
+        }
+        return null;
+      } catch {
+        return null;
+      }
+    });
+  }
 }
+
 
 /**
  * Compatibility refusal. The ping layout is the only version signal this

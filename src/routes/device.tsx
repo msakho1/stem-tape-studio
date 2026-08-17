@@ -15,17 +15,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { SupportButton } from "@/components/SupportButton";
 import { sniffHeader } from "@/audio/format";
 import { Sp1Transport, Sp1Session, BAUD_RATE, type SerialLikePort } from "@/sp1/protocol";
-import { parseMeta, metaBlockCount, type Sp1Meta } from "@/sp1/meta";
 import { bpmFromTaps, STEM_ORDER, STEM_LABEL, type StemSlotName } from "@/sp1/prepare";
 import { prepareCanonicalSong, type CanonicalSong } from "@/sp1/song";
-import { LOCK_NOTICE, legacyVerdict, type CompatibilityVerdict } from "@/sp1/compatibility";
-import {
-  LegacyProvisionalTransport,
-  portIsMock,
-  type DeviceSongSlot,
-  type StemTapeDeviceTransport,
-} from "@/sp1/transport";
-import { type UploadProgress } from "@/sp1/upload";
+import { parseCapabilities, readOnlyVerdict, type CompatibilityVerdict } from "@/sp1/compatibility";
+import { StemTapeTransport, type DeviceSongSlot, type UploadProgress } from "@/sp1/transport";
 
 export const Route = createFileRoute("/device")({
   component: DevicePage,
@@ -59,14 +52,14 @@ function DevicePage() {
   const [status, setStatus] = useState("Not connected");
   const [log, setLog] = useState<string[]>([]);
   const [songs, setSongs] = useState<DeviceSongSlot[] | null>(null);
-  const [verdict, setVerdict] = useState<CompatibilityVerdict>(() => legacyVerdict());
+  const [verdict, setVerdict] = useState<CompatibilityVerdict>(() => readOnlyVerdict());
   const [mockMode, setMockMode] = useState(false);
-  const [description, setDescription] = useState<ReturnType<StemTapeDeviceTransport["describe"]> | null>(null);
+  const [description, setDescription] = useState<ReturnType<StemTapeTransport["describe"]> | null>(null);
   const [slot, setSlot] = useState(0);
   const [files, setFiles] = useState<Files>({});
   const [decoded, setDecoded] = useState<Decoded>({});
   const [song, setSong] = useState<CanonicalSong | null>(null);
-  const [progress, setProgress] = useState<UploadProgress | null>(null);
+  const [progress, setProgress] = useState<{ stage: string; fraction: number; detail: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [uninitialised, setUninitialised] = useState(false);
   const [sourceRates, setSourceRates] = useState<Partial<Record<StemSlotName, number | null>>>({});
@@ -74,7 +67,7 @@ function DevicePage() {
   const [artist, setArtist] = useState("");
   const [bpm, setBpm] = useState("");
   const [downbeat, setDownbeat] = useState("0");
-  const transportRef = useRef<LegacyProvisionalTransport | null>(null);
+  const transportRef = useRef<StemTapeTransport | null>(null);
   const abortRef = useRef({ aborted: false });
   const tapsRef = useRef<number[]>([]);
   const previewRef = useRef<HTMLAudioElement | null>(null);
@@ -92,7 +85,7 @@ function DevicePage() {
     if (!t) return;
     setSongs(await t.listSongs());
     setDescription(t.describe());
-    const bad = !t.indexMatchesFirmware;
+    const bad = !t.indexInitialised;
     setUninitialised(bad);
     if (bad) say("This SP-1's song index is uninitialised or written by different firmware. Nothing was changed.");
   }, [say]);
@@ -120,32 +113,19 @@ function DevicePage() {
       const l = await session.handshake(40, (n) => setStatus(`Connecting (attempt ${n})…`));
 
       // Answering SP1XFER! proves only that an SP-1-class device is listening.
-      // No generated Stem Tape protocol package, so the verdict fails closed.
-      const v = legacyVerdict();
-      setVerdict(v);
-      const isMock = !!injected || portIsMock(port);
-      setMockMode(isMock);
-
-      const n = metaBlockCount(l);
-      const raw = await session.lock.run(async () => {
-        const b0 = await session.readBlock(0);
-        if (n === 1) return b0;
-        const b1 = await session.readBlock(1);
-        const joined = new Uint8Array(1024);
-        joined.set(b0, 0);
-        joined.set(b1, 512);
-        return joined;
-      });
-      const meta: Sp1Meta = parseMeta(raw, l);
-      transportRef.current = new LegacyProvisionalTransport(session, meta, { kind: isMock ? "mock" : "physical" }, v);
+      // Writes require the Stem Tape capability reply, which stock firmware
+      // never sends.
+      const rawCaps = await session.queryCapabilities();
+      const caps = rawCaps ? parseCapabilities(rawCaps) : null;
+      const t = new StemTapeTransport(session, caps, { kind: injected ? "mock" : "physical" });
+      transportRef.current = t;
+      setVerdict(t.verdict);
+      setMockMode(!!injected);
+      await t.readIndex();
 
       say(`Connected: ${l.numSlots} song slots reported, ${l.sampleRate / 1000} kHz.`);
-      say(
-        isMock
-          ? "Mock transport in use — writes are permitted against the in-process fixture only."
-          : `Physical device: ${LOCK_NOTICE}`,
-      );
-      setStatus("Connected (read-only)");
+      say(t.verdict.summary);
+      setStatus(transportRef.current?.writable ? "Connected" : "Connected (read-only)");
       await refresh();
       session.startKeepalive();
     } catch (e) {
@@ -228,8 +208,7 @@ function DevicePage() {
         STEM_ORDER.map((n) => ({ name: n, filename: files[n]!.name, buffer: decoded[n]! })),
         {
           metadata: { title, artist, bpm: bpmValue, downbeatSeconds: downbeatValue },
-          onStage: (stage, fraction) =>
-            setProgress({ stage: stage as UploadProgress["stage"], fraction, detail: stage }),
+          onStage: (stage, fraction) => setProgress({ stage, fraction, detail: stage }),
         },
       );
       setSong(result);
@@ -240,7 +219,7 @@ function DevicePage() {
       }
       const detail = `${result.frames} frames · stereo 24-bit @ 48 kHz · ${result.audioBytes} audio bytes (${fmtBytes(result.audioBytes)})`;
       say(`Prepared: ${detail}`);
-      setProgress({ stage: "checksumming", fraction: 1, detail });
+      setProgress({ stage: "checksums", fraction: 1, detail });
     } catch (e) {
       setSong(null);
       say(`Preparation failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -249,7 +228,7 @@ function DevicePage() {
     }
   }, [allFour, artist, bpmValue, decoded, downbeatValue, files, metadataComplete, say, title]);
 
-  const mutationLocked = !transportRef.current || transportRef.current.mutationLocked;
+  const mutationLocked = !verdict.writable;
 
   const startUpload = useCallback(async () => {
     const t = transportRef.current;
@@ -257,10 +236,10 @@ function DevicePage() {
     abortRef.current = { aborted: false };
     setBusy(true);
     try {
-      const out = await t.writeSong({ slot, song, signal: abortRef.current, onProgress: setProgress });
+      const out = await t.uploadSong({ slot, song, signal: abortRef.current, onProgress: setProgress });
       if (out.ok) {
         say(
-          out.durableCommitAcknowledged && out.independentReReadMatches
+          out.hardwareVerified
             ? "Upload verified on hardware."
             : "Mock protocol smoke passed · Physical SP-1 upload not verified.",
         );
@@ -377,8 +356,8 @@ function DevicePage() {
 
       <main className="mx-auto w-full max-w-[860px] px-4 pb-24 pt-6 md:px-8">
         <section className="st-section" data-testid="write-lock">
-          <p className="st-section__title">physical uploads locked</p>
-          <p className="font-mono text-[13px] leading-relaxed text-[var(--ink-dim)]">{LOCK_NOTICE}</p>
+          <p className="st-section__title">{verdict.writable ? "compatibility negotiated" : "physical uploads locked"}</p>
+          <p className="font-mono text-[13px] leading-relaxed text-[var(--ink-dim)]">{verdict.summary}</p>
           <ul className="mt-3 grid gap-1 font-mono text-[11px] text-[var(--ink-faint)]">
             {verdict.requirements.map((r) => (
               <li key={r.id} data-testid={`req-${r.id}`}>
@@ -425,21 +404,18 @@ function DevicePage() {
           {connected && description && (
             <dl className="mt-3 grid grid-cols-2 gap-x-6 gap-y-1 font-mono text-[12px] text-[var(--ink-dim)] md:grid-cols-3">
               <div>device · <span className="text-[var(--ink)]">{description.deviceName}</span></div>
-              <div>protocol · <span className="text-[var(--ink)]">{description.protocol}</span></div>
-              <div>device format · <span className="text-[var(--ink)]">{description.formatIdentifier}</span></div>
+              <div>transport · <span className="text-[var(--ink)]">{description.transport}</span></div>
+              <div>audio · <span className="text-[var(--ink)]">{description.audioFormat}</span></div>
               <div>slots reported · <span className="text-[var(--ink)]" data-testid="slots">{description.slots}</span></div>
+              <div>library base · <span className="text-[var(--ink)]">block {description.libraryBase}</span></div>
               <div>
-                used · <span className="text-[var(--ink)]">{fmtBytes(description.usedBytes)}</span> of{" "}
-                {fmtBytes(description.totalBytes)}
+                per song · <span className="text-[var(--ink)]">{description.sectorsPerSong}</span> sectors (
+                {fmtBytes(description.capacityBytesPerSong)})
               </div>
-              <div>per track · <span className="text-[var(--ink)]">{fmtSecs(description.perTrackSeconds)}</span></div>
+              <div>index blocks · <span className="text-[var(--ink)]">{description.indexBlocks}</span></div>
+              <div>generation · <span className="text-[var(--ink)]">{description.generation}</span></div>
+              <div>staging · <span className="text-[var(--ink)]">{description.staging ? "yes" : "no"}</span></div>
             </dl>
-          )}
-          {connected && description?.provisional && (
-            <p className="mt-2 font-mono text-[11px] text-[var(--ink-faint)]" data-testid="provisional">
-              Legacy/provisional adapter: every storage figure above is device-reported through the classic block
-              protocol and is not the Stem Tape storage contract.
-            </p>
           )}
         </section>
 
@@ -599,7 +575,7 @@ function DevicePage() {
           </div>
           {mutationLocked && (
             <p className="mt-2 font-mono text-[12px] text-[var(--ink-dim)]" data-testid="upload-locked">
-              {LOCK_NOTICE}
+              {verdict.summary}
             </p>
           )}
           {progress && (
