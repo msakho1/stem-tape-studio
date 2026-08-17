@@ -1202,6 +1202,124 @@ static void test_stem_validate_check_order_is_deterministic(void)
 	      "with multiple simultaneous violations, zero-length is reported first (documented order)");
 }
 
+/* ========================================================================
+ * st_stem_validate against the deterministic fixture
+ * (tests/fixtures/generate_fixture.py, tests/fixtures/manifest.json) --
+ * real fixture bytes on disk, run through the REAL st_crc32_compute() and
+ * st_stem_validate_commit() production functions, not synthetic in-test
+ * values. Run from the repo root (matches the CI host-test step's
+ * working-directory and this repo's own `cc ... && ./audit/test_...`
+ * convention).
+ * ======================================================================== */
+#define FIXTURE_DIR "firmware/stemtape_player/tests/fixtures/"
+#define FIXTURE_EMMC_BLOCK_SIZE 512u
+#define FIXTURE_FRAME_COUNT_BLOCKS 8u
+#define FIXTURE_STEM_BYTES (FIXTURE_FRAME_COUNT_BLOCKS * FIXTURE_EMMC_BLOCK_SIZE)
+
+/* Manifest-recorded CRC32 values (regenerate via generate_fixture.py and
+ * update both manifest.json and these constants together if the fixture
+ * ever changes -- the self-check below fails loudly if they drift apart). */
+static const uint32_t FIXTURE_STEM_CRC32[ST_STEM_COUNT] = {
+	0x09CF6B00u, 0xB029AC6Du, 0x2CD21102u, 0x90EC77F9u,
+};
+static const uint32_t FIXTURE_STEM0_CORRUPT_CRC32 = 0x5317C22Cu;
+
+static bool fixture_read(const char *name, uint8_t *buf, size_t len)
+{
+	char path[256];
+	FILE *f;
+	size_t n;
+
+	snprintf(path, sizeof(path), "%s%s", FIXTURE_DIR, name);
+	f = fopen(path, "rb");
+	if (!f) return false;
+	n = fread(buf, 1, len, f);
+	fclose(f);
+	return n == len;
+}
+
+static void test_stem_validate_fixture_manifest_crc_matches_generator(void)
+{
+	/* Recomputing the CRC the same way the generator did (zlib.crc32 is
+	 * the identical reflected-IEEE-802.3 algorithm st_crc32_compute()
+	 * implements) proves the checked-in fixture bytes are exactly what
+	 * manifest.json / this file's constants claim -- catches silent
+	 * fixture-file corruption or a stale hardcoded constant. */
+	static uint8_t buf[FIXTURE_STEM_BYTES];
+	uint32_t i;
+	bool all_present = true;
+	bool all_match = true;
+	char name[16];
+
+	for (i = 0; i < ST_STEM_COUNT; i++) {
+		snprintf(name, sizeof(name), "stem%u.bin", i);
+		if (!fixture_read(name, buf, sizeof(buf))) { all_present = false; continue; }
+		if (st_crc32_compute(buf, sizeof(buf)) != FIXTURE_STEM_CRC32[i]) all_match = false;
+	}
+	CHECK(all_present, "all 4 fixture stem files are present and the declared size");
+	CHECK(all_match, "st_crc32_compute() over each fixture stem reproduces the "
+	      "manifest-recorded CRC32 exactly");
+}
+
+static void test_stem_validate_fixture_valid_set_accepted(void)
+{
+	static uint8_t buf[ST_STEM_COUNT][FIXTURE_STEM_BYTES];
+	st_stem_commit_t c;
+	uint32_t i;
+	char name[16];
+
+	c.present_mask = 0x0Fu;
+	c.track_block_capacity = 1000000u;
+	for (i = 0; i < ST_STEM_COUNT; i++) {
+		snprintf(name, sizeof(name), "stem%u.bin", i);
+		(void)fixture_read(name, buf[i], sizeof(buf[i]));
+		c.frame_count[i] = FIXTURE_FRAME_COUNT_BLOCKS;
+		/* the uploader declares the CRC of the bytes it sent; here that's
+		 * exactly the on-disk fixture, matching a real untampered upload. */
+		c.declared_crc32[i] = st_crc32_compute(buf[i], sizeof(buf[i]));
+		/* "read back from the card" -- the real xfer_service() streams this
+		 * in ZBURST-block bursts through st_crc32_update(); a single-shot
+		 * st_crc32_compute() over the same bytes is CRC32-equivalent
+		 * (streaming update is associative over the concatenated input). */
+		c.actual_crc32[i] = st_crc32_compute(buf[i], sizeof(buf[i]));
+	}
+	CHECK(st_stem_validate_commit(&c) == ST_STEM_OK,
+	      "the deterministic fixture's real 4-stem set, read from disk and CRC'd "
+	      "with the real st_crc32_compute(), is accepted by the real st_stem_validate_commit()");
+}
+
+static void test_stem_validate_fixture_corrupt_set_rejected(void)
+{
+	static uint8_t good[FIXTURE_STEM_BYTES];
+	static uint8_t corrupt[FIXTURE_STEM_BYTES];
+	st_stem_commit_t c;
+	uint32_t i;
+	char name[16];
+
+	c.present_mask = 0x0Fu;
+	c.track_block_capacity = 1000000u;
+	(void)fixture_read("stem0_corrupt.bin", corrupt, sizeof(corrupt));
+	for (i = 0; i < ST_STEM_COUNT; i++) {
+		snprintf(name, sizeof(name), "stem%u.bin", i);
+		(void)fixture_read(name, good, sizeof(good));
+		c.frame_count[i] = FIXTURE_FRAME_COUNT_BLOCKS;
+		/* the uploader still DECLARES the original, uncorrupted CRC ... */
+		c.declared_crc32[i] = FIXTURE_STEM_CRC32[i];
+	}
+	/* ... but what the card actually reads back for stem 0 is the
+	 * corrupted variant (one flipped bit) -- simulating real-world
+	 * corruption occurring between the host declaring the CRC and the
+	 * bytes actually landing on eMMC. */
+	c.actual_crc32[0] = st_crc32_compute(corrupt, sizeof(corrupt));
+	CHECK(c.actual_crc32[0] == FIXTURE_STEM0_CORRUPT_CRC32,
+	      "the corrupt fixture variant's real CRC32 matches the manifest-recorded value");
+	for (i = 1u; i < ST_STEM_COUNT; i++)
+		c.actual_crc32[i] = FIXTURE_STEM_CRC32[i];
+	CHECK(st_stem_validate_commit(&c) == ST_STEM_ERR_CRC_MISMATCH,
+	      "a real single-bit-corrupted fixture stem, read from disk and CRC'd with the "
+	      "real st_crc32_compute(), is rejected by the real st_stem_validate_commit()");
+}
+
 int main(void)
 {
 	RUN(test_crc32);
@@ -1222,6 +1340,9 @@ int main(void)
 	RUN(test_stem_validate_rejects_oversize);
 	RUN(test_stem_validate_rejects_crc_mismatch);
 	RUN(test_stem_validate_check_order_is_deterministic);
+	RUN(test_stem_validate_fixture_manifest_crc_matches_generator);
+	RUN(test_stem_validate_fixture_valid_set_accepted);
+	RUN(test_stem_validate_fixture_corrupt_set_rejected);
 
 	RUN(test_gesture_idle_zero_actions);
 	RUN(test_gesture_boot_baseline_not_input);

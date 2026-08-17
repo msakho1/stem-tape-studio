@@ -15,20 +15,22 @@
  *  (firmware/ vs firmware/stemtape_player/) built from separate binaries —
  *  changing this copy never touches firmware/src/main.c or its CI baseline.
  *
- *  STEM TAPE CONCEPT: one song = four synchronized stereo 24-bit stems
- *  (Vocal/Drums/Bass/Instrument) instead of four independently-looping mono
- *  16-bit tracks. Concretely this reuses, UNCHANGED: the NUM_SLOTS=16/
- *  NTRK=4 slot×track addressing (trk_blk()), the two-copy meta_blk commit
- *  protocol (meta_write_blocks()), the classic P/R/W/F/X xfer_service()
- *  block-transfer verbs, and the single-shared-transport mixing structure in
- *  looper_audio_block() (all 4 tracks already play from one shared
- *  playhead — see PASS A/B). It changes: the on-flash/ring sample
- *  representation (mono 16-bit -> stereo 24-bit, see SAMP_PER_BLK/
- *  codec_pack/codec_unpack/PASS C), the meta format (new magic + per-stem
- *  CRC32/frame-count/BPM/downbeat fields, additive to struct meta_blk), and
- *  adds one new xfer verb ('Z', stem-song commit) that validates all four
- *  stems (presence, matching frame count, per-stem CRC32) before it is ever
- *  possible to mark them present[]=1 and playable — see st_stem_validate.c.
+ *  STEM TAPE CONCEPT: one song = four synchronized stems (Vocal/Drums/Bass/
+ *  Instrument), validated as a matched set at upload time, instead of four
+ *  independently-looping tracks with no cross-track relationship. Concretely
+ *  this reuses, UNCHANGED: the NUM_SLOTS=16/NTRK=4 slot×track addressing
+ *  (trk_blk()), the two-copy meta_blk commit protocol (meta_write_blocks()),
+ *  the classic P/R/W/F/X xfer_service() block-transfer verbs, the on-flash/
+ *  ring sample representation (mono 16-bit PCM, SAMP_PER_BLK/codec_pack/
+ *  codec_unpack — a stereo/24-bit storage format is a follow-up milestone,
+ *  NOT part of this change), and the single-shared-transport mixing
+ *  structure in looper_audio_block() (all 4 tracks already play from one
+ *  shared playhead — see PASS A/B). It changes: the meta format (new magic +
+ *  per-stem CRC32/frame-count/BPM/downbeat fields, additive to struct
+ *  meta_blk), and adds one new xfer verb ('Z', stem-song commit) that
+ *  validates all four stems (presence, matching frame count, per-stem
+ *  CRC32) before it is ever possible to mark them present[]=1 and playable
+ *  — see st_stem_validate.c.
  *
  * ---- ORIGINAL TAPE LOOPER HEADER BELOW (unmodified) ----
  * ============================================================================
