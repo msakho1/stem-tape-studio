@@ -87,14 +87,24 @@ describe("capture epochs", () => {
 });
 
 describe("real event-time capture — no reconstruction", () => {
+  /** Page clock far enough along that realistic multi-second holds are in its past. */
+  const withPageClock = (at: number, fn: () => void) => {
+    const spy = vi.spyOn(performance, "now").mockReturnValue(at);
+    try {
+      fn();
+    } finally {
+      spy.mockRestore();
+    }
+  };
+
   it("preserves a 1200 ms hold between the real DOWN and UP records", () => {
     trace.startCapture();
     const adapter = new Sp1SurfaceAdapter();
     const device = { id: "in-1", name: "STEM TAPE SP-1" };
-    // Timestamps must be in the past of the page clock: a live press is never stale.
-    const base = performance.now() - 30_000;
-    adapter.handleBytes([0x90, 40, 127], device, base);
-    adapter.handleBytes([0x80, 40, 0], device, base + 1_200);
+    withPageClock(100_000, () => {
+      adapter.handleBytes([0x90, 40, 127], device, 50_000);
+      adapter.handleBytes([0x80, 40, 0], device, 51_200);
+    });
     const decoded = body().filter((r) => r.stage === "surface.decoded");
     expect(decoded).toHaveLength(2);
     expect(decoded[1]!.t - decoded[0]!.t).toBeCloseTo(1200, 3);
@@ -106,13 +116,15 @@ describe("real event-time capture — no reconstruction", () => {
     trace.startCapture();
     const adapter = new Sp1SurfaceAdapter();
     const device = { id: "in-1", name: "STEM TAPE SP-1" };
-    let t = performance.now() - 60_000;
-    for (const note of [36, 37, 38]) {
-      adapter.handleBytes([0x90, note, 127], device, t);
-      t += 5_223;
-      adapter.handleBytes([0x80, note, 0], device, t);
-      t += 10;
-    }
+    withPageClock(200_000, () => {
+      let t = 100_000;
+      for (const note of [36, 37, 38]) {
+        adapter.handleBytes([0x90, note, 127], device, t);
+        t += 5_223;
+        adapter.handleBytes([0x80, note, 0], device, t);
+        t += 10;
+      }
+    });
     const decoded = body().filter((r) => r.stage === "surface.decoded");
     const span = decoded[decoded.length - 1]!.t - decoded[0]!.t;
     expect(span).toBeGreaterThan(15_000);
