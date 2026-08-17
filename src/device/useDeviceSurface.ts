@@ -156,6 +156,60 @@ export function useDeviceSurface() {
     surfaceCommandTracer.capture(state.commands);
   }, [state.commands]);
 
+  /**
+   * State transitions. Recorded only when the observed value actually changes,
+   * with the command responsible (the newest command in this reducer result).
+   */
+  useEffect(() => {
+    const cause = state.commands[state.commands.length - 1];
+    const opts = cause ? { commandId: cause.id } : {};
+    trace.recordIfChanged(
+      "state.transport",
+      `${state.playing}|${state.globalLoop.active}|${state.globalLoop.latched}|${state.globalScrub}|${state.scrubLatched}|${state.scrubSpeed}`,
+      "state.transport",
+      `playing=${state.playing} loop=${state.globalLoop.active ? (state.globalLoop.latched ? "latched" : "momentary") : "off"} scrub=${state.globalScrub}${state.scrubLatched ? " latched" : ""} speed=${state.scrubSpeed + 1}`,
+      {
+        playing: state.playing,
+        loopActive: state.globalLoop.active,
+        loopLatched: state.globalLoop.latched,
+        scrub: state.globalScrub,
+        scrubLatched: state.scrubLatched,
+        scrubSpeed: state.scrubSpeed,
+        causedBy: cause?.type ?? null,
+      },
+      opts,
+    );
+    trace.recordIfChanged(
+      "state.mixer",
+      state.tracks.map((t) => `${t.volume.toFixed(3)}:${t.content}`).join("|") +
+        state.perf.tracks.map((t) => `${t.soloed ? "S" : ""}${t.linked ? "L" : ""}`).join("|"),
+      "state.mixer",
+      `gains ${state.tracks.map((t) => t.volume.toFixed(2)).join(" ")}`,
+      {
+        gains: state.tracks.map((t) => t.volume),
+        muted: state.tracks.map((t) => t.content === "muted"),
+        soloed: state.perf.tracks.map((t) => t.soloed),
+        linked: state.perf.tracks.map((t) => t.linked),
+        causedBy: cause?.type ?? null,
+      },
+      opts,
+    );
+    trace.recordIfChanged(
+      "state.fx",
+      `${state.perf.fxOverlay}|${state.perf.fxScope}|${state.bank}|${state.perf.activeStem}`,
+      "state.fx",
+      `overlay=${state.perf.fxOverlay ? state.perf.fxScope : "closed"} bank=${state.bank + 1} stem=${state.perf.activeStem + 1}`,
+      {
+        overlay: state.perf.fxOverlay,
+        scope: state.perf.fxScope,
+        bank: state.bank,
+        activeStem: state.perf.activeStem,
+        causedBy: cause?.type ?? null,
+      },
+      opts,
+    );
+  }, [state]);
+
   /** Which fader layer is live (FN = chop window, HEADS = scrub, else volume). */
   const layerRef = useRef<{ fn: boolean; heads: boolean }>({ fn: false, heads: false });
   layerRef.current = { fn: state.functionHeld, heads: state.headsMode };
