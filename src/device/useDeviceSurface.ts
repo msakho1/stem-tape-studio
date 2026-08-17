@@ -38,7 +38,7 @@ import { FaderSessionManager, type FaderIndex } from "@/input/faderSessions";
 import { installDiagnostics, publishArbiter, publishSurface, publishTapLatency } from "@/lib/diagnostics";
 import { surfaceCommandTracer } from "@/diagnostics/commandTrace";
 import { trace } from "@/diagnostics/trace";
-import { formatPhysicalFrame, resolvePhysicalFrame } from "@/diagnostics/physicalFrame";
+import { useSp1LedFrame } from "@/leds/useSp1LedFrame";
 import { ledTransport } from "@/diagnostics/ledTransport";
 
 
