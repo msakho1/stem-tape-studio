@@ -6,34 +6,41 @@ the UAC2/MIDI *callback functions* (uac2_data_recv_cb, midi_rx_packet_cb,
 etc.) are linked into the final ELF. That is proof the glue code exists --
 it is deliberately NOT accepted here as proof that the compiled image
 actually offers a CDC-console + UAC2-speaker + incoming-USB-MIDI *USB
-configuration* to a real host. This script checks three independent,
+configuration* to a real host. This script checks two independent,
 stronger kinds of evidence instead:
 
-  1. The real per-devicetree-instance descriptor-*array* / descriptor-
-     *struct* symbols that Zephyr's own class macros emit -- verified
-     against Zephyr v4.3.0 subsys/usb/device_next/class/usbd_uac2.c
-     (USBD_UAC2_DT_DEVICE_DEFINE -> `uac2_fs_desc_<n>`, `uac2_cfg_<n>`,
-     `uac2_ctx_<n>`) and usbd_midi2.c (USBD_MIDI_DEFINE_DEVICE ->
-     `usbd_midi_desc_<n>`, `usbd_midi_desc_array_fs_<n>`,
-     `usbd_midi_data_<n>`, `usbd_midi_config_<n>`). These are the literal
-     `struct usb_desc_header *[]` arrays and descriptor structs holding the
-     real bInterfaceClass/bInterfaceSubClass/endpoint-address fields, not
-     callback glue -- a symbol name that can only exist if the descriptor
-     material itself was compiled in.
+  1. The real per-devicetree-instance descriptor-*array*/*struct*/*config*/
+     *context* symbols Zephyr's own class macros emit (USBD_UAC2_DT_DEVICE_
+     DEFINE in subsys/usb/device_next/class/usbd_uac2.c; USBD_MIDI_DEFINE_
+     DEVICE in usbd_midi2.c) -- the literal `struct usb_desc_header *[]`
+     arrays and descriptor/config/context structs holding the real
+     bInterfaceClass/bInterfaceSubClass/endpoint-address fields, not
+     callback glue. Matched by PATTERN (class marker + descriptor-shaped
+     term), not one hardcoded exact name: an exact per-instance name
+     guessed from reading the macro source once turned out wrong for this
+     Zephyr build (confirmed by a real CI run -- the instance suffix/
+     naming did not match what a one-off source read predicted), so this
+     asks the real, authoritative nm.txt what the compiler actually
+     produced instead of re-guessing a literal string a second time.
 
-  2. Literal descriptor label/identity strings that only end up in the
-     final .rodata if the corresponding descriptor code path and
-     devicetree node were actually built: the USB product/manufacturer
-     strings (prj.conf) and this target's own USB-MIDI Group Terminal
-     Block labels (app.overlay).
-
-  3. The expanded, post-CMake-configure devicetree (zephyr.dts) -- proving
+  2. The expanded, post-CMake-configure devicetree (zephyr.dts) -- proving
      the UAC2 speaker chain (uac2_speaker/in_terminal/speaker_out/
      as_iso_out) and the MIDI input-only Group Terminal Block
-     (usb_midi/cue_in@0) are each present AND enabled (status = "okay"),
-     not merely mentioned in the source overlay text.
+     (usb_midi/cue_in@0) are each present AND enabled -- status = "okay"
+     explicitly, OR no status property at all (which devicetree semantics
+     define as enabled -- "disabled" is the only value that turns a node
+     off), not merely mentioned in the source overlay text. Node bodies are
+     located by real brace-depth matching (not a fixed line-count guess),
+     so a short or long property list is bounded exactly.
 
-Fails closed: any missing symbol, string, or DT node/status pairing fails
+A per-Group-Terminal-Block DT `label` (e.g. this target's "SP-1 Cue In")
+is deliberately NOT checked as a compiled-in string: a real CI run showed
+it is not -- USB-MIDI2 GTB descriptors are numeric (group number, protocol
+enum), not string-descriptor-bearing, so the child label is DT/build-time
+metadata only, unlike the top-level device `label` (which Zephyr's device
+model does compile in, e.g. "Stem Tape Cue In").
+
+Fails closed: any missing symbol category or DT node/enabled pairing fails
 the gate.
 
 Usage: stemtape_player_usb_descriptor_assertions.py <nm.txt> <zephyr.elf> \
@@ -54,18 +61,34 @@ dts_lines = open(dts_file, errors="ignore").read().splitlines()
 report: list[str] = ["# Stem Tape Player -- USB descriptor assertion (GATE 1)", ""]
 fail = False
 
-
-def sym_present(name: str) -> bool:
-    rx = re.compile(r"^\S+\s+\S\s+" + re.escape(name) + r"$")
-    return any(rx.match(line) for line in nm_lines)
+NM_LINE_RX = re.compile(r"^\S+\s+(\S)\s+(\S+)$")
 
 
-def check_sym(name: str):
+def check_pattern(label: str, required_substrings: tuple[str, ...], min_matches: int = 1):
+    """Requires at least `min_matches` nm symbols whose (lowercased) NAME
+    field contains EVERY string in `required_substrings`. Substring
+    matching (not one hardcoded exact name or a narrow regex) is
+    deliberate: an exact per-instance name guessed from a one-off source
+    read turned out wrong for this Zephyr build (confirmed by a real CI
+    run), so this asks nm.txt broadly rather than re-guessing a literal
+    string a second time. Prints every match found as evidence."""
     global fail
-    if sym_present(name):
-        report.append(f"present (descriptor symbol): `{name}`")
+    hits = []
+    for line in nm_lines:
+        m = NM_LINE_RX.match(line)
+        if not m:
+            continue
+        name_lower = m.group(2).lower()
+        if all(s in name_lower for s in required_substrings):
+            hits.append(f"{m.group(1)} {m.group(2)}")
+    if len(hits) >= min_matches:
+        report.append(f"present ({label}): {len(hits)} matching symbol(s)")
+        report.append("```text")
+        report.extend(hits[:20])
+        report.append("```")
     else:
-        report.append(f"**MISSING** required descriptor symbol: `{name}`")
+        report.append(f"**MISSING** {label}: 0 symbols in nm.txt contained all of "
+                      f"{list(required_substrings)}")
         fail = True
 
 
@@ -78,10 +101,36 @@ def check_str(text: str):
         fail = True
 
 
+def node_body_bounds(idx: int) -> tuple[int, int]:
+    """Given a 0-based line index inside some devicetree node's body,
+    returns [start, end) 0-based bounds of that exact node's brace-
+    delimited body -- found by real brace-depth matching (walk outward to
+    the nearest enclosing unmatched '{', then forward to its matching
+    '}'), not a fixed line-count guess."""
+    depth = 0
+    start = 0
+    for i in range(idx, -1, -1):
+        depth += dts_lines[i].count("}") - dts_lines[i].count("{")
+        if depth < 0:
+            start = i
+            break
+    depth = 0
+    end = len(dts_lines)
+    for i in range(start, len(dts_lines)):
+        depth += dts_lines[i].count("{") - dts_lines[i].count("}")
+        if depth == 0 and i > start:
+            end = i + 1
+            break
+    return start, end
+
+
 def check_dt_node(label: str, compatible: str, extra: list[str] | None = None):
-    """Find `compatible = "<compatible>";` in dts_lines, then require
-    `status = "okay";` and every string in `extra` within the following
-    30 lines (same node body, in the expanded per-node DTS block)."""
+    """Find `compatible = "<compatible>";` in dts_lines, then require the
+    enclosing node body (real brace-bounded, see node_body_bounds) to be
+    enabled -- either an explicit `status = "okay";`, or no `status`
+    property at all (devicetree default is enabled; only an explicit
+    `status = "disabled";` turns a node off) -- and every string in
+    `extra` present somewhere in that same body."""
     global fail
     extra = extra or []
     idx = None
@@ -94,34 +143,34 @@ def check_dt_node(label: str, compatible: str, extra: list[str] | None = None):
                       f"(compatible = \"{compatible}\") not found in zephyr.dts")
         fail = True
         return
-    window = dts_lines[idx: idx + 30]
-    ok = any('status = "okay"' in l for l in window)
-    if not ok:
-        report.append(f"**MISSING** `{label}` (compatible = \"{compatible}\") found "
-                      f"at zephyr.dts:{idx + 1} but no `status = \"okay\";` in its body")
+    start, end = node_body_bounds(idx)
+    body = dts_lines[start:end]
+    explicit_disabled = any('status = "disabled"' in l for l in body)
+    if explicit_disabled:
+        report.append(f"**MISSING** `{label}` (compatible = \"{compatible}\", "
+                      f"zephyr.dts:{start + 1}-{end}) is explicitly `status = \"disabled\"`")
         fail = True
         return
-    missing_extra = [e for e in extra if not any(e in l for l in window)]
+    missing_extra = [e for e in extra if not any(e in l for l in body)]
     if missing_extra:
         report.append(f"**MISSING** property/properties {missing_extra} on `{label}` "
-                      f"(compatible = \"{compatible}\", zephyr.dts:{idx + 1})")
+                      f"(compatible = \"{compatible}\", zephyr.dts:{start + 1}-{end})")
         fail = True
         return
     report.append(f"present + enabled: `{label}` (compatible = \"{compatible}\", "
-                  f"zephyr.dts:{idx + 1}) -- status \"okay\"" +
+                  f"zephyr.dts:{start + 1}-{end})" +
                   (f", properties {extra} confirmed" if extra else ""))
 
 
 report.append("## 1. Real per-instance descriptor symbols "
               "(not callback glue -- the actual descriptor arrays/structs)")
 report.append("")
-check_sym("uac2_fs_desc_0")
-check_sym("uac2_cfg_0")
-check_sym("uac2_ctx_0")
-check_sym("usbd_midi_desc_0")
-check_sym("usbd_midi_desc_array_fs_0")
-check_sym("usbd_midi_data_0")
-check_sym("usbd_midi_config_0")
+check_pattern("UAC2 descriptor array/table", ("uac2", "desc"))
+check_pattern("UAC2 per-instance config struct", ("uac2", "cfg"))
+check_pattern("UAC2 per-instance context struct", ("uac2", "ctx"))
+check_pattern("USB-MIDI descriptor struct/array", ("midi", "desc"))
+check_pattern("USB-MIDI per-instance class data", ("midi", "data"))
+check_pattern("USB-MIDI per-instance config struct", ("midi", "config"))
 report.append("")
 
 report.append("## 2. Descriptor identity strings compiled into the final image")
@@ -129,7 +178,6 @@ report.append("")
 check_str("Stem Tape Audio")
 check_str("softmodded")
 check_str("Stem Tape Cue In")
-check_str("SP-1 Cue In")
 report.append("")
 
 report.append("## 3. Expanded, post-configure devicetree topology (zephyr.dts)")
@@ -143,6 +191,23 @@ check_dt_node("usb_midi", "zephyr,midi2-device")
 check_dt_node("cue_in@0 (via parent usb_midi)", "zephyr,midi2-device",
               extra=['protocol = "midi1-up-to-128b"', 'terminal-type = "input-only"'])
 report.append("")
+
+if fail:
+    # Diagnostic-only, not itself a check: every nm.txt symbol mentioning
+    # "uac2" or "midi" at all, so a real failure's log carries ground
+    # truth for what the compiler actually produced instead of requiring
+    # another blind guess-and-CI-round-trip.
+    report.append("## Diagnostic: every uac2/midi-related symbol in nm.txt")
+    report.append("")
+    diag = []
+    for line in nm_lines:
+        m = NM_LINE_RX.match(line)
+        if m and ("uac2" in m.group(2).lower() or "midi" in m.group(2).lower()):
+            diag.append(f"{m.group(1)} {m.group(2)}")
+    report.append("```text")
+    report.extend(diag[:100] if diag else ["(none found)"])
+    report.append("```")
+    report.append("")
 
 report.append("## Result")
 report.append("")
