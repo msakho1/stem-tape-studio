@@ -485,6 +485,7 @@ jobs:
             firmware/stemtape_player/src/st_crc32.c \
             firmware/stemtape_player/src/st_storage_layout.c \
             firmware/stemtape_player/src/st_sector_codec.c \
+            firmware/stemtape_player/src/st_stem_validate.c \
             firmware/stemtape_player/src/st_transfer.c \
             firmware/stemtape_player/src/st_gesture.c \
             firmware/stemtape_player/src/st_scrub.c \
@@ -520,6 +521,61 @@ jobs:
             grep -E '^\[(PASS|FAIL)\]|^ALL IMAGE' audit/image-assertions.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: STEM TAPE runtime symbol-presence gate (fail-closed)
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          # Proves the real vertical-slice runtime is actually linked into
+          # this build's final ELF -- not merely present as a source file
+          # that could be dead-stripped or never wired up. Every symbol here
+          # is a real, non-inlined function this session added or modified
+          # in firmware/stemtape_player/src/main.c (or the files it now
+          # reuses from the classic Tape Looper): storage/transfer,
+          # cold-boot discovery, playback, fader control, and LEDs. Fails
+          # closed (missing nm.txt or any missing symbol = CI failure) so a
+          # future change that silently drops one of these out of the link
+          # (e.g. reverting to the old CMakeLists.txt source list) is caught
+          # here, not discovered on hardware.
+          test -s audit/nm.txt
+          missing=0
+          # nm marks a function's own text symbol lowercase 't' when it has
+          # internal (static) linkage and uppercase 'T' when it's external --
+          # nearly everything in main.c is `static`, so both cases count as
+          # "really linked in" here. trk_blk() is deliberately NOT checked:
+          # it's a one-line `static inline` and -Os may legitimately fold it
+          # into every call site with no standalone symbol at all, which
+          # would be a false failure, not evidence of anything missing.
+          check() {
+            if ! grep -qE " [tT] ${1}\$" audit/nm.txt; then
+              echo "MISSING required linked symbol: $1" >&2
+              missing=1
+            else
+              echo "present: $1"
+            fi
+          }
+          # storage + the new validated stem-song transfer commit path
+          check emmc_read_blocks
+          check emmc_write_blocks
+          check emmc_cache_flush
+          check meta_write_blocks
+          check xfer_service
+          check st_stem_validate_commit
+          check st_crc32_update
+          # cold-boot discovery + the shared-transport playback engine
+          check streamer_thread
+          check audio_thread
+          check looper_audio_block
+          # physical control scanner (button/fader ladder read) + LED output
+          check ladder_read
+          check led_service
+          check led_pwm_isr
+          check main
+          if [ "$missing" -ne 0 ]; then
+            echo "one or more required runtime symbols are missing from the final ELF" >&2
+            exit 1
+          fi
+          echo "all required Stem Tape runtime symbols are linked into zephyr.elf"
 
       - name: Persistent-memory and power audit report (descriptive)
         working-directory: ${{ github.workspace }}/project

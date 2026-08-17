@@ -22,6 +22,7 @@
 #include "st_led_pattern.h"
 #include "st_scrub.h"
 #include "st_sector_codec.h"
+#include "st_stem_validate.h"
 #include "st_storage_layout.h"
 #include "st_transfer.h"
 #include "st_transfer_protocol.h"
@@ -1110,6 +1111,97 @@ static void test_led_transfer_pattern(void)
 	      "transfer mode: all four Track LEDs blink together (on-phase)");
 }
 
+/* ========================================================================
+ * st_stem_validate — the atomic-commit gate wired into the real
+ * xfer_service() 'Z' verb in firmware/stemtape_player/src/main.c.
+ * ======================================================================== */
+static st_stem_commit_t make_valid_commit(void)
+{
+	st_stem_commit_t c;
+	uint32_t i;
+
+	c.present_mask = 0x0Fu;
+	c.track_block_capacity = 100000u;
+	for (i = 0; i < ST_STEM_COUNT; i++) {
+		c.frame_count[i] = 12345u;
+		c.declared_crc32[i] = 0xAAAA0000u + i;
+		c.actual_crc32[i] = c.declared_crc32[i];
+	}
+	return c;
+}
+
+static void test_stem_validate_accepts_valid_commit(void)
+{
+	st_stem_commit_t c = make_valid_commit();
+
+	CHECK(st_stem_validate_commit(&c) == ST_STEM_OK,
+	      "a fully valid 4-stem commit (all present, equal length, matching CRCs) is accepted");
+}
+
+static void test_stem_validate_rejects_missing_stem(void)
+{
+	st_stem_commit_t c = make_valid_commit();
+
+	c.present_mask = 0x07u; /* only 3 of 4 stems declared present */
+	CHECK(st_stem_validate_commit(&c) == ST_STEM_ERR_MISSING_STEM,
+	      "fewer than 4 declared-present stems is rejected, not partially activated");
+}
+
+static void test_stem_validate_rejects_zero_length(void)
+{
+	st_stem_commit_t c = make_valid_commit();
+
+	c.frame_count[2] = 0u;
+	CHECK(st_stem_validate_commit(&c) == ST_STEM_ERR_ZERO_LENGTH,
+	      "a zero-length declared stem is rejected");
+}
+
+static void test_stem_validate_rejects_length_mismatch(void)
+{
+	st_stem_commit_t c = make_valid_commit();
+
+	c.frame_count[3] = c.frame_count[0] + 1u; /* one stem one block longer than the other three */
+	CHECK(st_stem_validate_commit(&c) == ST_STEM_ERR_LENGTH_MISMATCH,
+	      "mismatched per-stem lengths are rejected -- the shared-transport invariant "
+	      "every stem song's synchronization depends on");
+}
+
+static void test_stem_validate_rejects_oversize(void)
+{
+	st_stem_commit_t c = make_valid_commit();
+
+	c.frame_count[0] = c.frame_count[1] = c.frame_count[2] = c.frame_count[3] =
+		c.track_block_capacity + 1u;
+	CHECK(st_stem_validate_commit(&c) == ST_STEM_ERR_TOO_LARGE,
+	      "a shared length exceeding the device's real per-track block capacity is rejected");
+}
+
+static void test_stem_validate_rejects_crc_mismatch(void)
+{
+	st_stem_commit_t c = make_valid_commit();
+
+	c.actual_crc32[1] ^= 0xFFFFFFFFu; /* the real read-back CRC does not match what was declared */
+	CHECK(st_stem_validate_commit(&c) == ST_STEM_ERR_CRC_MISMATCH,
+	      "a stem whose real read-back CRC-32 does not match the declared value is rejected "
+	      "(corrupt/truncated/reordered upload)");
+}
+
+static void test_stem_validate_check_order_is_deterministic(void)
+{
+	/* Multiple simultaneous violations -> the fixed, documented check
+	 * order (presence, then zero-length, then mismatch, then size, then
+	 * CRC) determines which single reason is reported, not an unordered
+	 * "rejected" -- exercise one such case explicitly. */
+	st_stem_commit_t c = make_valid_commit();
+
+	c.present_mask = 0x0Fu;
+	c.frame_count[0] = 0u;             /* zero-length ... */
+	c.frame_count[1] = 999999999u;     /* ... AND a length mismatch ... */
+	c.actual_crc32[2] ^= 1u;           /* ... AND a CRC mismatch, all at once */
+	CHECK(st_stem_validate_commit(&c) == ST_STEM_ERR_ZERO_LENGTH,
+	      "with multiple simultaneous violations, zero-length is reported first (documented order)");
+}
+
 int main(void)
 {
 	RUN(test_crc32);
@@ -1122,6 +1214,14 @@ int main(void)
 	RUN(test_transfer_interrupted_upload_never_commits);
 	RUN(test_transfer_abort_and_token);
 	RUN(test_transfer_bad_slot_and_oversize);
+
+	RUN(test_stem_validate_accepts_valid_commit);
+	RUN(test_stem_validate_rejects_missing_stem);
+	RUN(test_stem_validate_rejects_zero_length);
+	RUN(test_stem_validate_rejects_length_mismatch);
+	RUN(test_stem_validate_rejects_oversize);
+	RUN(test_stem_validate_rejects_crc_mismatch);
+	RUN(test_stem_validate_check_order_is_deterministic);
 
 	RUN(test_gesture_idle_zero_actions);
 	RUN(test_gesture_boot_baseline_not_input);
