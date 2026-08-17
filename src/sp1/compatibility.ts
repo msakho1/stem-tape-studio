@@ -82,7 +82,12 @@ export interface CompatibilityVerdict {
   staging: boolean;
 }
 
-export function evaluate(caps: StemTapeCapabilities | null): CompatibilityVerdict {
+export interface CapacityDemand {
+  /** Logical 8 KiB sectors the prepared song needs. */
+  requiredSectors: number;
+}
+
+export function evaluate(caps: StemTapeCapabilities | null, demand?: CapacityDemand): CompatibilityVerdict {
   const f = caps?.flags ?? 0;
   const has = (bit: number) => (f & bit) !== 0;
   const req = (id: string, label: string, satisfied: boolean, detail: string): Requirement => ({
@@ -108,8 +113,33 @@ export function evaluate(caps: StemTapeCapabilities | null): CompatibilityVerdic
       !!caps && caps.songSlots > 0 && caps.indexBlocks > 0 && caps.libraryBase >= caps.indexBlocks && caps.sectorsPerSong > 0,
       caps ? `${caps.songSlots} slots · index ${caps.indexBlocks} blk · base ${caps.libraryBase} · ${caps.sectorsPerSong} sectors/song` : "not reported",
     ),
+    req(
+      "plausible-boundaries",
+      "plausible, non-overlapping boundaries",
+      !!caps &&
+        caps.songSlots <= MAX_PLAUSIBLE_SLOTS &&
+        caps.sectorsPerSong <= MAX_PLAUSIBLE_SECTORS_PER_SONG &&
+        caps.indexBlocks <= MAX_PLAUSIBLE_INDEX_BLOCKS &&
+        caps.libraryBase >= caps.indexBlocks,
+      caps
+        ? caps.libraryBase < caps.indexBlocks
+          ? "song region overlaps the index region"
+          : "within plausible limits"
+        : "not reported",
+    ),
     req("explicit-init", "explicit-initialization support", has(CAP_FLAG.EXPLICIT_INIT), has(CAP_FLAG.EXPLICIT_INIT) ? "yes" : "not reported"),
   ];
+
+  if (demand) {
+    requirements.push(
+      req(
+        "capacity",
+        "sufficient capacity for this song",
+        !!caps && demand.requiredSectors > 0 && demand.requiredSectors <= caps.sectorsPerSong,
+        caps ? `needs ${demand.requiredSectors} of ${caps.sectorsPerSong} logical sectors per slot` : "not reported",
+      ),
+    );
+  }
 
   const writable = requirements.every((r) => r.satisfied);
   return {
@@ -122,6 +152,18 @@ export function evaluate(caps: StemTapeCapabilities | null): CompatibilityVerdic
   };
 }
 
+/** Upper bounds used only to reject implausible device-reported boundaries. */
+export const MAX_PLAUSIBLE_SLOTS = 256;
+export const MAX_PLAUSIBLE_SECTORS_PER_SONG = 262144; // ≈ 2 GiB per slot
+export const MAX_PLAUSIBLE_INDEX_BLOCKS = 4096;
+
 export function readOnlyVerdict(): CompatibilityVerdict {
   return evaluate(null);
 }
+
+/** Field-by-field capability equality, used for the immediately-before-write re-query. */
+export function sameCapabilities(a: StemTapeCapabilities | null, b: StemTapeCapabilities | null): boolean {
+  if (!a || !b) return false;
+  return (Object.keys(a) as (keyof StemTapeCapabilities)[]).every((k) => a[k] === b[k]);
+}
+
