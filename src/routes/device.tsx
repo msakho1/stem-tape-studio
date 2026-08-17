@@ -290,13 +290,7 @@ function DevicePage() {
         songChecksum: result.songChecksum || 0,
       });
       setResult({ ...result, outcome, ok: outcome === "committed" });
-      say(
-        outcome === "committed"
-          ? "Reconnect check: the committed index matches this song. It is stored on the device."
-          : outcome === "failed"
-            ? "Reconnect check: the song was NOT committed. The previous song is still active."
-            : "Reconnect check: still unresolved. The index could not be read.",
-      );
+      say(resolveWording(t.mode.kind, outcome));
       await refresh();
     } finally {
       setBusy(false);
