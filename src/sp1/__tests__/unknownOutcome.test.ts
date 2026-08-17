@@ -109,7 +109,7 @@ describe("interruption matrix — the previous song always survives", () => {
       for (const p of FORBIDDEN_INTERRUPTION_PHRASES) expect(res.detail.toLowerCase()).not.toContain(p);
 
       // Reconnect and run the ONE shared selector over the stored bytes.
-      mock.opts.onWrite = undefined;
+      delete mock.opts.onWrite;
       const { mock: m2, t: t2 } = await reconnect(mock);
       const lib = (await t2.readLibrary())!;
       expect(lib.requiresInitialization).toBe(false);
@@ -146,7 +146,7 @@ describe("interruption matrix — the previous song always survives", () => {
     expect(res.detail).toContain("Outcome unknown: reconnect");
     expect(res.detail).toContain(`Generation ${first.generation} is still intact`);
 
-    mock.opts.onFlush = undefined;
+    delete mock.opts.onFlush;
     const { mock: m2, t: t2 } = await reconnect(mock);
     const resolved = await t2.resolveOutcome({ frames: two.frames, songChecksum: res.songChecksum || 0 });
     expect(["committed", "failed"]).toContain(resolved.outcome);
@@ -172,7 +172,7 @@ describe("interruption matrix — the previous song always survives", () => {
     expect(res.ok).toBe(false);
     expect(lastIndexWrite).toBeGreaterThan(0);
 
-    mock.opts.onWrite = undefined;
+    delete mock.opts.onWrite;
     const { mock: m2, t: t2 } = await reconnect(mock);
     const lib = (await t2.readLibrary())!;
     expect(lib.requiresInitialization).toBe(false);
