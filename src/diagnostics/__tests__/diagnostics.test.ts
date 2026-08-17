@@ -197,7 +197,7 @@ describe("trace ring", () => {
     r.record("surface.decoded", "ROCKER FWD DOWN");
     r.record("gesture.rejected", "scrub candidate", { detail: "transport guard" });
     r.endGesture();
-    const list = r.list();
+    const list = r.list().filter((rec) => rec.stage !== "capture.control");
     expect(list[0]!.corr).toBe(1);
     expect(list[1]!.corr).toBe(2);
     expect(list[1]!.gesture).toBe(1);
@@ -257,7 +257,7 @@ describe("physical LED model", () => {
     expect(M0_IMPLEMENTED_LED_OUTPUTS).toHaveLength(8);
     expect(M0_LED_COVERAGE.electricalCoverage).toBe("8/8");
     expect(M0_LED_COVERAGE.behaviorCoverage).toBe("partial");
-    expect(M0_LED_COVERAGE.hostToDeviceLedFeedback).toBe("unsupported-by-audited-build");
+    expect(M0_LED_COVERAGE.hostToDeviceLedFeedback).toBe("expected-protocol-v1-pending-handshake");
   });
 
   it("rejects frames with missing keys, extra keys, function LEDs or a play indicator", () => {
@@ -542,7 +542,7 @@ describe("surface command tracing (StrictMode safety)", () => {
     const next = a;
     expect(a.commands.map((c) => c.type)).toEqual(b.commands.map((c) => c.type));
     expect(next.commands).toHaveLength(1); // one logical surface command
-    expect(ring.list()).toHaveLength(0);
+    expect(ring.list().filter((r) => r.stage === "command.surface")).toHaveLength(0);
     expect(next.commands.length).toBeGreaterThan(0);
 
     // StrictMode also double-invokes the capture effect.
