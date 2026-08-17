@@ -1,18 +1,52 @@
 /**
  * Mock SP-1 serial device implementing the real block protocol, used by the
  * focused tests and by the browser smoke check.
+ *
+ * The Stem Tape v1.1 model here stores TWO song regions and TWO index regions
+ * as plain 512-byte blocks. There is deliberately NO hidden "active song"
+ * variable: `activeLibrary()` parses the stored index blocks and runs the same
+ * shared selector the companion uses, so the mock can never mask a selection
+ * bug. Interruption injection (torn writes, lost acknowledgements, flush
+ * failures, CRC corruption) is modelled at the block level, below the format.
  */
 import { put32, type SerialLikePort } from "../protocol";
 import {
-  CAP_FLAG,
+  BLOCKS_PER_SECTOR,
   CAPS_BYTES,
-  CAPS_OFF,
+  CAP_FLAG,
   FORMAT_MAJOR,
+  FORMAT_MINOR,
+  PHYSICAL_BLOCK_BYTES,
   PROTOCOL_MAJOR,
+  PROTOCOL_MINOR,
+  REQUIRED_ALIGNMENT,
   REQUIRED_CAP_FLAGS,
+  SECTOR_BYTES,
+  SLOT_A,
+  SLOT_B,
   STEM_TAPE_FIRMWARE_ID,
-  indexBlockCount,
+  STIX_VERSION,
+  type AbSlot,
 } from "../stemTapeFormat";
+import { serializeCapabilities, type StemTapeCapabilities } from "../compatibility";
+import { readSlot, selectActiveIndex, type LibraryState } from "../activeIndex";
+
+/** What the mock does with one incoming 'W' block write. */
+export interface WriteAction {
+  /** How much of the payload reaches storage. */
+  apply?: "full" | "none" | "partial";
+  /** Bytes applied when apply === "partial". */
+  partialBytes?: number;
+  /** Acknowledgement behaviour: 'w', a NAK byte, or silence. */
+  ack?: "ok" | "nak" | "none";
+  /** Drop the connection after handling this write. */
+  disconnect?: boolean;
+}
+
+export interface FlushAction {
+  ack?: "ok" | "nak" | "none";
+  disconnect?: boolean;
+}
 
 export interface MockOptions {
   numSlots?: number;
@@ -33,13 +67,26 @@ export interface MockOptions {
   stemTape?: boolean;
   /** Override the reported capability flags (defaults to the required set). */
   capFlags?: number;
-  /** Logical 8 KiB sectors reserved per song slot. */
+  /** Logical 8 KiB sectors reserved per song slot (A and B alike). */
   sectorsPerSong?: number;
+  /** Override reported versions to model incompatible firmware. */
+  protoMinor?: number;
+  formatMinor?: number;
+  stixVersion?: number;
+  /** Override the reported A/B geometry (used by region-validation tests). */
+  geometry?: Partial<Pick<StemTapeCapabilities, "song" | "index" | "deviceBlocks" | "alignment" | "sectorBytes">>;
+  /** Per-write interruption injection. */
+  onWrite?: (ctx: { n: number; blk: number; data: Uint8Array }) => WriteAction | undefined;
+  /** Per-flush interruption injection. */
+  onFlush?: (n: number) => FlushAction | undefined;
+  /** Per-read interruption injection. */
+  onRead?: (ctx: { n: number; blk: number }) => { disconnect?: boolean; corrupt?: boolean } | undefined;
 }
 
 export class MockSp1 {
   blocks = new Map<number, Uint8Array>();
   writes = 0;
+  reads = 0;
   pings = 0;
   capQueries = 0;
   flushes = 0;
@@ -53,24 +100,14 @@ export class MockSp1 {
   private inbox = new Uint8Array(0);
   private failed = new Set<number>();
   private disconnected = false;
-  readonly opts: {
-    numSlots: number;
-    ntrk: number;
-    slot0: number;
-    trackBlocks: number;
-    blockSize: number;
-    magic: number;
-    fragment: number;
-    banner: string | undefined;
-    failWriteOnce: number[] | undefined;
-    disconnectAfterWrites: number | undefined;
-    stemTape: boolean;
-    capFlags: number;
-    sectorsPerSong: number;
-  };
+  readonly opts: Required<
+    Pick<MockOptions, "numSlots" | "ntrk" | "slot0" | "trackBlocks" | "blockSize" | "magic" | "fragment" | "stemTape" | "capFlags" | "sectorsPerSong">
+  > &
+    MockOptions;
 
   constructor(o: MockOptions = {}) {
     this.opts = {
+      ...o,
       numSlots: o.numSlots ?? 8,
       ntrk: o.ntrk ?? 4,
       slot0: o.slot0 ?? 16,
@@ -78,15 +115,93 @@ export class MockSp1 {
       blockSize: o.blockSize ?? 512,
       magic: o.magic ?? 0x53453441, // 'SE4A' -> 48 kHz
       fragment: o.fragment ?? 0,
-      banner: o.banner,
-      failWriteOnce: o.failWriteOnce,
-      disconnectAfterWrites: o.disconnectAfterWrites,
       stemTape: o.stemTape ?? false,
       capFlags: o.capFlags ?? REQUIRED_CAP_FLAGS | CAP_FLAG.STAGING_COW,
       sectorsPerSong: o.sectorsPerSong ?? 8,
     };
     if (this.opts.banner) this.push(new TextEncoder().encode(this.opts.banner));
   }
+
+  /* ---------- Stem Tape v1.1 A/B geometry ---------- */
+
+  /**
+   * Fixed, device-reported layout:
+   *   index A  block 0            (1 block)
+   *   index B  block 1            (1 block)
+   *   song  A  block 16           (sectorsPerSong * 16 blocks)
+   *   song  B  block 16 + A       (sectorsPerSong * 16 blocks)
+   */
+  get capabilities(): StemTapeCapabilities {
+    const songBlocks = this.opts.sectorsPerSong * BLOCKS_PER_SECTOR;
+    const songAStart = 16;
+    const songBStart = songAStart + songBlocks;
+    const base: StemTapeCapabilities = {
+      firmwareId: STEM_TAPE_FIRMWARE_ID,
+      protoMajor: PROTOCOL_MAJOR,
+      protoMinor: this.opts.protoMinor ?? PROTOCOL_MINOR,
+      formatMajor: FORMAT_MAJOR,
+      formatMinor: this.opts.formatMinor ?? FORMAT_MINOR,
+      flags: this.opts.capFlags,
+      sampleRate: 48000,
+      blockSize: PHYSICAL_BLOCK_BYTES,
+      sectorBytes: SECTOR_BYTES,
+      alignment: REQUIRED_ALIGNMENT,
+      deviceBlocks: songBStart + songBlocks,
+      song: [
+        { start: songAStart, blocks: songBlocks },
+        { start: songBStart, blocks: songBlocks },
+      ],
+      index: [
+        { start: 0, blocks: 1 },
+        { start: 1, blocks: 1 },
+      ],
+      activeIndexSlot: 0,
+      activeSongSlot: 0,
+      activeGeneration: 0,
+      stixVersion: this.opts.stixVersion ?? STIX_VERSION,
+    };
+    const merged = { ...base, ...this.opts.geometry } as StemTapeCapabilities;
+    // The advisory active pointers are derived from the stored records, never
+    // from a hidden variable.
+    const lib = this.parseLibrary(merged);
+    merged.activeIndexSlot = lib.activeIndexSlot ?? 0xffffffff;
+    merged.activeSongSlot = lib.activeSongSlot ?? 0xffffffff;
+    merged.activeGeneration = lib.generation;
+    return merged;
+  }
+
+  private parseLibrary(caps: StemTapeCapabilities): LibraryState {
+    const regions = { song: caps.song, index: caps.index };
+    return selectActiveIndex(
+      readSlot(SLOT_A, this.block(caps.index[0].start), regions),
+      readSlot(SLOT_B, this.block(caps.index[1].start), regions),
+    );
+  }
+
+  /** The mock's own view of which song is active — computed, never stored. */
+  activeLibrary(): LibraryState {
+    return this.parseLibrary(this.capabilities);
+  }
+
+  /** Bytes of one song region as currently stored. */
+  songBytes(slot: AbSlot, sectors: number): Uint8Array {
+    const caps = this.capabilities;
+    const start = caps.song[slot].start;
+    const out = new Uint8Array(sectors * SECTOR_BYTES);
+    for (let i = 0; i < sectors * BLOCKS_PER_SECTOR; i++) {
+      out.set(this.block(start + i), i * PHYSICAL_BLOCK_BYTES);
+    }
+    return out;
+  }
+
+  /** Simulated power-cycle / rescan: same storage, fresh connection state. */
+  reboot(): MockSp1 {
+    const next = new MockSp1({ ...this.opts, onWrite: undefined, onFlush: undefined, onRead: undefined, disconnectAfterWrites: undefined, failWriteOnce: undefined });
+    next.blocks = this.blocks;
+    return next;
+  }
+
+  /* ---------- wire ---------- */
 
   private push(bytes: Uint8Array) {
     const frag = this.opts.fragment;
@@ -137,9 +252,18 @@ export class MockSp1 {
         if (b.length < 5) return;
         const blk = b[1]! | (b[2]! << 8) | (b[3]! << 16) | b[4]! * 0x1000000;
         this.inbox = b.slice(5);
+        this.reads++;
+        const act = this.opts.onRead?.({ n: this.reads, blk });
+        if (act?.disconnect) {
+          this.disconnected = true;
+          this.wake?.();
+          return;
+        }
+        const payload = this.block(blk).slice(0);
+        if (act?.corrupt) payload[0] = payload[0]! ^ 0xff;
         const out = new Uint8Array(513);
         out[0] = 0x72;
-        out.set(this.block(blk), 1);
+        out.set(payload, 1);
         this.push(out);
         continue;
       }
@@ -151,6 +275,7 @@ export class MockSp1 {
         this.writes++;
         if (this.opts.disconnectAfterWrites && this.writes > this.opts.disconnectAfterWrites) {
           this.disconnected = true;
+          this.wake?.();
           return;
         }
         if (this.opts.failWriteOnce?.includes(blk) && !this.failed.has(blk)) {
@@ -158,25 +283,31 @@ export class MockSp1 {
           this.push(new Uint8Array([0x21])); // NAK: not 'w'
           continue;
         }
-        this.blocks.set(blk, data);
-        this.push(new Uint8Array([0x77]));
+        const act = this.opts.onWrite?.({ n: this.writes, blk, data }) ?? {};
+        const apply = act.apply ?? "full";
+        if (apply === "full") {
+          this.blocks.set(blk, data);
+        } else if (apply === "partial") {
+          const cur = this.block(blk).slice(0);
+          const n = Math.max(0, Math.min(512, act.partialBytes ?? 256));
+          cur.set(data.slice(0, n), 0);
+          this.blocks.set(blk, cur);
+        }
+        const ack = act.ack ?? "ok";
+        if (ack === "ok") this.push(new Uint8Array([0x77]));
+        else if (ack === "nak") this.push(new Uint8Array([0x21]));
+        if (act.disconnect) {
+          this.disconnected = true;
+          this.wake?.();
+          return;
+        }
         continue;
       }
       if (cmd === 0x51) {
         this.inbox = b.slice(1);
         this.capQueries++;
         if (!this.opts.stemTape) continue; // stock firmware: no reply at all
-        const caps = new Uint8Array(CAPS_BYTES);
-        put32(caps, CAPS_OFF.firmwareId, STEM_TAPE_FIRMWARE_ID);
-        caps[CAPS_OFF.protoMajor] = PROTOCOL_MAJOR;
-        caps[CAPS_OFF.formatMajor] = FORMAT_MAJOR;
-        put32(caps, CAPS_OFF.flags, this.opts.capFlags);
-        put32(caps, CAPS_OFF.sampleRate, 48000);
-        put32(caps, CAPS_OFF.songSlots, this.opts.numSlots);
-        put32(caps, CAPS_OFF.indexBlocks, indexBlockCount(this.opts.numSlots));
-        put32(caps, CAPS_OFF.libraryBase, this.opts.slot0);
-        put32(caps, CAPS_OFF.sectorsPerSong, this.opts.sectorsPerSong);
-        put32(caps, CAPS_OFF.generation, 0);
+        const caps = serializeCapabilities(this.capabilities);
         const reply = new Uint8Array(4 + CAPS_BYTES);
         reply.set(new TextEncoder().encode("STCP"));
         reply.set(caps, 4);
@@ -186,7 +317,15 @@ export class MockSp1 {
       if (cmd === 0x46) {
         this.flushes++;
         this.inbox = b.slice(1);
-        this.push(new Uint8Array([0x66]));
+        const act = this.opts.onFlush?.(this.flushes) ?? {};
+        const ack = act.ack ?? "ok";
+        if (ack === "ok") this.push(new Uint8Array([0x66]));
+        else if (ack === "nak") this.push(new Uint8Array([0x21]));
+        if (act.disconnect) {
+          this.disconnected = true;
+          this.wake?.();
+          return;
+        }
         continue;
       }
       if (cmd === 0x58) {
