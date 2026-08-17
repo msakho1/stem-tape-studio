@@ -24,6 +24,8 @@ import { sectorsForFrames, BLOCKS_PER_SECTOR, PHYSICAL_BLOCK_BYTES, SECTOR_BYTES
 import { sha256Hex } from "@/sp1/digest";
 import { encodeSong } from "@/sp1/sector";
 
+const STAGE_NAMES = ["connect sp-1", "add stems", "prepare song", "transfer", "verify"] as const;
+
 export const Route = createFileRoute("/device")({
   component: DevicePage,
   head: () => ({
@@ -484,7 +486,7 @@ function DevicePage() {
 
         {/* connection */}
         <section className="st-section">
-          <p className="st-section__title">1 · connection</p>
+          <p className="st-section__title">1 · connect sp-1</p>
           <div className="flex flex-wrap items-center gap-3">
             <button
               className="st-btn"
@@ -543,7 +545,7 @@ function DevicePage() {
         {/* library */}
         {connected && songs && (
           <section className="st-section">
-            <p className="st-section__title">2 · song slots</p>
+            <p className="st-section__title">song slots</p>
             <div className="grid gap-2">
               {songs.map((s) => (
                 <div
@@ -578,7 +580,7 @@ function DevicePage() {
 
         {/* stems */}
         <section className="st-section">
-          <p className="st-section__title">3 · four stems</p>
+          <p className="st-section__title">2 · add stems</p>
           <div className="grid gap-2">
             {stemRows.map(({ name, file, buf, out }) => (
               <div
@@ -651,18 +653,44 @@ function DevicePage() {
             >
               Prepare stems
             </button>
-            {song && (
-              <span className="font-mono text-[12px] text-[var(--ink-dim)]" data-testid="prepared">
-                {song.frames} frames · 48 kHz stereo 24-bit · {song.audioBytes} B total ·{" "}
-                {fmtSecs(song.durationSeconds)}
-              </span>
-            )}
           </div>
         </section>
 
+        {song && (
+          <section className="st-section" data-testid="review">
+            <p className="st-section__title">3 · prepare song</p>
+            <p className="font-mono text-[13px] leading-relaxed text-[var(--ink-dim)]" data-testid="prepared">
+              {song.metadata.title || "untitled"} — {fmtSecs(song.durationSeconds)}, {song.metadata.bpm} BPM, beat zero
+              at {song.metadata.downbeatSeconds}s. Four stems, 48 kHz stereo 24-bit.
+            </p>
+            <p className="mt-1 font-mono text-[12px] text-[var(--ink-dim)]" data-testid="capacity">
+              {requiredSectors} sectors of {description ? description.sectorsPerSong : "?"} available in song slot{" "}
+              {slot + 1} · {capacityOk ? "fits" : "does NOT fit — shorten the song"}
+            </p>
+            <button className="st-btn mt-3" onClick={() => setShowTech((v) => !v)} data-testid="tech-toggle">
+              {showTech ? "Hide technical detail" : "Show technical detail"}
+            </button>
+            {showTech && (
+              <dl className="mt-2 grid gap-1 font-mono text-[11px] text-[var(--ink-faint)]" data-testid="tech">
+                <div>frames · {song.frames} @ {SAMPLE_RATE} Hz</div>
+                <div>audio bytes · {song.audioBytes}</div>
+                <div>sector bytes · {SECTOR_BYTES} ({BLOCKS_PER_SECTOR} × {PHYSICAL_BLOCK_BYTES} B blocks)</div>
+                <div>blocks to write · {requiredSectors * BLOCKS_PER_SECTOR}</div>
+                <div>song sha-256 · {songSha ?? "…"}</div>
+                <div>song checksum · {song.checksum}</div>
+                {song.stems.map((st) => (
+                  <div key={st.name}>
+                    {st.name} · {st.filename} · pad {st.padFrames} frames · checksum {st.checksum}
+                  </div>
+                ))}
+              </dl>
+            )}
+          </section>
+        )}
+
         {/* upload */}
         <section className="st-section">
-          <p className="st-section__title">4 · upload</p>
+          <p className="st-section__title">4 · transfer</p>
           <div className="flex flex-wrap items-center gap-3">
             <button
               className="st-btn"
@@ -687,6 +715,52 @@ function DevicePage() {
             </p>
           )}
         </section>
+
+        {result && (
+          <section className="st-section" data-testid="verify">
+            <p className="st-section__title">5 · verify</p>
+            <p className="font-mono text-[13px] leading-relaxed text-[var(--ink-dim)]" data-testid="outcome">
+              {result.outcome === "committed"
+                ? "Committed. The device index now points at this song."
+                : result.outcome === "failed"
+                  ? `Not committed — ${result.detail}. The slot still holds whatever it held before, so retrying is safe.`
+                  : `Outcome unknown — ${result.detail}. Reconnect the SP-1 and resolve it below before assuming anything.`}
+            </p>
+            <ul className="mt-3 grid gap-1 font-mono text-[12px]" data-testid="verification">
+              <li data-testid="v-simulated">
+                {result.verification.simulatedVerification ? "ok  " : "no  "}simulated verification (mock protocol run)
+              </li>
+              <li data-testid="v-readback">
+                {result.verification.deviceReadbackVerification ? "ok  " : "no  "}device readback verification
+                (committed bytes re-read from the SP-1)
+              </li>
+              <li data-testid="v-playback">
+                {playbackConfirmed && result.verification.deviceReadbackVerification ? "ok  " : "no  "}physical playback
+                verification (you heard it play on the device)
+              </li>
+            </ul>
+            <div className="mt-3 flex flex-wrap items-center gap-3">
+              {result.outcome === "unknown" && (
+                <button className="st-btn" data-testid="resolve" disabled={busy} onClick={() => void resolveUnknown()}>
+                  Reconnect &amp; resolve outcome
+                </button>
+              )}
+              <label className="flex items-center gap-2 font-mono text-[12px] text-[var(--ink-dim)]">
+                <input
+                  type="checkbox"
+                  data-testid="playback-confirm"
+                  checked={playbackConfirmed}
+                  disabled={!result.verification.deviceReadbackVerification}
+                  onChange={(e) => setPlaybackConfirmed(e.target.checked)}
+                />
+                I played song {slot + 1} on the SP-1 and heard all four stems
+              </label>
+              <button className="st-btn" data-testid="receipt" onClick={downloadReceipt}>
+                Download receipt
+              </button>
+            </div>
+          </section>
+        )}
 
         <section className="st-section">
           <p className="st-section__title">activity</p>
