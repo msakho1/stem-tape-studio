@@ -6,8 +6,9 @@
  * deterministic mock device through the SAME recording wrapper. Every inherited
  * operation must put identical bytes on the wire and parse identically.
  */
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { MockSp1 } from "./mockSerial";
+import { MockSp1, type MockOptions } from "./mockSerial";
 import { Recorder, recordPort, hex } from "./recordingPort";
 import { loadGoldenCompanion, goldenCompanionFileSha256, type GoldenSerial } from "./goldenCompanion";
 import { Sp1Session, Sp1Transport, type SerialLikePort } from "../protocol";
@@ -15,7 +16,7 @@ import { Sp1Session, Sp1Transport, type SerialLikePort } from "../protocol";
 /** Hash of the golden companion recorded before this work started. */
 const GOLDEN_HTML_SHA256 = "85308e040125f5807686c822e693dfc72f3bcc2e92481277587c7dc56f311f6b";
 
-function pair(opts: Parameters<typeof MockSp1.prototype.constructor>[0] = {}) {
+function pair(opts: MockOptions = {}) {
   const mockA = new MockSp1(opts);
   const mockB = new MockSp1(opts);
   const recA = new Recorder();
@@ -278,7 +279,7 @@ describe("golden Tape Looper conformance", () => {
       await s.exit();
     });
     const txSha = (r: Recorder) =>
-      require("node:crypto").createHash("sha256").update(r.txHex.join("|")).digest("hex");
+      createHash("sha256").update(r.txHex.join("|")).digest("hex");
     expect(txSha(recA)).toBe(txSha(recB));
     expect(txSha(recA)).toMatchInlineSnapshot(
       `"0cd3fc1a25e3ba1f92a8be4c3ce7f3fbbe9ba0b3b0e2e0a5a0b3bd9b2fdd4bbb"`,
