@@ -19,7 +19,7 @@ import {
   type ExpectedPhysicalLedFrame,
 } from "./physical";
 
-export const BEHAVIOR_CONTRACT_VERSION = "sp1-behavior-contract/3.0.0";
+export const BEHAVIOR_CONTRACT_VERSION = "sp1-behavior-contract/4.0.0";
 
 export type Provenance =
   | "STOCK_SP1_DOCUMENTED"
@@ -32,6 +32,8 @@ export type Provenance =
 export type EvidenceKind = "documentary" | "pinned source" | "physical observation" | "inference";
 
 export type Confidence = "high" | "medium" | "low" | "none";
+
+import type { ObservationSource, ReproductionResult, ReproductionStatus } from "./segments";
 
 export type ImplStatus = "implemented" | "partial" | "missing" | "conflicting" | "unverified";
 
@@ -889,6 +891,15 @@ export const BEHAVIOR_CONTRACT: ContractEntry[] = [
 
 export interface ContractResult extends ContractEntry {
   observed: string | null;
+  /** Implementation status from SOURCE AUDIT. Never a test result. */
+  implementationStatus: ImplStatus;
+  /** Reproduction status. `not-run` until a segment actually executed. */
+  reproductionStatus: ReproductionStatus;
+  observationSource: ObservationSource;
+  segmentId: string | null;
+  /** Only present when a reproduction really ran and really diverged. */
+  reproductionFirstDivergence: string | null;
+  reproductionDetail: string | null;
 }
 
 /** Contract self-validation: every entry must carry an exact 8-LED frame. */
@@ -902,9 +913,27 @@ export function validateContract(entries: ContractEntry[] = BEHAVIOR_CONTRACT): 
   return problems;
 }
 
-export function evaluateContract(state: SurfaceState | null): ContractResult[] {
-  return BEHAVIOR_CONTRACT.map((entry) => ({
-    ...entry,
-    observed: state && entry.observe ? entry.observe(state) : null,
-  }));
+/**
+ * Reference data + (optionally) the result of a reproduction that ACTUALLY
+ * ran. A static audit finding is never reported as a failed live test: with no
+ * segment for an entry, `reproductionStatus` stays `not-run`, the observation
+ * source is `source-audit`, and no first-divergence stage is claimed.
+ */
+export function evaluateContract(
+  state: SurfaceState | null,
+  reproductions?: (contractId: string) => ReproductionResult | null,
+): ContractResult[] {
+  return BEHAVIOR_CONTRACT.map((entry) => {
+    const rep = reproductions?.(entry.id) ?? null;
+    return {
+      ...entry,
+      observed: state && entry.observe ? entry.observe(state) : null,
+      implementationStatus: entry.status,
+      reproductionStatus: rep?.status ?? "not-run",
+      observationSource: rep?.observationSource ?? "source-audit",
+      segmentId: rep?.segmentId ?? null,
+      reproductionFirstDivergence: rep?.status === "failed" ? rep.firstMissingStage : null,
+      reproductionDetail: rep?.detail ?? null,
+    };
+  });
 }
