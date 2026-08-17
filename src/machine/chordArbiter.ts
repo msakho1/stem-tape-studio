@@ -26,6 +26,7 @@ import type { Control } from "@/device/geometry";
 import type { RawInputEvent } from "@/input/gestures";
 import { bankOfButton, type BankIndex } from "./fx12";
 import { type StemIndex } from "./stemPerformance";
+import { trace, traceNow } from "@/diagnostics/trace";
 
 export interface ArbiterTimings {
   /** The second control of a chord must arrive within this of the first. */
@@ -148,7 +149,43 @@ export class ChordArbiter {
    */
   private holdFired = new Set<Control>();
 
+  /** Intent that currently owns arbitration, or null when nothing does. */
+  private owner: PerfIntent["type"] | null = null;
+
   constructor(private view: () => ArbiterView) {}
+
+  /** Null whenever no gesture currently owns arbitration. */
+  currentOwner(): PerfIntent["type"] | null {
+    return this.owner;
+  }
+
+  /**
+   * ONE decision point writes ONE arbitration record, with this code's own
+   * `performance.now()` reading. Nothing downstream replays this log into the
+   * trace; the ring is written here, when the decision is made.
+   */
+  private note(rec: ArbitrationRecord): void {
+    this.log.unshift(rec);
+    if (this.log.length > 60) this.log.length = 60;
+    trace.record(
+      "gesture.arbitration",
+      `${rec.controls.join(" + ")} → ${rec.intent}`,
+      { candidates: rec.controls, owner: rec.intent, suppressed: rec.suppressed, detail: rec.detail },
+      { t: rec.t },
+    );
+    if (rec.intent === "none") {
+      trace.record(
+        "gesture.rejected",
+        `suppressed ${rec.suppressed.join(" + ") || "(none)"}`,
+        { suppressed: rec.suppressed, detail: rec.detail },
+        { t: rec.t },
+      );
+      return;
+    }
+    this.owner = rec.intent;
+    if (rec.intent === "fx.overlay") this.owner = "fx.overlay";
+    trace.record("gesture.owner", `owner ${rec.intent}`, { owner: rec.intent, detail: rec.detail }, { t: rec.t });
+  }
 
   /** The gesture engine reports a real holdStart here, before dispatch. */
   noteHoldStart(control: Control): void {
@@ -174,8 +211,7 @@ export class ChordArbiter {
       taken.push(c);
     }
     if (taken.length > 0) {
-      this.log.unshift({ t: Date.now(), controls: taken, intent: "none", suppressed: [...taken], detail });
-      if (this.log.length > 60) this.log.length = 60;
+      this.note({ t: traceNow(), controls: taken, intent: "none", suppressed: [...taken], detail });
     }
     return taken;
   }
@@ -189,8 +225,8 @@ export class ChordArbiter {
   }
 
   private emit(intent: PerfIntent, controls: Control[], detail: string) {
-    this.log.unshift({ t: Date.now(), controls, intent: intent.type, suppressed: [...controls], detail });
-    if (this.log.length > 60) this.log.length = 60;
+    this.note({ t: traceNow(), controls, intent: intent.type, suppressed: [...controls], detail });
+    if (intent.type === "fx.overlay" && !intent.on) this.owner = null;
     for (const l of this.listeners) l(intent);
   }
 
@@ -233,6 +269,12 @@ export class ChordArbiter {
 
   /** Feed every raw transition here, in order. */
   handle(e: RawInputEvent): void {
+    trace.record(
+      "gesture.candidate",
+      `${e.control} ${e.phase}`,
+      { control: e.control, phase: e.phase, down: [...this.down.keys()] },
+      { t: e.t },
+    );
     if (e.phase === "down") return this.onDown(e.control, e.t);
     if (e.phase === "cancel") return this.onCancel(e.control);
     return this.onUp(e.control, e.t);
@@ -347,14 +389,13 @@ export class ChordArbiter {
     // transport.play / transport.stop / transport.cue can leak out.
     if (isRocker(control) && this.down.has("play")) {
       this.claim("play");
-      this.log.unshift({
+      this.note({
         t,
         controls: ["play", control],
         intent: "none",
         suppressed: ["play"],
         detail: "PLAY claimed by rocker deflection — chop family, transport suppressed",
       });
-      if (this.log.length > 60) this.log.length = 60;
     }
 
     // ---- FIRST-CLAIM OWNERSHIP of PLAY (restores PLAY + Track solo/link).
@@ -381,14 +422,13 @@ export class ChordArbiter {
       const holdOwnsPlay = this.holdFired.has("play") || playHeld >= this.timings.globalLoopClaimMs;
       if (!holdOwnsPlay) {
         this.claim("play", control);
-        this.log.unshift({
+        this.note({
           t,
           controls: ["play", control],
           intent: "none",
           suppressed: ["play", control],
           detail: `PLAY+Track claimed PLAY at ${playHeld.toFixed(0)} ms — global-loop hold cancelled`,
         });
-        if (this.log.length > 60) this.log.length = 60;
         const stem = TRACK_INDEX[control]! as StemIndex;
         const timer = setTimeout(() => {
           this.linkFired.add(control);
@@ -400,14 +440,13 @@ export class ChordArbiter {
         }, this.timings.soloLinkMs);
         this.soloLinkTimers.set(control, timer);
       } else {
-        this.log.unshift({
+        this.note({
           t,
           controls: ["play", control],
           intent: "none",
           suppressed: [],
           detail: `PLAY already owned by the global-loop hold (${playHeld.toFixed(0)} ms) — Track runs normally`,
         });
-        if (this.log.length > 60) this.log.length = 60;
       }
     }
     void this.modifierFresh;
@@ -536,14 +575,13 @@ export class ChordArbiter {
           );
           return;
         }
-        this.log.unshift({
+        this.note({
           t,
           controls: ["play", control],
           intent: "none",
           suppressed: ["play", control],
           detail: `link already fired at ${this.timings.soloLinkMs} ms — release inert`,
         });
-        if (this.log.length > 60) this.log.length = 60;
         return;
       }
       this.emit(
@@ -554,14 +592,13 @@ export class ChordArbiter {
       return;
     }
     if (this.down.has("play") && isVolume(control)) {
-      this.log.unshift({
+      this.note({
         t,
         controls: ["play", control],
         intent: "none",
         suppressed: [],
         detail: "PLAY + Volume retired (stem.select) — base gesture runs",
       });
-      if (this.log.length > 60) this.log.length = 60;
     }
 
     // ---- precedence 4: FX chords already resolved on press; releases only end
