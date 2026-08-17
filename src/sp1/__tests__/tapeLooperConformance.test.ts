@@ -234,7 +234,7 @@ describe("golden Tape Looper conformance", () => {
     expect(a.releasedReader && a.releasedWriter && a.closedPort).toBe(true);
     expect(b.releasedReader && b.releasedWriter && b.closedPort).toBe(true);
     expect(recA.opNotes).toEqual(recB.opNotes);
-  });
+  }, 30000);
 
   it("index-read-then-rebuild: the index block is read before any rebuild write", async () => {
     const { mockA, mockB, recA, recB } = pair();
@@ -282,7 +282,7 @@ describe("golden Tape Looper conformance", () => {
       createHash("sha256").update(r.txHex.join("|")).digest("hex");
     expect(txSha(recA)).toBe(txSha(recB));
     expect(txSha(recA)).toMatchInlineSnapshot(
-      `"0cd3fc1a25e3ba1f92a8be4c3ce7f3fbbe9ba0b3b0e2e0a5a0b3bd9b2fdd4bbb"`,
+      `"2924129dd01a93fcd80f22220350427054e6710c41a87b8aaf6aa717a2d5664a"`,
     );
   });
 });

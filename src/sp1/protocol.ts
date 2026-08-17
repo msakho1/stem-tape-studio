@@ -135,7 +135,7 @@ export class Sp1Transport {
     while (this.buf.length < n) {
       if (this.closed) throw new Error("port closed");
       if (Date.now() > deadline) throw new Error(`timed out (got ${this.buf.length}/${n} bytes)`);
-      await new Promise((r) => setTimeout(r, 4));
+      await new Promise((r) => setTimeout(r, 8)); // 8 ms poll: verbatim from the Tape Looper companion
     }
     const out = this.buf.slice(0, n);
     this.buf = this.buf.slice(n);
