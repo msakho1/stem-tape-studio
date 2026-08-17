@@ -49,7 +49,6 @@ Usage: stemtape_player_usb_descriptor_assertions.py <nm.txt> <zephyr.elf> \
 
 from __future__ import annotations
 
-import re
 import sys
 
 nm_file, elf_file, dts_file, out_path = sys.argv[1:5]
@@ -61,7 +60,25 @@ dts_lines = open(dts_file, errors="ignore").read().splitlines()
 report: list[str] = ["# Stem Tape Player -- USB descriptor assertion (GATE 1)", ""]
 fail = False
 
-NM_LINE_RX = re.compile(r"^\S+\s+(\S)\s+(\S+)$")
+def parse_nm_line(line: str):
+    """(type, name) from one `nm -n -S` line, or None. `-S` prints a SIZE
+    column for symbols that have one (functions, sized objects) but omits
+    it for others (absolute symbols, some externs) -- the field count
+    varies per line, so this is NOT a fixed-column parse. Same approach as
+    the established stemtape_player_safety_gate.py's parse_nm_line() in
+    this repo -- reused deliberately, not reinvented. (A first version of
+    this script used a fixed-position regex that silently only matched
+    the no-size-column lines -- confirmed by a real CI run's diagnostic
+    dump showing solely Kconfig absolute markers matching -- so every real
+    function/data symbol with a size column was invisible to it.)"""
+    parts = line.split(None, 3)
+    if len(parts) == 3:
+        _addr, typ, name = parts
+        return typ, name
+    if len(parts) == 4:
+        _addr, _size, typ, name = parts
+        return typ, name
+    return None
 
 
 def check_pattern(label: str, required_substrings: tuple[str, ...], min_matches: int = 1):
@@ -75,12 +92,21 @@ def check_pattern(label: str, required_substrings: tuple[str, ...], min_matches:
     global fail
     hits = []
     for line in nm_lines:
-        m = NM_LINE_RX.match(line)
-        if not m:
+        p = parse_nm_line(line)
+        if p is None:
             continue
-        name_lower = m.group(2).lower()
-        if all(s in name_lower for s in required_substrings):
-            hits.append(f"{m.group(1)} {m.group(2)}")
+        typ, name = p
+        if typ in ("A", "a"):
+            # Absolute symbols here are Kconfig build markers (literally
+            # named CONFIG_..., e.g. CONFIG_USBD_MIDI2_CLASS) -- every one
+            # of this script's required substring pairs is a coincidental
+            # substring of some CONFIG_* name (e.g. "midi"+"config" matches
+            # CONFIG_..._MIDI2_..._ENABLED trivially), so counting them
+            # would let a real missing descriptor struct pass silently.
+            # Real descriptor/config/context objects are never type 'A'.
+            continue
+        if all(s in name.lower() for s in required_substrings):
+            hits.append(f"{typ} {name}")
     if len(hits) >= min_matches:
         report.append(f"present ({label}): {len(hits)} matching symbol(s)")
         report.append("```text")
@@ -201,9 +227,12 @@ if fail:
     report.append("")
     diag = []
     for line in nm_lines:
-        m = NM_LINE_RX.match(line)
-        if m and ("uac2" in m.group(2).lower() or "midi" in m.group(2).lower()):
-            diag.append(f"{m.group(1)} {m.group(2)}")
+        p = parse_nm_line(line)
+        if p is None:
+            continue
+        typ, name = p
+        if "uac2" in name.lower() or "midi" in name.lower():
+            diag.append(f"{typ} {name}")
     report.append("```text")
     report.extend(diag[:100] if diag else ["(none found)"])
     report.append("```")
