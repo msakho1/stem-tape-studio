@@ -68,6 +68,7 @@ function DevicePage() {
   const [progress, setProgress] = useState<UploadProgress | null>(null);
   const [busy, setBusy] = useState(false);
   const [uninitialised, setUninitialised] = useState(false);
+  const [sourceRates, setSourceRates] = useState<Partial<Record<StemSlotName, number | null>>>({});
   const [title, setTitle] = useState("");
   const [artist, setArtist] = useState("");
   const [bpm, setBpm] = useState("");
@@ -176,13 +177,16 @@ function DevicePage() {
     async (name: StemSlotName, file: File) => {
       setFiles((f) => ({ ...f, [name]: file }));
       setPrepared(null);
+      // Source rate comes from the container header; the decode context rate is
+      // the browser's, not the file's, so it must never be reported as such.
+      const sniff = sniffHeader(await file.slice(0, 65536).arrayBuffer());
       const ac = new AudioContext();
       try {
         const buf = await ac.decodeAudioData(await file.arrayBuffer());
         setDecoded((d) => ({ ...d, [name]: buf }));
-        say(
-          `${STEM_LABEL[name]}: ${file.name} · ${buf.sampleRate} Hz · ${buf.numberOfChannels} ch · ${fmtSecs(buf.duration)}`,
-        );
+        setSourceRates((r) => ({ ...r, [name]: sniff.sampleRate ?? null }));
+        const rate = sniff.sampleRate ? `${sniff.sampleRate} Hz` : `${buf.sampleRate} Hz (decoded)`;
+        say(`${STEM_LABEL[name]}: ${file.name} · ${rate} · ${buf.numberOfChannels} ch · ${fmtSecs(buf.duration)}`);
       } catch (e) {
         say(`${STEM_LABEL[name]}: could not decode ${file.name} — ${e instanceof Error ? e.message : String(e)}`);
       } finally {
@@ -500,7 +504,7 @@ function DevicePage() {
                 </div>
                 {buf && (
                   <p className="text-[var(--ink-dim)]" data-testid={`info-${name}`}>
-                    {file?.name} · {buf.sampleRate} Hz · {buf.numberOfChannels} ch · {fmtSecs(buf.duration)}
+                    {file?.name} · {sourceRates[name] ?? buf.sampleRate} Hz · {buf.numberOfChannels} ch · {fmtSecs(buf.duration)}
                     {out ? ` · out ${fmtBytes(out.outputBytes)} · peak ${(out.peak * 100).toFixed(0)}%` : ""}
                     {out?.clipped ? " · CLIPPING" : ""}
                     {out && out.padSamples > 0 ? " · padded with silence" : ""}
