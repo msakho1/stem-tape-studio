@@ -11,18 +11,27 @@
  */
 
 import { trace, traceNow } from "./trace";
+import { CURRENT_FIRMWARE_PROFILE } from "./firmwareProfiles";
+import { ledTransport } from "./ledTransport";
 
 export const SP1_USB_VENDOR_ID = 0x1915;
 export const SP1_USB_PRODUCT_ID = 0x5211;
 export const SP1_SERIAL_BAUD = 115200;
 
+/**
+ * EXPECTED artifact metadata, taken from the CURRENT profile in the versioned
+ * registry. It is never evidence of what is flashed: reported identity comes
+ * only from the CDC banner, and stays `unknown`/null while the console is
+ * closed.
+ */
 export const EXPECTED_ARTIFACT = {
-  product: "Stem Tape SP-1",
-  firmwareBanner: "Stem Tape M0 v1.0.0",
-  usbVendorId: "0x1915",
-  usbProductId: "0x5211",
-  binarySha256: "53de4c003047e20b7e18c45034eab89b79d58ba1677651348e62f9a85b257eeb",
-  sourceCommit: "ea354f32c8c484c1d48e68804a4f1695a8a7b131",
+  product: CURRENT_FIRMWARE_PROFILE.product,
+  firmwareBanner: CURRENT_FIRMWARE_PROFILE.firmwareBanner,
+  usbVendorId: CURRENT_FIRMWARE_PROFILE.usbVendorId,
+  usbProductId: CURRENT_FIRMWARE_PROFILE.usbProductId,
+  binarySha256: CURRENT_FIRMWARE_PROFILE.binarySha256,
+  sourceCommit: CURRENT_FIRMWARE_PROFILE.sourceCommit,
+  ledProtocolVersion: String(CURRENT_FIRMWARE_PROFILE.ledProtocolVersion),
   note: "expected build metadata — the device cannot transmit or attest its flashed binary",
 } as const;
 
@@ -79,6 +88,32 @@ export function parseFirmwareLine(raw: string): FirmwareLine {
     };
   }
   return { kind: "other", text: line };
+}
+
+/**
+ * `led: host=1 seq=12 frame=00,00,7f,... renderer=ready pwm_err=0`
+ * Firmware-committed LED report. This proves the firmware's PWM COMMAND state,
+ * not human-visible illumination.
+ */
+const LED_REPORT =
+  /^led:\s*host=(\d+)\s+seq=(\d+)\s+frame=([0-9a-fA-F,]+)\s+renderer=(\w+)\s+pwm_err=(\d+)/;
+
+export function parseFirmwareLedLine(raw: string): {
+  hostOwned: boolean;
+  sequence: number;
+  frame: number[];
+  rendererReady: boolean;
+  pwmErrors: number;
+} | null {
+  const m = LED_REPORT.exec(raw.replace(/\r/g, "").trim());
+  if (!m) return null;
+  return {
+    hostOwned: m[1] !== "0",
+    sequence: Number(m[2]),
+    frame: m[3]!.split(",").map((h) => parseInt(h, 16)),
+    rendererReady: m[4] === "ready",
+    pwmErrors: Number(m[5]),
+  };
 }
 
 export interface FirmwareConsoleState {
@@ -202,8 +237,13 @@ export class FirmwareConsole {
 
   /** Feed one already-decoded line (mock console / smoke harness). */
   ingestLine(line: string): void {
+    const t = traceNow();
+    trace.record("serial.raw", `CDC: ${line.slice(0, 120)}`, { line }, { t, causeId: "cdc" });
+    const parsed = parseFirmwareLine(line);
     this.state = applyFirmwareLine(this.state, line);
-    trace.record("serial.line", `CDC: ${line.slice(0, 96)}`, { line }, traceNow());
+    trace.record("serial.parsed", `${parsed.kind}`, { parsed: parsed as unknown }, { t, causeId: "cdc" });
+    const ledFrame = parseFirmwareLedLine(line);
+    if (ledFrame) ledTransport.reportFirmwareFrame(ledFrame);
     this.publishRaw();
   }
 
