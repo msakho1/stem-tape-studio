@@ -80,6 +80,6 @@ export function recordPort(port: SerialLikePort, rec: Recorder): SerialLikePort 
       rec.op("port.close");
       return port.close();
     },
-    setSignals: port.setSignals ? (s) => port.setSignals!(s) : undefined,
+    ...(port.setSignals ? { setSignals: (s: { dataTerminalReady: boolean; requestToSend: boolean }) => port.setSignals!(s) } : {}),
   };
 }
