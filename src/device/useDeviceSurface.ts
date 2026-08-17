@@ -37,6 +37,9 @@ import type { StemMidiEvent } from "@/audio/midi/contract";
 import { FaderSessionManager, type FaderIndex } from "@/input/faderSessions";
 import { installDiagnostics, publishArbiter, publishSurface, publishTapLatency } from "@/lib/diagnostics";
 import { surfaceCommandTracer } from "@/diagnostics/commandTrace";
+import { trace } from "@/diagnostics/trace";
+import { formatPhysicalFrame, resolvePhysicalFrame } from "@/diagnostics/physicalFrame";
+import { ledTransport } from "@/diagnostics/ledTransport";
 
 
 
@@ -870,6 +873,54 @@ export function useDeviceSurface() {
   }, []);
 
   const leds = useMemo(() => deriveLeds(state), [state]);
+
+  /**
+   * Authoritative resolved PHYSICAL frame → trace + physical sink.
+   *
+   * Runs regardless of whether the diagnostic drawer is open. `led.derived` is
+   * recorded ONLY when the semantic frame changes, so idle polling adds
+   * nothing to the ring, and the transport re-sends nothing for an unchanged
+   * frame (the heartbeat alone holds the lease).
+   */
+  useEffect(() => {
+    const resolved = resolvePhysicalFrame(leds);
+    trace.recordIfChanged(
+      "led.derived",
+      resolved.signature,
+      "led.derived",
+      formatPhysicalFrame(resolved),
+      {
+        leds: resolved.leds.map((l) => ({
+          index: l.index,
+          id: l.id,
+          mode: l.pattern,
+          value: l.value,
+          owner: l.owner,
+          priority: l.priority,
+          periodMs: l.periodMs,
+          animated: l.animated,
+          phaseAnchor: l.animated ? "css-arbitrary" : "none",
+        })),
+        values: resolved.values,
+      },
+      { causeId: "led.derive" },
+    );
+    ledTransport.present(resolved);
+  }, [leds]);
+
+  // Release the host LED lease when the tab goes away; the 1 s firmware lease
+  // expiry is the fallback when we never get to run.
+  useEffect(() => {
+    const release = () => ledTransport.release("page hidden/unload");
+    window.addEventListener("pagehide", release);
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") release();
+    });
+    return () => {
+      window.removeEventListener("pagehide", release);
+      release();
+    };
+  }, []);
   const observed = useMemo(() => observedRows(state, leds), [state, leds]);
 
   /**
