@@ -34,8 +34,13 @@ export function outcomeWording(kind: TransportKind, result: Pick<UploadResult, "
       ? `Not committed — ${detail}. The slot still holds whatever it held before, so retrying is safe.`
       : `Simulated run stopped — ${detail}. No hardware was involved.`;
   }
+  if (outcome === "corrupt") {
+    return kind === "physical"
+      ? "Both index records are unreadable. This is corrupt storage, not an ordinary interrupted upload."
+      : "Simulated: both index records are unreadable in the simulation. No hardware was involved.";
+  }
   return kind === "physical"
-    ? `Outcome unknown — ${detail}. Reconnect the SP-1 and resolve it below before assuming anything.`
+    ? `Transfer outcome unknown. Reconnect to check which verified song is active. (${detail}.)`
     : `Simulated run left an unknown outcome — ${detail}. No hardware was involved.`;
 }
 
@@ -63,11 +68,49 @@ export function resolveWording(kind: TransportKind, outcome: UploadOutcome): str
         : "Simulated reconnect: still unresolved in the simulation. No hardware was read.";
   }
   return outcome === "committed"
-    ? "Reconnect check: the committed index matches this song. It is stored on the device."
+    ? RECONNECT_COMMITTED
     : outcome === "failed"
-      ? "Reconnect check: the song was NOT committed. The previous song is still active."
-      : "Reconnect check: still unresolved. The index could not be read.";
+      ? RECONNECT_NOT_COMMITTED
+      : outcome === "corrupt"
+        ? "Both index records are unreadable. This is corrupt storage, not an ordinary interrupted upload."
+        : UNKNOWN_BEFORE_RECONNECT;
 }
+
+/* ---------- interrupted-transfer messaging (A/B contract v1.1) ---------- */
+
+export const UNKNOWN_BEFORE_RECONNECT =
+  "Transfer outcome unknown. Reconnect to check which verified song is active.";
+export const RECONNECT_NOT_COMMITTED =
+  "The replacement was not committed. Your previous song remains active.";
+export const RECONNECT_COMMITTED =
+  "The replacement was committed and verified on the connected device.";
+
+/** Simulated variants — a mock run may never borrow device language. */
+export function interruptedWording(kind: TransportKind, phase: "pending" | "old" | "new" | "corrupt"): string {
+  const simulated = kind === "mock";
+  switch (phase) {
+    case "pending":
+      return simulated ? `Simulated: ${UNKNOWN_BEFORE_RECONNECT} No hardware was involved.` : UNKNOWN_BEFORE_RECONNECT;
+    case "old":
+      return simulated ? `Simulated: ${RECONNECT_NOT_COMMITTED} No hardware was involved.` : RECONNECT_NOT_COMMITTED;
+    case "new":
+      return simulated
+        ? "Simulated: the replacement was committed in the simulation only. No hardware was involved."
+        : RECONNECT_COMMITTED;
+    default:
+      return simulated
+        ? "Simulated: both index records are unreadable in the simulation. No hardware was involved."
+        : "Both index records are unreadable. This is corrupt storage, not an ordinary interrupted upload.";
+  }
+}
+
+/** Phrases that must never be shown for an ordinary interrupted upload. */
+export const FORBIDDEN_INTERRUPTION_PHRASES = [
+  "library must be reinitialized",
+  "library must be reinitialised",
+  "reinitialize the library",
+  "reinitialise the library",
+] as const;
 
 /** Phrases that may never appear for a simulated run. */
 export const DEVICE_ONLY_PHRASES = [
