@@ -6,9 +6,15 @@ include(${ZEPHYR_BASE}/samples/subsys/usb/common/common.cmake)
 
 # src/main.c and src/sp1_emmc.c are real derivatives of the proven Tape
 # Looper (firmware/src/main.c, firmware/src/sp1_emmc.c) -- see main.c's
-# provenance banner. src/st_crc32.c and src/st_stem_validate.c are real,
-# newly added and WIRED INTO main.c's xfer_service() 'Z' verb (the stem-song
-# commit gate), not standalone/unused modules.
+# provenance banner.
+#
+# STEM TAPE PHASE 1 (safe read-only player): src/st_crc32.c and
+# src/st_stem_validate.c -- the validated-commit CRC/gate modules -- are NOT
+# linked into this target. Phase 1 has no write path for them to gate (the
+# 'Z' verb is removed; 'W'/'F'/'X' are all read-only-safe -- see main.c).
+# They remain real, host-tested modules (see tests/test_stemtape_player.c)
+# and return to this target's link in Phase 2, behind a real, validated
+# write path -- they are NOT presented as linked/production code until then.
 #
 # NOT included here (compiled only into tests/test_stemtape_player.c's host
 # test binary, not into this firmware target): led_duty.c/led_render.c/
@@ -23,8 +29,6 @@ include(${ZEPHYR_BASE}/samples/subsys/usb/common/common.cmake)
 target_sources(app PRIVATE
 	src/main.c
 	src/sp1_emmc.c
-	src/st_crc32.c
-	src/st_stem_validate.c
 )
 
 # See firmware/CMakeLists.txt's identical note: the batchbuf/meta-block code

@@ -400,10 +400,15 @@ jobs:
           if-no-files-found: error
 
   stemtape-player:
-    # Standalone four-stem player release skeleton (firmware/stemtape_player).
-    # Same board/Zephyr revision/SDK as the other two targets; no Zephyr
-    # patch needed (USB audio is not yet enabled in this target -- see its
-    # README's "Deferred" section).
+    # Stem Tape Player -- PHASE 1: a safe, read-only four-stem player derived
+    # from the golden Tape Looper (firmware/stemtape_player). Same board/
+    # Zephyr revision/SDK as the other two targets. No Zephyr patch needed:
+    # this phase has no UAC2 audio-input class at all (CONFIG_USBD_AUDIO2_
+    # CLASS=n), so the UAC2 Windows-feedback patch the `build` job applies
+    # is not required here. Storage fails closed -- no format-fresh, no
+    # metadata/settings persistence, no raw 'W' write, no recording -- see
+    # main.c's PHASE 1 comments for the exhaustive removal list. Phase 2
+    # reintroduces recording and a validated write path.
     runs-on: ubuntu-latest
     steps:
       - name: Checkout project
@@ -434,27 +439,7 @@ jobs:
           test -f firmware/stemtape_player/app.overlay
           test -f firmware/west.yml
           test -d firmware/boards/teenageengineering/stem_player
-          test -f firmware/patches/uac2-windows-fs-feedback.patch
           west topdir
-
-      - name: Apply documented Zephyr patch
-        # STEM TAPE: src/main.c is now a real derivative of the Tape Looper
-        # (see its provenance banner) and carries over that file's
-        # `extern bool uac2_fs_fb_windows_fmt;` USB Full-Speed UAC2 feedback
-        # auto-negotiation (main.c:100, used at the feedback-format watchdog
-        # around main.c:5027) UNCHANGED. That symbol is not part of stock
-        # Zephyr v4.3.1 -- it is DEFINED by this exact patch inside
-        # subsys/usb/device_next/class/usbd_uac2.c (see the patch's own
-        # diff). This target previously never needed the patch because its
-        # placeholder main.c never enabled USB audio at all; the same "build"
-        # job (classic looper) above already applies this identical patch
-        # for the identical reason. Without it, linking main.c fails with
-        # "undefined reference to `uac2_fs_fb_windows_fmt`" -- a real CI
-        # failure this exact omission caused (see commit history).
-        working-directory: ${{ github.workspace }}/project/zephyr
-        run: |
-          set -eux
-          git apply --verbose ../firmware/patches/uac2-windows-fs-feedback.patch
 
       - name: Provenance preflight (clean tree, frozen manifest, toolchain versions)
         working-directory: ${{ github.workspace }}/project
@@ -483,6 +468,44 @@ jobs:
             -- -DBOARD_ROOT="$GITHUB_WORKSPACE/project/firmware" \
                -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             2>&1 | tee audit/build.log
+
+      - name: RAM budget assertion (fail-closed)
+        # PHASE 1 must fit in a real, measured RAM budget: max 229,376 bytes
+        # used (256 KiB region minus a required 32 KiB free), leaving real
+        # headroom for runtime stack/audio-buffer behavior. Reads west's own
+        # "Memory region ... Used Size" report already captured in
+        # audit/build.log by the Build step above -- the same authoritative
+        # number `west build` itself computed from the real linked ELF, not
+        # a re-derived estimate.
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          MAX_USED=229376
+          RAM_LINE="$(grep -E '^ *RAM:' audit/build.log | tail -n1)"
+          if [ -z "$RAM_LINE" ]; then
+            echo "could not find a 'RAM:' memory-region line in audit/build.log" >&2
+            exit 1
+          fi
+          USED="$(echo "$RAM_LINE" | grep -oE '[0-9]+' | head -n1)"
+          FREE=$((262144 - USED))
+          {
+            echo '### Stem Tape Player RAM budget'
+            echo '```text'
+            echo "$RAM_LINE"
+            echo "used:   $USED bytes"
+            echo "budget: $MAX_USED bytes max"
+            echo "free:   $FREE bytes (region 262144 bytes total)"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$USED" -gt "$MAX_USED" ]; then
+            echo "::error::RAM used ($USED bytes) exceeds the Phase 1 budget ($MAX_USED bytes)"
+            exit 1
+          fi
+          if [ "$FREE" -lt 32768 ]; then
+            echo "::error::RAM free ($FREE bytes) is below the required 32 KiB minimum"
+            exit 1
+          fi
+          echo "RAM budget OK: $USED bytes used, $FREE bytes free"
 
       - name: Collect toolchain analysis
         working-directory: ${{ github.workspace }}/project
@@ -588,26 +611,27 @@ jobs:
         working-directory: ${{ github.workspace }}/project
         run: |
           set -euo pipefail
-          # Proves the real vertical-slice runtime is actually linked into
-          # this build's final ELF -- not merely present as a source file
-          # that could be dead-stripped or never wired up. Every symbol here
-          # is a real, non-inlined function this session added or modified
-          # in firmware/stemtape_player/src/main.c (or the files it now
-          # reuses from the classic Tape Looper): storage/transfer,
-          # cold-boot discovery, playback, fader control, and LEDs. Fails
-          # closed (missing nm.txt or any missing symbol = CI failure) so a
-          # future change that silently drops one of these out of the link
-          # (e.g. reverting to the old CMakeLists.txt source list) is caught
-          # here, not discovered on hardware.
+          # PHASE 1 (safe read-only player): proves both that the preserved
+          # playback/storage-read/control runtime is actually linked into
+          # this build's final ELF, AND that recording/UAC2-input/write
+          # capability is genuinely ABSENT from it -- not merely "unused at
+          # runtime" but not present in the object file at all. Fails closed
+          # (missing nm.txt, any missing required symbol, or any forbidden
+          # symbol present = CI failure).
           test -s audit/nm.txt
           missing=0
           # nm marks a function's own text symbol lowercase 't' when it has
           # internal (static) linkage and uppercase 'T' when it's external --
           # nearly everything in main.c is `static`, so both cases count as
-          # "really linked in" here. trk_blk() is deliberately NOT checked:
-          # it's a one-line `static inline` and -Os may legitimately fold it
-          # into every call site with no standalone symbol at all, which
-          # would be a false failure, not evidence of anything missing.
+          # "really linked in" here. trk_blk() and xfer_service() are
+          # deliberately NOT checked: both have exactly one, always-taken
+          # call site each (trk_blk() a one-line `static inline`;
+          # xfer_service() called unconditionally from streamer_thread()'s
+          # loop under `#if SP1_XFER_ENABLE`, `#define`d to 1), so -Os
+          # legitimately inlines them with no standalone symbol left in nm --
+          # confirmed by a real CI run, not anticipated. Reachability is
+          # proven instead by their retained callers (streamer_thread, its
+          # loop) plus the single unconditional call site in the source.
           check() {
             if ! grep -qE " [tT] ${1}\$" audit/nm.txt; then
               echo "MISSING required linked symbol: $1" >&2
@@ -616,24 +640,9 @@ jobs:
               echo "present: $1"
             fi
           }
-          # storage + the new validated stem-song transfer commit path
+          # storage read path (write is checked ABSENT below)
           check emmc_read_blocks
-          check emmc_write_blocks
           check emmc_cache_flush
-          check meta_write_blocks
-          # xfer_service() is NOT checked as a standalone symbol: it has
-          # exactly one, always-taken call site (inside streamer_thread()'s
-          # main loop, unconditionally under `#if SP1_XFER_ENABLE` which is
-          # `#define`d to 1, not gated on any Kconfig/build option), so -Os
-          # legitimately inlines it into streamer_thread() with no separate
-          # symbol left in nm -- confirmed by CI itself: it was reported
-          # "MISSING" the first time this gate ran on a real (non-RAM-
-          # overflowing) build, even though the same build's image
-          # assertions and every other check here passed. Reachability is
-          # proven instead by streamer_thread() being present (checked
-          # below) plus this single, unconditional call site in the source.
-          check st_stem_validate_commit
-          check st_crc32_update
           # cold-boot discovery + the shared-transport playback engine
           check streamer_thread
           check audio_thread
@@ -642,12 +651,79 @@ jobs:
           check ladder_read
           check led_service
           check led_pwm_isr
+          # MIDI clock output thread
+          check midi_thread
           check main
+
+          # PHASE 1 REQUIRED-ABSENT: any of these appearing in the final ELF
+          # (any nm symbol type -- function OR data/bss) means recording,
+          # UAC2 audio input, or a raw persistent-write capability leaked
+          # back into the link, which this phase must never allow.
+          absent() {
+            if grep -qE "[[:space:]]${1}\$" audit/nm.txt; then
+              echo "FORBIDDEN symbol present in final ELF: $1" >&2
+              missing=1
+            else
+              echo "confirmed absent: $1"
+            fi
+          }
+          # eMMC/index write primitives -- meta_write_blocks() is removed
+          # from src/main.c entirely (no definition left to link); prefer
+          # emmc_write_blocks() (defined in sp1_emmc.c, the shared driver)
+          # to be dead-code-eliminated for having zero remaining callers.
+          absent emmc_write_blocks
+          absent meta_write_blocks
+          # UAC2 audio input + its buffers
+          absent usb_audio_ring
+          absent uac2_rx_slab
+          absent uac2_dev
+          absent uac2_terminal_update_cb
+          absent uac2_data_recv_cb
+          # the live-input record ring (32 KB) -- removed from src/main.c
+          absent g_rring
+
           if [ "$missing" -ne 0 ]; then
-            echo "one or more required runtime symbols are missing from the final ELF" >&2
+            echo "one or more required runtime symbols are missing, or one or more forbidden symbols are present, in the final ELF" >&2
             exit 1
           fi
-          echo "all required Stem Tape runtime symbols are linked into zephyr.elf"
+          echo "all required Stem Tape Phase 1 runtime symbols are linked, and all forbidden (recording/UAC2/write) symbols are confirmed absent, in zephyr.elf"
+
+      - name: Effective configuration assertion (fail-closed)
+        # Checks the REAL effective .config the build actually used (not
+        # prj.conf, which only requests values -- some are silently
+        # overridden by board/SoC defaults or dependency rules).
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          CFG=build-stemtape-player/zephyr/.config
+          test -f "$CFG"
+          fail=0
+          expect_unset() {
+            if grep -qE "^$1=y\$" "$CFG"; then
+              echo "::error::$1=y in the effective config (must be disabled in Phase 1)"
+              fail=1
+            else
+              echo "confirmed disabled: $1"
+            fi
+          }
+          expect_set() {
+            if ! grep -qE "^$1=y\$" "$CFG"; then
+              echo "::error::$1 is not =y in the effective config (required)"
+              fail=1
+            else
+              echo "confirmed enabled: $1"
+            fi
+          }
+          expect_unset CONFIG_USBD_AUDIO2_CLASS
+          expect_set   CONFIG_USBD_CDC_ACM_CLASS
+          expect_set   CONFIG_I2S
+          expect_set   CONFIG_ADC
+          expect_set   CONFIG_I2C
+          expect_set   CONFIG_WATCHDOG
+          if [ "$fail" -ne 0 ]; then
+            exit 1
+          fi
+          echo "effective configuration matches the Phase 1 requirements"
 
       - name: Persistent-memory and power audit report (descriptive)
         working-directory: ${{ github.workspace }}/project
