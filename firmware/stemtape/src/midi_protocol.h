@@ -47,12 +47,19 @@
 #define ST_CC_ALL_NOTES_OFF 123u
 
 /* Firmware identity, printed on the CDC console at boot. v1.1.0 added the
- * Stem Tape LED Feedback Protocol v1 (see led_protocol.h); v1.1.1 corrects
+ * Stem Tape LED Feedback Protocol v1 (see led_protocol.h); v1.1.1 corrected
  * physical LED ordering/naming, the lease-rollover and heartbeat-sequence
  * logic, release-state clearing, renderer capability truthfulness, PWM
- * write reduction, and safety-pattern accuracy in that protocol (see
+ * write reduction, and safety-pattern accuracy in that protocol; v1.1.2
+ * replaces the arbitrary battery quintile model with the real BQ24232
+ * charger-status-driven gauge, fixes the diagnostic sweep's backward side-row
+ * PWM channel printout by introducing one authoritative hardware table
+ * (led_duty.h's led_channel_table[]), and makes runtime PWM write failures
+ * retry deterministically and fault-latch the renderer (releasing host
+ * ownership and suppressing the CC91 capability response) instead of
+ * silently caching a failed write as successful (see
  * docs/stem-tape-led-feedback-v1.md). The MIDI channel-1 contract above is
- * unchanged in both revisions. */
-#define ST_FW_VERSION "Stem Tape M0 v1.1.1"
+ * unchanged across all three revisions. */
+#define ST_FW_VERSION "Stem Tape M0 v1.1.2"
 
 #endif /* STEMTAPE_MIDI_PROTOCOL_H_ */

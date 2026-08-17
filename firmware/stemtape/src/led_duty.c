@@ -6,16 +6,20 @@
 
 /* Must match led_protocol.h's table and app.overlay's pwm-leds child order,
  * index for index. PLAY-end-to-FUNCTION-end direction for indices 4-7 is a
- * best-effort inference — see led_protocol.h's physical-inventory comment. */
-const led_physical_pin_t led_physical_pin_map[LED_PHYSICAL_COUNT] = {
-	[LED_IDX_TRACK1]        = { 0u, 29u }, /* P0.29 */
-	[LED_IDX_TRACK2]        = { 0u, 26u }, /* P0.26 */
-	[LED_IDX_TRACK3]        = { 1u, 15u }, /* P1.15 */
-	[LED_IDX_TRACK4]        = { 1u, 14u }, /* P1.14 */
-	[LED_IDX_SIDE_PLAY]     = { 1u, 13u }, /* P1.13 */
-	[LED_IDX_SIDE_MID1]     = { 0u,  0u }, /* P0.00 */
-	[LED_IDX_SIDE_MID2]     = { 1u, 12u }, /* P1.12 */
-	[LED_IDX_SIDE_FUNCTION] = { 0u,  1u }, /* P0.01 */
+ * best-effort inference — see led_protocol.h's physical-inventory comment.
+ * gauge_step is the bottom-to-top position used by led_battery.h's charging
+ * gauge: ascending from LED_IDX_SIDE_PLAY (step 0) toward LED_IDX_SIDE_FUNCTION
+ * (step 3) — the SAME order as this table's row position, not a separate
+ * assumption. */
+const led_channel_t led_channel_table[LED_PHYSICAL_COUNT] = {
+	[LED_IDX_TRACK1]        = { LED_IDX_TRACK1,        0u, 29u, 2u, 0u, LED_GAUGE_STEP_NONE, "Track 1" },
+	[LED_IDX_TRACK2]        = { LED_IDX_TRACK2,        0u, 26u, 2u, 1u, LED_GAUGE_STEP_NONE, "Track 2" },
+	[LED_IDX_TRACK3]        = { LED_IDX_TRACK3,        1u, 15u, 2u, 2u, LED_GAUGE_STEP_NONE, "Track 3" },
+	[LED_IDX_TRACK4]        = { LED_IDX_TRACK4,        1u, 14u, 2u, 3u, LED_GAUGE_STEP_NONE, "Track 4" },
+	[LED_IDX_SIDE_PLAY]     = { LED_IDX_SIDE_PLAY,     1u, 13u, 3u, 3u, 0u, "Side, nearest PLAY" },
+	[LED_IDX_SIDE_MID1]     = { LED_IDX_SIDE_MID1,     0u,  0u, 3u, 2u, 1u, "Side, PLAY-side middle" },
+	[LED_IDX_SIDE_MID2]     = { LED_IDX_SIDE_MID2,     1u, 12u, 3u, 1u, 2u, "Side, FUNCTION-side middle" },
+	[LED_IDX_SIDE_FUNCTION] = { LED_IDX_SIDE_FUNCTION, 0u,  1u, 3u, 0u, 3u, "Side, nearest FUNCTION" },
 };
 
 uint32_t led_row_max_pulse_us(uint8_t index)

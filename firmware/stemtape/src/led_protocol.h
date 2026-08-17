@@ -55,9 +55,11 @@
  * host-side illustration only — never physical LED channels. Do not add
  * them here.
  *
- * Never drive P0.22 (BQ24232 nCHG), P0.24 (BQ24232 nPGOOD), or P0.21 outside
- * the existing charger_init()/BQ_NCE_PIN implementation: charger-control/
- * status nets, not available LED outputs.
+ * P0.22 (BQ24232 nCHG) and P0.24 (BQ24232 nPGOOD) are charger STATUS inputs,
+ * read (never driven) inside main.c's charger_init(); P0.21 (nCE) is the one
+ * charger-control OUTPUT and is driven only there. None of the three is, or
+ * has ever been, an available LED output — see led_battery.h for how the two
+ * status inputs feed the local charging gauge.
  */
 
 #ifndef STEMTAPE_LED_PROTOCOL_H_
@@ -122,14 +124,20 @@
 #define LED_LEASE_TIMEOUT_MS       1000u
 
 /* ------------------------------------------------ battery / Play baseline -
- * Local (unleased) stock behavior: the side row (4-7) is a 4-step battery
- * meter computed from the same battery ADC reading main.c already sends as
- * MIDI CC24 (0..127). "Low battery" == the bottom step of that same meter
- * (step 0 of 4) and is an UNMEASURED threshold (no real-battery-voltage
- * calibration has been performed) — see docs/stem-tape-led-feedback-v1.md
- * "Battery / Play baseline" for the exact composition rule with a leased
- * host frame. */
-#define LED_BATTERY_STEP_COUNT     4u
-#define LED_BATTERY_LOW_STEP       0u
+ * Local (unleased) stock behavior: the side row (4-7) is the SP-1's
+ * documented 4-step CHARGING GAUGE (led_battery.h), driven from the real
+ * BQ24232 charger status pins (nCHG/nPGOOD) and the AIN4 battery-divider ADC
+ * reading — NOT an arbitrary function of the compressed 0..127 CC24 value.
+ * "Low battery" is the bottom gauge level (1 of 4) while the charger is
+ * absent and the reading is valid; it is the ONLY battery-driven condition
+ * allowed to preempt an owned host frame (led_render_select()'s
+ * `low_battery` argument) — an unavailable, faulted, or charger-related
+ * reading must never be classified as low and must never preempt a host
+ * frame. See led_battery.h for the full state machine and
+ * docs/stem-tape-led-feedback-v1.md "Battery / charging baseline" for the
+ * exact composition rule with a leased host frame and the provisional
+ * calibration constants' citation. */
+#define LED_BATTERY_GAUGE_LEVEL_COUNT  4u  /* quarters, 1..4 */
+#define LED_BATTERY_LOW_LEVEL          1u  /* bottom quarter == LED_BATTERY_LOW */
 
 #endif /* STEMTAPE_LED_PROTOCOL_H_ */

@@ -2,19 +2,17 @@
  * led_render.h — Stem Tape M0 physical LED renderer: hardware PWM2/PWM3.
  *
  * NOT host-testable (touches the PWM driver/devicetree) — kept deliberately
- * thin. All brightness math is led_duty.c's pure led_level_to_pulse_us()
- * and led_duty_diff_frame(), which ARE host-tested; this file only feeds
- * their results to pwm_set_pulse_dt() and propagates its return code. No
- * ISR: the nRF PWM peripheral generates each channel's waveform
+ * thin: it is now just an adapter binding pwm_set_pulse_dt() to
+ * led_render_policy.c's PURE (and host-tested) write/retry/fault-latch
+ * policy. No ISR: the nRF PWM peripheral generates each channel's waveform
  * autonomously in hardware once programmed, so there is no software-PWM
  * loop and nothing here runs from interrupt context.
  *
- * PHYSICAL ATOMICITY, ACCURATELY STATED: a call to this module renders all
- * eight channels by issuing up to eight separate pwm_set_pulse_dt() calls
- * (one per changed channel — see led_duty_diff_frame()). Each call is an
- * independent register write to a shared nRF PWM peripheral instance
- * (PWM2 serves the four Track channels, PWM3 serves the four side
- * channels); per Zephyr's nrfx PWM driver
+ * PHYSICAL ATOMICITY, ACCURATELY STATED: a call to this module renders up to
+ * eight independent register writes (one per channel actually needing one —
+ * see led_render_policy.h), each an independent write to a shared nRF PWM
+ * peripheral instance (PWM2 serves the four Track channels, PWM3 serves the
+ * four side channels); per Zephyr's nrfx PWM driver
  * (drivers/pwm/pwm_nrfx.c, zephyrproject-rtos/zephyr), updating one
  * channel's duty re-triggers that instance's whole EasyDMA sequence
  * playback, which can restart the waveform for every channel sharing that
@@ -36,35 +34,57 @@
 
 #include "led_protocol.h"
 
-/* Verifies all 8 PWM channels are ready and drives every channel to a
- * proven-off state. Returns 0 if every channel is ready AND every one of
- * the 8 proving writes succeeded; -1 otherwise. The readiness gate is
- * all-or-nothing (matching feldd's led_init()): if any single channel is
- * not ready, or any proving write fails, led_render_is_ready() latches
- * false and led_render_apply() no-ops entirely rather than partially drive
- * a device in an unverified state. */
+/* Verifies all 8 PWM channels are devicetree-ready, that each one's
+ * configured devicetree channel matches led_channel_table's pwm_channel for
+ * that index (a runtime cross-check against the ONE authoritative table —
+ * see led_duty.h — not just a comment that could silently drift), and drives
+ * every channel to a proven-off state through led_render_policy_bringup().
+ * Returns 0 only if every one of those checks and all 8 proving writes
+ * succeeded; -1 otherwise. led_render_is_ready() latches false on any
+ * failure rather than partially drive a device in an unverified state. */
 int led_render_init(void);
 
-/* True only if led_render_init() verified every one of the 8 channels.
- * "Do not answer the CC91 capability query as supported unless all eight
- * outputs initialized successfully" reads this (via
+/* True only if every one of the 8 outputs is currently proven usable: latched
+ * true by led_render_init()/led_render_reinit() and latched back to false by
+ * led_render_apply() if a channel fails LED_RENDER_MAX_CONSECUTIVE_FAILS
+ * consecutive writes at runtime — it does NOT stay true after an unrecovered
+ * runtime write failure. "Do not answer the CC91 capability query as
+ * supported unless all eight outputs [are] usable" reads this (via
  * led_capability_should_answer()) before responding. */
 bool led_render_is_ready(void);
 
-/* Cumulative count of pwm_set_pulse_dt() calls that returned a nonzero
- * (error) status since boot. Exposed for CDC diagnostics. */
+/* Cumulative count of failed physical writes since boot (never reset by
+ * led_render_reinit()). Exposed for CDC diagnostics. */
 uint32_t led_render_error_count(void);
 
+/* Most recent failing channel index (LED_PHYSICAL_COUNT if none ever
+ * recorded) and its pwm_set_pulse_dt() return code — "expose the exact
+ * failing LED index and return code through CDC". */
+void led_render_last_failure(uint8_t *index, int *rc);
+
+/* Explicit recovery / reinitialization path, callable any time (e.g. from a
+ * CDC command) after a runtime fault has latched led_render_is_ready() false.
+ * Re-runs the exact same all-8-channels proving sequence as
+ * led_render_init(); "recovery restores capability only after all eight
+ * channels are usable" holds because it is the identical bringup routine. */
+int led_render_reinit(void);
+
 /*
- * Renders a complete 8-value 0..127 frame. Skips any channel whose value is
- * unchanged since the last successfully-applied render (led_duty_diff_frame())
- * — "do not resend all eight PWM values every 5 ms when nothing changed" —
- * so a steady frame costs zero PWM register writes per call.
+ * Renders a complete 8-value 0..127 frame. Not ready -> returns -1 and
+ * writes nothing at all. Otherwise skips any channel already proven at the
+ * requested level (led_render_policy.h) — a steady, fully-healthy frame
+ * costs zero PWM register writes per call. A channel whose write fails is
+ * left dirty for a deterministic retry on the next call; its cached level is
+ * NOT updated until a write for it actually succeeds. If a channel fails
+ * LED_RENDER_MAX_CONSECUTIVE_FAILS consecutive times, the WHOLE renderer
+ * latches not-ready (led_render_is_ready() flips false) and the outputs are
+ * forced to a best-effort safe (all-off) state.
  *
  * Returns 0 if every attempted write succeeded (including "no writes were
  * needed"); a negative count of failed writes otherwise. The caller (main.c)
- * must release host ownership and fail safely on a nonzero return — this
- * function does not do that itself, since it has no concept of "ownership".
+ * must release host ownership when led_render_is_ready() has gone false —
+ * this function does not do that itself, since it has no concept of
+ * "ownership".
  *
  * The caller is responsible for taking a consistent snapshot beforehand
  * (see main.c's led_snapshot_active()) — this function does no locking

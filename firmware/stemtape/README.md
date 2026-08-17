@@ -112,31 +112,56 @@ automatic flashing.
 Two quick flashes of all four track LEDs (90 ms on / 110 ms off) distinguish
 Stem Tape M0 from the stock looper at power-on.
 
-## LED Feedback Protocol v1 (v1.1.1)
+## LED Feedback Protocol v1 (v1.1.2)
 
-Eight independently dimmable physical LEDs (4 Track + 4 side battery/Play),
-driven by hardware PWM2/PWM3 — no software-PWM loop, no LED ISR. The host
-stages and atomically commits (in firmware state — not a claim of physical
-simultaneity, see the doc's "Physical update timing") an 8-value 0–127
-brightness frame over MIDI channel 16 (existing channel-1 surface controls
-are untouched) under a 1000 ms wrap-safe lease that requires a heartbeat
-matching the last committed sequence to stay alive. Full protocol table,
-sequence/wrap rules, brightness-to-duty mapping, the battery/Play local
-baseline and a TypeScript constants block for the web team:
+Eight independently dimmable physical LEDs (4 Track + 4 side battery/
+charging), driven by hardware PWM2/PWM3 — no software-PWM loop, no LED ISR.
+The host stages and atomically commits (in firmware state — not a claim of
+physical simultaneity, see the doc's "Physical update timing") an 8-value
+0–127 brightness frame over MIDI channel 16 (existing channel-1 surface
+controls are untouched) under a 1000 ms wrap-safe lease that requires a
+heartbeat matching the last committed sequence to stay alive. Full protocol
+table, sequence/wrap rules, brightness-to-duty mapping, the battery/charging
+local baseline and a TypeScript constants block for the web team:
 **[`docs/stem-tape-led-feedback-v1.md`](../../docs/stem-tape-led-feedback-v1.md)**.
 
-The side row is a stock 4-step battery meter by default (no host connection
-required); releasing/losing the lease reverts to it immediately, never to
-all-off. Safety precedence: DFU escape (300 ms, human-visible) > fatal error
-(no LED cue — reboots immediately) > shutdown countdown > boot signature >
-low battery > a leased host frame > the local battery/Play baseline. See
+The side row is the SP-1's own documented 4-step charging gauge by default
+(no host connection required), driven from the real BQ24232 charger status
+pins (`nCHG`/`nPGOOD`) and the AIN4 battery ADC — not an arbitrary function
+of the compressed MIDI battery CC. An unavailable/faulted reading, or a
+charger-status fault, is never treated as low battery and never preempts an
+owned host frame; only a *valid* low reading does. Releasing/losing the
+lease reverts to the local gauge immediately, never to all-off. Safety
+precedence: DFU escape (300 ms, human-visible) > fatal error (no LED cue —
+reboots immediately) > shutdown countdown > boot signature > valid low
+battery > a leased host frame > the local charging gauge. See
 `firmware/stemtape/src/led_protocol.h`, `led_frame.h`/`.c`,
-`led_midi.h`/`.c`, `led_battery.h`/`.c` and `led_render.h`/`.c`.
+`led_midi.h`/`.c`, `led_battery.h`/`.c`, `led_render.h`/`.c` and
+`led_render_policy.h`/`.c`.
+
+**One authoritative hardware table.** `led_duty.h`'s `led_channel_table[]`
+is the single source for index → physical role → GPIO → PWM instance/
+channel → charging-gauge position; the renderer, the diagnostic sweep, and
+the CDC diagnostics all read the same table instead of separately re-deriving
+any of those fields — the class of bug that once made the diagnostic sweep
+print the side row's PWM channels backward.
+
+**Runtime PWM write failures are retried, not silently swallowed.** A
+channel's cached level is updated only once its write actually succeeds; a
+failed write stays dirty and is retried on every subsequent render. Three
+consecutive failures on one channel latch the whole renderer not-ready:
+host ownership is released, the CC91 capability response is suppressed, and
+the outputs are forced to a best-effort safe (all-off) state. Recovery is an
+explicit re-initialization (type `r` into the CDC console, or see
+`led_render_reinit()`) that only reports ready again once all eight channels
+are proven usable. See `led_render_policy.h`/`.c` (pure, host-tested with a
+mocked physical write) for the exact policy.
 
 The side row's PLAY-end/FUNCTION-end direction is a best-effort inference,
 **not hardware-confirmed** — type `s` into the CDC console to run the
-eight-step diagnostic sweep (`led_diag_sweep()` in `main.c`) and visually
-verify or correct it on a real device.
+eight-step diagnostic sweep (`led_diag_sweep()` in `main.c`, reading
+straight from `led_channel_table[]`) and visually verify or correct it on a
+real device.
 
 ## Building
 

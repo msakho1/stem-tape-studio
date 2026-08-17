@@ -16,16 +16,28 @@ Exactly **eight** MCU-controllable LEDs: four Track LEDs and four side
 battery/Play LEDs. **The Function-button dots and the red triangle are
 static enclosure markings, not LEDs** — there is no ninth or tenth channel.
 
-| Index | Logical LED | GPIO | PWM instance | PWM channel |
-|---:|---|---|---|---|
-| 0 | Track 1 | P0.29 | PWM2 | 0 |
-| 1 | Track 2 | P0.26 | PWM2 | 1 |
-| 2 | Track 3 | P1.15 | PWM2 | 2 |
-| 3 | Track 4 | P1.14 | PWM2 | 3 |
-| 4 | Side, nearest PLAY | P1.13 | PWM3 | 3 |
-| 5 | Side, PLAY-side middle | P0.00 | PWM3 | 2 |
-| 6 | Side, FUNCTION-side middle | P1.12 | PWM3 | 1 |
-| 7 | Side, nearest FUNCTION | P0.01 | PWM3 | 0 |
+| Index | Logical LED | GPIO | PWM instance | PWM channel | Gauge step |
+|---:|---|---|---|---|---:|
+| 0 | Track 1 | P0.29 | PWM2 | 0 | — |
+| 1 | Track 2 | P0.26 | PWM2 | 1 | — |
+| 2 | Track 3 | P1.15 | PWM2 | 2 | — |
+| 3 | Track 4 | P1.14 | PWM2 | 3 | — |
+| 4 | Side, nearest PLAY | P1.13 | PWM3 | 3 | 1 (bottom) |
+| 5 | Side, PLAY-side middle | P0.00 | PWM3 | 2 | 2 |
+| 6 | Side, FUNCTION-side middle | P1.12 | PWM3 | 1 | 3 |
+| 7 | Side, nearest FUNCTION | P0.01 | PWM3 | 0 | 4 (top) |
+
+Note the PWM channel column is **reversed** for the side row relative to
+index order (index 4 → channel 3 … index 7 → channel 0) — this is real,
+verified electrical wiring (`app.overlay`), not a typo. This table is the
+device firmware's **one authoritative hardware table**
+(`led_channel_table[]` in `firmware/stemtape/src/led_duty.h`); the renderer,
+the diagnostic sweep, the CDC diagnostics, and this document all read the
+same table, so a website integrator reading a `led_sweep:` CDC line will see
+exactly these GPIO/PWM/gauge-step values, never a re-derived approximation.
+"Gauge step" is the bottom-to-top position used by the local charging gauge
+(section 2) — 1 is the first LED to light, 4 is only lit at a full/complete
+charge.
 
 **The GPIO set for the side row is confirmed** by three independent sources
 (community `stemplayer_pins.h`, a hardware-tested community PWM
@@ -54,44 +66,76 @@ outside the firmware's own charger-enable implementation — those are
 charger-control/status nets, not available LED outputs, and are not part of
 this protocol in any way.
 
-## 2. Battery / Play baseline (stock local behavior)
+## 2. Battery / charging baseline (stock local behavior)
 
-**The side row is not four generic effect-bank LEDs — it is a battery meter
-that also shows Play state, always available with no browser connected.**
+**The side row is not four generic effect-bank LEDs and not an arbitrary
+function of the compressed CC24 value — it is the SP-1's own documented
+4-step charging gauge**, driven from the real BQ24232 charger status pins
+(`nCHG` P0.22, `nPGOOD` P0.24, both open-drain/active-LOW) and the raw AIN4
+battery-divider ADC reading, ported from the pinned Tape Looper firmware's
+own standby gauge (see "Evidence"). It is always available with no browser
+connected.
 
-- **Local baseline (no host lease held):** all four side LEDs form a 4-step
-  battery meter, computed from the same battery reading the firmware already
-  sends as MIDI CC24 (0–127). Steps fill ascending from the PLAY-adjacent
-  LED (index 4) toward the FUNCTION-adjacent LED (index 7). Track LEDs stay
-  off in this baseline. This requires no host connection at all — do not
-  build a "keep a browser tab open just to see battery level" assumption
-  into the website; the device shows it unattended.
-- **Low battery** (the bottom step of that same meter — an UNMEASURED
-  threshold against real battery voltage, not yet calibrated on hardware)
-  **outranks a leased host frame.** Even while the website holds a valid
-  lease, the firmware shows its own low-battery indication instead of your
-  frame if the battery is in the bottom step. This is a safety-tier
-  behavior, listed in the precedence table below.
-- **While a valid host lease is held (and battery is not critically low):**
+**Local gauge states.** The firmware classifies its own battery/charger
+reading into exactly one of six states every tick
+(`led_battery_classify()`):
+
+| State | Meaning |
+|---|---|
+| `UNAVAILABLE` | No valid ADC sample has ever landed (e.g. just after boot). |
+| `FAULT` | Either the most recent ADC read failed after a prior valid one, or the charger status pins report a combination the BQ24232 should never produce (`nCHG` asserted while `nPGOOD` is deasserted). |
+| `CHARGER_ABSENT` | On battery, valid reading, above the low threshold — ordinary operation. |
+| `CHARGING` | Charger present (`nPGOOD` asserted) and actively charging (`nCHG` asserted). |
+| `CHARGE_COMPLETE` | Charger present, not actively charging. |
+| `LOW` | On battery, valid reading, at/below the low threshold. |
+
+**`LOW` is the ONLY state allowed to preempt an owned host frame.** An
+unavailable or failed ADC reading, or a charger-status fault, is **never**
+classified as low and **never** suppresses a valid, leased host frame —
+including at startup, before the first ADC sample has ever landed. This is a
+correction from an earlier revision, which incorrectly treated "no reading
+yet" as "empty battery" and could silently override a freshly-leased host
+frame during the first second after boot.
+
+- **While a valid host lease is held and the battery state is not `LOW`:**
   the firmware renders the complete 8-value **host-committed frame
-  verbatim** — there is no element-wise merge with the local baseline. If
-  you want the PLAY-adjacent LED fully illuminated to indicate "playing,"
-  commit a frame with index 4 (and whatever you choose for the other 7,
-  typically your own battery-aware composition) via the ordinary stage/
-  commit flow in section 4 below. There is no separate "play" message —
+  verbatim** — including the side LED nearest PLAY — with no element-wise
+  merge with the local gauge, regardless of whether the device also happens
+  to be `CHARGING` or `CHARGE_COMPLETE` at that moment. If you want the
+  PLAY-adjacent LED fully illuminated to indicate "playing," commit a frame
+  with index 4 (and whatever you choose for the other 7) via the ordinary
+  stage/commit flow in section 4. There is no separate "play" message —
   playback state is conveyed entirely by what you choose to commit.
-- **On host release, MIDI disconnect, or lease timeout, the firmware
-  reverts immediately and deterministically to the local battery baseline
-  above — never to all-LEDs-off.** If you want the side row to show "not
-  playing" while still connected, commit a new frame with index 4 back to a
-  battery-appropriate value; if you disconnect or let the lease lapse
-  instead, the firmware's own local baseline takes over automatically.
+- **`LOW` outranks a leased host frame.** This is a safety-tier behavior,
+  listed in the precedence table in section 8.
+- **On host release, MIDI disconnect, lease timeout, or an unrecovered
+  renderer fault, the firmware reverts immediately and deterministically to
+  the local gauge above — never to all-LEDs-off.**
 
-In short: **the local baseline is the LED protocol's idle state**, not a
-separate mechanism. Every "override" the side row can show is just an
-ordinary committed frame; the composition rule is "host frame wins outright
-while leased and battery is not critically low, local baseline wins
-otherwise" — never a partial/blended merge.
+**Local gauge rendering** (`led_battery_gauge_frame()`), matching the pinned
+looper's own documented gauge exactly: 1–4 side LEDs solid **below** the
+current charge level (bottom-to-top, per the "Gauge step" column in section
+1); the current level's LED is **solid** when not charging, or **blinks
+(~1 Hz)** while `CHARGING`; all four solid once `CHARGE_COMPLETE`. When the
+gauge has never been seeded (`UNAVAILABLE` with no prior data at all), the
+entire side row is left **off** — never fabricated as a specific charge
+level.
+
+**Provisional calibration.** The raw-ADC thresholds that divide the gauge
+into quarters (2020 / 2140 / 2260, ±18-count hysteresis, 1/8 EMA smoothing)
+are copied verbatim from the pinned Tape Looper source, which itself labels
+them *"PLACEHOLDERS until calibrated" / "Interim calibration"* — see
+"Evidence". M0 inherits that same provisional status unchanged; do not
+present these as a final hardware calibration. The raw ADC code, smoothed
+EMA, gauge level, and the two charger status pin readings are all exposed
+on the CDC diagnostic stream (a `batt:` line, tagged `calib=PROVISIONAL`)
+for anyone re-running a bench calibration.
+
+In short: **the local gauge is the LED protocol's idle state**, not a
+separate mechanism. The composition rule is "host frame wins outright while
+leased and the battery state is not the *valid* `LOW` reading, local gauge
+wins otherwise" — never a partial/blended merge, and never based on a
+reading the firmware does not actually trust.
 
 ## 3. Transport: MIDI channel 16
 
@@ -114,13 +158,19 @@ Control Change messages on channel 16:
 
 Device → host: CC91 on channel 16 with value `1` (protocol version 1) is the
 capability response — **sent only if every one of the eight physical
-outputs initialized successfully.** If the renderer failed to initialize,
-the device sends no response at all to a capability query (never a false
-"supported"); this is distinguishable from "device not present" only by the
-absence of any other MIDI traffic from it either. A capability query never
-alters LED state and never enters the normal SP-1 control decoder. Invalid
-channels and any CC on channel 16 outside 80–91 are silently ignored — no
-echo, no error message.
+outputs is CURRENTLY usable**, checked fresh against live renderer state,
+not just a one-time boot flag. This is true right after boot only if
+initialization succeeded, and can become false again later at runtime if a
+channel accumulates enough consecutive write failures to fault the renderer
+(section 7) — the response is suppressed the instant that happens, and
+resumes only once every channel has been proven usable again (an explicit
+firmware recovery). If the renderer is not currently ready, the device sends
+no response at all to a capability query (never a false "supported"); this
+is distinguishable from "device not present" only by the absence of any
+other MIDI traffic from it either. A capability query never alters LED
+state and never enters the normal SP-1 control decoder. Invalid channels and
+any CC on channel 16 outside 80–91 are silently ignored — no echo, no error
+message.
 
 ## 4. Frame rules
 
@@ -214,6 +264,28 @@ been measured on real hardware.** If your use case depends on
 sub-millisecond synchronized transitions across all four Track (or all four
 side) LEDs, do not assume it — request a hardware timing measurement first.
 
+**Write reliability, retry, and fault handling.** Each of the (up to eight)
+physical writes a render performs can itself fail at the driver level. The
+firmware never presents a failed write as if it had succeeded:
+
+- A channel's cached "last known good" level is updated **only when its
+  write actually succeeds.** A failed write leaves that channel's cache
+  invalidated and marks it dirty, so the exact same requested level is
+  retried, deterministically, on the very next render (every 5 ms).
+- If one channel fails **3 consecutive** writes, the renderer as a whole
+  latches **not-ready**: the CC91 capability response is suppressed
+  (section 3), the device forces a best-effort safe (all-off) write across
+  every channel, and — if a host frame was leased at the time — that lease
+  is released exactly like an explicit release or a timeout (section 6),
+  reverting the side row to the local gauge (section 2).
+- Recovery is an explicit re-initialization that re-proves all eight
+  channels from scratch; the renderer only reports ready again once every
+  one of the eight succeeds. There is no implicit "it'll probably come back
+  on its own" behavior.
+- A steady, fully healthy frame costs **zero** PWM writes per render call —
+  only channels that changed, or that are still dirty from a prior failure,
+  are ever written.
+
 ## 8. Safety precedence
 
 The device's own safety behavior always outranks a host frame, in this
@@ -228,16 +300,21 @@ order:
    all**; the next LED event is the following boot's boot signature.
 3. Shutdown (FUNCTION hold-to-power-off) countdown and handling.
 4. Boot signature (two flashes at power-on).
-5. Low battery (section 2) — outranks a leased host frame, not the states
-   above it.
-6. A valid leased host frame (this protocol).
-7. Local battery/Play baseline (section 2) — the idle fallback whenever no
-   host frame is leased, not all-off.
+5. `LOW` battery (section 2) — outranks a leased host frame, not the states
+   above it. Only the valid `LOW` state; `UNAVAILABLE`, `FAULT`,
+   `CHARGER_ABSENT`, `CHARGING` and `CHARGE_COMPLETE` never preempt a host
+   frame.
+6. A valid leased host frame (this protocol) — released automatically, and
+   demoted to the next tier below, if the renderer latches an unrecovered
+   write fault (section 7).
+7. Local charging gauge (section 2) — the idle fallback whenever no host
+   frame is leased (or the renderer just released one due to a fault), not
+   all-off.
 
 A host frame can never hide the DFU cue, the shutdown countdown, the boot
-signature, or a low-battery indication — the device will visibly override
-your frame during those states, and resume showing it afterward once you
-still hold the lease and the battery is no longer critically low.
+signature, or a valid low-battery indication — the device will visibly
+override your frame during those states, and resume showing it afterward
+once you still hold the lease and the battery state is no longer `LOW`.
 
 ## 9. TypeScript constants (copy into the web app)
 
@@ -308,10 +385,17 @@ function sendHeartbeat(output: MIDIOutput, lastCommittedSeq: number) {
 - `zephyrproject-rtos/zephyr`'s nRF PWM driver
   ([`drivers/pwm/pwm_nrfx.c`](https://github.com/zephyrproject-rtos/zephyr/blob/main/drivers/pwm/pwm_nrfx.c))
   — basis for section 7's physical-simultaneity caveat.
+- This repository's own pinned Tape Looper source
+  (`firmware/src/main.c`, commit `a8dd127`): `charger_init()` /
+  `usb_present()` / `charging()` (lines 4260–4290, charger GPIO wiring and
+  active levels) and the standby battery gauge (lines 4591–4647, the
+  quarter-level/blink/solid gauge logic and the provisional `batt_thr`
+  calibration constants section 2's local charging gauge ports verbatim).
 
 No physical device has been flashed or tested as part of writing this
 protocol or the firmware that implements it. The side row's PLAY-end/
-FUNCTION-end direction and the physical-simultaneity caveat in section 7 are
-both explicitly UNCONFIRMED on hardware — see the firmware repo's build
+FUNCTION-end direction, the physical-simultaneity caveat in section 7, and
+the provisional battery-gauge calibration constants in section 2 are all
+explicitly UNCONFIRMED on real SP-1 hardware — see the firmware repo's build
 report for exactly what has and has not been verified. Do not describe any
 built image as verified-safe-to-flash based on this document alone.

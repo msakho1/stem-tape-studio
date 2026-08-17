@@ -6,16 +6,21 @@
  *
  *     cc -std=c11 -Wall -Wextra -I../src \
  *        ../src/led_duty.c ../src/led_frame.c ../src/led_midi.c \
- *        ../src/led_battery.c test_led.c \
+ *        ../src/led_battery.c ../src/led_render_policy.c test_led.c \
  *        -o test_led && ./test_led
  *
- * This links the EXACT same led_duty.c/led_frame.c/led_midi.c/led_battery.c
- * translation units the firmware compiles (see ../CMakeLists.txt) — nothing
- * here is a reimplementation of the protocol logic, so a pass here is
- * evidence about the real firmware behavior, not a parallel model of it.
- * led_render.c is NOT linked here (it touches the Zephyr PWM driver); its
- * hardware-facing behavior is verified only by code review and the full
- * Zephyr build/CI, not by this file.
+ * This links the EXACT same led_duty.c/led_frame.c/led_midi.c/led_battery.c/
+ * led_render_policy.c translation units the firmware compiles (see
+ * ../CMakeLists.txt) — nothing here is a reimplementation of the protocol
+ * logic, so a pass here is evidence about the real firmware behavior, not a
+ * parallel model of it. led_render.c itself is NOT linked here (it touches
+ * the Zephyr PWM driver directly); its hardware-facing behavior is verified
+ * only by code review and the full Zephyr build/CI. But led_render.c is now
+ * a thin adapter over led_render_policy.c's write/retry/fault-latch POLICY,
+ * and THAT — the part that decides what to do about a failed write — is
+ * pure and IS linked and tested here, driven through a mocked
+ * led_channel_write_fn that can be told to fail on demand (see
+ * mock_write()/mock_pwm_t below).
  *
  * Exit code 0 = every check passed. Any failure prints [FAIL] and the
  * process exits non-zero, matching the repo's other self-checking audit
@@ -30,6 +35,7 @@
 #include "led_frame.h"
 #include "led_midi.h"
 #include "led_protocol.h"
+#include "led_render_policy.h"
 
 static int g_checks;
 static int g_failures;
@@ -47,7 +53,8 @@ static int g_failures;
 	} while (0)
 
 /* ------------------------------------------------------------------------
- * exact eight-output inventory + physical-location-to-GPIO mapping
+ * exact eight-output inventory + the ONE authoritative hardware table
+ * (index -> physical role -> GPIO -> PWM instance/channel -> gauge step)
  * ------------------------------------------------------------------------ */
 static void test_index_to_pin_mapping(void)
 {
@@ -56,30 +63,69 @@ static void test_index_to_pin_mapping(void)
 	 * markings, not LEDs). */
 	CHECK(LED_PHYSICAL_COUNT == 8u, "exactly eight physical LED channels");
 
-	/* Track row: identity, confirmed unambiguous by all sources. Side
-	 * row: PLAY-end-to-FUNCTION-end per led_protocol.h's best-effort
-	 * inference (this firmware's own pinned leds[] array order) — see
-	 * that header's physical-inventory comment for why neither
-	 * community source's numbering could be used instead. */
-	static const led_physical_pin_t expected[LED_PHYSICAL_COUNT] = {
-		{ 0, 29 }, { 0, 26 }, { 1, 15 }, { 1, 14 }, /* Track 1-4 */
-		{ 1, 13 }, { 0,  0 }, { 1, 12 }, { 0,  1 }, /* side: PLAY..FUNCTION */
+	/* Track row: identity, confirmed unambiguous by all sources, PWM2
+	 * channels 0-3 in index order. Side row: PLAY-end-to-FUNCTION-end per
+	 * led_protocol.h's best-effort inference (this firmware's own pinned
+	 * leds[] array order); PWM3 channels are REVERSED relative to index
+	 * order (index 4 -> channel 3 ... index 7 -> channel 0) — this table
+	 * is the single source every consumer (led_render.c, the diagnostic
+	 * sweep, CDC output, docs) reads from, so a regression here is a
+	 * regression everywhere at once instead of driving the wrong channel
+	 * or printing a backward sweep. */
+	static const led_channel_t expected[LED_PHYSICAL_COUNT] = {
+		{ 0, 0, 29, 2, 0, LED_GAUGE_STEP_NONE, "Track 1" },
+		{ 1, 0, 26, 2, 1, LED_GAUGE_STEP_NONE, "Track 2" },
+		{ 2, 1, 15, 2, 2, LED_GAUGE_STEP_NONE, "Track 3" },
+		{ 3, 1, 14, 2, 3, LED_GAUGE_STEP_NONE, "Track 4" },
+		{ 4, 1, 13, 3, 3, 0, "Side, nearest PLAY" },
+		{ 5, 0,  0, 3, 2, 1, "Side, PLAY-side middle" },
+		{ 6, 1, 12, 3, 1, 2, "Side, FUNCTION-side middle" },
+		{ 7, 0,  1, 3, 0, 3, "Side, nearest FUNCTION" },
 	};
 
 	for (uint8_t i = 0; i < LED_PHYSICAL_COUNT; i++) {
-		CHECK(led_physical_pin_map[i].port == expected[i].port &&
-		      led_physical_pin_map[i].pin == expected[i].pin,
-		      "index %u -> P%u.%02u", i,
-		      led_physical_pin_map[i].port, led_physical_pin_map[i].pin);
+		const led_channel_t *c = &led_channel_table[i];
+
+		CHECK(c->index == i, "index %u -> table entry index == %u", i, i);
+		CHECK(c->port == expected[i].port && c->pin == expected[i].pin,
+		      "index %u -> P%u.%02u", i, c->port, c->pin);
+		CHECK(c->pwm_instance == expected[i].pwm_instance,
+		      "index %u -> PWM instance %u", i, c->pwm_instance);
+		CHECK(c->pwm_channel == expected[i].pwm_channel,
+		      "index %u -> PWM channel %u", i, c->pwm_channel);
+		CHECK(c->gauge_step == expected[i].gauge_step,
+		      "index %u -> gauge_step %u", i, c->gauge_step);
 	}
 
 	/* The named endpoints match the table above. */
-	CHECK(led_physical_pin_map[LED_IDX_SIDE_PLAY].port == 1 &&
-	      led_physical_pin_map[LED_IDX_SIDE_PLAY].pin == 13,
+	CHECK(led_channel_table[LED_IDX_SIDE_PLAY].port == 1 &&
+	      led_channel_table[LED_IDX_SIDE_PLAY].pin == 13,
 	      "LED_IDX_SIDE_PLAY (nearest PLAY) -> P1.13");
-	CHECK(led_physical_pin_map[LED_IDX_SIDE_FUNCTION].port == 0 &&
-	      led_physical_pin_map[LED_IDX_SIDE_FUNCTION].pin == 1,
+	CHECK(led_channel_table[LED_IDX_SIDE_FUNCTION].port == 0 &&
+	      led_channel_table[LED_IDX_SIDE_FUNCTION].pin == 1,
 	      "LED_IDX_SIDE_FUNCTION (nearest FUNCTION) -> P0.01");
+
+	/* The specific regression this table exists to prevent: the side
+	 * row's PWM channels are 3,2,1,0 for indices 4-7 — NOT 0,1,2,3. A
+	 * hand-derived "index - 4" (the bug that once made the diagnostic
+	 * sweep print this backward) would fail every one of these. */
+	CHECK(led_channel_table[LED_IDX_SIDE_PLAY].pwm_channel == 3,
+	      "regression: index 4 (SIDE_PLAY) -> PWM3 channel 3, not 0");
+	CHECK(led_channel_table[LED_IDX_SIDE_MID1].pwm_channel == 2,
+	      "regression: index 5 (SIDE_MID1) -> PWM3 channel 2, not 1");
+	CHECK(led_channel_table[LED_IDX_SIDE_MID2].pwm_channel == 1,
+	      "regression: index 6 (SIDE_MID2) -> PWM3 channel 1, not 2");
+	CHECK(led_channel_table[LED_IDX_SIDE_FUNCTION].pwm_channel == 0,
+	      "regression: index 7 (SIDE_FUNCTION) -> PWM3 channel 0, not 3");
+
+	/* gauge_step ascends bottom-to-top from SIDE_PLAY exactly like the
+	 * table's own row order — "one verified physical bottom-to-top index
+	 * map", not a second assumption. */
+	for (uint8_t i = LED_TRACK_ROW_COUNT; i < LED_PHYSICAL_COUNT; i++) {
+		CHECK(led_channel_table[i].gauge_step == i - LED_TRACK_ROW_COUNT,
+		      "gauge_step for side index %u == %u (bottom-to-top order)",
+		      i, i - LED_TRACK_ROW_COUNT);
+	}
 }
 
 /* ------------------------------------------------------------------------
@@ -204,55 +250,167 @@ static void test_midi_dispatch(void)
 }
 
 /* ------------------------------------------------------------------------
- * Battery / Play local baseline
+ * Battery / charging local baseline: the real SP-1 charging-gauge state
+ * machine (led_battery.h), replacing the old arbitrary quintile model.
  * ------------------------------------------------------------------------ */
-static void test_battery_baseline(void)
+static void test_battery_unavailable_and_fault_are_never_low(void)
 {
-	CHECK(led_battery_step(0) == 0, "battery value 0 -> step 0 (empty)");
-	CHECK(led_battery_step(127) == LED_BATTERY_STEP_COUNT, "battery value 127 -> step 4 (full)");
-	CHECK(led_battery_is_low(0), "value 0 is the low-battery step");
-	CHECK(!led_battery_is_low(127), "value 127 is not the low-battery step");
+	led_battery_gauge_t g;
 
-	/* Monotonic step function. */
-	uint8_t prev_step = 0;
-	int monotonic = 1;
+	led_battery_gauge_reset(&g);
+	CHECK(led_battery_classify(&g, false, false) == LED_BATTERY_UNAVAILABLE,
+	      "never-seeded gauge classifies UNAVAILABLE, not empty/low");
+	CHECK(!led_battery_state_is_low(LED_BATTERY_UNAVAILABLE),
+	      "UNAVAILABLE is never classified as low battery");
 
-	for (int v = 0; v <= (int)LED_LEVEL_MAX; v++) {
-		uint8_t step = led_battery_step((uint8_t)v);
+	/* A failed read after at least one valid sample -> FAULT, not LOW,
+	 * and the sticky level/EMA from the prior valid sample survive. */
+	led_battery_gauge_update(&g, true, 1000); /* valid, seeds level 1 (below thr1) */
+	uint8_t level_before = g.level;
 
-		if (step < prev_step)
-			monotonic = 0;
-		prev_step = step;
-	}
-	CHECK(monotonic, "battery value -> step is monotonic non-decreasing");
+	led_battery_gauge_update(&g, false, 0); /* failed read: sticky */
+	CHECK(g.level == level_before, "a failed read leaves the sticky level unchanged");
+	CHECK(led_battery_classify(&g, false, false) == LED_BATTERY_FAULT,
+	      "a failed read after a valid one classifies FAULT, not LOW");
+	CHECK(!led_battery_state_is_low(LED_BATTERY_FAULT),
+	      "FAULT is never classified as low battery");
 
-	/* Full frame: Track row always off, side row lit ascending from
-	 * SIDE_PLAY toward SIDE_FUNCTION, exactly `step` of the 4 lit. */
+	/* Charger-status fault: nCHG asserted without nPGOOD is contradictory. */
+	CHECK(led_battery_classify(&g, false, true) == LED_BATTERY_FAULT,
+	      "charging_now with charger_present == false is a charger-status FAULT");
+
+	/* Neither UNAVAILABLE nor FAULT ever blocks host rendering: the ONLY
+	 * state allowed to preempt an owned host frame is LED_BATTERY_LOW —
+	 * "must never suppress a valid host LED frame". */
+	CHECK(led_render_select(false, led_battery_state_is_low(LED_BATTERY_UNAVAILABLE), true) ==
+		      LED_RENDER_SOURCE_HOST,
+	      "UNAVAILABLE battery state never blocks an owned host frame");
+	CHECK(led_render_select(false, led_battery_state_is_low(LED_BATTERY_FAULT), true) ==
+		      LED_RENDER_SOURCE_HOST,
+	      "FAULT battery state never blocks an owned host frame");
+}
+
+static void test_battery_charging_states_distinct(void)
+{
+	led_battery_gauge_t g;
+
+	led_battery_gauge_reset(&g);
+	led_battery_gauge_update(&g, true, 1000); /* well below THR_1: bottom quarter */
+
+	CHECK(led_battery_classify(&g, false, false) == LED_BATTERY_LOW,
+	      "charger absent + valid bottom-quarter reading classifies LOW");
+	CHECK(led_battery_classify(&g, true, true) == LED_BATTERY_CHARGING,
+	      "charger present + nCHG asserted -> CHARGING");
+	CHECK(led_battery_classify(&g, true, false) == LED_BATTERY_CHARGE_COMPLETE,
+	      "charger present + nCHG deasserted -> CHARGE_COMPLETE");
+	CHECK(led_battery_classify(&g, false, false) != led_battery_classify(&g, true, true),
+	      "CHARGER_ABSENT/LOW and CHARGING are distinct states");
+	CHECK(led_battery_classify(&g, true, true) != led_battery_classify(&g, true, false),
+	      "CHARGING and CHARGE_COMPLETE are distinct states");
+	CHECK(!led_battery_state_is_low(LED_BATTERY_CHARGING) &&
+	      !led_battery_state_is_low(LED_BATTERY_CHARGE_COMPLETE),
+	      "neither CHARGING nor CHARGE_COMPLETE is ever classified as low battery");
+}
+
+static void test_battery_low_threshold_and_hysteresis(void)
+{
+	led_battery_gauge_t g;
+
+	led_battery_gauge_reset(&g);
+	/* Below THR_1: bottom quarter, charger absent -> LOW. */
+	led_battery_gauge_update(&g, true, (int32_t)LED_BATTERY_THR_1 - 100);
+	CHECK(g.level == 1, "a reading well below THR_1 seeds gauge level 1");
+	CHECK(led_battery_classify(&g, false, false) == LED_BATTERY_LOW,
+	      "charger absent, valid, bottom quarter -> LOW");
+	CHECK(led_battery_state_is_low(led_battery_classify(&g, false, false)),
+	      "LOW is the only state where led_battery_state_is_low() is true");
+
+	/* Comfortably above THR_3: top quarter, charger absent -> not low. */
+	led_battery_gauge_reset(&g);
+	led_battery_gauge_update(&g, true, (int32_t)LED_BATTERY_THR_3 + 200);
+	CHECK(g.level == 4, "a reading well above THR_3 seeds gauge level 4");
+	CHECK(led_battery_classify(&g, false, false) == LED_BATTERY_CHARGER_ABSENT,
+	      "charger absent, valid, top quarter -> CHARGER_ABSENT, not LOW");
+
+	/* Hysteresis at the level 1->2 boundary, exercised directly against
+	 * the EMA rather than through repeated smoothing (whose exact
+	 * trajectory is an implementation detail): an EMA that has crossed
+	 * THR_1 but not yet THR_1 + LED_BATTERY_HYSTERESIS_COUNTS must NOT
+	 * bump the sticky level yet — "a single sample per pass with no
+	 * hysteresis let ADC noise ... flip the level" [looper a8dd127:4622-4629]
+	 * is exactly the flicker this guards against. */
+	led_battery_gauge_reset(&g);
+	g.ema = 2000;         /* just under THR_1 (2020), already established */
+	g.level = 1;
+	g.ever_valid = true;
+	g.last_read_ok = true;
+	led_battery_gauge_update(&g, true, 2200); /* ema -> 2000+(2200-2000)/8 = 2025: > THR_1, inside hysteresis */
+	CHECK(g.level == 1,
+	      "EMA just past THR_1 but inside the hysteresis band does not bump the level yet");
+	led_battery_gauge_update(&g, true, 2300); /* ema -> 2025+(2300-2025)/8 = 2059: past THR_1+18 */
+	CHECK(g.level == 2,
+	      "EMA past THR_1 + LED_BATTERY_HYSTERESIS_COUNTS finally bumps the level");
+}
+
+static void test_battery_gauge_frame_distinct(void)
+{
+	led_battery_gauge_t g;
 	uint8_t frame[LED_PHYSICAL_COUNT];
 
-	led_battery_frame(127, frame); /* step 4: all 4 side LEDs lit */
+	led_battery_gauge_reset(&g);
+
+	/* Never seeded: entire side row off, never fabricated. */
+	led_battery_gauge_frame(&g, false, false, frame);
 	for (uint8_t i = 0; i < LED_TRACK_ROW_COUNT; i++)
-		CHECK(frame[i] == 0, "battery frame: Track LED %u stays off", i);
-	for (uint8_t i = 0; i < LED_SIDE_ROW_COUNT; i++)
-		CHECK(frame[LED_TRACK_ROW_COUNT + i] == LED_LEVEL_MAX,
-		      "battery frame at full charge: side LED %u fully lit", i);
+		CHECK(frame[i] == 0, "never-seeded gauge frame: Track LED %u off", i);
+	for (uint8_t i = LED_TRACK_ROW_COUNT; i < LED_PHYSICAL_COUNT; i++)
+		CHECK(frame[i] == 0, "never-seeded gauge frame: side LED %u off (not fabricated)", i);
 
-	led_battery_frame(0, frame); /* step 0: nothing lit */
-	for (uint8_t i = 0; i < LED_SIDE_ROW_COUNT; i++)
-		CHECK(frame[LED_TRACK_ROW_COUNT + i] == 0,
-		      "battery frame at empty: side LED %u off", i);
+	/* Full level (4), not charging: all four side LEDs solid. */
+	led_battery_gauge_update(&g, true, (int32_t)LED_BATTERY_THR_3 + 300);
+	led_battery_gauge_frame(&g, false, false, frame);
+	for (uint8_t i = LED_TRACK_ROW_COUNT; i < LED_PHYSICAL_COUNT; i++)
+		CHECK(frame[i] == LED_LEVEL_MAX, "full level, not charging: side LED %u solid", i);
 
-	/* A mid-range value lights a partial, ascending-from-PLAY count. */
-	uint8_t mid_step = led_battery_step(70);
+	/* Partial level (2), not charging: below-level solid, at-level solid
+	 * (not charging), above-level off — and this must differ from the
+	 * charging-blink rendering of the exact same level. */
+	led_battery_gauge_reset(&g);
+	led_battery_gauge_update(&g, true, (int32_t)LED_BATTERY_THR_1 + 40); /* -> level 2 */
+	CHECK(g.level == 2, "seeded at level 2 for the partial-frame checks");
 
-	led_battery_frame(70, frame);
-	for (uint8_t i = 0; i < LED_SIDE_ROW_COUNT; i++) {
-		bool expect_lit = i < mid_step;
+	uint8_t not_charging_frame[LED_PHYSICAL_COUNT];
+	uint8_t charging_blink_off_frame[LED_PHYSICAL_COUNT];
+	uint8_t charging_blink_on_frame[LED_PHYSICAL_COUNT];
 
-		CHECK((frame[LED_TRACK_ROW_COUNT + i] == LED_LEVEL_MAX) == expect_lit,
-		      "battery frame value=70 (step %u): side LED %u lit == %d",
-		      mid_step, i, (int)expect_lit);
-	}
+	led_battery_gauge_frame(&g, false, false, not_charging_frame);
+	led_battery_gauge_frame(&g, true, false, charging_blink_off_frame);
+	led_battery_gauge_frame(&g, true, true, charging_blink_on_frame);
+
+	/* Step 0 (bottom, LED_IDX_SIDE_PLAY): strictly below level 2 -> solid
+	 * in all three (never blinks). */
+	CHECK(not_charging_frame[LED_IDX_SIDE_PLAY] == LED_LEVEL_MAX &&
+	      charging_blink_off_frame[LED_IDX_SIDE_PLAY] == LED_LEVEL_MAX &&
+	      charging_blink_on_frame[LED_IDX_SIDE_PLAY] == LED_LEVEL_MAX,
+	      "the bottom (below-level) side LED is solid regardless of charging or blink phase");
+
+	/* Step 1 (LED_IDX_SIDE_MID1) is the current/top level: solid when not
+	 * charging, follows blink_phase when charging — "the next level
+	 * blinking while charging, and all four solid when charging is
+	 * complete" behavior, exercised directly. */
+	CHECK(not_charging_frame[LED_IDX_SIDE_MID1] == LED_LEVEL_MAX,
+	      "not charging: the current level's LED is solid");
+	CHECK(charging_blink_off_frame[LED_IDX_SIDE_MID1] == 0,
+	      "charging, blink phase off: the current level's LED is dark");
+	CHECK(charging_blink_on_frame[LED_IDX_SIDE_MID1] == LED_LEVEL_MAX,
+	      "charging, blink phase on: the current level's LED is lit");
+	CHECK(memcmp(not_charging_frame, charging_blink_off_frame, LED_PHYSICAL_COUNT) != 0,
+	      "charge-complete (not charging) and mid-blink-off frames are visibly distinct");
+
+	/* Steps 2-3: strictly above level 2 -> off in all three. */
+	CHECK(not_charging_frame[LED_IDX_SIDE_MID2] == 0 &&
+	      not_charging_frame[LED_IDX_SIDE_FUNCTION] == 0,
+	      "above-level side LEDs stay off");
 }
 
 /* ------------------------------------------------------------------------
@@ -280,6 +438,236 @@ static void test_capability_gate(void)
 	CHECK(led_capability_should_answer(true), "renderer ready: capability query is answered");
 	CHECK(!led_capability_should_answer(false),
 	      "renderer NOT ready: capability query is never answered as supported");
+}
+
+/* ------------------------------------------------------------------------
+ * led_render_policy.c: write/retry/fault-latch policy, driven through a
+ * MOCKED physical write (led_channel_write_fn) that can be told to fail on
+ * demand — this is the "mocked PWM-write coverage" the corrected renderer
+ * requires, exercising the exact same pure module led_render.c binds to
+ * pwm_set_pulse_dt() through.
+ * ------------------------------------------------------------------------ */
+typedef struct {
+	bool fail[LED_PHYSICAL_COUNT];
+	int  fail_rc;
+	int  write_count[LED_PHYSICAL_COUNT];
+	uint32_t last_pulse[LED_PHYSICAL_COUNT];
+} mock_pwm_t;
+
+static void mock_reset(mock_pwm_t *m)
+{
+	uint8_t i;
+
+	for (i = 0; i < LED_PHYSICAL_COUNT; i++) {
+		m->fail[i] = false;
+		m->write_count[i] = 0;
+		m->last_pulse[i] = 0xFFFFFFFFu;
+	}
+	m->fail_rc = -1;
+}
+
+static int mock_write(uint8_t index, uint32_t pulse_us, void *ctx)
+{
+	mock_pwm_t *m = (mock_pwm_t *)ctx;
+
+	m->write_count[index]++;
+	if (m->fail[index]) {
+		return m->fail_rc;
+	}
+	m->last_pulse[index] = pulse_us;
+	return 0;
+}
+
+static void test_render_policy_bringup(void)
+{
+	led_render_policy_t p;
+	mock_pwm_t m;
+	bool ok;
+	uint8_t i;
+
+	led_render_policy_init(&p);
+	CHECK(!led_render_policy_is_ready(&p), "policy starts not ready before any bringup");
+
+	mock_reset(&m);
+	ok = led_render_policy_bringup(&p, mock_write, &m);
+	CHECK(ok, "bringup with all 8 channels succeeding reports success");
+	CHECK(led_render_policy_is_ready(&p), "is_ready reflects a fully successful bringup");
+	for (i = 0; i < LED_PHYSICAL_COUNT; i++)
+		CHECK(m.write_count[i] == 1, "bringup proves channel %u with exactly one write", i);
+}
+
+static void test_render_policy_bringup_partial_failure(void)
+{
+	led_render_policy_t p;
+	mock_pwm_t m;
+	bool ok;
+	uint8_t idx;
+	int rc;
+
+	led_render_policy_init(&p);
+	mock_reset(&m);
+	m.fail[3] = true;
+	m.fail_rc = -5;
+
+	ok = led_render_policy_bringup(&p, mock_write, &m);
+	CHECK(!ok, "bringup with one failing channel reports failure");
+	CHECK(!led_render_policy_is_ready(&p), "is_ready stays false after a partial bringup failure");
+
+	led_render_policy_last_failure(&p, &idx, &rc);
+	CHECK(idx == 3 && rc == -5,
+	      "the exact failing index (3) and return code (-5) are recorded for CDC");
+}
+
+static void test_render_policy_unnecessary_rewrite_suppressed(void)
+{
+	led_render_policy_t p;
+	mock_pwm_t m;
+	uint8_t levels[LED_PHYSICAL_COUNT] = { 0 };
+	int rc;
+
+	led_render_policy_init(&p);
+	mock_reset(&m);
+	led_render_policy_bringup(&p, mock_write, &m); /* all-zero proven */
+
+	mock_reset(&m);
+	levels[2] = 50;
+	rc = led_render_policy_apply(&p, levels, mock_write, &m);
+	CHECK(rc == 0, "apply with one changed channel fully succeeds");
+	CHECK(m.write_count[2] == 1, "the changed channel is written");
+	for (uint8_t i = 0; i < LED_PHYSICAL_COUNT; i++)
+		if (i != 2)
+			CHECK(m.write_count[i] == 0,
+			      "unchanged channel %u is not unnecessarily rewritten", i);
+
+	mock_reset(&m);
+	rc = led_render_policy_apply(&p, levels, mock_write, &m);
+	CHECK(rc == 0 && m.write_count[2] == 0,
+	      "resending the identical frame writes nothing at all (already known-good)");
+}
+
+static void test_render_policy_failed_write_not_cached_and_retried(void)
+{
+	led_render_policy_t p;
+	mock_pwm_t m;
+	uint8_t levels[LED_PHYSICAL_COUNT] = { 0 };
+	int rc, prev_count;
+
+	led_render_policy_init(&p);
+	mock_reset(&m);
+	led_render_policy_bringup(&p, mock_write, &m);
+
+	mock_reset(&m);
+	m.fail[5] = true;
+	m.fail_rc = -7;
+	levels[5] = 90;
+	rc = led_render_policy_apply(&p, levels, mock_write, &m);
+	CHECK(rc == -1, "one failed channel: apply reports exactly one failure");
+	CHECK(m.write_count[5] == 1, "the failing channel was attempted once");
+	CHECK(!p.cache_valid[5],
+	      "a failed write is NOT cached as successful (cache_valid cleared)");
+	CHECK(p.dirty[5], "a failed write leaves the channel dirty for a deterministic retry");
+	CHECK(led_render_policy_is_ready(&p),
+	      "a single failure (below the consecutive-fail threshold) does not latch a fault");
+
+	m.fail[5] = false;
+	prev_count = m.write_count[5];
+	rc = led_render_policy_apply(&p, levels, mock_write, &m);
+	CHECK(rc == 0, "retrying after the transient failure clears now succeeds");
+	CHECK(m.write_count[5] == prev_count + 1,
+	      "the SAME requested level (90) is retried on the very next apply()");
+	CHECK(p.cache_valid[5] && p.cached_level[5] == 90,
+	      "a successful retry finally caches the level");
+}
+
+static void test_render_policy_fault_latch_and_safe_state(void)
+{
+	led_render_policy_t p;
+	mock_pwm_t m;
+	uint8_t levels[LED_PHYSICAL_COUNT] = { 0 };
+	int rc;
+	uint8_t k;
+
+	led_render_policy_init(&p);
+	mock_reset(&m);
+	led_render_policy_bringup(&p, mock_write, &m);
+
+	levels[1] = 10;
+	m.fail[1] = true;
+	m.fail_rc = -9;
+
+	for (k = 0; (unsigned)(k + 1) < LED_RENDER_MAX_CONSECUTIVE_FAILS; k++) {
+		rc = led_render_policy_apply(&p, levels, mock_write, &m);
+		CHECK(rc == -1 && led_render_policy_is_ready(&p),
+		      "still ready after %u consecutive failure(s) on one channel", (unsigned)(k + 1));
+	}
+
+	mock_reset(&m);
+	m.fail[1] = true;
+	m.fail_rc = -9;
+	rc = led_render_policy_apply(&p, levels, mock_write, &m);
+	CHECK(!led_render_policy_is_ready(&p),
+	      "renderer latches not-ready after LED_RENDER_MAX_CONSECUTIVE_FAILS consecutive "
+	      "failures on one channel");
+	CHECK(rc < 0, "apply reports failure on the call that latches the fault");
+	CHECK(!led_capability_should_answer(led_render_policy_is_ready(&p)),
+	      "capability response is suppressed the instant the fault latches");
+
+	/* Safe state: the fault-latching call also forces every channel to a
+	 * best-effort 0us write ("put the outputs into the documented safe
+	 * state"), not just the one that failed. */
+	CHECK(m.write_count[0] >= 1 && m.write_count[7] >= 1,
+	      "channels never touched by the failing frame still receive a forced safe-state write");
+	CHECK(m.last_pulse[0] == 0u, "the forced safe-state write drives an untouched channel to 0us");
+
+	/* Fully suppressed while faulted: no writes of any kind. */
+	mock_reset(&m);
+	rc = led_render_policy_apply(&p, levels, mock_write, &m);
+	CHECK(rc == -1, "apply() while faulted returns immediately");
+	for (uint8_t i = 0; i < LED_PHYSICAL_COUNT; i++)
+		CHECK(m.write_count[i] == 0, "no physical write of any kind is issued while faulted (channel %u)", i);
+}
+
+static void test_render_policy_recovery_requires_all_eight(void)
+{
+	led_render_policy_t p;
+	mock_pwm_t m;
+	uint8_t levels[LED_PHYSICAL_COUNT] = { 0 };
+	bool ok;
+	uint8_t k;
+
+	led_render_policy_init(&p);
+	mock_reset(&m);
+	led_render_policy_bringup(&p, mock_write, &m);
+
+	/* Drive channel 4 to a latched fault. */
+	levels[4] = 77;
+	m.fail[4] = true;
+	m.fail_rc = -2;
+	for (k = 0; k < LED_RENDER_MAX_CONSECUTIVE_FAILS; k++) {
+		mock_reset(&m);
+		m.fail[4] = true;
+		m.fail_rc = -2;
+		(void)led_render_policy_apply(&p, levels, mock_write, &m);
+	}
+	CHECK(!led_render_policy_is_ready(&p), "channel 4 fault-latched the renderer as expected");
+
+	/* Recovery attempt with one channel STILL bad: must stay not-ready. */
+	mock_reset(&m);
+	m.fail[2] = true;
+	m.fail_rc = -3;
+	ok = led_render_policy_bringup(&p, mock_write, &m);
+	CHECK(!ok && !led_render_policy_is_ready(&p),
+	      "a recovery attempt with one channel still failing stays not-ready");
+	CHECK(!led_capability_should_answer(led_render_policy_is_ready(&p)),
+	      "capability stays suppressed through a partial recovery attempt");
+
+	/* Now every channel is healthy. */
+	mock_reset(&m);
+	ok = led_render_policy_bringup(&p, mock_write, &m);
+	CHECK(ok && led_render_policy_is_ready(&p),
+	      "recovery restores capability only once all eight channels are usable");
+	CHECK(led_capability_should_answer(led_render_policy_is_ready(&p)),
+	      "capability is answered again immediately after full recovery");
 }
 
 /* ------------------------------------------------------------------------
@@ -658,9 +1046,18 @@ int main(void)
 	test_level_to_duty();
 	test_diff_frame();
 	test_midi_dispatch();
-	test_battery_baseline();
+	test_battery_unavailable_and_fault_are_never_low();
+	test_battery_charging_states_distinct();
+	test_battery_low_threshold_and_hysteresis();
+	test_battery_gauge_frame_distinct();
 	test_render_precedence();
 	test_capability_gate();
+	test_render_policy_bringup();
+	test_render_policy_bringup_partial_failure();
+	test_render_policy_unnecessary_rewrite_suppressed();
+	test_render_policy_failed_write_not_cached_and_retried();
+	test_render_policy_fault_latch_and_safe_state();
+	test_render_policy_recovery_requires_all_eight();
 	test_stage_not_visible();
 	test_first_commit();
 	test_partial_subsequent_commit();

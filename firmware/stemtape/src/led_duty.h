@@ -1,12 +1,22 @@
 /*
- * led_duty.h — Stem Tape LED Feedback Protocol v1: physical index/pin table,
- * level-to-duty math, and unchanged-frame diffing.
+ * led_duty.h — Stem Tape LED Feedback Protocol v1: the ONE authoritative
+ * physical LED hardware table, level-to-duty math, and unchanged-frame
+ * diffing.
  *
- * PURE: no Zephyr, no PWM driver calls. This is the documented, host-tested
- * mirror of the index map in led_protocol.h and app.overlay's `pwm-leds`
- * child order; led_render.c's devicetree-backed PWM spec array must list the
- * same 8 GPIOs in the same order (checked by code review + this table, since
- * a host test cannot reach into a compiled devicetree).
+ * PURE: no Zephyr, no PWM driver calls. led_channel_table[] below is the
+ * single source of truth for logical index -> physical role -> GPIO -> PWM
+ * instance/channel -> gauge position. Every other consumer reads FROM this
+ * table instead of re-deriving any of those fields on its own:
+ *   - led_render.c's devicetree PWM spec array is cross-checked against this
+ *     table's pwm_instance/pwm_channel at led_render_init() time (a runtime
+ *     assertion, not just a comment) — it cannot silently drift from this
+ *     table without the renderer failing to come up ready.
+ *   - main.c's led_diag_sweep() prints straight from this table (no
+ *     hand-derived "row < 4 ? ..." arithmetic, which is exactly the class of
+ *     bug that once made the sweep report the side row's PWM channels
+ *     backward).
+ *   - the host tests (tests/test_led.c) check this table directly.
+ *   - docs/stem-tape-led-feedback-v1.md mirrors it for the web team.
  */
 
 #ifndef STEMTAPE_LED_DUTY_H_
@@ -17,13 +27,25 @@
 
 #include "led_protocol.h"
 
-typedef struct {
-	uint8_t port; /* 0 = P0, 1 = P1 */
-	uint8_t pin;
-} led_physical_pin_t;
+/* No side-row gauge position (Track row channels 0..3). */
+#define LED_GAUGE_STEP_NONE 0xFFu
 
-/* Indexed 0..7, exactly the led_protocol.h table. */
-extern const led_physical_pin_t led_physical_pin_map[LED_PHYSICAL_COUNT];
+typedef struct {
+	uint8_t index;         /* protocol/physical index, == this entry's array position */
+	uint8_t port;           /* 0 = P0, 1 = P1 */
+	uint8_t pin;
+	uint8_t pwm_instance;   /* 2 or 3 (NRF_PWM2 / NRF_PWM3) */
+	uint8_t pwm_channel;    /* 0..3, channel within that PWM instance */
+	uint8_t gauge_step;     /* 0..3: bottom-to-top position in the 4-step
+				  * charging gauge (led_battery.h) for indices
+				  * 4-7; LED_GAUGE_STEP_NONE for 0-3 */
+	const char *role;       /* human-readable physical role, e.g. "Track 1"
+				  * or "Side, nearest PLAY" */
+} led_channel_t;
+
+/* Indexed 0..7, exactly the led_protocol.h table — THE authoritative table;
+ * see this header's top comment. */
+extern const led_channel_t led_channel_table[LED_PHYSICAL_COUNT];
 
 /* Row ceiling for a physical index: LED_TRACK_MAX_PULSE_US for 0..3,
  * LED_SIDE_MAX_PULSE_US for 4..7. An out-of-range index returns 0 (no

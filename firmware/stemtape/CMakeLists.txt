@@ -13,4 +13,5 @@ target_sources(app PRIVATE
 	src/led_frame.c
 	src/led_midi.c
 	src/led_render.c
+	src/led_render_policy.c
 )

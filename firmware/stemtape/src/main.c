@@ -75,6 +75,31 @@
  *  does not; only DFU escape, the FUNCTION countdown and boot signature
  *  render anything, and a fatal error reboots with no LED indication before
  *  the next boot_signature(). See docs/stem-tape-led-feedback-v1.md.
+ *
+ *  v1.1.2: CORRECTIONS
+ *  -------------------------------------------
+ *  The side row's local baseline is now the SP-1's own documented 4-step
+ *  CHARGING gauge (led_battery.h), driven from the real BQ24232 nCHG/nPGOOD
+ *  status pins and the AIN4 battery ADC — the previous `value * 5 / 128`
+ *  quintile model is gone, and was never stock SP-1 behavior. An
+ *  unavailable/failed ADC reading, or a charger-status fault, is now its
+ *  own distinct state (never "low") and can never preempt an owned host
+ *  frame or block host rendering, including during startup. led_duty.h's
+ *  led_channel_table[] is now the ONE authoritative index/GPIO/PWM-instance/
+ *  PWM-channel/gauge-position table — led_render.c cross-checks its
+ *  devicetree spec against it at init, and led_diag_sweep() prints straight
+ *  from it, fixing a bug where the sweep printed the side row's PWM
+ *  channels backward (a hand-derived "index - 4" instead of the table's
+ *  real 3,2,1,0 channel order). led_render.c's write path (now
+ *  led_render_policy.c, pure and host-tested with a mocked write function)
+ *  no longer caches a channel's level until its write actually succeeds; a
+ *  failed write retries deterministically, and three consecutive failures
+ *  on one channel fault-latch the whole renderer, release host ownership,
+ *  suppress the CC91 capability response, and force a best-effort safe
+ *  (all-off) state — recoverable only via an explicit reinitialization
+ *  (led_render_reinit(), triggered by typing 'r' into the CDC console) that
+ *  requires all eight channels to prove usable again. See
+ *  docs/stem-tape-led-feedback-v1.md.
  * ============================================================================
  */
 
@@ -131,9 +156,11 @@ void k_sys_fatal_error_handler(unsigned int reason, const struct arch_esf *esf)
  *       visual behavior as the pinned Tape Looper revision
  *       [looper a8dd127:101-108, 3906-3988], now expressed as brightness
  *       levels rendered through hardware PWM;
- *   (b) the local battery/Play baseline (led_battery.h) — the side row's
- *       stock behavior, computed fresh every tick from the same battery
- *       reading sent as MIDI CC24; requires no host connection at all;
+ *   (b) the local charging gauge (led_battery.h) — the side row's stock
+ *       behavior, computed from the real BQ24232 nCHG/nPGOOD status pins and
+ *       the raw AIN4 battery ADC reading (the same 1 Hz sample that also
+ *       feeds MIDI CC24, but NOT the compressed CC24 value itself); requires
+ *       no host connection at all;
  *   (c) g_led_state — the Stem Tape LED Feedback Protocol v1 host frame
  *       (led_frame.h) plus small irq_lock()-guarded wrappers that make
  *       committing/reading it race-safe against the USB MIDI RX path
@@ -277,18 +304,48 @@ static void pwr_btn_arm_wake(void)
 		(GPIO_PIN_CNF_SENSE_Low     << GPIO_PIN_CNF_SENSE_Pos);
 }
 
-/* ---- BQ24232 battery charger control  [looper a8dd127:128, 4274-4279] ---- */
+/* ---- BQ24232 battery charger control + status  [looper a8dd127:126-130,
+ * 4260-4290] ---- */
 #define BQ_PORT         NRF_P0
-#define BQ_NCE_PIN      21u   /* charge enable, ACTIVE-LOW */
+#define BQ_NCE_PIN      21u   /* charge enable, OUTPUT, ACTIVE-LOW */
+#define BQ_NCHG_PIN     22u   /* charge status, INPUT, open-drain, LOW = charging now */
+#define BQ_NPGOOD_PIN   24u   /* power good,    INPUT, open-drain, LOW = charger present */
 
+/* Drives nCE low (charging enabled) exactly as before, and additionally
+ * configures the two charger STATUS pins (nCHG, nPGOOD) as pulled-up inputs
+ * — both open-drain outputs of the BQ24232 — so charger_present()/
+ * charging_now() below can read them. Neither status pin is ever driven;
+ * only nCE is an output. [looper a8dd127:4263-4280] */
 static void charger_init(void)
 {
-	BQ_PORT->OUTCLR = (1u << BQ_NCE_PIN);          /* charging enabled */
+	BQ_PORT->PIN_CNF[BQ_NCHG_PIN] =
+		(GPIO_PIN_CNF_DIR_Input     << GPIO_PIN_CNF_DIR_Pos)  |
+		(GPIO_PIN_CNF_PULL_Pullup   << GPIO_PIN_CNF_PULL_Pos) |
+		(GPIO_PIN_CNF_INPUT_Connect << GPIO_PIN_CNF_INPUT_Pos);
+	BQ_PORT->PIN_CNF[BQ_NPGOOD_PIN] =
+		(GPIO_PIN_CNF_DIR_Input     << GPIO_PIN_CNF_DIR_Pos)  |
+		(GPIO_PIN_CNF_PULL_Pullup   << GPIO_PIN_CNF_PULL_Pos) |
+		(GPIO_PIN_CNF_INPUT_Connect << GPIO_PIN_CNF_INPUT_Pos);
+
+	BQ_PORT->OUTCLR = (1u << BQ_NCE_PIN);          /* drive low first */
 	BQ_PORT->PIN_CNF[BQ_NCE_PIN] =
 		(GPIO_PIN_CNF_DIR_Output    << GPIO_PIN_CNF_DIR_Pos)   |
 		(GPIO_PIN_CNF_DRIVE_S0S1    << GPIO_PIN_CNF_DRIVE_Pos) |
 		(GPIO_PIN_CNF_INPUT_Connect << GPIO_PIN_CNF_INPUT_Pos);
-	BQ_PORT->OUTCLR = (1u << BQ_NCE_PIN);
+	BQ_PORT->OUTCLR = (1u << BQ_NCE_PIN);          /* nCE low = charge enabled */
+}
+
+/* [looper a8dd127:4283-4286]: open-drain, LOW = active. */
+static bool charger_present(void)
+{
+	return (BQ_PORT->IN & (1u << BQ_NPGOOD_PIN)) == 0u;
+}
+/* [looper a8dd127:4287-4290]: open-drain, LOW = active. Only meaningful
+ * together with charger_present() — see led_battery_classify()'s
+ * charger-status-fault case for what an unaccompanied reading means. */
+static bool charging_now(void)
+{
+	return (BQ_PORT->IN & (1u << BQ_NCHG_PIN)) == 0u;
 }
 
 /* ----------------------------------------------------- button ladders ----
@@ -629,6 +686,19 @@ static bool diag_open(void)
 	return dtr != 0;
 }
 
+static const char *batt_state_name(led_battery_state_t s)
+{
+	switch (s) {
+	case LED_BATTERY_UNAVAILABLE:  return "UNAVAILABLE";
+	case LED_BATTERY_FAULT:        return "FAULT";
+	case LED_BATTERY_CHARGER_ABSENT: return "CHARGER_ABSENT";
+	case LED_BATTERY_CHARGING:     return "CHARGING";
+	case LED_BATTERY_CHARGE_COMPLETE: return "CHARGE_COMPLETE";
+	case LED_BATTERY_LOW:          return "LOW";
+	default:                       return "?";
+	}
+}
+
 static void mask_str(uint32_t m, char *out, size_t n)
 {
 	if (m == MASK_UNMEASURED) {
@@ -763,13 +833,20 @@ static void boot_signature(void)
 }
 
 /* ------------------------------------------------ LED diagnostic sweep ---
- * Lights physical indices 0..7 one at a time, printing index/GPIO/PWM
+ * Lights physical indices 0..7 one at a time, printing index/role/GPIO/PWM
  * instance+channel over CDC so a bench technician can visually confirm (or
  * correct) the index<->GPIO<->enclosure-position mapping — for the side row
  * (4-7) this is currently a BEST-EFFORT INFERENCE, not a hardware-confirmed
  * fact (see led_protocol.h). Triggered by typing 's' into the CDC console
  * while DTR is asserted (see the main loop). Blocking, like
  * boot_signature()/enter_dfu(); feeds the watchdog throughout.
+ *
+ * Every printed field is read straight from led_channel_table[] (led_duty.h)
+ * — the ONE authoritative hardware table also used by led_render.c to build
+ * its devicetree PWM spec array. There is no separate hand-derived
+ * "row < 4 ? ..." arithmetic here anymore: that duplication is exactly what
+ * once made this sweep report the side row's PWM channels backward
+ * (channels 3,2,1,0 for indices 4-7, not 0,1,2,3).
  *
  * This function is the TOOL for physical confirmation. Running it here does
  * not itself constitute hardware verification — only an operator watching
@@ -783,17 +860,14 @@ static void led_diag_sweep(void)
 	       (unsigned)LED_PHYSICAL_COUNT, (unsigned)SWEEP_STEP_MS);
 	for (uint8_t i = 0; i < LED_PHYSICAL_COUNT; i++) {
 		uint8_t frame[LED_PHYSICAL_COUNT] = { 0 };
-		const led_physical_pin_t *pin = &led_physical_pin_map[i];
-		unsigned pwm_inst = (i < LED_TRACK_ROW_COUNT) ? 2u : 3u;
-		unsigned pwm_ch = (i < LED_TRACK_ROW_COUNT) ? i
-					: (unsigned)(i - LED_TRACK_ROW_COUNT);
+		const led_channel_t *ch = &led_channel_table[i];
 		int rc;
 
 		frame[i] = (uint8_t)LED_LEVEL_MAX;
 		rc = led_render_apply(frame);
-		printk("led_sweep: index=%u P%u.%02u pwm%u ch%u apply_rc=%d\n",
-		       (unsigned)i, (unsigned)pin->port, (unsigned)pin->pin,
-		       pwm_inst, pwm_ch, rc);
+		printk("led_sweep: index=%u role=\"%s\" P%u.%02u pwm%u ch%u apply_rc=%d\n",
+		       (unsigned)ch->index, ch->role, (unsigned)ch->port, (unsigned)ch->pin,
+		       (unsigned)ch->pwm_instance, (unsigned)ch->pwm_channel, rc);
 		feed_wdt();
 		k_msleep(SWEEP_STEP_MS);
 	}
@@ -873,6 +947,9 @@ int main(void)
 	int fader_rr = 0;
 	int batt_last = -1;
 	int64_t batt_t = 0;
+	led_battery_gauge_t batt_gauge;
+
+	led_battery_gauge_reset(&batt_gauge); /* cold-boot: no reading yet, never fabricated */
 
 	/* diagnostics */
 	int64_t diag_t = 0;
@@ -895,6 +972,15 @@ int main(void)
 	uint32_t led_diag_stale_heartbeats = 0, led_diag_render_failures = 0;
 	bool led_diag_renderer_ready = false;
 	uint32_t led_diag_pwm_errors = 0;
+	uint8_t led_diag_fail_idx = LED_PHYSICAL_COUNT;
+	int led_diag_fail_rc = 0;
+
+	/* Battery/charging diagnostics: same change-triggered pattern. */
+	int64_t batt_diag_t = 0;
+	bool batt_diag_valid = false;
+	led_battery_state_t batt_diag_state = LED_BATTERY_UNAVAILABLE;
+	uint8_t batt_diag_level = 0;
+	int32_t batt_diag_ema = -1;
 
 	for (;;) {
 		feed_wdt();
@@ -921,6 +1007,7 @@ int main(void)
 		bool fn_was = (stable & BTN_FUNCTION) != 0u;
 		bool countdown_active = false;
 		bool sweep_requested = false;   /* set below if 's' arrives over CDC */
+		bool reinit_requested = false;  /* set below if 'r' arrives over CDC */
 		if (fn_now && !fn_was) {
 			press_start = k_uptime_get();
 			press_spent = false;
@@ -953,17 +1040,22 @@ int main(void)
 		 * two cases that run interleaved with the main loop, so both
 		 * are checked explicitly here, ahead of any host frame — low
 		 * battery outranks a leased host frame ("low-battery behavior
-		 * continue[s] to outrank host animation"). On a render
-		 * failure, host ownership is released ("fail safely"): LEDs
-		 * simply stop updating, nothing else in the firmware depends
-		 * on LED state. */
+		 * continue[s] to outrank host animation"), but ONLY the
+		 * LED_BATTERY_LOW state counts as "low" here: an unavailable,
+		 * faulted, or charger-related reading must never preempt an
+		 * owned host frame — "not during startup, unknown ADC state,
+		 * or charger-status failure" (led_battery_state_is_low()).
+		 * On a render failure that actually LATCHES the renderer
+		 * not-ready (not a single transient retry), host ownership is
+		 * released ("fail safely"): LEDs simply stop updating, nothing
+		 * else in the firmware depends on LED state. */
 		(void)led_state_check_timeout((uint32_t)k_uptime_get());
 		{
-			/* battery_last is updated at most once a second below;
-			 * -1 (never read yet, e.g. the first second after boot)
-			 * is treated as the lowest/safest reading. */
-			uint8_t battery_for_led = (batt_last >= 0) ? (uint8_t)batt_last : 0u;
-			bool low_battery = led_battery_is_low(battery_for_led);
+			bool chg_present = charger_present();
+			bool chg_now = charging_now();
+			led_battery_state_t batt_state =
+				led_battery_classify(&batt_gauge, chg_present, chg_now);
+			bool low_battery = led_battery_state_is_low(batt_state);
 			uint8_t led_snapshot[LED_PHYSICAL_COUNT];
 			bool led_owned;
 			int render_rc;
@@ -975,8 +1067,9 @@ int main(void)
 				break;
 			case LED_RENDER_SOURCE_LOCAL: {
 				uint8_t local_frame[LED_PHYSICAL_COUNT];
+				bool blink_phase = (((uint32_t)k_uptime_get() / 500u) & 1u) != 0u;
 
-				led_battery_frame(battery_for_led, local_frame);
+				led_battery_gauge_frame(&batt_gauge, chg_now, blink_phase, local_frame);
 				render_rc = led_render_apply(local_frame);
 				break;
 			}
@@ -985,7 +1078,13 @@ int main(void)
 				render_rc = led_render_apply(g_pattern_frame);
 				break;
 			}
-			if (render_rc != 0)
+			/* Guarded on led_owned (nothing to release otherwise) AND
+			 * !led_render_is_ready() (the renderer has actually
+			 * latched a fault, not just a single retried write —
+			 * "retry it deterministically" happens first, inside
+			 * led_render_apply() itself; only an UNRECOVERED failure
+			 * reaches here). */
+			if (render_rc != 0 && led_owned && !led_render_is_ready())
 				led_state_release(LED_RELEASE_RENDER_FAILURE, (uint32_t)k_uptime_get());
 		}
 
@@ -1060,14 +1159,17 @@ int main(void)
 				diag_a1 = a1;
 			}
 
-			/* Eight-step diagnostic sweep trigger: type 's' into the
-			 * CDC console. uart_poll_in() is a plain non-blocking
-			 * poll, independent of the interrupt-driven RX path
-			 * this console otherwise never uses for input. */
+			/* Diagnostic sweep ('s') and renderer recovery ('r')
+			 * triggers over the CDC console. uart_poll_in() is a
+			 * plain non-blocking poll, independent of the
+			 * interrupt-driven RX path this console otherwise
+			 * never uses for input. */
 			unsigned char rx_byte;
 			while (uart_poll_in(cdc, &rx_byte) == 0) {
 				if (rx_byte == 's' || rx_byte == 'S')
 					sweep_requested = true;
+				else if (rx_byte == 'r' || rx_byte == 'R')
+					reinit_requested = true;
 			}
 
 			/* LED Feedback Protocol v1 state: its own change-triggered,
@@ -1101,6 +1203,10 @@ int main(void)
 
 			bool renderer_ready_now = led_render_is_ready();
 			uint32_t pwm_errors_now = led_render_error_count();
+			uint8_t fail_idx_now;
+			int fail_rc_now;
+
+			led_render_last_failure(&fail_idx_now, &fail_rc_now);
 
 			bool led_changed = !led_diag_valid ||
 				owned_now != led_diag_owned ||
@@ -1116,7 +1222,9 @@ int main(void)
 				stale_hb_now != led_diag_stale_heartbeats ||
 				render_fail_now != led_diag_render_failures ||
 				renderer_ready_now != led_diag_renderer_ready ||
-				pwm_errors_now != led_diag_pwm_errors;
+				pwm_errors_now != led_diag_pwm_errors ||
+				fail_idx_now != led_diag_fail_idx ||
+				fail_rc_now != led_diag_fail_rc;
 
 			if (led_changed && now - led_diag_t >= DIAG_MIN_GAP_MS) {
 				/* Wrap-safe elapsed time, same rule as
@@ -1126,6 +1234,7 @@ int main(void)
 					: -1;
 
 				printk("led: owned=%d renderer_ready=%d pwm_errors=%u "
+				       "fail_idx=%u fail_rc=%d "
 				       "seq=%u staged_mask=0x%02x "
 				       "active=%u,%u,%u,%u,%u,%u,%u,%u "
 				       "lease_age_ms=%d valid=%u rejected=%u dup=%u "
@@ -1133,6 +1242,7 @@ int main(void)
 				       "stale_hb=%u render_fail_rel=%u\n",
 				       (int)owned_now, (int)renderer_ready_now,
 				       (unsigned)pwm_errors_now,
+				       (unsigned)fail_idx_now, fail_rc_now,
 				       (unsigned)seq_now, (unsigned)staged_mask_now,
 				       active_now[0], active_now[1], active_now[2], active_now[3],
 				       active_now[4], active_now[5], active_now[6], active_now[7],
@@ -1158,14 +1268,46 @@ int main(void)
 				led_diag_render_failures = render_fail_now;
 				led_diag_renderer_ready = renderer_ready_now;
 				led_diag_pwm_errors = pwm_errors_now;
+				led_diag_fail_idx = fail_idx_now;
+				led_diag_fail_rc = fail_rc_now;
+			}
+
+			/* Battery/charging gauge: its own change-triggered,
+			 * rate-limited line, independent of the streams above. */
+			led_battery_state_t batt_state_now =
+				led_battery_classify(&batt_gauge, charger_present(), charging_now());
+			bool batt_changed = !batt_diag_valid ||
+				batt_state_now != batt_diag_state ||
+				batt_gauge.level != batt_diag_level ||
+				batt_gauge.ema != batt_diag_ema;
+
+			if (batt_changed && now - batt_diag_t >= DIAG_MIN_GAP_MS) {
+				printk("batt: state=%s level=%u ema=%d raw_ok=%d "
+				       "pgood=%d nchg=%d cc24=%d calib=PROVISIONAL\n",
+				       batt_state_name(batt_state_now),
+				       (unsigned)batt_gauge.level, (int)batt_gauge.ema,
+				       (int)batt_gauge.last_read_ok,
+				       (int)charger_present(), (int)charging_now(),
+				       batt_last);
+				batt_diag_t = now;
+				batt_diag_valid = true;
+				batt_diag_state = batt_state_now;
+				batt_diag_level = batt_gauge.level;
+				batt_diag_ema = batt_gauge.ema;
 			}
 		} else {
 			banner_done = false;
 			led_diag_valid = false;
+			batt_diag_valid = false;
 		}
 
 		if (sweep_requested)
 			led_diag_sweep();   /* blocking; resumes normal rendering on return */
+		if (reinit_requested) {
+			int rc = led_render_reinit();
+
+			printk("led_render: reinit rc=%d ready=%d\n", rc, (int)led_render_is_ready());
+		}
 
 		/* ---- faders: one per pass (round-robin keeps ADC cost flat) ---- */
 		int fi = fader_rr;
@@ -1185,10 +1327,20 @@ int main(void)
 			}
 		}
 
-		/* ---- battery, at most once a second ---- */
+		/* ---- battery, at most once a second ----
+		 * The existing surface CC24 send below is unchanged: same
+		 * cadence, same compressed 0..127 value, same "only on
+		 * change" gating. The raw 12-bit code from the SAME read is
+		 * additionally folded into the local charging-gauge state
+		 * (led_battery.h), including on a FAILED read (b < 0) — the
+		 * gauge needs to see the failure to ever report FAULT; the
+		 * CC24 path simply skips sending on that same failure, as
+		 * before. */
 		if (k_uptime_get() - batt_t >= 1000) {
 			batt_t = k_uptime_get();
 			int b = ladder_read(&adc_ladder[LAD_BATT]);
+
+			led_battery_gauge_update(&batt_gauge, b >= 0, (int32_t)b);
 			if (b >= 0) {
 				uint8_t v = (uint8_t)(b >> 5);
 				if (v > 127u) v = 127u;

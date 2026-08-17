@@ -9,11 +9,20 @@
  * LED_SIDE_MAX_PULSE_US) instead of feldd's 0..100% global brightness
  * scale, and channels are driven directly rather than through an on/off +
  * brightness abstraction. The eight `pwm-leds` child node labels below are
- * declared in app.overlay; see led_protocol.h for the index -> GPIO table
- * both mirror. The devicetree node order is fixed by the proven electrical
- * wiring (PWM channel <-> GPIO), NOT by protocol index — led_pwm[] below
- * maps protocol index -> node explicitly so the two can differ (they do,
- * for the side row: see led_protocol.h's physical-inventory comment).
+ * declared in app.overlay; led_duty.h's led_channel_table[] is the
+ * authoritative index -> GPIO -> PWM instance/channel table both mirror.
+ * The devicetree node order is fixed by the proven electrical wiring (PWM
+ * channel <-> GPIO), NOT by protocol index — led_pwm[] below maps protocol
+ * index -> node explicitly so the two can differ (they do, for the side
+ * row: see led_protocol.h's physical-inventory comment). led_render_init()
+ * cross-checks every entry's compiled `.channel` against
+ * led_channel_table[i].pwm_channel at runtime, so this array cannot
+ * silently drift from the authoritative table without the renderer
+ * refusing to come up ready.
+ *
+ * All write/retry/fault-latch POLICY lives in led_render_policy.c (PURE,
+ * host-tested); this file only supplies the one function that actually
+ * touches the PWM driver.
  */
 
 #include "led_render.h"
@@ -25,10 +34,8 @@
 #include <zephyr/drivers/pwm.h>
 
 #include "led_duty.h"
+#include "led_render_policy.h"
 
-/* Index -> devicetree node, by GPIO (see led_protocol.h's table). Node
- * labels name the fixed electrical PWM channel; the array position is the
- * protocol index. */
 static const struct pwm_dt_spec led_pwm[LED_PHYSICAL_COUNT] = {
 	PWM_DT_SPEC_GET(DT_NODELABEL(stemtape_led_track1)),        /* idx 0: P0.29, PWM2 ch0 */
 	PWM_DT_SPEC_GET(DT_NODELABEL(stemtape_led_track2)),        /* idx 1: P0.26, PWM2 ch1 */
@@ -40,80 +47,66 @@ static const struct pwm_dt_spec led_pwm[LED_PHYSICAL_COUNT] = {
 	PWM_DT_SPEC_GET(DT_NODELABEL(stemtape_led_side_function)), /* idx 7: P0.01, PWM3 ch0 */
 };
 
-static bool ready;
-static uint32_t error_count;
-static uint8_t cached_levels[LED_PHYSICAL_COUNT];
-static bool cache_primed;
+static led_render_policy_t g_policy;
 
-int led_render_init(void)
+static int hw_write(uint8_t index, uint32_t pulse_us, void *ctx)
+{
+	ARG_UNUSED(ctx);
+	return pwm_set_pulse_dt(&led_pwm[index], PWM_USEC(pulse_us));
+}
+
+static int bring_up(void)
 {
 	uint8_t i;
-	uint8_t off[LED_PHYSICAL_COUNT] = { 0 };
-	bool all_channels_ready = true;
+	bool all_ready = true;
 
 	for (i = 0; i < LED_PHYSICAL_COUNT; i++) {
 		if (!pwm_is_ready_dt(&led_pwm[i])) {
-			all_channels_ready = false;
+			all_ready = false;
+			continue;
+		}
+		/* Cross-check against the ONE authoritative table (led_duty.h):
+		 * this devicetree spec's compiled channel must match
+		 * led_channel_table[i].pwm_channel exactly, or the wiring
+		 * documented there has drifted from what app.overlay actually
+		 * declares — fail closed rather than drive the wrong channel. */
+		if (led_pwm[i].channel != led_channel_table[i].pwm_channel) {
+			all_ready = false;
 		}
 	}
-	/* Force the first apply() to write every channel regardless of the
-	 * (zero-initialized, therefore possibly already-matching) cache. */
-	cache_primed = false;
-	ready = all_channels_ready;
-
-	/* Prove every channel by writing an explicit duty-0, and require that
-	 * proof to succeed too: "led_render_init() must fail if any
-	 * device/channel is unavailable" now covers write failures, not just
-	 * the readiness check. */
-	if (ready && led_render_apply(off) != 0) {
-		ready = false;
+	if (!all_ready) {
+		return -1;
 	}
-	return ready ? 0 : -1;
+	return led_render_policy_bringup(&g_policy, hw_write, NULL) ? 0 : -1;
+}
+
+int led_render_init(void)
+{
+	led_render_policy_init(&g_policy);
+	return bring_up();
+}
+
+int led_render_reinit(void)
+{
+	return bring_up();
 }
 
 bool led_render_is_ready(void)
 {
-	return ready;
+	return led_render_policy_is_ready(&g_policy);
 }
 
 uint32_t led_render_error_count(void)
 {
-	return error_count;
+	return led_render_policy_error_count(&g_policy);
+}
+
+void led_render_last_failure(uint8_t *index, int *rc)
+{
+	led_render_policy_last_failure(&g_policy, index, rc);
 }
 
 int led_render_apply(const uint8_t levels[LED_PHYSICAL_COUNT])
 {
-	uint8_t i;
-	bool changed[LED_PHYSICAL_COUNT];
-	int failures = 0;
-
-	if (!ready) {
-		return -1;
-	}
-
-	if (!cache_primed) {
-		/* First call after init: the cache has no meaning yet, so
-		 * force every channel to be treated as changed. */
-		for (i = 0; i < LED_PHYSICAL_COUNT; i++) {
-			changed[i] = true;
-			cached_levels[i] = levels[i];
-		}
-		cache_primed = true;
-	} else if (!led_duty_diff_frame(cached_levels, levels, changed)) {
-		return 0; /* nothing changed: zero PWM writes this call */
-	}
-
-	for (i = 0; i < LED_PHYSICAL_COUNT; i++) {
-		int rc;
-
-		if (!changed[i]) {
-			continue; /* "do not resend... when nothing changed" */
-		}
-		rc = pwm_set_pulse_dt(&led_pwm[i], PWM_USEC(led_level_to_pulse_us(i, levels[i])));
-		if (rc != 0) {
-			failures++;
-			error_count++;
-		}
-	}
-	return failures ? -failures : 0;
+	return led_render_policy_apply(&g_policy, levels, hw_write, NULL);
 }

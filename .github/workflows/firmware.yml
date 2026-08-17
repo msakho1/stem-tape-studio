@@ -254,6 +254,7 @@ jobs:
             firmware/stemtape/src/led_frame.c \
             firmware/stemtape/src/led_midi.c \
             firmware/stemtape/src/led_battery.c \
+            firmware/stemtape/src/led_render_policy.c \
             firmware/stemtape/tests/test_led.c \
             -o audit/test_led
           ./audit/test_led | tee audit/led-selftest.txt
