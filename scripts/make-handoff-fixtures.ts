@@ -138,40 +138,36 @@ writeJson("storage-initialized-empty.json", {
 
 /* ---------- 3/4. two successful uploads, valid index A and index B ---------- */
 
-const rec1 = new Recorder();
-const live = new MockSp1({ stemTape: true, sectorsPerSong: 8 });
-const first = await (async () => {
-  const { t } = await attach(live);
-  await t.initialiseLibrary();
-  return t;
-})();
 const songOne = await toneSong("HANDOFF ONE", 680, 3);
 const songTwo = await toneSong("HANDOFF TWO", 680, 11);
 
-// upload 1 (recorded)
-const rec1Session = await attach(live, rec1);
-const up1 = await rec1Session.t.uploadSong({ song: songOne });
+const rec1 = new Recorder();
+const live = new MockSp1({ stemTape: true, sectorsPerSong: 8 });
+const s1 = await attach(live, rec1);
+await s1.t.initialiseLibrary();
+const up1 = await s1.t.uploadSong({ song: songOne });
+if (!up1.ok) throw new Error(`upload 1 failed: ${up1.detail}`);
 writeTranscript("upload-1-successful.json", {
-  note: "First successful replacement upload (mock device). tx/rx are raw wire bytes in hex.",
+  note: "Explicit initialization followed by the first successful replacement upload (mock device). tx/rx are raw wire bytes in hex.",
   result: { outcome: up1.outcome, generation: up1.generation, songSlot: up1.targetSongSlot, indexSlot: up1.targetIndexSlot },
   sha256: rec1.sha256(),
   entries: rec1.entries,
 });
-void first;
 
-// upload 2 (recorded)
+const live2 = live.reboot();
 const rec2 = new Recorder();
-const rec2Session = await attach(live, rec2);
-const up2 = await rec2Session.t.uploadSong({ song: songTwo });
+const s2 = await attach(live2, rec2);
+const up2 = await s2.t.uploadSong({ song: songTwo });
+if (!up2.ok) throw new Error(`upload 2 failed: ${up2.detail}`);
 writeTranscript("upload-2-successful.json", {
-  note: "Second successful replacement upload; destination is the opposite A/B pair.",
+  note: "Second successful replacement upload over the same storage after a reconnect; the destination is the opposite A/B pair.",
   result: { outcome: up2.outcome, generation: up2.generation, songSlot: up2.targetSongSlot, indexSlot: up2.targetIndexSlot },
   sha256: rec2.sha256(),
   entries: rec2.entries,
 });
 
-const idxA = live.block(caps.index[0].start);
-const idxB = live.block(caps.index[1].start);
+const idxA = live2.block(caps.index[0].start);
+const idxB = live2.block(caps.index[1].start);
 writeBin("index-a-valid.bin", idxA);
 writeJson("index-a-valid.json", decodeIndexBlock(idxA, SLOT_A, regions));
 writeBin("index-b-valid.bin", idxB);
@@ -180,7 +176,7 @@ writeJson("index-b-valid.json", decodeIndexBlock(idxB, SLOT_B, regions));
 /* ---------- 5. uncommitted index and final magic block ---------- */
 
 const draftSlot = up2.targetIndexSlot!;
-const uncommittedSource = live.block(caps.index[draftSlot].start).slice(0);
+const uncommittedSource = live2.block(caps.index[draftSlot].start).slice(0);
 const uncommitted = uncommittedSource.slice(0);
 uncommitted.set([0, 0, 0, 0], IX_OFF.magic); // exactly what step 13 writes
 writeBin("index-uncommitted.bin", uncommitted);

@@ -1,0 +1,39 @@
+{
+  "note": "Canonical 8 KiB logical sectors for one four-stem song, exactly as transmitted (32-byte sector header + 340 frames of 24 bytes).",
+  "source": [
+    "src/sp1/__tests__/fixtures/vocal.wav",
+    "src/sp1/__tests__/fixtures/drums.wav",
+    "src/sp1/__tests__/fixtures/bass.wav",
+    "src/sp1/__tests__/fixtures/instrument.wav"
+  ],
+  "frames": 14592,
+  "sampleRate": 48000,
+  "channels": 2,
+  "pcmDepth": 24,
+  "sectorCount": 43,
+  "sectorsForFrames": 43,
+  "bytes": 352256,
+  "songChecksum": 3509299530,
+  "stems": [
+    {
+      "name": "vocal",
+      "originalFrames": 14592,
+      "checksum": 1982348978
+    },
+    {
+      "name": "drums",
+      "originalFrames": 14150,
+      "checksum": 207735031
+    },
+    {
+      "name": "bass",
+      "originalFrames": 14000,
+      "checksum": 3388280807
+    },
+    {
+      "name": "instrument",
+      "originalFrames": 12000,
+      "checksum": 3473776285
+    }
+  ]
+}

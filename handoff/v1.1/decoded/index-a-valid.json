@@ -5,38 +5,38 @@
     "formatMajor": 1,
     "formatMinor": 1,
     "slotIdentity": 0,
-    "songSlot": 0,
-    "songPresent": false,
-    "generation": 1,
-    "songStartBlock": 0,
-    "songBlockCount": 0,
-    "frames": 0,
-    "sectorCount": 0,
-    "sampleRate": 0,
-    "channels": 0,
-    "bitDepth": 0,
-    "bpm": 0,
+    "songSlot": 1,
+    "songPresent": true,
+    "generation": 3,
+    "songStartBlock": 144,
+    "songBlockCount": 32,
+    "frames": 680,
+    "sectorCount": 2,
+    "sampleRate": 48000,
+    "channels": 2,
+    "bitDepth": 24,
+    "bpm": 120,
     "downbeatFrame": 0,
     "originalFrames": [
-      0,
-      0,
-      0,
-      0
+      680,
+      680,
+      680,
+      680
     ],
     "stemChecksums": [
-      0,
-      0,
-      0,
-      0
+      3328139340,
+      3389290872,
+      1581417403,
+      981923180
     ],
-    "songChecksum": 0,
-    "title": "",
-    "artist": "",
-    "crc": 1324120305,
-    "crcComputed": 1324120305
+    "songChecksum": 4164182808,
+    "title": "HANDOFF TWO",
+    "artist": "Stem Tape handoff",
+    "crc": 888519033,
+    "crcComputed": 888519033
   },
   "validation": {
     "valid": true,
-    "reason": "valid, no song"
+    "reason": "valid"
   }
 }
