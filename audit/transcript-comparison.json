@@ -1,6 +1,6 @@
 {
-  "schema": "stem-tape-transcript-comparison/1",
-  "generatedAt": "2026-08-18T00:23:35.497Z",
+  "schema": "stem-tape-transcript-comparison/2",
+  "generatedAt": "2026-08-18T00:33:39.289Z",
   "goldenFileSha256": "85308e040125f5807686c822e693dfc72f3bcc2e92481277587c7dc56f311f6b",
   "operations": [
     "handshake",
@@ -10,6 +10,17 @@
     "read-back block 4",
     "exit"
   ],
+  "transcriptFileSha256": {
+    "original": "724246b2a1174b1dd4be345f0dadddcbfd2de70b5c49b164ab64ecd9ed75c9d9",
+    "inherited": "81337ecd983aa4215b223a1312d5d787d80a3cf9a6308560ed7e86c56268f878"
+  },
+  "transcriptFileHashesDiffer": true,
+  "fileHashDifferenceExplanation": "The two audit documents describe different sources and therefore carry different wrapper metadata keys (sourceFileSha256, executedRegionSha256) and a different 'source' value. Their comparable payload — operations, transmitted frames and entries — is byte-identical, which is what the conformance claim rests on. Differently structured audit documents are not expected to share a file hash.",
+  "wrapperOnlyKeys": [
+    "sourceFileSha256",
+    "executedRegionSha256"
+  ],
+  "payloadIdentical": true,
   "transmittedFrameCount": {
     "original": 7,
     "inherited": 7
@@ -38,6 +49,9 @@
     "identical": true
   },
   "deviceStateIdentical": true,
+  "byteDifferenceCount": 0,
+  "commandOrderDifferenceCount": 0,
+  "deviceStateDifferenceCount": 0,
   "differenceCount": 0,
   "differences": [],
   "verdict": "identical"
