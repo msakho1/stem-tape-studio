@@ -1,0 +1,157 @@
+/**
+ * SECTION 2 — THE SIX MAGIC-WRITE CASES, TESTED SEPARATELY
+ *
+ * The validity magic is the single commit point of the v1.1 contract. "Torn"
+ * and "landed" are NOT collapsed into one result: each of the six physically
+ * distinct outcomes is asserted on its own, always after rebooting the mock from
+ * its stored block contents.
+ *
+ *   A no bytes of the final block applied            -> previous generation active
+ *   B only the validity-magic bytes applied, valid   -> new generation may be active
+ *   C partial block applied, CRC/structure invalid   -> previous generation active
+ *   D complete block applied, acknowledgement lost   -> new generation committed
+ *   E complete block + flush ok, confirmation lost   -> new generation committed
+ *   F complete block acknowledged but not durable    -> previous generation active
+ *
+ * In no case may both generations be invalid.
+ */
+import { mkdirSync, writeFileSync } from "node:fs";
+import { describe, expect, it } from "vitest";
+import type { MockSp1, WriteAction } from "./mockSerial";
+import {
+  clearInjection,
+  forkBaseline,
+  reconnect,
+  regionHash,
+  sha256,
+  song,
+  songImage,
+  storedSong,
+  withFirstSong,
+  type Baseline,
+} from "./abHarness";
+
+const FRAMES = 680;
+const REPORT_DIR = "handoff/v1.1/reports";
+
+/** True for the one write that carries the validity magic 'STIX' (LE). */
+function isMagic(data: Uint8Array): boolean {
+  return data[0] === 0x58 && data[1] === 0x49 && data[2] === 0x54 && data[3] === 0x53;
+}
+
+function onMagic(mock: MockSp1, action: WriteAction) {
+  mock.opts.onWrite = ({ data }) => (isMagic(data) ? action : undefined);
+}
+
+interface CaseResult {
+  id: string;
+  description: string;
+  expected: "previous" | "new";
+  observed: "previous" | "new";
+  uploadOutcome: string;
+  resolvedOutcome: string;
+  activeGeneration: number;
+  bothGenerationsInvalid: boolean;
+}
+
+const table: CaseResult[] = [];
+
+async function runCase(
+  base: Baseline,
+  id: string,
+  description: string,
+  expected: "previous" | "new",
+  inject: (mock: MockSp1) => void,
+) {
+  const b = { ...base, ...(await forkBaseline(base)) };
+  const two = await song("TWO", FRAMES, 11);
+  inject(b.mock);
+  const res = await b.t.uploadSong({ song: two });
+  clearInjection(b.mock);
+
+  const { mock: m2, t: t2 } = await reconnect(b.mock);
+  const lib = (await t2.readLibrary())!;
+
+  // Never both invalid.
+  expect(lib.requiresInitialization).toBe(false);
+  expect(lib.status).toBe("ok");
+
+  const a = lib.active!;
+  const isNew = a.songChecksum === two.checksum && a.generation === base.generation + 1;
+  const isOld = a.songChecksum === base.one.checksum && a.generation === base.generation;
+  expect(isNew || isOld).toBe(true);
+  expect(isNew ? "new" : "previous").toBe(expected);
+
+  // The active record always points at complete, byte-exact audio.
+  const stored = storedSong(m2, base.caps, a.songSlot, a.sectorCount);
+  expect(sha256(stored)).toBe(sha256(isNew ? songImage(two) : base.oneImage));
+
+  if (isOld) {
+    expect(regionHash(m2, base.caps.song[base.activeSongSlot])).toBe(base.songRegionHash);
+    expect(regionHash(m2, base.caps.index[base.activeIndexSlot])).toBe(base.indexRegionHash);
+  }
+
+  const resolved = await t2.resolveOutcome({
+    frames: two.frames,
+    songChecksum: two.checksum,
+    generation: base.generation + 1,
+  });
+  expect(resolved.outcome).toBe(isNew ? "committed" : "failed");
+
+  table.push({
+    id,
+    description,
+    expected,
+    observed: isNew ? "new" : "previous",
+    uploadOutcome: res.outcome,
+    resolvedOutcome: resolved.outcome,
+    activeGeneration: a.generation,
+    bothGenerationsInvalid: false,
+  });
+}
+
+describe("magic-write cases, split", () => {
+  it("A–F each resolve to exactly one complete generation", async () => {
+    const base = await withFirstSong(FRAMES);
+
+    await runCase(base, "A", "no bytes of the final block are applied", "previous", (m) =>
+      onMagic(m, { apply: "none", ack: "none", disconnect: true }),
+    );
+
+    await runCase(
+      base,
+      "B",
+      "only the validity-magic bytes are applied and the record is fully valid",
+      "new",
+      (m) => onMagic(m, { apply: "partial", partialBytes: 4, ack: "ok", disconnect: true }),
+    );
+
+    await runCase(base, "C", "a partial block produces an invalid CRC / structure", "previous", (m) =>
+      onMagic(m, { apply: "partial", partialBytes: 200, ack: "ok", disconnect: true }),
+    );
+
+    await runCase(base, "D", "the complete final block lands but the acknowledgement is lost", "new", (m) =>
+      onMagic(m, { apply: "full", ack: "none", disconnect: true }),
+    );
+
+    await runCase(base, "E", "the final block and flush succeed but the confirmation is lost", "new", (m) => {
+      let seen = false;
+      m.opts.onWrite = ({ data }) => {
+        if (isMagic(data)) seen = true;
+        return undefined;
+      };
+      m.opts.onFlush = () => (seen ? { ack: "ok", disconnect: true } : undefined);
+    });
+
+    await runCase(base, "F", "the final block is acknowledged but not durably applied", "previous", (m) =>
+      onMagic(m, { apply: "none", ack: "ok", disconnect: true }),
+    );
+
+    expect(table.map((r) => r.id)).toEqual(["A", "B", "C", "D", "E", "F"]);
+    expect(table.every((r) => r.observed === r.expected)).toBe(true);
+    expect(table.some((r) => r.bothGenerationsInvalid)).toBe(false);
+
+    mkdirSync(REPORT_DIR, { recursive: true });
+    writeFileSync(`${REPORT_DIR}/magic-write-cases.json`, JSON.stringify({ cases: table }, null, 2) + "\n");
+  }, 120000);
+});
