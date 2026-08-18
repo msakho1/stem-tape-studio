@@ -879,18 +879,22 @@ jobs:
         run: |
           set -euo pipefail
           # Current vertical slice (Gate 1 USB audio playback + USB-MIDI
-          # receive, Gate 2 real 4-stem song transfer/commit): proves both
-          # that the preserved playback/storage-read/control runtime AND the
-          # allowed new capability (USB audio PLAYBACK, incoming USB MIDI,
-          # region-bounded song staging, and a verified/validated eMMC
-          # commit through the named transfer path below) are actually
-          # linked into this build's final ELF, AND that RECORDING/OVERDUB
+          # receive, Stem Tape v1.1 firmware/companion contract migration):
+          # proves both that the preserved playback/storage-read/control
+          # runtime AND the allowed new capability (USB audio PLAYBACK,
+          # incoming USB MIDI, and the real v1.1 Q -> STCP capability
+          # handler + A/B storage engine named below) are actually linked
+          # into this build's final ELF, AND that RECORDING/OVERDUB
           # capability -- a live capture-to-storage ring, USB-audio-to-
-          # storage, or any persistent write outside the validated,
-          # region-bounded commit path -- is genuinely ABSENT from it, not
-          # merely "unused at runtime" but not present in the object file at
-          # all. Fails closed (missing nm.txt, any missing required symbol,
-          # or any forbidden symbol present = CI failure).
+          # storage, or any persistent write outside a validated, region-
+          # bounded path -- is genuinely ABSENT from it, not merely "unused
+          # at runtime" but not present in the object file at all. Also
+          # proves the RETIRED v1.0 Gate 2 transactional-commit contract
+          # (V/B/S/K/C/A/D/I) is genuinely absent, not just unreachable:
+          # CMakeLists.txt no longer even compiles those modules into this
+          # target, so their own definitions can never appear here again.
+          # Fails closed (missing nm.txt, any missing required symbol, or
+          # any forbidden symbol present = CI failure).
           test -s audit/nm.txt
           missing=0
           # nm marks a function's own text symbol lowercase 't' when it has
@@ -971,44 +975,41 @@ jobs:
           check midi_service
           check st_midi_decode_ump32
           check st_midi_queue_push
-          # GATE 2: real 4-stem song transfer -- the three region-bounded
-          # eMMC write adapters (proven bounded by the STRICT persistence
-          # safety gate step below), the read adapter, the commit engine,
-          # and the pure transfer/library-header/wire modules they call.
-          check xfer_sector_read
-          check xfer_staging_write
-          check xfer_header_write
-          check xfer_songdata_write
-          check xfer_lib_save
-          check xfer_do_commit
-          check st_xfer_begin
-          check st_xfer_stage_sector
-          check st_xfer_verify
-          check st_xfer_commit_precheck
-          check st_xfer_build_slot_meta
-          check st_libio_load
-          check st_libio_save
-          check st_xfer_wire_decode_begin_req
-          # st_storage_sector_to_block()/st_storage_next_free_song_sector()
-          # are deliberately NOT checked here: both are `static inline` in
-          # st_storage_layout.h, the same pattern already CONFIRMED (by a
-          # real CI run, not anticipated) to leave no standalone -Os symbol
-          # for trk_blk()/xfer_service() and uac2_dev/midi_dev above -- so
-          # this applies that same lesson proactively rather than waiting
-          # for a predictable repeat failure. Their reachability is proven
-          # by their callers
-          # above (xfer_sector_read/xfer_staging_write/xfer_header_write/
-          # xfer_songdata_write/xfer_do_commit), which ARE checked.
+          # Stem Tape v1.1: the real Q -> STCP capability handler + session
+          # refresh (main.c's own two new functions), and the v1.1 A/B
+          # storage engine's top-level entry points main.c directly calls --
+          # boot-time region-layout computation, STIX v2 active-index
+          # selection (used identically by 'Q', the boot-time A/B-selection
+          # log, and session-open), the STCP capability-reply builder, and
+          # the write-safety session's two open paths. Deeper internals
+          # these call (st_ab_session_check_write(), st_stix_validate(),
+          # the STSC sector codec, the FNV-1a checksum, CRC-32) are
+          # deliberately NOT checked yet -- guarded 'W' (a later commit) is
+          # what actually reaches st_ab_session_check_write(), and until
+          # then this gate can't yet confirm which of those deeper pure
+          # functions -Os keeps as standalone symbols vs. inlines, the same
+          # "confirmed by a real CI run, not anticipated" discipline this
+          # gate's own comments already apply to trk_blk()/xfer_service()/
+          # uac2_dev/midi_dev above. That later commit extends this list
+          # once its own CI run confirms what's actually present.
+          check xfer_v11_refresh_session
+          check xfer_v11_send_caps
+          check st_stix_read_library
+          check st11_storage_layout_compute
+          check st11_stcp_build
+          check st_ab_session_open_replace
+          check st_ab_session_open_init
 
           # REQUIRED-ABSENT: any of these appearing in the final ELF (any nm
           # symbol type -- function OR data/bss) means recording, overdub,
-          # a live capture-to-storage path, or a raw persistent-write
-          # capability outside the validated commit path leaked back into
-          # the link, which this target must never allow. USB audio
-          # PLAYBACK and incoming USB MIDI (GATE 1) and the validated,
-          # region-bounded eMMC song-commit path (GATE 2) are the allowed,
-          # required new capability this vertical slice adds -- none of
-          # that is recording, and recording itself stays forbidden.
+          # a live capture-to-storage path, a raw persistent-write
+          # capability outside a validated path, or the RETIRED v1.0 write
+          # contract leaked back into the link, which this target must
+          # never allow. USB audio PLAYBACK and incoming USB MIDI (GATE 1)
+          # and the v1.1 Q/A-B-storage capability checked above are the
+          # allowed, required new capability this vertical slice adds --
+          # none of that is recording, and recording itself stays
+          # forbidden.
           absent() {
             if grep -qE "[[:space:]]${1}\$" audit/nm.txt; then
               echo "FORBIDDEN symbol present in final ELF: $1" >&2
@@ -1019,22 +1020,47 @@ jobs:
           }
           # eMMC/index write primitives -- meta_write_blocks() is removed
           # from src/main.c entirely (no definition left to link); this
-          # gate does not forbid emmc_write_blocks() itself (Gate 2 will
-          # legitimately need it for the validated song-commit path) --
-          # see the STRICT persistence safety gate step below, which proves
-          # every eMMC write call site instead of forbidding the symbol.
+          # gate does not forbid emmc_write_blocks() itself (guarded 'W',
+          # a later commit, will legitimately need it for the v1.1 write-
+          # safety session's validated path) -- see the STRICT persistence
+          # safety gate step below, which proves every eMMC write call
+          # site instead of forbidding the symbol.
           absent meta_write_blocks
           # the live-input record ring (32 KB) and any recording/overdub
           # state -- must never come back, with or without USB audio.
           absent g_rring
           absent g_record_arm
           absent g_overdub
+          # Stem Tape v1.0 Gate 2 (RETIRED as of this migration -- see
+          # docs/stem-tape-transfer-v1.1.md, docs/stem-tape-transfer-v1.md
+          # is the old, superseded doc): the single-index transactional
+          # write path (command verbs V/B/S/K/C/A/D/I) must never come
+          # back. Not merely "unreachable" -- CMakeLists.txt no longer
+          # compiles st_storage_layout.c/st_sector_codec.c/st_transfer.c/
+          # st_library_io.c/st_xfer_wire.c into this target at all, so
+          # these functions' own DEFINITIONS, not just call sites, must be
+          # entirely absent from the ELF. (Those files stay in the tree and
+          # keep their own host tests -- tests/test_stemtape_player.c --
+          # for regression evidence only.)
+          absent xfer_staging_write
+          absent xfer_header_write
+          absent xfer_songdata_write
+          absent xfer_lib_save
+          absent xfer_do_commit
+          absent st_xfer_begin
+          absent st_xfer_stage_sector
+          absent st_xfer_verify
+          absent st_xfer_commit_precheck
+          absent st_xfer_build_slot_meta
+          absent st_libio_load
+          absent st_libio_save
+          absent st_xfer_wire_decode_begin_req
 
           if [ "$missing" -ne 0 ]; then
             echo "one or more required runtime symbols are missing, or one or more forbidden symbols are present, in the final ELF" >&2
             exit 1
           fi
-          echo "all required Stem Tape runtime symbols are linked (USB audio playback, USB MIDI receive, and the validated eMMC song-commit path), and all forbidden recording/overdub symbols are confirmed absent, in zephyr.elf"
+          echo "all required Stem Tape runtime symbols are linked (USB audio playback, USB MIDI receive, and the v1.1 Q/A-B-storage capability), and all forbidden recording/overdub AND retired-v1.0-write-path symbols are confirmed absent, in zephyr.elf"
 
       - name: Effective configuration assertion (fail-closed)
         # Checks the REAL effective .config the build actually used (not
@@ -1099,20 +1125,21 @@ jobs:
         # stemtape-player is NOT stemtape-m0: this target's entire purpose is
         # to durably persist validated 4-stem songs to eMMC, so m0_safety_
         # gate.py's blanket "no eMMC write capability may be linked" property
-        # is the wrong gate here -- it fails on the exact capability this
-        # milestone requires (confirmed by a real CI run: emmc_write_blocks
-        # legitimately linked). stemtape_player_safety_gate.py is a
-        # DIFFERENT, still strictly fail-closed gate, scoped to this target:
-        # every other forbidden category (internal-flash, NVMC, UICR/
-        # APPROTECT, any OTHER disk/filesystem/NVS subsystem, MCUboot) stays
-        # exactly as forbidden as it is for stemtape-m0, and GATE 2's real
-        # emmc_write_blocks call sites are allowed ONLY when proven -- by
-        # real source inspection, evidence printed below -- to be inside one
-        # of the three purpose-built, independently region-bounded eMMC
-        # adapter functions (xfer_staging_write/xfer_header_write/
-        # xfer_songdata_write), each with its own real bounds-check pattern
-        # confirmed present in its own source body. m0_safety_gate.py itself
-        # is untouched and still strictly applied, unchanged, to the
+        # is the wrong gate here -- eMMC writes are the exact capability the
+        # Stem Tape v1.1 write path (once wired) legitimately needs.
+        # stemtape_player_safety_gate.py is a DIFFERENT, still strictly
+        # fail-closed gate, scoped to this target: every other forbidden
+        # category (internal-flash, NVMC, UICR/APPROTECT, any OTHER disk/
+        # filesystem/NVS subsystem, MCUboot) stays exactly as forbidden as it
+        # is for stemtape-m0, and any real emmc_write_blocks call site is
+        # allowed ONLY when proven -- by real source inspection, evidence
+        # printed below -- to be inside an independently region-bounded
+        # write adapter with its own real bounds-check pattern confirmed
+        # present in its own source body (currently: none exist in this
+        # image at all, since the old v1.0 adapters were deleted and
+        # guarded v1.1 'W' is a later commit -- pass D's own report reflects
+        # that transitional truth). m0_safety_gate.py itself is untouched
+        # and still strictly applied, unchanged, to the
         # stemtape-m0 job below.
         working-directory: ${{ github.workspace }}/project
         run: |

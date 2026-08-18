@@ -2182,6 +2182,20 @@ static void xfer_resync(uint8_t err_byte)
  * or if opening genuinely fails for a reason logged by the open result
  * (capacity, already-initialized) -- fails closed in every case.
  */
+/* __attribute__((noinline, noclone)): same reasoning as xfer_do_commit()
+ * elsewhere in this file -- a void(void) function with exactly one call
+ * site (the 'Q' branch in xfer_service()) is an -Os inlining candidate
+ * once nearby code shrinks; noinline stops that so this stays a real,
+ * separately-named symbol the runtime symbol-presence gate can find, and
+ * noclone is added defensively even though a void(void) call site gives
+ * GCC's interprocedural constant propagation nothing to clone on. Trailing,
+ * same-line attribute placement (not before the return type, not on its
+ * own line) is required for parsers of this exact function-signature shape
+ * elsewhere in this codebase -- see xfer_do_commit()'s own comment for the
+ * full story; this function isn't parsed by that specific gate today, but
+ * there's no reason to introduce a different, untested placement. */
+static void xfer_v11_refresh_session(void)
+	__attribute__((noinline, noclone));
 static void xfer_v11_refresh_session(void)
 {
 	if (!g_v11_layout_ready) {
@@ -2218,6 +2232,10 @@ static void xfer_v11_refresh_session(void)
  * = read-only") or either index block can't be read -- fails closed
  * exactly like every other v1.1 path here.
  */
+/* __attribute__((noinline, noclone)): same reasoning as
+ * xfer_v11_refresh_session() immediately above. */
+static void xfer_v11_send_caps(void)
+	__attribute__((noinline, noclone));
 static void xfer_v11_send_caps(void)
 {
 	if (!g_v11_layout_ready) {
