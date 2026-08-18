@@ -1,0 +1,1515 @@
+{
+  "note": "Exhaustive interruption sweep over one deterministic replacement upload (mock device only).",
+  "frames": 680,
+  "protocolOperations": 73,
+  "injectedInterruptionPoints": 146,
+  "byPhase": {
+    "preflight-index-read": {
+      "points": 4,
+      "previous": 4,
+      "new": 0
+    },
+    "audio-write": {
+      "points": 64,
+      "previous": 64,
+      "new": 0
+    },
+    "read-back": {
+      "points": 64,
+      "previous": 64,
+      "new": 0
+    },
+    "index-write-uncommitted": {
+      "points": 2,
+      "previous": 2,
+      "new": 0
+    },
+    "flush-uncommitted-index": {
+      "points": 2,
+      "previous": 2,
+      "new": 0
+    },
+    "index-read-back": {
+      "points": 2,
+      "previous": 2,
+      "new": 0
+    },
+    "magic-write": {
+      "points": 2,
+      "previous": 1,
+      "new": 1
+    },
+    "final-flush": {
+      "points": 2,
+      "previous": 0,
+      "new": 2
+    },
+    "confirm-read": {
+      "points": 4,
+      "previous": 0,
+      "new": 4
+    }
+  },
+  "results": [
+    {
+      "op": 1,
+      "when": "before",
+      "phase": "preflight-index-read",
+      "block": 0,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 1,
+      "when": "after",
+      "phase": "preflight-index-read",
+      "block": 0,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 2,
+      "when": "before",
+      "phase": "preflight-index-read",
+      "block": 1,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 2,
+      "when": "after",
+      "phase": "preflight-index-read",
+      "block": 1,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 3,
+      "when": "before",
+      "phase": "audio-write",
+      "block": 144,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 3,
+      "when": "after",
+      "phase": "audio-write",
+      "block": 144,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 4,
+      "when": "before",
+      "phase": "audio-write",
+      "block": 145,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 4,
+      "when": "after",
+      "phase": "audio-write",
+      "block": 145,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 5,
+      "when": "before",
+      "phase": "audio-write",
+      "block": 146,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 5,
+      "when": "after",
+      "phase": "audio-write",
+      "block": 146,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 6,
+      "when": "before",
+      "phase": "audio-write",
+      "block": 147,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 6,
+      "when": "after",
+      "phase": "audio-write",
+      "block": 147,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 7,
+      "when": "before",
+      "phase": "audio-write",
+      "block": 148,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 7,
+      "when": "after",
+      "phase": "audio-write",
+      "block": 148,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 8,
+      "when": "before",
+      "phase": "audio-write",
+      "block": 149,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 8,
+      "when": "after",
+      "phase": "audio-write",
+      "block": 149,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 9,
+      "when": "before",
+      "phase": "audio-write",
+      "block": 150,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 9,
+      "when": "after",
+      "phase": "audio-write",
+      "block": 150,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 10,
+      "when": "before",
+      "phase": "audio-write",
+      "block": 151,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 10,
+      "when": "after",
+      "phase": "audio-write",
+      "block": 151,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 11,
+      "when": "before",
+      "phase": "audio-write",
+      "block": 152,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 11,
+      "when": "after",
+      "phase": "audio-write",
+      "block": 152,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 12,
+      "when": "before",
+      "phase": "audio-write",
+      "block": 153,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 12,
+      "when": "after",
+      "phase": "audio-write",
+      "block": 153,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 13,
+      "when": "before",
+      "phase": "audio-write",
+      "block": 154,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 13,
+      "when": "after",
+      "phase": "audio-write",
+      "block": 154,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 14,
+      "when": "before",
+      "phase": "audio-write",
+      "block": 155,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 14,
+      "when": "after",
+      "phase": "audio-write",
+      "block": 155,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 15,
+      "when": "before",
+      "phase": "audio-write",
+      "block": 156,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 15,
+      "when": "after",
+      "phase": "audio-write",
+      "block": 156,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 16,
+      "when": "before",
+      "phase": "audio-write",
+      "block": 157,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 16,
+      "when": "after",
+      "phase": "audio-write",
+      "block": 157,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 17,
+      "when": "before",
+      "phase": "audio-write",
+      "block": 158,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 17,
+      "when": "after",
+      "phase": "audio-write",
+      "block": 158,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 18,
+      "when": "before",
+      "phase": "audio-write",
+      "block": 159,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 18,
+      "when": "after",
+      "phase": "audio-write",
+      "block": 159,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 19,
+      "when": "before",
+      "phase": "audio-write",
+      "block": 160,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 19,
+      "when": "after",
+      "phase": "audio-write",
+      "block": 160,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 20,
+      "when": "before",
+      "phase": "audio-write",
+      "block": 161,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 20,
+      "when": "after",
+      "phase": "audio-write",
+      "block": 161,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 21,
+      "when": "before",
+      "phase": "audio-write",
+      "block": 162,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 21,
+      "when": "after",
+      "phase": "audio-write",
+      "block": 162,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 22,
+      "when": "before",
+      "phase": "audio-write",
+      "block": 163,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 22,
+      "when": "after",
+      "phase": "audio-write",
+      "block": 163,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 23,
+      "when": "before",
+      "phase": "audio-write",
+      "block": 164,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 23,
+      "when": "after",
+      "phase": "audio-write",
+      "block": 164,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 24,
+      "when": "before",
+      "phase": "audio-write",
+      "block": 165,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 24,
+      "when": "after",
+      "phase": "audio-write",
+      "block": 165,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 25,
+      "when": "before",
+      "phase": "audio-write",
+      "block": 166,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 25,
+      "when": "after",
+      "phase": "audio-write",
+      "block": 166,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 26,
+      "when": "before",
+      "phase": "audio-write",
+      "block": 167,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 26,
+      "when": "after",
+      "phase": "audio-write",
+      "block": 167,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 27,
+      "when": "before",
+      "phase": "audio-write",
+      "block": 168,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 27,
+      "when": "after",
+      "phase": "audio-write",
+      "block": 168,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 28,
+      "when": "before",
+      "phase": "audio-write",
+      "block": 169,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 28,
+      "when": "after",
+      "phase": "audio-write",
+      "block": 169,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 29,
+      "when": "before",
+      "phase": "audio-write",
+      "block": 170,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 29,
+      "when": "after",
+      "phase": "audio-write",
+      "block": 170,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 30,
+      "when": "before",
+      "phase": "audio-write",
+      "block": 171,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 30,
+      "when": "after",
+      "phase": "audio-write",
+      "block": 171,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 31,
+      "when": "before",
+      "phase": "audio-write",
+      "block": 172,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 31,
+      "when": "after",
+      "phase": "audio-write",
+      "block": 172,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 32,
+      "when": "before",
+      "phase": "audio-write",
+      "block": 173,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 32,
+      "when": "after",
+      "phase": "audio-write",
+      "block": 173,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 33,
+      "when": "before",
+      "phase": "audio-write",
+      "block": 174,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 33,
+      "when": "after",
+      "phase": "audio-write",
+      "block": 174,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 34,
+      "when": "before",
+      "phase": "audio-write",
+      "block": 175,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 34,
+      "when": "after",
+      "phase": "audio-write",
+      "block": 175,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 35,
+      "when": "before",
+      "phase": "read-back",
+      "block": 144,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 35,
+      "when": "after",
+      "phase": "read-back",
+      "block": 144,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 36,
+      "when": "before",
+      "phase": "read-back",
+      "block": 145,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 36,
+      "when": "after",
+      "phase": "read-back",
+      "block": 145,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 37,
+      "when": "before",
+      "phase": "read-back",
+      "block": 146,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 37,
+      "when": "after",
+      "phase": "read-back",
+      "block": 146,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 38,
+      "when": "before",
+      "phase": "read-back",
+      "block": 147,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 38,
+      "when": "after",
+      "phase": "read-back",
+      "block": 147,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 39,
+      "when": "before",
+      "phase": "read-back",
+      "block": 148,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 39,
+      "when": "after",
+      "phase": "read-back",
+      "block": 148,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 40,
+      "when": "before",
+      "phase": "read-back",
+      "block": 149,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 40,
+      "when": "after",
+      "phase": "read-back",
+      "block": 149,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 41,
+      "when": "before",
+      "phase": "read-back",
+      "block": 150,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 41,
+      "when": "after",
+      "phase": "read-back",
+      "block": 150,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 42,
+      "when": "before",
+      "phase": "read-back",
+      "block": 151,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 42,
+      "when": "after",
+      "phase": "read-back",
+      "block": 151,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 43,
+      "when": "before",
+      "phase": "read-back",
+      "block": 152,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 43,
+      "when": "after",
+      "phase": "read-back",
+      "block": 152,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 44,
+      "when": "before",
+      "phase": "read-back",
+      "block": 153,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 44,
+      "when": "after",
+      "phase": "read-back",
+      "block": 153,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 45,
+      "when": "before",
+      "phase": "read-back",
+      "block": 154,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 45,
+      "when": "after",
+      "phase": "read-back",
+      "block": 154,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 46,
+      "when": "before",
+      "phase": "read-back",
+      "block": 155,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 46,
+      "when": "after",
+      "phase": "read-back",
+      "block": 155,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 47,
+      "when": "before",
+      "phase": "read-back",
+      "block": 156,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 47,
+      "when": "after",
+      "phase": "read-back",
+      "block": 156,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 48,
+      "when": "before",
+      "phase": "read-back",
+      "block": 157,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 48,
+      "when": "after",
+      "phase": "read-back",
+      "block": 157,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 49,
+      "when": "before",
+      "phase": "read-back",
+      "block": 158,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 49,
+      "when": "after",
+      "phase": "read-back",
+      "block": 158,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 50,
+      "when": "before",
+      "phase": "read-back",
+      "block": 159,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 50,
+      "when": "after",
+      "phase": "read-back",
+      "block": 159,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 51,
+      "when": "before",
+      "phase": "read-back",
+      "block": 160,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 51,
+      "when": "after",
+      "phase": "read-back",
+      "block": 160,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 52,
+      "when": "before",
+      "phase": "read-back",
+      "block": 161,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 52,
+      "when": "after",
+      "phase": "read-back",
+      "block": 161,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 53,
+      "when": "before",
+      "phase": "read-back",
+      "block": 162,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 53,
+      "when": "after",
+      "phase": "read-back",
+      "block": 162,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 54,
+      "when": "before",
+      "phase": "read-back",
+      "block": 163,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 54,
+      "when": "after",
+      "phase": "read-back",
+      "block": 163,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 55,
+      "when": "before",
+      "phase": "read-back",
+      "block": 164,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 55,
+      "when": "after",
+      "phase": "read-back",
+      "block": 164,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 56,
+      "when": "before",
+      "phase": "read-back",
+      "block": 165,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 56,
+      "when": "after",
+      "phase": "read-back",
+      "block": 165,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 57,
+      "when": "before",
+      "phase": "read-back",
+      "block": 166,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 57,
+      "when": "after",
+      "phase": "read-back",
+      "block": 166,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 58,
+      "when": "before",
+      "phase": "read-back",
+      "block": 167,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 58,
+      "when": "after",
+      "phase": "read-back",
+      "block": 167,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 59,
+      "when": "before",
+      "phase": "read-back",
+      "block": 168,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 59,
+      "when": "after",
+      "phase": "read-back",
+      "block": 168,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 60,
+      "when": "before",
+      "phase": "read-back",
+      "block": 169,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 60,
+      "when": "after",
+      "phase": "read-back",
+      "block": 169,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 61,
+      "when": "before",
+      "phase": "read-back",
+      "block": 170,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 61,
+      "when": "after",
+      "phase": "read-back",
+      "block": 170,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 62,
+      "when": "before",
+      "phase": "read-back",
+      "block": 171,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 62,
+      "when": "after",
+      "phase": "read-back",
+      "block": 171,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 63,
+      "when": "before",
+      "phase": "read-back",
+      "block": 172,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 63,
+      "when": "after",
+      "phase": "read-back",
+      "block": 172,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 64,
+      "when": "before",
+      "phase": "read-back",
+      "block": 173,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 64,
+      "when": "after",
+      "phase": "read-back",
+      "block": 173,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 65,
+      "when": "before",
+      "phase": "read-back",
+      "block": 174,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 65,
+      "when": "after",
+      "phase": "read-back",
+      "block": 174,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 66,
+      "when": "before",
+      "phase": "read-back",
+      "block": 175,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 66,
+      "when": "after",
+      "phase": "read-back",
+      "block": 175,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 67,
+      "when": "before",
+      "phase": "index-write-uncommitted",
+      "block": 0,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 67,
+      "when": "after",
+      "phase": "index-write-uncommitted",
+      "block": 0,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 68,
+      "when": "before",
+      "phase": "flush-uncommitted-index",
+      "block": -1,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 68,
+      "when": "after",
+      "phase": "flush-uncommitted-index",
+      "block": -1,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 69,
+      "when": "before",
+      "phase": "index-read-back",
+      "block": 0,
+      "outcome": "failed",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 69,
+      "when": "after",
+      "phase": "index-read-back",
+      "block": 0,
+      "outcome": "unknown",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 70,
+      "when": "before",
+      "phase": "magic-write",
+      "block": 0,
+      "outcome": "unknown",
+      "active": "previous",
+      "activeGeneration": 2,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 70,
+      "when": "after",
+      "phase": "magic-write",
+      "block": 0,
+      "outcome": "unknown",
+      "active": "new",
+      "activeGeneration": 3,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 71,
+      "when": "before",
+      "phase": "final-flush",
+      "block": -1,
+      "outcome": "unknown",
+      "active": "new",
+      "activeGeneration": 3,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 71,
+      "when": "after",
+      "phase": "final-flush",
+      "block": -1,
+      "outcome": "unknown",
+      "active": "new",
+      "activeGeneration": 3,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 72,
+      "when": "before",
+      "phase": "confirm-read",
+      "block": 0,
+      "outcome": "unknown",
+      "active": "new",
+      "activeGeneration": 3,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 72,
+      "when": "after",
+      "phase": "confirm-read",
+      "block": 0,
+      "outcome": "unknown",
+      "active": "new",
+      "activeGeneration": 3,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 73,
+      "when": "before",
+      "phase": "confirm-read",
+      "block": 1,
+      "outcome": "unknown",
+      "active": "new",
+      "activeGeneration": 3,
+      "priorBytesUnchanged": true
+    },
+    {
+      "op": 73,
+      "when": "after",
+      "phase": "confirm-read",
+      "block": 1,
+      "outcome": "committed",
+      "active": "new",
+      "activeGeneration": 3,
+      "priorBytesUnchanged": true
+    }
+  ]
+}

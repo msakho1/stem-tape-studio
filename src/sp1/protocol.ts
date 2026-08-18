@@ -95,6 +95,8 @@ export class Sp1Transport {
   private writer: ReturnType<SerialLikePort["writable"]["getWriter"]>;
   private buf = new Uint8Array(0);
   closed = false;
+  /** True once the device stream ended (unplug / port closed by the device). */
+  streamEnded = false;
   rxTotal = 0;
 
   constructor(private port: SerialLikePort) {
@@ -107,7 +109,10 @@ export class Sp1Transport {
     try {
       while (!this.closed) {
         const { value, done } = await this.reader.read();
-        if (done) break;
+        if (done) {
+          this.streamEnded = true;
+          break;
+        }
         if (value && value.length) {
           const merged = new Uint8Array(this.buf.length + value.length);
           merged.set(this.buf);
@@ -118,6 +123,7 @@ export class Sp1Transport {
       }
     } catch {
       /* reader cancelled on close */
+      this.streamEnded = true;
     }
   }
 
@@ -134,6 +140,7 @@ export class Sp1Transport {
     const deadline = Date.now() + timeoutMs;
     while (this.buf.length < n) {
       if (this.closed) throw new Error("port closed");
+      if (this.streamEnded) throw new Error("device disconnected before the reply completed");
       if (Date.now() > deadline) throw new Error(`timed out (got ${this.buf.length}/${n} bytes)`);
       await new Promise((r) => setTimeout(r, 8)); // 8 ms poll: verbatim from the Tape Looper companion
     }

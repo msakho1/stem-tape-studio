@@ -1,0 +1,41 @@
+{
+  "note": "Bytes 0..4 are the ASCII tag STCP; bytes 4..100 are the 96-byte little-endian capability structure (CAPS_OFF in src/sp1/stemTapeFormat.ts).",
+  "tag": "STCP",
+  "decoded": {
+    "firmwareId": 1398031959,
+    "protoMajor": 1,
+    "protoMinor": 1,
+    "formatMajor": 1,
+    "formatMinor": 1,
+    "flags": 4095,
+    "sampleRate": 48000,
+    "blockSize": 512,
+    "sectorBytes": 8192,
+    "alignment": 512,
+    "deviceBlocks": 272,
+    "song": [
+      {
+        "start": 16,
+        "blocks": 128
+      },
+      {
+        "start": 144,
+        "blocks": 128
+      }
+    ],
+    "index": [
+      {
+        "start": 0,
+        "blocks": 1
+      },
+      {
+        "start": 1,
+        "blocks": 1
+      }
+    ],
+    "activeIndexSlot": 4294967295,
+    "activeSongSlot": 4294967295,
+    "activeGeneration": 0,
+    "stixVersion": 2
+  }
+}

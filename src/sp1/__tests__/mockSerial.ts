@@ -41,6 +41,8 @@ export interface WriteAction {
   ack?: "ok" | "nak" | "none";
   /** Drop the connection after handling this write. */
   disconnect?: boolean;
+  /** Corrupt the bytes that reach storage (models a failed flash program). */
+  mangle?: (data: Uint8Array) => Uint8Array;
 }
 
 export interface FlushAction {
@@ -76,17 +78,19 @@ export interface MockOptions {
   /** Override the reported A/B geometry (used by region-validation tests). */
   geometry?: Partial<Pick<StemTapeCapabilities, "song" | "index" | "deviceBlocks" | "alignment" | "sectorBytes">>;
   /** Per-write interruption injection. */
-  onWrite?: (ctx: { n: number; blk: number; data: Uint8Array }) => WriteAction | undefined;
+  onWrite?: (ctx: { n: number; blk: number; op: number; data: Uint8Array }) => WriteAction | undefined;
   /** Per-flush interruption injection. */
-  onFlush?: (n: number) => FlushAction | undefined;
+  onFlush?: (n: number, op: number) => FlushAction | undefined;
   /** Per-read interruption injection. */
-  onRead?: (ctx: { n: number; blk: number }) => { disconnect?: boolean; corrupt?: boolean } | undefined;
+  onRead?: (ctx: { n: number; blk: number; op: number }) => { disconnect?: boolean; disconnectAfter?: boolean; corrupt?: boolean } | undefined;
 }
 
 export class MockSp1 {
   blocks = new Map<number, Uint8Array>();
   writes = 0;
   reads = 0;
+  /** Monotonic counter over every R/W/F protocol operation. */
+  ops = 0;
   pings = 0;
   capQueries = 0;
   flushes = 0;
@@ -259,7 +263,8 @@ export class MockSp1 {
         const blk = b[1]! | (b[2]! << 8) | (b[3]! << 16) | b[4]! * 0x1000000;
         this.inbox = b.slice(5);
         this.reads++;
-        const act = this.opts.onRead?.({ n: this.reads, blk });
+        this.ops++;
+        const act = this.opts.onRead?.({ n: this.reads, blk, op: this.ops });
         if (act?.disconnect) {
           this.disconnected = true;
           this.wake?.();
@@ -271,6 +276,11 @@ export class MockSp1 {
         out[0] = 0x72;
         out.set(payload, 1);
         this.push(out);
+        if (act?.disconnectAfter) {
+          this.disconnected = true;
+          this.wake?.();
+          return;
+        }
         continue;
       }
       if (cmd === 0x57) {
@@ -279,6 +289,7 @@ export class MockSp1 {
         const data = b.slice(5, 5 + 512);
         this.inbox = b.slice(5 + 512);
         this.writes++;
+        this.ops++;
         if (this.opts.disconnectAfterWrites && this.writes > this.opts.disconnectAfterWrites) {
           this.disconnected = true;
           this.wake?.();
@@ -289,14 +300,15 @@ export class MockSp1 {
           this.push(new Uint8Array([0x21])); // NAK: not 'w'
           continue;
         }
-        const act = this.opts.onWrite?.({ n: this.writes, blk, data }) ?? {};
+        const act = this.opts.onWrite?.({ n: this.writes, blk, op: this.ops, data }) ?? {};
         const apply = act.apply ?? "full";
+        const eff = act.mangle ? act.mangle(data.slice(0)) : data;
         if (apply === "full") {
-          this.blocks.set(blk, data);
+          this.blocks.set(blk, eff);
         } else if (apply === "partial") {
           const cur = this.block(blk).slice(0);
           const n = Math.max(0, Math.min(512, act.partialBytes ?? 256));
-          cur.set(data.slice(0, n), 0);
+          cur.set(eff.slice(0, n), 0);
           this.blocks.set(blk, cur);
         }
         const ack = act.ack ?? "ok";
@@ -322,8 +334,9 @@ export class MockSp1 {
       }
       if (cmd === 0x46) {
         this.flushes++;
+        this.ops++;
         this.inbox = b.slice(1);
-        const act = this.opts.onFlush?.(this.flushes) ?? {};
+        const act = this.opts.onFlush?.(this.flushes, this.ops) ?? {};
         const ack = act.ack ?? "ok";
         if (ack === "ok") this.push(new Uint8Array([0x66]));
         else if (ack === "nak") this.push(new Uint8Array([0x21]));

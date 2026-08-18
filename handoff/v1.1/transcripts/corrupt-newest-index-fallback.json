@@ -1,0 +1,14 @@
+{
+  "note": "The newest committed index record is corrupted (one CRC byte flipped). The shared selector falls back to the immediately previous complete song. No initialization is required.",
+  "corruptedIndexSlot": 0,
+  "corruptedGeneration": 3,
+  "selected": {
+    "status": "ok",
+    "requiresInitialization": false,
+    "activeIndexSlot": 1,
+    "activeSongSlot": 0,
+    "generation": 2,
+    "title": "HANDOFF ONE",
+    "explanation": "Only index B is valid (generation 2); index A is ignored: CRC mismatch (stored 0x34f5b986, computed 0x34f5b979)."
+  }
+}

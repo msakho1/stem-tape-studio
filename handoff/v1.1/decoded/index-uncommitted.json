@@ -1,0 +1,45 @@
+{
+  "note": "Step 13 image: the complete next-generation record with the validity magic deliberately absent (bytes 0..4 zero). Never selectable.",
+  "decoded": {
+    "record": {
+      "committed": false,
+      "indexVersion": 2,
+      "formatMajor": 1,
+      "formatMinor": 1,
+      "slotIdentity": 0,
+      "songSlot": 1,
+      "songPresent": true,
+      "generation": 3,
+      "songStartBlock": 144,
+      "songBlockCount": 32,
+      "frames": 680,
+      "sectorCount": 2,
+      "sampleRate": 48000,
+      "channels": 2,
+      "bitDepth": 24,
+      "bpm": 120,
+      "downbeatFrame": 0,
+      "originalFrames": [
+        680,
+        680,
+        680,
+        680
+      ],
+      "stemChecksums": [
+        3328139340,
+        3389290872,
+        1581417403,
+        981923180
+      ],
+      "songChecksum": 4164182808,
+      "title": "HANDOFF TWO",
+      "artist": "Stem Tape handoff",
+      "crc": 888519033,
+      "crcComputed": 888519033
+    },
+    "validation": {
+      "valid": false,
+      "reason": "validity magic absent (uncommitted record)"
+    }
+  }
+}

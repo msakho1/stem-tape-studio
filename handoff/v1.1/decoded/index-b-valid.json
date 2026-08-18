@@ -1,0 +1,42 @@
+{
+  "record": {
+    "committed": true,
+    "indexVersion": 2,
+    "formatMajor": 1,
+    "formatMinor": 1,
+    "slotIdentity": 1,
+    "songSlot": 0,
+    "songPresent": true,
+    "generation": 2,
+    "songStartBlock": 16,
+    "songBlockCount": 32,
+    "frames": 680,
+    "sectorCount": 2,
+    "sampleRate": 48000,
+    "channels": 2,
+    "bitDepth": 24,
+    "bpm": 120,
+    "downbeatFrame": 0,
+    "originalFrames": [
+      680,
+      680,
+      680,
+      680
+    ],
+    "stemChecksums": [
+      372356050,
+      3369609747,
+      277600979,
+      59441969
+    ],
+    "songChecksum": 1510267332,
+    "title": "HANDOFF ONE",
+    "artist": "Stem Tape handoff",
+    "crc": 720762313,
+    "crcComputed": 720762313
+  },
+  "validation": {
+    "valid": true,
+    "reason": "valid"
+  }
+}
