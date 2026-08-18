@@ -119,8 +119,11 @@ describe("exhaustive interruption sweep (v1.1 A/B)", () => {
       outcome: string;
       active: "previous" | "new";
       activeGeneration: number;
+      /** Number of valid, selectable generations the selector resolved to. Must always be exactly 1. */
+      selectedValidGenerations: number;
       priorBytesUnchanged: boolean;
     }[] = [];
+
 
     const baseline = await withFirstSong(FRAMES);
     const two = await song("TWO", FRAMES, 11);
