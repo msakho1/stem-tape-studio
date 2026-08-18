@@ -26,6 +26,23 @@ on:
       - '.github/workflows/firmware.yml'
       - '.github/scripts/**'
   workflow_dispatch:
+    inputs:
+      diagnostic_mode:
+        description: >-
+          Diagnostic CI run: disables ccache for the firmware build/link
+          steps, builds with verbose Ninja output at -j2, and shortens the
+          Set-up-Zephyr heartbeat interval to 30s. Does not change any
+          firmware source, compiler flag, linker flag, safety-gate policy,
+          or the golden Tape Looper target -- diagnostics and timing only.
+        type: boolean
+        default: false
+
+# A newer push/PR update to the same branch cancels any run still in
+# progress for it, so a stalled runner (e.g. wedged in Set up Zephyr) never
+# keeps occupying a runner slot after it's already obsolete.
+concurrency:
+  group: firmware-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -41,13 +58,49 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Start CI heartbeat (Set up Zephyr)
+        # This composite action prints nothing while it downloads/unpacks
+        # the SDK, so a genuine hang here is otherwise indistinguishable
+        # from "just slow" until the job either finishes or is manually
+        # cancelled. Runs detached in the background; stopped right after
+        # the step it watches, whether that step succeeds, fails, or times
+        # out (see the timeout-minutes on that step below).
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          mkdir -p audit
+          INTERVAL=60
+          if [ "${{ github.event.inputs.diagnostic_mode }}" = "true" ]; then
+            INTERVAL=30
+          fi
+          nohup bash "$GITHUB_WORKSPACE/project/.github/scripts/ci_heartbeat.sh" \
+            audit/heartbeat-zephyr-setup.log "$INTERVAL" \
+            > audit/heartbeat-zephyr-setup.out 2>&1 &
+          echo $! > /tmp/st_heartbeat_zephyr_setup.pid
+
       - name: Set up Zephyr v4.3.1 + SDK 0.17.4 (arm-zephyr-eabi only)
+        timeout-minutes: 15
         uses: zephyrproject-rtos/action-zephyr-setup@be8136a8bba01580485d98b7ad2d32477c36a49a  # v1.0.15
         with:
           base-path: project
           app-path: firmware
           toolchains: arm-zephyr-eabi
           sdk-version: 0.17.4
+
+      - name: Stop CI heartbeat (Set up Zephyr)
+        if: ${{ always() }}
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -uo pipefail
+          if [ -f /tmp/st_heartbeat_zephyr_setup.pid ]; then
+            kill "$(cat /tmp/st_heartbeat_zephyr_setup.pid)" 2>/dev/null || true
+          fi
+          {
+            echo '### Set up Zephyr heartbeat (build job)'
+            echo '```text'
+            cat audit/heartbeat-zephyr-setup.log 2>/dev/null || echo "(no heartbeat log)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Path preflight
         working-directory: ${{ github.workspace }}/project
@@ -67,12 +120,39 @@ jobs:
           set -eux
           git apply --verbose ../firmware/patches/uac2-windows-fs-feedback.patch
 
-      - name: Build (west build -p always -b stem_player firmware)
+      - name: Configure (west build --cmake-only -b stem_player firmware)
+        timeout-minutes: 10
         working-directory: ${{ github.workspace }}/project
         run: |
-          set -eux
-          west build -p always -b stem_player firmware \
-            -- -DBOARD_ROOT="$GITHUB_WORKSPACE/project/firmware"
+          set -euo pipefail
+          mkdir -p audit
+          command -v /usr/bin/time >/dev/null 2>&1 || sudo apt-get install -y --no-install-recommends time
+          /usr/bin/time -v -o audit/configure-time.txt \
+            west build -p always -b stem_player firmware --cmake-only \
+              -- -DBOARD_ROOT="$GITHUB_WORKSPACE/project/firmware" \
+                 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            2>&1 | tee audit/configure.log | tee audit/build.log
+
+      - name: Compile & link (cmake --build)
+        timeout-minutes: 20
+        working-directory: ${{ github.workspace }}/project
+        env:
+          # NINJA_STATUS timestamps every completed build task -- see
+          # https://ninja-build.org/manual.html#_environment_variables --
+          # so normal builds already avoid multi-minute silent gaps without
+          # needing verbose/-j2 (those are reserved for diagnostic_mode,
+          # since they meaningfully slow the build down).
+          NINJA_STATUS: "[%f/%t %es] "
+        run: |
+          set -euo pipefail
+          BUILD_ARGS=(--parallel "$(nproc)")
+          if [ "${{ github.event.inputs.diagnostic_mode }}" = "true" ]; then
+            export CCACHE_DISABLE=1
+            BUILD_ARGS=(--verbose --parallel 2)
+          fi
+          /usr/bin/time -v -o audit/compile-time.txt \
+            cmake --build build "${BUILD_ARGS[@]}" \
+            2>&1 | tee audit/compile.log | tee -a audit/build.log
 
       - name: Report artifact hash
         working-directory: ${{ github.workspace }}/project/build/zephyr
@@ -131,6 +211,14 @@ jobs:
           path: project/build/zephyr/sp1_looper.bin
           if-no-files-found: error
 
+      - name: Upload build diagnostics (heartbeat + configure/compile logs and timing)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: build-diagnostics
+          path: project/audit/**
+          if-no-files-found: warn
+
   stemtape-m0:
     # Milestone M0: the Stem Tape raw USB-MIDI control surface. Same board,
     # same Zephyr revision and SDK; no Zephyr patch is needed (the UAC2
@@ -148,13 +236,46 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Start CI heartbeat (Set up Zephyr)
+        # See the `build` job's identical step for why: this composite
+        # action prints nothing while it downloads/unpacks the SDK, so a
+        # genuine hang is otherwise indistinguishable from "just slow".
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          mkdir -p audit
+          INTERVAL=60
+          if [ "${{ github.event.inputs.diagnostic_mode }}" = "true" ]; then
+            INTERVAL=30
+          fi
+          nohup bash "$GITHUB_WORKSPACE/project/.github/scripts/ci_heartbeat.sh" \
+            audit/heartbeat-zephyr-setup.log "$INTERVAL" \
+            > audit/heartbeat-zephyr-setup.out 2>&1 &
+          echo $! > /tmp/st_heartbeat_zephyr_setup.pid
+
       - name: Set up Zephyr v4.3.1 + SDK 0.17.4 (arm-zephyr-eabi only)
+        timeout-minutes: 15
         uses: zephyrproject-rtos/action-zephyr-setup@be8136a8bba01580485d98b7ad2d32477c36a49a  # v1.0.15
         with:
           base-path: project
           app-path: firmware
           toolchains: arm-zephyr-eabi
           sdk-version: 0.17.4
+
+      - name: Stop CI heartbeat (Set up Zephyr)
+        if: ${{ always() }}
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -uo pipefail
+          if [ -f /tmp/st_heartbeat_zephyr_setup.pid ]; then
+            kill "$(cat /tmp/st_heartbeat_zephyr_setup.pid)" 2>/dev/null || true
+          fi
+          {
+            echo '### Set up Zephyr heartbeat (stemtape-m0 job)'
+            echo '```text'
+            cat audit/heartbeat-zephyr-setup.log 2>/dev/null || echo "(no heartbeat log)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Path preflight
         working-directory: ${{ github.workspace }}/project
@@ -202,15 +323,34 @@ jobs:
           cat audit/provenance.txt audit/zephyr-revision.txt
 
 
-      - name: Build (west build -p always -b stem_player firmware/stemtape)
+      - name: Configure (west build --cmake-only -b stem_player firmware/stemtape)
+        timeout-minutes: 10
         working-directory: ${{ github.workspace }}/project
         run: |
-          set -euxo pipefail
+          set -euo pipefail
           mkdir -p audit
-          west build -p always -b stem_player firmware/stemtape -d build-stemtape \
-            -- -DBOARD_ROOT="$GITHUB_WORKSPACE/project/firmware" \
-               -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-            2>&1 | tee audit/build.log
+          command -v /usr/bin/time >/dev/null 2>&1 || sudo apt-get install -y --no-install-recommends time
+          /usr/bin/time -v -o audit/configure-time.txt \
+            west build -p always -b stem_player firmware/stemtape -d build-stemtape --cmake-only \
+              -- -DBOARD_ROOT="$GITHUB_WORKSPACE/project/firmware" \
+                 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            2>&1 | tee audit/configure.log | tee audit/build.log
+
+      - name: Compile & link (cmake --build)
+        timeout-minutes: 20
+        working-directory: ${{ github.workspace }}/project
+        env:
+          NINJA_STATUS: "[%f/%t %es] "
+        run: |
+          set -euo pipefail
+          BUILD_ARGS=(--parallel "$(nproc)")
+          if [ "${{ github.event.inputs.diagnostic_mode }}" = "true" ]; then
+            export CCACHE_DISABLE=1
+            BUILD_ARGS=(--verbose --parallel 2)
+          fi
+          /usr/bin/time -v -o audit/compile-time.txt \
+            cmake --build build-stemtape "${BUILD_ARGS[@]}" \
+            2>&1 | tee audit/compile.log | tee -a audit/build.log
 
       - name: Collect toolchain analysis
         working-directory: ${{ github.workspace }}/project
@@ -437,13 +577,46 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Start CI heartbeat (Set up Zephyr)
+        # See the `build` job's identical step for why: this composite
+        # action prints nothing while it downloads/unpacks the SDK, so a
+        # genuine hang is otherwise indistinguishable from "just slow".
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          mkdir -p audit
+          INTERVAL=60
+          if [ "${{ github.event.inputs.diagnostic_mode }}" = "true" ]; then
+            INTERVAL=30
+          fi
+          nohup bash "$GITHUB_WORKSPACE/project/.github/scripts/ci_heartbeat.sh" \
+            audit/heartbeat-zephyr-setup.log "$INTERVAL" \
+            > audit/heartbeat-zephyr-setup.out 2>&1 &
+          echo $! > /tmp/st_heartbeat_zephyr_setup.pid
+
       - name: Set up Zephyr v4.3.1 + SDK 0.17.4 (arm-zephyr-eabi only)
+        timeout-minutes: 15
         uses: zephyrproject-rtos/action-zephyr-setup@be8136a8bba01580485d98b7ad2d32477c36a49a  # v1.0.15
         with:
           base-path: project
           app-path: firmware
           toolchains: arm-zephyr-eabi
           sdk-version: 0.17.4
+
+      - name: Stop CI heartbeat (Set up Zephyr)
+        if: ${{ always() }}
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -uo pipefail
+          if [ -f /tmp/st_heartbeat_zephyr_setup.pid ]; then
+            kill "$(cat /tmp/st_heartbeat_zephyr_setup.pid)" 2>/dev/null || true
+          fi
+          {
+            echo '### Set up Zephyr heartbeat (stemtape-player job)'
+            echo '```text'
+            cat audit/heartbeat-zephyr-setup.log 2>/dev/null || echo "(no heartbeat log)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Path preflight
         working-directory: ${{ github.workspace }}/project
@@ -487,15 +660,39 @@ jobs:
           set -eux
           git apply --verbose ../firmware/patches/uac2-windows-fs-feedback.patch
 
-      - name: Build (west build -p always -b stem_player firmware/stemtape_player)
+      - name: Configure (west build --cmake-only -b stem_player firmware/stemtape_player)
+        timeout-minutes: 10
         working-directory: ${{ github.workspace }}/project
         run: |
-          set -euxo pipefail
+          set -euo pipefail
           mkdir -p audit
-          west build -p always -b stem_player firmware/stemtape_player -d build-stemtape-player \
-            -- -DBOARD_ROOT="$GITHUB_WORKSPACE/project/firmware" \
-               -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-            2>&1 | tee audit/build.log
+          command -v /usr/bin/time >/dev/null 2>&1 || sudo apt-get install -y --no-install-recommends time
+          /usr/bin/time -v -o audit/configure-time.txt \
+            west build -p always -b stem_player firmware/stemtape_player -d build-stemtape-player --cmake-only \
+              -- -DBOARD_ROOT="$GITHUB_WORKSPACE/project/firmware" \
+                 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            2>&1 | tee audit/configure.log | tee audit/build.log
+
+      - name: Compile & link (cmake --build)
+        timeout-minutes: 20
+        working-directory: ${{ github.workspace }}/project
+        env:
+          # RAM budget assertion below reads the "Memory region ... RAM:"
+          # line ninja prints as part of the final link -- captured here in
+          # audit/compile.log (and appended into the combined audit/build.log
+          # the RAM budget step actually greps, so that step needs no
+          # change).
+          NINJA_STATUS: "[%f/%t %es] "
+        run: |
+          set -euo pipefail
+          BUILD_ARGS=(--parallel "$(nproc)")
+          if [ "${{ github.event.inputs.diagnostic_mode }}" = "true" ]; then
+            export CCACHE_DISABLE=1
+            BUILD_ARGS=(--verbose --parallel 2)
+          fi
+          /usr/bin/time -v -o audit/compile-time.txt \
+            cmake --build build-stemtape-player "${BUILD_ARGS[@]}" \
+            2>&1 | tee audit/compile.log | tee -a audit/build.log
 
       - name: RAM budget assertion (fail-closed)
         # PHASE 1 must fit in a real, measured RAM budget: max 229,376 bytes
