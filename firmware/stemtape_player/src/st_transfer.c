@@ -86,20 +86,8 @@ st_xfer_result_t st_xfer_stage_sector(st_xfer_txn_t *t, uint32_t sector_index,
 	return ST_XFER_OK;
 }
 
-/*
- * Bounded, non-stack work buffers for verify's read-back + decode pass.
- * `static` (not a local automatic array) so this never touches the calling
- * thread's stack for the 8192-byte sector body or its decoded-frame
- * expansion — the exact "no 8192-byte automatic stack buffer" fix the v1
- * storage/transfer audit required. Transfer mode is inherently serial (one
- * open transaction, one verify at a time; audio is paused while it runs —
- * see main.c), so a single static instance is safe without additional
- * locking.
- */
-static uint8_t s_verify_sector_buf[ST_SECTOR_BYTES];
-static st_audio_frame_t s_verify_frame_buf[ST_SECTOR_FRAME_CAPACITY];
-
-st_xfer_result_t st_xfer_verify(st_xfer_txn_t *t, st_sector_read_fn read_fn, void *ctx)
+st_xfer_result_t st_xfer_verify(st_xfer_txn_t *t, uint8_t *scratch_sector,
+				 st_sector_read_fn read_fn, void *ctx)
 {
 	uint32_t i;
 	uint32_t s;
@@ -121,17 +109,21 @@ st_xfer_result_t st_xfer_verify(st_xfer_txn_t *t, st_sector_read_fn read_fn, voi
 	for (i = 0; i < t->total_sectors; i++) {
 		uint32_t frame_in_sector;
 
-		if (read_fn(ST_STAGING_SECTOR0 + i, s_verify_sector_buf, ctx) != 0) {
+		if (read_fn(ST_STAGING_SECTOR0 + i, scratch_sector, ctx) != 0) {
 			t->verified = false;
 			return ST_XFER_ERR_READ_FAILED;
 		}
-		payload_crc = st_crc32_update(payload_crc, s_verify_sector_buf, ST_SECTOR_BYTES);
+		payload_crc = st_crc32_update(payload_crc, scratch_sector, ST_SECTOR_BYTES);
 
-		st_sector_decode(s_verify_sector_buf, s_verify_frame_buf, NULL);
 		for (frame_in_sector = 0; frame_in_sector < ST_SECTOR_FRAME_CAPACITY;
 		     frame_in_sector++) {
-			const st_audio_frame_t *fr = &s_verify_frame_buf[frame_in_sector];
+			/* One frame (32 bytes) decoded at a time -- on the stack is fine,
+			 * unlike the whole-sector 10880-byte frame array this replaces --
+			 * see st_sector_decode_frame()'s own doc comment. */
+			st_audio_frame_t frame;
+			const st_audio_frame_t *fr = &frame;
 
+			st_sector_decode_frame(scratch_sector, frame_in_sector, &frame);
 			for (s = 0; s < ST_STEM_COUNT; s++) {
 				uint8_t sample_bytes[8];
 

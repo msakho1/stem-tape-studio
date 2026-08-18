@@ -103,4 +103,16 @@ void st_sector_decode(const uint8_t in[ST_SECTOR_BYTES],
 		       st_audio_frame_t frames_out[ST_SECTOR_FRAME_CAPACITY],
 		       st_sector_reserved_t *reserved_out);
 
+/*
+ * Decodes just ONE frame (frame_index in [0, ST_SECTOR_FRAME_CAPACITY)) out
+ * of a sector buffer, without expanding the whole sector to an array --
+ * exactly equivalent to st_sector_decode(in, tmp, NULL)[frame_index], but
+ * without the ST_SECTOR_FRAME_CAPACITY-frame (10880-byte) work buffer that
+ * would require. Intended for callers (st_xfer_verify()'s per-frame CRC
+ * pass) that only ever need one decoded frame at a time and can keep the
+ * RAM cost to sizeof(st_audio_frame_t) (32 bytes, stack-safe) instead.
+ */
+void st_sector_decode_frame(const uint8_t in[ST_SECTOR_BYTES], uint32_t frame_index,
+			     st_audio_frame_t *frame_out);
+
 #endif /* STEMTAPE_PLAYER_SECTOR_CODEC_H_ */

@@ -107,21 +107,25 @@ static inline bool st_storage_sector_to_block(uint32_t logical_sector, uint32_t 
 					    * slot_count(4)+current_slot(4)+header_crc32(4) */
 #define ST_SLOT_RECORD_BYTES        144u  /* actual fields sum to 133; see st_storage_layout.c */
 
-#define ST_MAX_SLOTS 24u /* a deliberate FIRMWARE POLICY ceiling (not a hardware limit) --
+#define ST_MAX_SLOTS 8u /* a deliberate FIRMWARE POLICY ceiling (not a hardware limit) --
 			   * see the overflow this replaces: 256 slots at the old ad-hoc
 			   * struct size overflowed a single sector by 3096 bytes.
 			   * st_storage_compute_slot_capacity() still clamps DOWN from
 			   * here based on real reported device capacity.
 			   *
-			   * Sized at 24, not the earlier 96: st_library_header_t is
-			   * carried as a whole-struct static/global (g_lib in main.c),
-			   * not streamed, so its in-memory size is a direct RAM cost --
-			   * 24 slots is a realistic on-device library for a 4-stem
-			   * multi-minute-song instrument (each committed song already
-			   * costs a meaningful chunk of the eMMC song-data region) and
-			   * leaves real RAM headroom instead of provisioning for a
-			   * count of songs the staging/song-data regions could not
-			   * practically hold anyway. */
+			   * Sized at 8 for this vertical slice, not the original 96:
+			   * st_library_header_t is carried as a whole-struct static/
+			   * global (g_lib in main.c), not streamed, so its in-memory
+			   * size is a direct RAM cost against the device's fixed
+			   * budget, and every other Gate 2 sector-sized work buffer
+			   * has already been merged down to one shared 8192-byte
+			   * buffer (see main.c's s_commit_copy_buf) and per-frame
+			   * verify decode (see st_sector_decode_frame()) -- an 8-song
+			   * onboard library is this pass's real, measured fit within
+			   * that budget; raising it is real future work (most likely
+			   * a directory/full-metadata split so only the CURRENT
+			   * song's full st_slot_meta_t needs to be RAM-resident),
+			   * not a number to bump casually. */
 
 #define ST_LIBRARY_HEADER_SERIALIZED_MAX_BYTES \
 	(ST_LIBRARY_HEADER_FIXED_BYTES + (uint64_t)ST_MAX_SLOTS * ST_SLOT_RECORD_BYTES)

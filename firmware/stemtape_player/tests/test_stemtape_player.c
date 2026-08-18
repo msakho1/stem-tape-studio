@@ -289,6 +289,31 @@ static void test_sector_codec_round_trip(void)
 	CHECK(reserved_out.sync[0] == 0xBEEFu && reserved_out.tempo[2] == 0x1234u &&
 	      reserved_out.led[3][1] == 0x99u,
 	      "reserved sync/tempo/LED metadata round-trips per sub-block");
+
+	/* st_sector_decode_frame() (the RAM-cheap, one-frame-at-a-time decode
+	 * st_xfer_verify() uses instead of a whole-sector frame array) must be
+	 * byte-for-byte equivalent to indexing st_sector_decode()'s full
+	 * output, for every frame in the sector -- not just a spot check. */
+	{
+		bool per_frame_match = true;
+		uint32_t fi;
+
+		for (fi = 0; fi < ST_SECTOR_FRAME_CAPACITY && per_frame_match; fi++) {
+			st_audio_frame_t one;
+
+			st_sector_decode_frame(sector, fi, &one);
+			for (s = 0; s < ST_STEM_COUNT; s++) {
+				if (one.stem_l[s] != frames_out[fi].stem_l[s] ||
+				    one.stem_r[s] != frames_out[fi].stem_r[s]) {
+					per_frame_match = false;
+					break;
+				}
+			}
+		}
+		CHECK(per_frame_match,
+		      "st_sector_decode_frame() matches st_sector_decode()'s per-frame output "
+		      "exactly, for all 340 frames * 4 stems");
+	}
 }
 
 /* ========================================================================
@@ -326,6 +351,13 @@ static int mock_read(uint32_t sector, uint8_t out[ST_SECTOR_BYTES], void *ctx)
 	memcpy(out, m->data[local], ST_SECTOR_BYTES);
 	return 0;
 }
+
+/* st_xfer_verify() now takes a caller-owned scratch sector buffer (see its
+ * doc comment -- this is what lets the real firmware share ONE physical
+ * 8192-byte buffer across staging/commit/verify/library-io instead of each
+ * module owning its own). Tests share this one static buffer the same way
+ * main.c's s_commit_copy_buf does. */
+static uint8_t s_test_verify_scratch[ST_SECTOR_BYTES];
 
 /* Builds two real, decodable sectors (ST_SECTOR_FRAME_CAPACITY frames each)
  * from a deterministic pattern, computes the matching whole-payload CRC and
@@ -426,7 +458,7 @@ static void test_transfer_happy_path(void)
 				    mock_write, &m) == ST_XFER_OK,
 	      "stage sector 1: accepted");
 
-	CHECK(st_xfer_verify(&t, mock_read, &m) == ST_XFER_OK,
+	CHECK(st_xfer_verify(&t, s_test_verify_scratch, mock_read, &m) == ST_XFER_OK,
 	      "verify: whole-payload CRC AND all four independently-decoded per-stem CRCs match");
 	CHECK(st_xfer_commit_precheck(&t) == ST_XFER_OK, "commit precheck passes after a real verify");
 	CHECK(!t.open, "commit clears the transaction");
@@ -437,7 +469,7 @@ static void test_transfer_happy_path(void)
 	(void)st_xfer_begin(&t, 2, &meta, 16u, &resume);
 	(void)st_xfer_stage_sector(&t, 0, sec0, st_crc32_compute(sec0, ST_SECTOR_BYTES), mock_write, &m);
 	(void)st_xfer_stage_sector(&t, 1, sec1, st_crc32_compute(sec1, ST_SECTOR_BYTES), mock_write, &m);
-	(void)st_xfer_verify(&t, mock_read, &m);
+	(void)st_xfer_verify(&t, s_test_verify_scratch, mock_read, &m);
 	CHECK(st_xfer_build_slot_meta(&t, 999u, &slot_meta), "slot meta builds after a real verify");
 	CHECK(slot_meta.frame_count == meta.frame_count && slot_meta.start_sector == 999u,
 	      "committed slot meta carries the right frame count and start sector");
@@ -466,7 +498,7 @@ static void test_transfer_wrong_stem_crc_rejected(void)
 	(void)st_xfer_stage_sector(&t, 0, sec0, st_crc32_compute(sec0, ST_SECTOR_BYTES), mock_write, &m);
 	(void)st_xfer_stage_sector(&t, 1, sec1, st_crc32_compute(sec1, ST_SECTOR_BYTES), mock_write, &m);
 
-	CHECK(st_xfer_verify(&t, mock_read, &m) == ST_XFER_ERR_PAYLOAD_CRC,
+	CHECK(st_xfer_verify(&t, s_test_verify_scratch, mock_read, &m) == ST_XFER_ERR_PAYLOAD_CRC,
 	      "a wrong declared per-stem checksum fails verify even though the whole-payload CRC matches -- "
 	      "each stem's checksum is checked independently, not inferred from the others");
 	CHECK(!t.verified, "the transaction is not marked verified");
@@ -623,6 +655,11 @@ static int libio_mock_read(uint32_t sector, uint8_t out[ST_SECTOR_BYTES], void *
 	return 0;
 }
 
+/* st_libio_load()/st_libio_save() now take a caller-owned scratch buffer
+ * (see their doc comments); tests share one static buffer the same way
+ * main.c's s_commit_copy_buf does. */
+static uint8_t s_test_libio_scratch[ST_LIBRARY_HEADER_SECTORS_PER_COPY * ST_SECTOR_BYTES];
+
 static void libio_build_sample_header(st_library_header_t *h, uint32_t song_id, const char *title)
 {
 	memset(h, 0, sizeof(*h));
@@ -644,10 +681,10 @@ static void test_libio_fresh_on_blank_media(void)
 	int trusted = -99;
 
 	memset(&m, 0, sizeof(m));
-	CHECK(st_libio_load(&h, 12u, &trusted, libio_mock_read, &m) == ST_LIBIO_FRESH,
+	CHECK(st_libio_load(&h, 6u, &trusted, s_test_libio_scratch, libio_mock_read, &m) == ST_LIBIO_FRESH,
 	      "blank (never-written) media loads as FRESH, not an error");
 	CHECK(trusted == -1, "FRESH reports no trusted copy");
-	CHECK(h.magic == ST_LIBRARY_HEADER_MAGIC && h.slot_count == 12u && h.generation == 0u,
+	CHECK(h.magic == ST_LIBRARY_HEADER_MAGIC && h.slot_count == 6u && h.generation == 0u,
 	      "a fresh header is seeded with the real capacity-detected slot_count, not a placeholder");
 	CHECK(h.slot[0].frame_count == 0u, "every slot in a fresh header is empty");
 }
@@ -661,11 +698,11 @@ static void test_libio_save_then_load_round_trip(void)
 	memset(&m, 0, sizeof(m));
 	libio_build_sample_header(&h, 0xABCD1234u, "Round Trip Song");
 
-	CHECK(st_libio_save(&h, -1, libio_mock_write, &m) == true,
+	CHECK(st_libio_save(&h, -1, s_test_libio_scratch, libio_mock_write, &m) == true,
 	      "save succeeds against blank media (trusted_copy -1: order doesn't matter)");
 	CHECK(h.generation == 1u, "save() bumps the generation it was given (visible to the caller)");
 
-	CHECK(st_libio_load(&loaded, 99u, &trusted, libio_mock_read, &m) == ST_LIBIO_LOADED,
+	CHECK(st_libio_load(&loaded, 99u, &trusted, s_test_libio_scratch, libio_mock_read, &m) == ST_LIBIO_LOADED,
 	      "a just-saved header loads back as LOADED");
 	CHECK(trusted == 0 || trusted == 1, "a real trusted copy index is reported");
 	CHECK(loaded.generation == 1u, "the loaded generation matches what was saved");
@@ -686,12 +723,12 @@ static void test_libio_corrupt_single_copy_falls_back(void)
 
 	memset(&m, 0, sizeof(m));
 	libio_build_sample_header(&h, 0x1111u, "Corrupt Test");
-	(void)st_libio_save(&h, -1, libio_mock_write, &m);
+	(void)st_libio_save(&h, -1, s_test_libio_scratch, libio_mock_write, &m);
 
 	/* Flip a byte in copy 1's first sector -- its header_crc32 (or magic)
 	 * check must now fail deserialize. */
 	m.data[copy1_sector0][0] ^= 0xFFu;
-	CHECK(st_libio_load(&loaded, 4u, &trusted, libio_mock_read, &m) == ST_LIBIO_LOADED,
+	CHECK(st_libio_load(&loaded, 4u, &trusted, s_test_libio_scratch, libio_mock_read, &m) == ST_LIBIO_LOADED,
 	      "one corrupt copy still loads -- the other copy is used");
 	CHECK(trusted == 0, "falls back to copy 0 when copy 1 is corrupt");
 	CHECK(loaded.slot[1].song_id_hash == 0x1111u, "the recovered data is the real, uncorrupted content");
@@ -700,16 +737,16 @@ static void test_libio_corrupt_single_copy_falls_back(void)
 	 * one we just corrupted above; write a fresh, both-valid state first). */
 	memset(&m, 0, sizeof(m));
 	libio_build_sample_header(&h, 0x2222u, "Corrupt Test 2");
-	(void)st_libio_save(&h, -1, libio_mock_write, &m);
+	(void)st_libio_save(&h, -1, s_test_libio_scratch, libio_mock_write, &m);
 	m.data[ST_LIBRARY_HEADER_SECTOR0][0] ^= 0xFFu; /* corrupt copy 0's first sector */
-	CHECK(st_libio_load(&loaded, 4u, &trusted, libio_mock_read, &m) == ST_LIBIO_LOADED,
+	CHECK(st_libio_load(&loaded, 4u, &trusted, s_test_libio_scratch, libio_mock_read, &m) == ST_LIBIO_LOADED,
 	      "corrupting copy 0 instead still loads -- copy 1 is used");
 	CHECK(trusted == 1, "falls back to copy 1 when copy 0 is corrupt");
 	CHECK(loaded.slot[1].song_id_hash == 0x2222u, "the recovered data is the real, uncorrupted content");
 
 	/* Corrupt BOTH copies: neither validates. */
 	m.data[copy1_sector0][0] ^= 0xFFu;
-	CHECK(st_libio_load(&loaded, 7u, &trusted, libio_mock_read, &m) == ST_LIBIO_FRESH,
+	CHECK(st_libio_load(&loaded, 7u, &trusted, s_test_libio_scratch, libio_mock_read, &m) == ST_LIBIO_FRESH,
 	      "corrupting both copies falls all the way back to FRESH, never fabricated old data");
 	CHECK(trusted == -1, "FRESH reports no trusted copy");
 }
@@ -730,8 +767,8 @@ static void test_libio_write_failure_on_first_copy_preserves_old_data(void)
 
 	memset(&m, 0, sizeof(m));
 	libio_build_sample_header(&h, 0x5555u, "Generation One");
-	CHECK(st_libio_save(&h, -1, libio_mock_write, &m) == true, "first save succeeds cleanly");
-	CHECK(st_libio_load(&loaded, 4u, &trusted, libio_mock_read, &m) == ST_LIBIO_LOADED,
+	CHECK(st_libio_save(&h, -1, s_test_libio_scratch, libio_mock_write, &m) == true, "first save succeeds cleanly");
+	CHECK(st_libio_load(&loaded, 4u, &trusted, s_test_libio_scratch, libio_mock_read, &m) == ST_LIBIO_LOADED,
 	      "generation-one header loads back");
 
 	untrusted_copy = (uint32_t)(1 - trusted);
@@ -742,11 +779,11 @@ static void test_libio_write_failure_on_first_copy_preserves_old_data(void)
 
 	libio_build_sample_header(&h, 0x6666u, "Generation Two (never lands)");
 	h.generation = loaded.generation; /* save() bumps it itself, matching the real caller contract */
-	CHECK(st_libio_save(&h, trusted, libio_mock_write, &m) == false,
+	CHECK(st_libio_save(&h, trusted, s_test_libio_scratch, libio_mock_write, &m) == false,
 	      "a write failure on the FIRST (untrusted) copy makes save() report failure "
 	      "without ever touching the trusted copy");
 
-	CHECK(st_libio_load(&loaded, 4u, &trusted, libio_mock_read, &m) == ST_LIBIO_LOADED,
+	CHECK(st_libio_load(&loaded, 4u, &trusted, s_test_libio_scratch, libio_mock_read, &m) == ST_LIBIO_LOADED,
 	      "the media is still loadable after the failed save");
 	CHECK(loaded.slot[1].song_id_hash == 0x5555u && loaded.generation == 1u,
 	      "the previously-committed (generation one) content survives completely intact -- "
@@ -773,8 +810,8 @@ static void test_libio_write_failure_on_second_copy_never_leaves_both_invalid(vo
 
 	memset(&m, 0, sizeof(m));
 	libio_build_sample_header(&h, 0x5555u, "Generation One");
-	CHECK(st_libio_save(&h, -1, libio_mock_write, &m) == true, "first save succeeds cleanly");
-	CHECK(st_libio_load(&loaded, 4u, &trusted, libio_mock_read, &m) == ST_LIBIO_LOADED,
+	CHECK(st_libio_save(&h, -1, s_test_libio_scratch, libio_mock_write, &m) == true, "first save succeeds cleanly");
+	CHECK(st_libio_load(&loaded, 4u, &trusted, s_test_libio_scratch, libio_mock_read, &m) == ST_LIBIO_LOADED,
 	      "generation-one header loads back");
 
 	trusted_base = ST_LIBRARY_HEADER_SECTOR0 + (uint32_t)trusted * ST_LIBRARY_HEADER_SECTORS_PER_COPY;
@@ -784,10 +821,10 @@ static void test_libio_write_failure_on_second_copy_never_leaves_both_invalid(vo
 
 	libio_build_sample_header(&h, 0x6666u, "Generation Two");
 	h.generation = loaded.generation;
-	CHECK(st_libio_save(&h, trusted, libio_mock_write, &m) == false,
+	CHECK(st_libio_save(&h, trusted, s_test_libio_scratch, libio_mock_write, &m) == false,
 	      "a write failure on the second (previously-trusted) copy still makes save() report failure");
 
-	CHECK(st_libio_load(&loaded, 4u, &trusted, libio_mock_read, &m) == ST_LIBIO_LOADED,
+	CHECK(st_libio_load(&loaded, 4u, &trusted, s_test_libio_scratch, libio_mock_read, &m) == ST_LIBIO_LOADED,
 	      "the media is still loadable -- never both-invalid, never a torn/ambiguous state");
 	CHECK(loaded.slot[1].song_id_hash == 0x5555u || loaded.slot[1].song_id_hash == 0x6666u,
 	      "the surviving content is one complete, real generation (old or new), never a mix");

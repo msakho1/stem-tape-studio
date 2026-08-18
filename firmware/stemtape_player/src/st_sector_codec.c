@@ -130,3 +130,19 @@ void st_sector_decode(const uint8_t in[ST_SECTOR_BYTES],
 		}
 	}
 }
+
+void st_sector_decode_frame(const uint8_t in[ST_SECTOR_BYTES], uint32_t frame_index,
+			     st_audio_frame_t *frame_out)
+{
+	uint32_t sb = frame_index / ST_SUBBLOCK_FRAMES;
+	uint32_t f = frame_index % ST_SUBBLOCK_FRAMES;
+	uint8_t physical = ST_SUBBLOCK_PHYSICAL_ORDER[sb];
+	const uint8_t *base = in + (uint32_t)physical * ST_SUBBLOCK_BYTES;
+	const uint8_t *p = base + f * ST_FRAME_BYTES;
+	uint32_t s;
+
+	for (s = 0; s < ST_STEM_COUNT; s++) {
+		decode_stem_frame(p, &frame_out->stem_l[s], &frame_out->stem_r[s]);
+		p += ST_STEM_FRAME_BYTES;
+	}
+}

@@ -8,23 +8,6 @@
 
 #define ST_LIBIO_COPY_BYTES (ST_LIBRARY_HEADER_SECTORS_PER_COPY * ST_SECTOR_BYTES)
 
-/* Static (not stack) work buffer: a serialized copy occupies
- * ST_LIBRARY_HEADER_SECTORS_PER_COPY sectors -- this does not belong on a
- * bounded thread stack, matching st_transfer.c's own static-work-buffer
- * precedent for exactly the same reason. Library load/save is inherently
- * serial (one transfer/commit at a time, audio paused -- see main.c), so
- * a single static instance is safe without additional locking, also
- * matching st_transfer.c.
- *
- * Deliberately only ONE raw buffer and NO second `st_library_header_t`
- * scratch instance: st_library_header_t is itself several KiB (grows with
- * ST_MAX_SLOTS), and st_libio_load() below only ever needs ONE candidate
- * fully deserialized into `*out` at a time -- see its comment for how the
- * generation compare is done from the raw bytes directly, before
- * committing to a real (all-or-nothing, per
- * st_library_header_deserialize()'s own contract) deserialize into `*out`. */
-static uint8_t s_libio_raw[ST_LIBIO_COPY_BYTES];
-
 /* Wraparound-safe "is a newer than b" compare, matching the header's own
  * documented generation semantics. */
 static bool gen_is_newer(uint32_t a, uint32_t b)
@@ -46,13 +29,13 @@ static uint32_t peek_generation(const uint8_t *raw)
 	       ((uint32_t)raw[10] << 16) | ((uint32_t)raw[11] << 24);
 }
 
-static bool read_copy(uint32_t copy_index, st_sector_read_fn read_fn, void *ctx)
+static bool read_copy(uint32_t copy_index, uint8_t *scratch, st_sector_read_fn read_fn, void *ctx)
 {
 	uint32_t base = ST_LIBRARY_HEADER_SECTOR0 + copy_index * ST_LIBRARY_HEADER_SECTORS_PER_COPY;
 	uint32_t i;
 
 	for (i = 0; i < ST_LIBRARY_HEADER_SECTORS_PER_COPY; i++) {
-		if (read_fn(base + i, s_libio_raw + (uint64_t)i * ST_SECTOR_BYTES, ctx) != 0) {
+		if (read_fn(base + i, scratch + (uint64_t)i * ST_SECTOR_BYTES, ctx) != 0) {
 			return false;
 		}
 	}
@@ -85,7 +68,8 @@ static void build_fresh(st_library_header_t *out, uint32_t slot_count_if_fresh)
 }
 
 st_libio_load_result_t st_libio_load(st_library_header_t *out, uint32_t slot_count_if_fresh,
-				      int *trusted_copy, st_sector_read_fn read_fn, void *ctx)
+				      int *trusted_copy, uint8_t *scratch,
+				      st_sector_read_fn read_fn, void *ctx)
 {
 	bool read_ok0, read_ok1;
 	bool valid0, valid1;
@@ -94,8 +78,8 @@ st_libio_load_result_t st_libio_load(st_library_header_t *out, uint32_t slot_cou
 	/* Copy 0: deserialize (all-or-nothing) directly into *out. On failure
 	 * *out is left completely untouched, per st_library_header_deserialize()'s
 	 * own contract. */
-	read_ok0 = read_copy(0u, read_fn, ctx);
-	valid0 = read_ok0 && st_library_header_deserialize(s_libio_raw, ST_LIBIO_COPY_BYTES, out);
+	read_ok0 = read_copy(0u, scratch, read_fn, ctx);
+	valid0 = read_ok0 && st_library_header_deserialize(scratch, ST_LIBIO_COPY_BYTES, out);
 
 	/* Copy 1: only worth a real (all-or-nothing) deserialize attempt into
 	 * *out if it could actually win -- either copy 0 wasn't valid, or
@@ -103,12 +87,12 @@ st_libio_load_result_t st_libio_load(st_library_header_t *out, uint32_t slot_cou
 	 * already sitting in *out. A failed attempt here leaves *out exactly
 	 * as it was (still copy 0's data, if valid0), so it's always safe to
 	 * try opportunistically. */
-	read_ok1 = read_copy(1u, read_fn, ctx);
+	read_ok1 = read_copy(1u, scratch, read_fn, ctx);
 	valid1 = false;
 	if (read_ok1) {
-		attempt1 = !valid0 || gen_is_newer(peek_generation(s_libio_raw), out->generation);
+		attempt1 = !valid0 || gen_is_newer(peek_generation(scratch), out->generation);
 		if (attempt1) {
-			valid1 = st_library_header_deserialize(s_libio_raw, ST_LIBIO_COPY_BYTES, out);
+			valid1 = st_library_header_deserialize(scratch, ST_LIBIO_COPY_BYTES, out);
 		}
 	}
 
@@ -129,19 +113,19 @@ st_libio_load_result_t st_libio_load(st_library_header_t *out, uint32_t slot_cou
 	return ST_LIBIO_READ_FAILED;
 }
 
-bool st_libio_save(st_library_header_t *h, int trusted_copy,
+bool st_libio_save(st_library_header_t *h, int trusted_copy, uint8_t *scratch,
 		    st_sector_write_fn write_fn, void *ctx)
 {
 	uint32_t serialized;
 	uint32_t first_copy, second_copy;
 
 	h->generation++;
-	serialized = st_library_header_serialize(h, s_libio_raw, ST_LIBIO_COPY_BYTES);
+	serialized = st_library_header_serialize(h, scratch, ST_LIBIO_COPY_BYTES);
 	if (serialized == 0u) {
 		return false;
 	}
 	if (serialized < ST_LIBIO_COPY_BYTES) {
-		memset(s_libio_raw + serialized, 0, ST_LIBIO_COPY_BYTES - serialized);
+		memset(scratch + serialized, 0, ST_LIBIO_COPY_BYTES - serialized);
 	}
 
 	/* Write the currently-UNTRUSTED (or, if neither was trusted, copy 0)
@@ -155,10 +139,10 @@ bool st_libio_save(st_library_header_t *h, int trusted_copy,
 		first_copy = 0u; second_copy = 1u;
 	}
 
-	if (!write_copy(first_copy, s_libio_raw, write_fn, ctx)) {
+	if (!write_copy(first_copy, scratch, write_fn, ctx)) {
 		return false;
 	}
-	if (!write_copy(second_copy, s_libio_raw, write_fn, ctx)) {
+	if (!write_copy(second_copy, scratch, write_fn, ctx)) {
 		return false;
 	}
 	return true;

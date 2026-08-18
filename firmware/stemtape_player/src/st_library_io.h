@@ -58,9 +58,17 @@ typedef enum {
  * receives which copy (0 or 1) was selected as trusted, or -1 if neither
  * validated (LOADED only ever reports 0 or 1; FRESH/READ_FAILED report
  * -1) -- st_libio_save() needs this to decide write order.
+ *
+ * `scratch` is a caller-owned buffer of at least ST_LIBRARY_HEADER_SECTORS_
+ * PER_COPY * ST_SECTOR_BYTES bytes, used as raw read/serialize scratch space
+ * -- caller-supplied (not a static buffer owned by this module) so the ONE
+ * physical sector-sized buffer a transfer/commit/library-load session needs
+ * can be shared instead of duplicated per module; see main.c's single
+ * s_commit_copy_buf. Must not be NULL.
  */
 st_libio_load_result_t st_libio_load(st_library_header_t *out, uint32_t slot_count_if_fresh,
-				      int *trusted_copy, st_sector_read_fn read_fn, void *ctx);
+				      int *trusted_copy, uint8_t *scratch,
+				      st_sector_read_fn read_fn, void *ctx);
 
 /*
  * Saves `h` as a NEW generation (increments h->generation itself, so the
@@ -71,8 +79,9 @@ st_libio_load_result_t st_libio_load(st_library_header_t *out, uint32_t slot_cou
  * then copy 1 in that case). Returns false (leaves the on-media state
  * exactly as far as it got -- see the file header's guarantee) on any
  * write_fn failure; true only if BOTH copies were written successfully.
+ * `scratch` is the same caller-owned buffer st_libio_load() takes.
  */
-bool st_libio_save(st_library_header_t *h, int trusted_copy,
+bool st_libio_save(st_library_header_t *h, int trusted_copy, uint8_t *scratch,
 		    st_sector_write_fn write_fn, void *ctx);
 
 #endif /* STEMTAPE_PLAYER_LIBRARY_IO_H_ */

@@ -1133,8 +1133,24 @@ static st_xfer_txn_t       g_xfer_txn;               /* the one open transaction
 
 /* Non-stack (static) 8192-byte work buffer for the commit path's staged-
  * to-permanent sector copy -- same "no 8192-byte automatic stack buffer"
- * discipline st_transfer.c's own verify path already follows. */
+ * discipline st_transfer.c's own verify path already follows.
+ *
+ * Also THE ONE shared scratch buffer for every other Gate 2 operation that
+ * needs a sector-sized work area: the 'S' verb's staged sector body,
+ * st_libio_load()/st_libio_save()'s raw serialize/deserialize scratch, and
+ * st_xfer_verify()'s per-sector read-back -- see each call site's own
+ * comment. Sharing ONE buffer instead of one-per-module is a deliberate RAM
+ * trade (each of those modules used to own its own static 8192-byte
+ * buffer); it's safe because a transfer session only ever runs ONE of
+ * these operations at a time (xfer_service() services one command per
+ * call, audio paused throughout -- see its own comment), so their
+ * lifetimes never overlap. */
 static uint8_t s_commit_copy_buf[ST_SECTOR_BYTES];
+#if !defined(__cplusplus)
+_Static_assert((uint64_t)ST_LIBRARY_HEADER_SECTORS_PER_COPY * ST_SECTOR_BYTES <= ST_SECTOR_BYTES,
+	       "s_commit_copy_buf is too small to double as st_libio_load/save's scratch buffer "
+	       "-- ST_LIBRARY_HEADER_SECTORS_PER_COPY must stay at 1 for this sharing to be safe");
+#endif
 
 /* The ONE reader for every Stem Tape sector -- staging, library header,
  * and (once playback streams from it) committed song data alike. Reads
@@ -1215,10 +1231,14 @@ static int xfer_songdata_write(uint32_t sector, const uint8_t data[ST_SECTOR_BYT
 }
 
 /* Saves g_lib (torn-write-safe, two-copy) via st_libio_save() -- the ONLY
- * caller of xfer_header_write(). */
+ * caller of xfer_header_write(). Reuses s_commit_copy_buf as st_libio_save()'s
+ * scratch buffer (see its doc comment) -- safe because library-save,
+ * sector-staging, and commit's copy loop never run concurrently (one
+ * command serviced at a time, audio paused during a transfer -- see
+ * xfer_service()). */
 static bool xfer_lib_save(void)
 {
-	if (!st_libio_save(&g_lib, g_lib_trusted_copy, xfer_header_write, NULL)) {
+	if (!st_libio_save(&g_lib, g_lib_trusted_copy, s_commit_copy_buf, xfer_header_write, NULL)) {
 		return false;
 	}
 	/* A successful save left BOTH copies identical and valid at the new
@@ -2449,7 +2469,11 @@ static void xfer_service(void)
 		uint8_t h = (rc == ST_XFER_OK) ? (uint8_t)ST_XFER_RSP_STAGE_OK : (uint8_t)'e';
 		cdc_tx(&h, 1);
 	} else if (cmd == 'K') {                               /* verify */
-		uint8_t h = (st_xfer_verify(&g_xfer_txn, xfer_sector_read, NULL) == ST_XFER_OK)
+		/* Reuses s_commit_copy_buf as the per-sector read-back scratch (see
+		 * its own comment) -- safe for the same "one command at a time"
+		 * reason. */
+		uint8_t h = (st_xfer_verify(&g_xfer_txn, s_commit_copy_buf, xfer_sector_read, NULL) ==
+			     ST_XFER_OK)
 				    ? (uint8_t)ST_XFER_RSP_OK_GENERIC : (uint8_t)'e';
 		cdc_tx(&h, 1);
 	} else if (cmd == 'C') {                               /* commit */
@@ -2847,7 +2871,8 @@ static void streamer_thread(void *a, void *b, void *c)
 	memset(&g_lib, 0, sizeof(g_lib));
 	if (g_emmc_ready) {
 		st_libio_load_result_t r = st_libio_load(&g_lib, g_lib_slot_capacity,
-							   &g_lib_trusted_copy, xfer_sector_read, NULL);
+							   &g_lib_trusted_copy, s_commit_copy_buf,
+							   xfer_sector_read, NULL);
 		if (r == ST_LIBIO_READ_FAILED) {
 			g_lib_read_failed = 1;
 			g_lib.magic = ST_LIBRARY_HEADER_MAGIC;

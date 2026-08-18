@@ -114,16 +114,24 @@ st_xfer_result_t st_xfer_stage_sector(st_xfer_txn_t *t, uint32_t sector_index,
  * staged). Reads every staged sector back through `read_fn`, checks the
  * running whole-payload CRC-32 against `expected_crc32` from B — a real
  * read-back of what is actually on the media, not just what was in RAM
- * before the write — AND decodes every sector (st_sector_decode(), the real
- * documented SP-1 codec) to independently accumulate each stem's CRC-32
- * over exactly its declared `stem_content_frames[i]`, checked against
- * `meta.stem_crc32[i]`. Only when the whole-payload CRC and all four
- * per-stem CRCs match does this set `verified = true`; ANY read failure or
- * mismatch leaves it false and the transaction stays open (nothing is
- * committed either way). Uses a bounded, non-stack (static) sector work
- * buffer — see st_transfer.c — never an 8192-byte automatic/stack buffer.
+ * before the write — AND decodes every sector one frame at a time
+ * (st_sector_decode_frame(), the real documented SP-1 codec) to
+ * independently accumulate each stem's CRC-32 over exactly its declared
+ * `stem_content_frames[i]`, checked against `meta.stem_crc32[i]`. Only when
+ * the whole-payload CRC and all four per-stem CRCs match does this set
+ * `verified = true`; ANY read failure or mismatch leaves it false and the
+ * transaction stays open (nothing is committed either way).
+ *
+ * `scratch_sector` is a caller-owned, exactly-ST_SECTOR_BYTES buffer this
+ * function reads each sector's raw bytes into -- caller-supplied (not a
+ * static/stack buffer of this function's own) so the ONE physical 8192-byte
+ * buffer a whole transfer/commit/verify session needs can be shared instead
+ * of duplicated per module; see main.c's single s_commit_copy_buf. Must not
+ * be NULL. Per-frame decode happens into a small on-stack st_audio_frame_t
+ * (32 bytes) -- never an 8192-byte or 10880-byte automatic/stack buffer.
  */
-st_xfer_result_t st_xfer_verify(st_xfer_txn_t *t, st_sector_read_fn read_fn, void *ctx);
+st_xfer_result_t st_xfer_verify(st_xfer_txn_t *t, uint8_t *scratch_sector,
+				 st_sector_read_fn read_fn, void *ctx);
 
 /*
  * C precheck: the transactional GATE. Returns ST_XFER_OK only if a
