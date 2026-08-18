@@ -44,7 +44,9 @@ const PENDING_NOTE =
   "Upload remains disabled until device capacity is confirmed. No data has been written.";
 
 export function assessCapacity(input: CapacityInput): CapacityAssessment {
-  const required = Number.isFinite(input.requiredSectors) ? Math.max(0, Math.trunc(input.requiredSectors)) : 0;
+  const required = Number.isFinite(input.requiredSectors)
+    ? Math.max(0, Math.trunc(input.requiredSectors))
+    : 0;
 
   if (input.queryState === "unverified") {
     return {
