@@ -2442,8 +2442,22 @@ static void xfer_service(void)
 			uint8_t h = (xfer_v11_write(blk, sec) == 0) ? (uint8_t)ST11_WRITE_ACK : (uint8_t)'E';
 			cdc_tx(&h, 1);
 		}
-	} else if (cmd == 'F') {                               /* Phase 1: ack only -- never persists */
-		uint8_t h = 'f';
+	} else if (cmd == 'F') {                               /* real durability barrier (docs section 1, 10 item 6) */
+		/* emmc_cache_flush() blocks until the card's internal volatile
+		 * write cache actually programs to NAND (EXT_CSD FLUSH_CACHE) --
+		 * the SAME real hardware primitive stop_and_flush() already uses
+		 * at power-off, and the classic looper's own xfer_do_commit()
+		 * used identically before this migration. Only acks success
+		 * (ST11_FLUSH_ACK, 0x66); a failed flush must never claim
+		 * durability it didn't actually achieve. Safe to block the bus
+		 * here: a transfer is audio-paused throughout (see
+		 * xfer_service()'s own comment) -- exactly the "SAFE points, not
+		 * mid-record" rule emmc_cache_flush()'s own doc requires.
+		 * Unconditional (not gated on g_v11_layout_ready or which region
+		 * was last written): 'F' flushes the WHOLE card's write cache,
+		 * not a specific region, matching the unchanged base transport's
+		 * own scope (docs section 1: 'F' takes no payload). */
+		uint8_t h = emmc_cache_flush() ? (uint8_t)ST11_FLUSH_ACK : (uint8_t)'E';
 		cdc_tx(&h, 1);
 	} else if (cmd == 'X') {                               /* Phase 1: exit transfer mode -- never commits */
 		g_slot_switch_req = 1;                         /* reload tracks for the active song (read-only) */
