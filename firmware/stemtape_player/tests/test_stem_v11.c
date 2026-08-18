@@ -26,6 +26,7 @@
 #include "st_checksum32.h"
 #include "st_crc32.h"
 #include "st_sector_v11.h"
+#include "st_stcp.h"
 #include "st_stix.h"
 #include "st_transfer_protocol.h" /* ST_CRC32_INIT */
 #include "st_v11_format.h"
@@ -480,6 +481,81 @@ static void test_stix_select_active_two_generations(void)
 	free(block_b);
 }
 
+/* ========================================================================
+ * st_stcp.c: A/B region layout + Q -> STCP reply vs
+ * handoff/v1.1/binaries/stcp-capability-response.bin.
+ *
+ * Ground truth (handoff/v1.1/decoded/stcp-capability-response.json):
+ *   deviceBlocks=272, song=[{start:16,blocks:128},{start:144,blocks:128}],
+ *   index=[{start:0,blocks:1},{start:1,blocks:1}], activeIndexSlot=
+ *   4294967295 (NO_SLOT), activeSongSlot=4294967295 (NO_SLOT),
+ *   activeGeneration=0, flags=4095, firmwareId=1398031959 ('STFW'),
+ *   proto=1.1, format=1.1, stixVersion=2.
+ * ======================================================================== */
+static void test_stcp_region_layout_matches_fixture(void)
+{
+	st11_region_layout_t layout;
+	bool ok = st11_storage_layout_compute(0u, 272u, &layout);
+
+	CHECK(ok, "st11_storage_layout_compute(base=0, deviceBlocks=272) succeeds");
+	CHECK(layout.index_a_start == 0u && layout.index_a_blocks == 1u,
+	      "computed index A == [0,1), matching the fixture exactly");
+	CHECK(layout.index_b_start == 1u && layout.index_b_blocks == 1u,
+	      "computed index B == [1,1), matching the fixture exactly");
+	CHECK(layout.song_a_start == 16u && layout.song_a_blocks == 128u,
+	      "computed song A == [16,144), matching the fixture exactly");
+	CHECK(layout.song_b_start == 144u && layout.song_b_blocks == 128u,
+	      "computed song B == [144,272), matching the fixture exactly");
+}
+
+static void test_stcp_build_matches_fixture_byte_for_byte(void)
+{
+	size_t len;
+	uint8_t *fixture = read_fixture("handoff/v1.1/binaries/stcp-capability-response.bin", &len);
+
+	CHECK(len == 4 + ST11_CAPS_BYTES, "stcp-capability-response.bin is exactly 4 + 96 = 100 bytes");
+
+	st11_region_layout_t layout;
+	bool laid_out = st11_storage_layout_compute(0u, 272u, &layout);
+
+	CHECK(laid_out, "region layout for the 272-block fixture device computes successfully");
+
+	uint8_t built[4 + ST11_CAPS_BYTES];
+
+	/* Fresh/never-committed device: NO_SLOT/NO_SLOT/generation 0 --
+	 * exactly what this fixture captured. */
+	st11_stcp_build(&layout, 272u, ST11_NO_SLOT, ST11_NO_SLOT, 0u, built);
+
+	CHECK(memcmp(built, fixture, 4 + ST11_CAPS_BYTES) == 0,
+	      "st11_stcp_build() reproduces stcp-capability-response.bin byte-for-byte (all 100 bytes)");
+
+	st11_stcp_reply_t parsed;
+	bool parsed_ok = st11_stcp_parse(fixture, &parsed);
+
+	CHECK(parsed_ok, "st11_stcp_parse() accepts the real fixture's \"STCP\" tag");
+	CHECK(parsed.firmware_id == ST11_FIRMWARE_ID, "parsed firmwareId == ST11_FIRMWARE_ID ('STFW')");
+	CHECK(parsed.proto_major == 1u && parsed.proto_minor == 1u, "parsed protocol == 1.1");
+	CHECK(parsed.format_major == 1u && parsed.format_minor == 1u, "parsed format == 1.1");
+	CHECK(parsed.flags == 4095u, "parsed flags == 4095 (all 12 capability bits, matching the fixture)");
+	CHECK(parsed.sample_rate == 48000u, "parsed sampleRate == 48000");
+	CHECK(parsed.device_blocks == 272u, "parsed deviceBlocks == 272");
+	CHECK(parsed.regions.song_a_start == 16u && parsed.regions.song_a_blocks == 128u,
+	      "parsed songA == [16,144)");
+	CHECK(parsed.regions.song_b_start == 144u && parsed.regions.song_b_blocks == 128u,
+	      "parsed songB == [144,272)");
+	CHECK(parsed.regions.index_a_start == 0u && parsed.regions.index_a_blocks == 1u,
+	      "parsed indexA == [0,1)");
+	CHECK(parsed.regions.index_b_start == 1u && parsed.regions.index_b_blocks == 1u,
+	      "parsed indexB == [1,1)");
+	CHECK(parsed.active_index_slot == ST11_NO_SLOT, "parsed activeIndexSlot == NO_SLOT (0xffffffff)");
+	CHECK(parsed.active_song_slot == ST11_NO_SLOT, "parsed activeSongSlot == NO_SLOT (0xffffffff)");
+	CHECK(parsed.active_generation_lo == 0u && parsed.active_generation_hi == 0u,
+	      "parsed activeGeneration == 0");
+	CHECK(parsed.stix_version == 2u, "parsed stixVersion == 2");
+
+	free(fixture);
+}
+
 int main(void)
 {
 	RUN(test_song_sectors_fixture);
@@ -490,6 +566,8 @@ int main(void)
 	RUN(test_stix_validate_uncommitted);
 	RUN(test_stix_storage_initialized_empty);
 	RUN(test_stix_select_active_two_generations);
+	RUN(test_stcp_region_layout_matches_fixture);
+	RUN(test_stcp_build_matches_fixture_byte_for_byte);
 
 	printf("\n");
 	printf("%d distinct test cases, %d assertion checks\n", g_test_cases, g_checks);

@@ -142,6 +142,21 @@ _Static_assert(ST11_REQUIRED_CAP_FLAGS == 0x00000fbfu,
 	       "required capability flag set does not match docs/stem-tape-transfer-v1.1.md 12.4");
 #endif
 
+/* What this firmware actually reports in its Q -> STCP reply's `flags`
+ * field: every required flag PLUS the optional STAGING_COW (bit 6) --
+ * verified to match handoff/v1.1/binaries/stcp-capability-response.bin's
+ * real declared flags value (4095 = 0xfff = all 12 bits) exactly (see
+ * tests/test_stem_v11.c). STAGING_COW is genuinely true of this design:
+ * the v1.1 replacement sequence always writes the INACTIVE song/index
+ * pair and never touches the active one in place -- that IS
+ * copy-on-write staging at the region level. */
+#define ST11_CAP_ALL_FLAGS (ST11_REQUIRED_CAP_FLAGS | ST11_CAP_STAGING_COW)
+
+#if !defined(__cplusplus)
+_Static_assert(ST11_CAP_ALL_FLAGS == 0x00000fffu,
+	       "reported capability flag set does not match the real stcp-capability-response.bin fixture");
+#endif
+
 /* ---- STCP capability record offsets [doc 12.5] ------------------------
  * Reply to 'Q': 4-byte ASCII tag "STCP" followed by this 96-byte payload
  * (100 bytes total on the wire). */
