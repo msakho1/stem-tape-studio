@@ -128,17 +128,35 @@ Padding, frame count, audio bytes and sector count produced by the UI path
 match the node reference exactly (14592 frames, 350208 bytes, 43 sectors,
 688 blocks, pads 0/442/592/2592).
 
-Open wording defect (not changed here): with no device connected the capacity
-line reads `43 sectors of ? available in the inactive staging slot · does NOT
-fit — no data will be written`. The state is fail-safe (upload disabled), but
-"does NOT fit" is asserted when capacity is unknown.
+Wording defect closed (tri-state capacity, `src/sp1/capacity.ts`): with no
+device connected, `/device` no longer asserts "does NOT fit". Capacity is now
+`unknown | fits | insufficient`; unknown is never encoded as false, zero, NaN
+or insufficient, and never enables upload.
+
+    disconnected / pending / unverified
+      "43 sectors required. Connect a compatible Stem Tape SP-1 to check available storage."
+      "Upload remains disabled until device capacity is confirmed. No data has been written."
+      (unverified line: "Device storage capacity could not be verified.")
+    compatible, sufficient
+      "43 sectors required · 256 available · fits"
+    compatible, insufficient
+      "43 sectors required · 8 available · does not fit"
+      "No data will be written."
+
+Re-verified on the production server (Chromium, four fixture stems, BPM 120):
+
+    capacity        43 sectors required. Connect a compatible Stem Tape SP-1 to check available storage.
+    capacity note   Upload remains disabled until device capacity is confirmed. No data has been written.
+    upload button   disabled
+    write state     "no data has been written"
+    console errors / page errors   [] / []
 
 ## 6. Lint, tests, typecheck, manifests
 
     $ npx eslint <7 audit files>            42 prettier errors -> --fix on those files only
     $ npx eslint <7 audit files>            EXIT=0, 0 problems
-    $ bunx vitest run                       Test Files 45 passed (45)
-                                            Tests 472 passed (472)   EXIT=0
+    $ bunx vitest run                       Test Files 46 passed (46)
+                                            Tests 482 passed (482)   EXIT=0
     $ bunx vitest run src/sp1               Test Files 12 passed (12)
     $ npx tsgo --noEmit                     EXIT=0, no diagnostics
     $ sha256sum -c handoff/v1.1/SHA256SUMS.txt   20 listed / 20 OK / 0 failed
