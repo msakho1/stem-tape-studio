@@ -422,6 +422,127 @@ static void test_stix_validate_uncommitted(void)
 	free(block);
 }
 
+/* ========================================================================
+ * Cross-contract check against handoff/v1.1/reports/magic-write-cases.json
+ * -- the companion's own exhaustive torn-write sweep over the final
+ * magic-committing block write, categorized by how many bytes of that one
+ * write actually landed. "Every result is produced by rebooting the mock
+ * from its stored blocks and reparsing them through the production
+ * selector. No hidden mock state is consulted" (the fixture's own note) --
+ * i.e. each case is fully characterized by the RESULTING on-disk bytes,
+ * exactly what st_stix_select_active() operates on here too.
+ *
+ * Only case A is newly exercised below: it is the one declared outcome
+ * whose exact resulting byte pair (index-uncommitted.bin as the torn
+ * region, index-b-valid.bin as the untouched other region) is a REAL,
+ * already-frozen fixture combination this suite had not yet run through
+ * the selector together. The other cases are not fabricated here because
+ * their exact corrupted bytes were never supplied as fixtures (only the
+ * declared outcome was) -- inventing byte patterns to hit a declared
+ * result would be exactly the "self-generated fixture" this whole suite
+ * exists to avoid. They are still real, already-proven properties of this
+ * firmware, cross-referenced instead of duplicated:
+ *   - case B ("only the validity-magic bytes are applied and the record
+ *     is fully valid") and cases D/E (the complete block lands; only the
+ *     write ack or the post-commit confirmation is lost) all resolve to
+ *     the SAME final on-disk state as a normal successful commit --
+ *     index-a-valid.bin (generation 3) selected over index-b-valid.bin
+ *     (generation 2) -- already proven byte-for-byte by
+ *     test_stix_select_active_two_generations() above. Firmware has no
+ *     way to distinguish "ack lost" from "ack received": both leave the
+ *     identical durable bytes behind, which is the whole point of a
+ *     generation-committed design.
+ *   - case C ("a partial block is applied that produces an invalid CRC /
+ *     structure") is the generic "any CRC mismatch is rejected, previous
+ *     stays selected" property -- proven for hand-built invalid records in
+ *     test_ab_session_open_and_negative_writes()'s BAD_COMMIT_RECORD
+ *     checks, and implicitly by st_stix_block_crc() itself matching every
+ *     real fixture's declared crc32 field exactly.
+ *   - case F ("the final block is acknowledged but not durably applied")
+ *     is a volatile-write-cache property this pure, in-memory-mock host
+ *     suite cannot model at all -- it is exactly what main.c's real 'F'
+ *     handler (routed through the real emmc_cache_flush() EXT_CSD
+ *     primitive, not a host-testable mock) exists to prevent. Not
+ *     host-testable; addressed at the hardware-integration level instead.
+ * ======================================================================== */
+static void test_magic_write_cases_case_a_torn_write_no_bytes_applied(void)
+{
+	size_t len_a, len_b;
+	/* "no bytes of the final [magic-committing] block are applied" --
+	 * region A is left exactly as it stood immediately before that
+	 * write: the step-13 uncommitted image (magic=0, otherwise complete
+	 * and CRC-valid). Region B is untouched throughout, still the real
+	 * generation-2 active record. */
+	uint8_t *block_a = read_fixture("handoff/v1.1/binaries/index-uncommitted.bin", &len_a);
+	uint8_t *block_b = read_fixture("handoff/v1.1/binaries/index-b-valid.bin", &len_b);
+	st_stix_record_t selected;
+
+	st_stix_select_t sel = st_stix_select_active(block_a, block_b, FIXTURE_SONG_A_START,
+						      FIXTURE_SONG_A_BLOCKS, FIXTURE_SONG_B_START,
+						      FIXTURE_SONG_B_BLOCKS, &selected);
+
+	CHECK(sel == ST_STIX_SELECT_B,
+	      "magic-write-cases.json case A (no bytes of the final write applied): region A stays "
+	      "uncommitted (ERR_MAGIC), selector correctly falls back to region B -- SELECT_B");
+	CHECK(selected.generation_lo == 2u,
+	      "magic-write-cases.json case A: resolved generation == 2, matching the fixture's declared "
+	      "activeGeneration -- an interrupted replacement never requires reinitialization");
+
+	free(block_a);
+	free(block_b);
+}
+
+/*
+ * Cross-contract check against handoff/v1.1/binaries/index-final-magic-
+ * block.bin (the "step 17 image": the block as it stands the instant after
+ * the validity-magic write, the sole commit point). Verified by direct
+ * comparison (sha256sum, both files) rather than a redundant byte-for-byte
+ * parse test: this fixture is byte-for-byte IDENTICAL to index-a-valid.bin
+ * (same SHA-256), which test_stix_parse_index_a_valid() above already
+ * proves matches its own declared decoded fields exactly, so a second
+ * parse of the identical bytes would prove nothing new. What IS new here
+ * is the fixture's own claim about its relationship to index-uncommitted.bin
+ * -- "byte-identical to index-uncommitted.bin except bytes 0..4, which
+ * carry the little-endian validity magic" -- confirmed directly below by
+ * diffing the two real fixture files' bytes, not merely trusted from the
+ * decoded JSON's prose.
+ */
+static void test_index_final_magic_block_matches_uncommitted_except_magic(void)
+{
+	size_t len_final, len_uncommitted;
+	uint8_t *final_block = read_fixture("handoff/v1.1/binaries/index-final-magic-block.bin", &len_final);
+	uint8_t *uncommitted_block = read_fixture("handoff/v1.1/binaries/index-uncommitted.bin", &len_uncommitted);
+
+	CHECK(len_final == ST11_PHYSICAL_BLOCK_BYTES && len_uncommitted == ST11_PHYSICAL_BLOCK_BYTES,
+	      "index-final-magic-block.bin and index-uncommitted.bin are both exactly one 512-byte block");
+
+	bool differs_only_in_magic = true;
+	uint32_t i;
+
+	for (i = ST11_IX_OFF_MAGIC + 4u; i < ST11_PHYSICAL_BLOCK_BYTES; i++) {
+		if (final_block[i] != uncommitted_block[i]) {
+			differs_only_in_magic = false;
+			break;
+		}
+	}
+	CHECK(differs_only_in_magic,
+	      "index-final-magic-block.bin: every byte from offset 4 onward is byte-identical to "
+	      "index-uncommitted.bin -- the magic-committing write changes ONLY the magic field, "
+	      "confirmed by direct comparison of the real fixture files, not merely the decoded JSON's prose");
+
+	uint32_t final_magic = (uint32_t)final_block[0] | ((uint32_t)final_block[1] << 8) |
+				 ((uint32_t)final_block[2] << 16) | ((uint32_t)final_block[3] << 24);
+	uint32_t uncommitted_magic = (uint32_t)uncommitted_block[0] | ((uint32_t)uncommitted_block[1] << 8) |
+				      ((uint32_t)uncommitted_block[2] << 16) | ((uint32_t)uncommitted_block[3] << 24);
+
+	CHECK(final_magic == ST11_INDEX_MAGIC && uncommitted_magic == 0u,
+	      "index-final-magic-block.bin: magic field is the real ST11_INDEX_MAGIC ('STIX'); "
+	      "index-uncommitted.bin's is 0 -- the ONLY difference, confirmed field-by-field");
+
+	free(final_block);
+	free(uncommitted_block);
+}
+
 static void test_stix_storage_initialized_empty(void)
 {
 	size_t len;
@@ -1117,6 +1238,8 @@ int main(void)
 	RUN(test_stix_parse_index_b_valid);
 	RUN(test_stix_validate_committed_records);
 	RUN(test_stix_validate_uncommitted);
+	RUN(test_magic_write_cases_case_a_torn_write_no_bytes_applied);
+	RUN(test_index_final_magic_block_matches_uncommitted_except_magic);
 	RUN(test_stix_storage_initialized_empty);
 	RUN(test_stix_select_active_two_generations);
 	RUN(test_stix_read_library_fresh_init);
