@@ -845,6 +845,270 @@ static void test_torn_invalid_magic(void)
 	      "byte-for-byte from final mock-device storage");
 }
 
+/* ========================================================================
+ * handoff/v1.1/reports/interruption-sweep.json: an exhaustive sweep of
+ * where-if-anywhere-the-connection-drops, over every one of a single real
+ * replacement upload's own protocol operations. See
+ * test_interruption_sweep_matches_fixture()'s own doc comment for exactly
+ * how this is reproduced with zero fabricated bytes.
+ * ======================================================================== */
+
+typedef struct {
+	uint32_t op;
+	uint8_t when;      /* 0 = "before", 1 = "after" */
+	uint8_t is_new;    /* 0 = active=="previous", 1 = active=="new" */
+	uint32_t generation;
+} sweep_expected_t;
+
+/* Loads the ISWP sidecar emitted by gen_interruption_sweep_expected.py --
+ * see that script's own doc comment for the exact format. Mechanical
+ * parsing only, mirroring load_sidecar() above. */
+static uint32_t load_sweep_expected(const char *path, uint8_t **file_buf_out, sweep_expected_t **out)
+{
+	size_t len;
+	uint8_t *buf = read_whole_file(path, &len);
+
+	if (len < 8 || memcmp(buf, "ISWP", 4) != 0) {
+		fprintf(stderr, "FATAL: %s is not a valid ISWP sidecar\n", path);
+		exit(2);
+	}
+	uint32_t count = get_u32le(buf + 4);
+	sweep_expected_t *records = malloc(sizeof(sweep_expected_t) * count);
+
+	if (!records) {
+		exit(2);
+	}
+	size_t off = 8;
+
+	for (uint32_t i = 0; i < count; i++) {
+		if (off + 10 > len) {
+			fprintf(stderr, "FATAL: %s truncated at record %u\n", path, i);
+			exit(2);
+		}
+		records[i].op = get_u32le(buf + off);
+		records[i].when = buf[off + 4];
+		records[i].is_new = buf[off + 5];
+		records[i].generation = get_u32le(buf + off + 6);
+		off += 10;
+	}
+	*file_buf_out = buf;
+	*out = records;
+	return count;
+}
+
+/* Independently derives the current selector state straight from the mock
+ * device's own bytes, via the SAME real st_stix_read_library() every other
+ * test in this file calls, WITHOUT touching any write session -- exactly
+ * "what would be durably selected if the device rebooted right now",
+ * which is precisely what an interruption-point measurement means. Returns
+ * 0 if the library is not currently in a valid (ST_STIX_LIB_OK) state
+ * (never a real generation number, since generations start at 1). */
+static uint32_t sweep_query_generation(void)
+{
+	st11_region_layout_t layout;
+	uint8_t idx_a[ST11_PHYSICAL_BLOCK_BYTES];
+	uint8_t idx_b[ST11_PHYSICAL_BLOCK_BYTES];
+
+	if (!st11_storage_layout_compute(0u, MOCK_DEVICE_BLOCKS, &layout) ||
+	    mock_read_block(layout.index_a_start, idx_a, NULL) != 0 ||
+	    mock_read_block(layout.index_b_start, idx_b, NULL) != 0) {
+		return 0u;
+	}
+
+	st_stix_library_state_t lib;
+
+	st_stix_read_library(idx_a, idx_b, layout.song_a_start, layout.song_a_blocks, layout.song_b_start,
+			      layout.song_b_blocks, &lib);
+	return (lib.status == ST_STIX_LIB_OK) ? (uint32_t)lib.generation : 0u;
+}
+
+/* One measurement point: compares the real selector state (`actual_gen`,
+ * and whether it differs from the checkpoint's own starting generation --
+ * the fixture's own "previous" vs "new" axis) against the corresponding
+ * transcribed record, and tallies it into the running previous/new counts
+ * used for the final total-count cross-check. */
+static void sweep_check_point(uint32_t op, uint8_t when, uint32_t actual_gen, uint32_t checkpoint_gen,
+			       const sweep_expected_t *expected, uint32_t idx, uint32_t expected_count,
+			       int *previous_count, int *new_count)
+{
+	const char *when_str = when ? "after" : "before";
+
+	CHECK(idx < expected_count && expected[idx].op == op && expected[idx].when == when,
+	      "interruption-sweep op %u '%s': record alignment matches interruption-sweep.json's own op/when "
+	      "ordering",
+	      op, when_str);
+	CHECK(actual_gen == expected[idx].generation,
+	      "interruption-sweep op %u '%s': active generation == %u, matching interruption-sweep.json's own "
+	      "declared activeGeneration exactly",
+	      op, when_str, expected[idx].generation);
+	CHECK((actual_gen != checkpoint_gen) == (expected[idx].is_new != 0),
+	      "interruption-sweep op %u '%s': active == \"%s\", matching interruption-sweep.json's own declared "
+	      "\"active\" field",
+	      op, when_str, expected[idx].is_new ? "new" : "previous");
+	if (expected[idx].is_new) {
+		(*new_count)++;
+	} else {
+		(*previous_count)++;
+	}
+}
+
+/*
+ * handoff/v1.1/reports/interruption-sweep.json's own note: "Exhaustive
+ * interruption sweep over one deterministic replacement upload (mock
+ * device only)." Directly verified, before writing this test (python3,
+ * comparing op/phase/block against each real transcript's own decoded
+ * command sequence), that its declared 73 protocol operations are
+ * op-for-op IDENTICAL -- same command, same block address, same order --
+ * to upload-2-successful.json's own real recorded R/W/F tx bytes
+ * (excluding the two leading 'Q' capability queries and the SP1XFER!/'P'
+ * framing, which the fixture does not count as "protocol operations"),
+ * and that its declared baseline (selectedValidGenerations==1,
+ * activeGeneration==2 for every point up through the magic-write op) is
+ * the SAME upload-1-successful.json checkpoint every other cross-scenario
+ * test in this file replays first (index A blank/invalid, only index B --
+ * generation 2 -- valid; see test_successful_uploads()'s own citations).
+ *
+ * So this entire 146-point sweep is reproduced here with ZERO fabricated
+ * bytes: the checkpoint is the real upload-1-successful.json transcript;
+ * the 73 interrupted operations are upload-2-successful.json's own real
+ * recorded tx bytes, replayed op-by-op through the SAME real
+ * st_ab_session_check_write()/verify_song_before_commit()/
+ * st_stix_read_library() functions every other test in this file calls;
+ * and the 146 expected (op, when, active, generation) values checked
+ * against below are mechanically transcribed from the real JSON's own
+ * "results" array by gen_interruption_sweep_expected.py (a pure field
+ * copy that itself verifies strict op-ascending, before-then-after
+ * ordering before emitting anything) -- never hand-typed, never
+ * fabricated.
+ *
+ * "before" a non-mutating op (R) or a no-observable-effect-on-this-mock
+ * op (F -- real EXT_CSD flush durability is a hardware property this
+ * in-memory mock cannot model, consistent with every other test in this
+ * file) equals "after" it: no real production function call runs between
+ * them that could change any stored byte, so both measurements are taken
+ * back-to-back with nothing happening in between -- matching the
+ * fixture's own declared values exactly (see byPhase: audio-write,
+ * read-back, index-write-uncommitted, flush-uncommitted-index and
+ * index-read-back all show identical before/after tallies). "before" a W
+ * op is the selector state prior to that write's real effect; "after" is
+ * the state once st_ab_session_check_write() (and, for the magic-
+ * committing write, verify_song_before_commit()) has actually been
+ * applied to the mock device -- exactly mirroring what "the connection
+ * drops right here" means for real firmware, which has no notion of
+ * "before" vs "after" its own completed writes other than what bytes are
+ * actually, durably stored.
+ */
+static void test_interruption_sweep_matches_fixture(void)
+{
+	memset(g_mock_device, 0, sizeof(g_mock_device));
+
+	st_ab_session_t session;
+
+	memset(&session, 0, sizeof(session));
+
+	int f1 = replay_transcript("interruption-sweep (checkpoint upload-1)",
+				    "build-transcripts/upload-1-successful.bin", &session);
+
+	CHECK(f1 == 0, "interruption-sweep checkpoint: upload-1-successful.json replays with 0 mismatches");
+
+	uint32_t checkpoint_gen = sweep_query_generation();
+
+	CHECK(checkpoint_gen == 2u,
+	      "interruption-sweep checkpoint: generation == 2, matching interruption-sweep.json's own declared "
+	      "baseline activeGeneration for every pre-magic-write point");
+
+	/* upload-2-successful.json's own real sidecar entries -- already
+	 * generated for test_successful_uploads() -- reloaded here purely
+	 * to walk its 73 real R/W/F protocol operations in order. Its 'Q'
+	 * entries are processed normally via replay_query() to open/refresh
+	 * `session` exactly as a real 'Q' would, but are not themselves
+	 * numbered "protocol operations" in the fixture. */
+	uint8_t *ops_file_buf;
+	txn_entry_t *entries;
+	uint32_t entry_count = load_sidecar("build-transcripts/upload-2-successful.bin", &ops_file_buf, &entries);
+
+	uint8_t *expected_file_buf;
+	sweep_expected_t *expected;
+	uint32_t expected_count =
+		load_sweep_expected("build-transcripts/interruption-sweep-expected.bin", &expected_file_buf, &expected);
+
+	CHECK(expected_count == 146u,
+	      "interruption-sweep-expected.bin: 146 transcribed results, matching interruption-sweep.json's own "
+	      "declared injectedInterruptionPoints");
+
+	uint32_t op = 0;
+	uint32_t point = 0; /* index into `expected`, 0..145 */
+	uint32_t i = 0;
+	int sweep_previous_count = 0;
+	int sweep_new_count = 0;
+
+	while (i < entry_count) {
+		const txn_entry_t *tx = &entries[i];
+
+		if (tx->dir != 0) {
+			i++;
+			continue;
+		}
+		if (tx->len == 8 && memcmp(tx->data, "SP1XFER!", 8) == 0) {
+			i++;
+			continue;
+		}
+
+		uint8_t cmd = tx->data[0];
+		bool have_next = (i + 1 < entry_count);
+		const txn_entry_t *rx = have_next ? &entries[i + 1] : NULL;
+
+		if (cmd == 'P') {
+			i += rx ? 2 : 1;
+			continue;
+		}
+		if (cmd == 'Q') {
+			uint8_t reply[4 + ST11_CAPS_BYTES];
+
+			replay_query(&session, reply);
+			i += rx ? 2 : 1;
+			continue;
+		}
+
+		/* cmd is 'R', 'W', or 'F': the next real protocol operation. */
+		op++;
+
+		uint32_t before_gen = sweep_query_generation();
+
+		if (cmd == 'W') {
+			uint32_t block = get_u32le(tx->data + 1);
+			const uint8_t *data = tx->data + 5;
+
+			(void)replay_write(&session, block, data);
+		}
+		/* 'R' and 'F': no mutating effect to apply (see doc comment). */
+
+		uint32_t after_gen = sweep_query_generation();
+
+		sweep_check_point(op, 0, before_gen, checkpoint_gen, expected, point, expected_count,
+				   &sweep_previous_count, &sweep_new_count);
+		point++;
+		sweep_check_point(op, 1, after_gen, checkpoint_gen, expected, point, expected_count,
+				   &sweep_previous_count, &sweep_new_count);
+		point++;
+
+		i += rx ? 2 : 1;
+	}
+
+	CHECK(op == 73u,
+	      "interruption-sweep: exactly 73 real protocol operations replayed, matching interruption-sweep.json's "
+	      "own declared protocolOperations");
+	CHECK(point == expected_count, "interruption-sweep: all 146 expected points consumed");
+	CHECK(sweep_previous_count == 139 && sweep_new_count == 7,
+	      "interruption-sweep: 139 previous-survived / 7 new-committed points, matching "
+	      "interruption-sweep.json's own declared totals exactly");
+
+	free(entries);
+	free(ops_file_buf);
+	free(expected);
+	free(expected_file_buf);
+}
+
 int main(int argc, char **argv)
 {
 	g_test_cases++;
@@ -855,6 +1119,8 @@ int main(int argc, char **argv)
 	test_magic_applied_ack_lost();
 	g_test_cases++;
 	test_torn_invalid_magic();
+	g_test_cases++;
+	test_interruption_sweep_matches_fixture();
 
 	printf("\n");
 	printf("%d distinct test cases, %d assertion checks\n", g_test_cases, g_checks);
@@ -866,7 +1132,8 @@ int main(int argc, char **argv)
 			fprintf(report,
 				"{\n  \"total_checks\": %d,\n  \"total_failures\": %d,\n  \"transcripts\": "
 				"[\"upload-1-successful\", \"upload-2-successful\", \"interrupted-before-magic\", "
-				"\"magic-applied-ack-lost\", \"torn-invalid-magic\"]\n}\n",
+				"\"magic-applied-ack-lost\", \"torn-invalid-magic\"],\n  \"reports\": "
+				"[\"interruption-sweep\"]\n}\n",
 				g_checks, g_failures);
 			fclose(report);
 		}

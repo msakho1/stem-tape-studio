@@ -903,6 +903,17 @@ jobs:
         #     the honest, provable claim: given exactly what was
         #     transmitted, the real selector correctly commits generation
         #     3 -- see test_torn_invalid_magic()'s own doc comment.
+        #   - handoff/v1.1/reports/interruption-sweep.json: an exhaustive
+        #     146-point sweep (before/after each of 73 real protocol
+        #     operations) over a single replacement upload, reproduced
+        #     with zero fabricated bytes -- the 73 operations are
+        #     upload-2-successful.json's own real recorded tx bytes,
+        #     confirmed op-for-op identical (command, block address,
+        #     order) to the fixture's own declared op/phase/block table
+        #     before this step was written; the 146 expected (op, when,
+        #     active, generation) values are mechanically transcribed from
+        #     the real JSON by gen_interruption_sweep_expected.py. See
+        #     test_interruption_sweep_matches_fixture()'s own doc comment.
         working-directory: ${{ github.workspace }}/project
         run: |
           set -euo pipefail
@@ -917,6 +928,8 @@ jobs:
             magic-applied-ack-lost build-transcripts/magic-applied-ack-lost.bin
           python3 firmware/stemtape_player/tests/gen_transcript_bin.py . \
             torn-invalid-magic build-transcripts/torn-invalid-magic.bin
+          python3 firmware/stemtape_player/tests/gen_interruption_sweep_expected.py . \
+            build-transcripts/interruption-sweep-expected.bin
           cc -std=c11 -Wall -Wextra -Ifirmware/stemtape_player/src \
             firmware/stemtape_player/src/st_crc32.c \
             firmware/stemtape_player/src/st_checksum32.c \

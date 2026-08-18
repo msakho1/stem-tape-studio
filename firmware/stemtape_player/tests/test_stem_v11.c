@@ -443,15 +443,27 @@ static void test_stix_validate_uncommitted(void)
  * exists to avoid. They are still real, already-proven properties of this
  * firmware, cross-referenced instead of duplicated:
  *   - case B ("only the validity-magic bytes are applied and the record
- *     is fully valid") and cases D/E (the complete block lands; only the
- *     write ack or the post-commit confirmation is lost) all resolve to
- *     the SAME final on-disk state as a normal successful commit --
+ *     is fully valid"), case C2 ("a clean prefix tear that lands only the
+ *     magic bytes stays valid" -- categorized by the fixture itself under
+ *     the SAME "valid-magic-prefix-intact-body" bucket as case B, since a
+ *     tear that lands only the magic-field prefix of an already-complete-
+ *     minus-magic block is byte-for-byte the same resulting state B
+ *     describes), and cases D/E (the complete block lands; only the write
+ *     ack or the post-commit confirmation is lost) all resolve to the
+ *     SAME final on-disk state as a normal successful commit --
  *     index-a-valid.bin (generation 3) selected over index-b-valid.bin
  *     (generation 2) -- already proven byte-for-byte by
- *     test_stix_select_active_two_generations() above. Firmware has no
- *     way to distinguish "ack lost" from "ack received": both leave the
- *     identical durable bytes behind, which is the whole point of a
- *     generation-committed design.
+ *     test_stix_select_active_two_generations() above, and independently
+ *     confirmed structurally: index-final-magic-block.bin (that exact
+ *     resulting state) differs from index-uncommitted.bin ONLY in the
+ *     4-byte magic field (test_index_final_magic_block_matches_
+ *     uncommitted_except_magic() below), which is precisely "only the
+ *     magic-prefix bytes landed, the rest of the block was already
+ *     correct" -- cases B/C2/D/E are four different ROUTES to that one
+ *     identical resulting byte pattern. Firmware has no way to
+ *     distinguish any of them from each other or from a clean write: all
+ *     leave the identical durable bytes behind, which is the whole point
+ *     of a generation-committed design.
  *   - case C ("a partial block is applied that produces an invalid CRC /
  *     structure") is the generic "any CRC mismatch is rejected, previous
  *     stays selected" property -- proven for hand-built invalid records in
@@ -1227,6 +1239,229 @@ static void test_ab_session_ceiling_allows_smaller_song(void)
 }
 
 /*
+ * Cross-contract check against handoff/v1.1/reports/successive-
+ * replacement.json (not covered by SHA256SUMS.txt/CRC32SUMS.txt -- like
+ * magic-write-cases.json, it is an unmanifested report, cited directly).
+ * Its own "uploads" array declares five successive REPLACE commits, each
+ * alternating destination and incrementing generation by exactly one:
+ *   step0 "ONE (baseline)": songSlot=A indexSlot=B generation=2
+ *     rollbackGeneration=1 -- the SAME real shape upload-1-successful.json
+ *     and test_ab_session_ceiling_allows_smaller_song() above both
+ *     already establish for the very first real upload out of a truly
+ *     blank device (docs section 5's worked example).
+ *   step1 "S1": songSlot=B indexSlot=A generation=3 rollbackGeneration=2
+ *     -- the SAME real shape upload-2-successful.json's own declared
+ *     result.
+ *   step2 "S2": songSlot=A indexSlot=B generation=4 rollbackGeneration=3
+ *   step3 "S3": songSlot=B indexSlot=A generation=5 rollbackGeneration=4
+ *   step4 "S4": songSlot=A indexSlot=B generation=6 rollbackGeneration=5
+ * plus a final "rollback" scenario: index B (step4's own generation-6
+ * commit) gets one CRC byte corrupted, and the selector is declared to
+ * fall back to index A / generation 5 / songSlot B (step3's own commit).
+ *
+ * The fixture's own songRegionSha256/indexSha256 values are hashes of the
+ * REAL companion's own real audio content, which was never supplied to
+ * this repository (only the hashes were) -- reproducing THOSE exact bytes
+ * is impossible without fabricating audio data never actually provided,
+ * which this whole suite's non-fabrication rule forbids. What IS
+ * reproduced here, with zero fabricated bytes, is the STRUCTURAL
+ * property the fixture demonstrates: driving five REAL successive
+ * REPLACE sessions (through the exact same st_ab_session_open_replace()/
+ * check_write()/verify_song_before_commit()/mark_song_verified()
+ * functions every other test in this suite calls) with real, freshly
+ * STSC-encoded song content (build_one_sector_song(), the same real
+ * codec + FNV-1a machinery test_song_sectors_fixture() proves matches
+ * the companion's own checksums) reproduces the SAME destination-
+ * alternation, generation-increment, and rollback-fallback pattern the
+ * real companion's own five real uploads produced -- proving the
+ * SELECTION ALGORITHM's behavior matches across an arbitrarily long
+ * chain, not that any particular byte content matches.
+ */
+static void test_successive_replacement_matches_fixture(void)
+{
+	memset(g_mock_device, 0, sizeof(g_mock_device));
+
+	st11_region_layout_t layout;
+
+	CHECK(st11_storage_layout_compute(0u, 272u, &layout), "successive-replacement: layout computation succeeds");
+
+	static const uint8_t expected_song_slot[5] = { ST11_SLOT_A, ST11_SLOT_B, ST11_SLOT_A, ST11_SLOT_B,
+							ST11_SLOT_A };
+	static const uint8_t expected_index_slot[5] = { ST11_SLOT_B, ST11_SLOT_A, ST11_SLOT_B, ST11_SLOT_A,
+							 ST11_SLOT_B };
+	static const uint32_t expected_generation[5] = { 2u, 3u, 4u, 5u, 6u };
+
+	/* Seed the same "post-INIT, generation-1, blank, index A active"
+	 * state test_ab_session_ceiling_allows_smaller_song() above already
+	 * establishes as the real shape st_ab_session_open_init() itself
+	 * produces on a truly blank device -- step 0 below starts from
+	 * exactly what that real INIT commit leaves behind. */
+	uint32_t zero_stem_checksums[ST11_STEM_COUNT] = { 0u, 0u, 0u, 0u };
+	uint8_t seed_a[ST11_PHYSICAL_BLOCK_BYTES];
+	uint8_t seed_b[ST11_PHYSICAL_BLOCK_BYTES];
+
+	build_stix_block(seed_a, ST11_INDEX_MAGIC, ST11_SLOT_A, ST11_SLOT_A, false, 1u, 0u, 0u, 0u, 0u,
+			  zero_stem_checksums, 0u, NULL);
+	memset(seed_b, 0, sizeof(seed_b));
+	memcpy(g_mock_device + (size_t)layout.index_a_start * ST11_PHYSICAL_BLOCK_BYTES, seed_a,
+	       ST11_PHYSICAL_BLOCK_BYTES);
+	memcpy(g_mock_device + (size_t)layout.index_b_start * ST11_PHYSICAL_BLOCK_BYTES, seed_b,
+	       ST11_PHYSICAL_BLOCK_BYTES);
+
+	int step;
+	bool all_opens_ok = true;
+
+	for (step = 0; step < 5; step++) {
+		uint8_t cur_a[ST11_PHYSICAL_BLOCK_BYTES];
+		uint8_t cur_b[ST11_PHYSICAL_BLOCK_BYTES];
+
+		memcpy(cur_a, g_mock_device + (size_t)layout.index_a_start * ST11_PHYSICAL_BLOCK_BYTES,
+		       ST11_PHYSICAL_BLOCK_BYTES);
+		memcpy(cur_b, g_mock_device + (size_t)layout.index_b_start * ST11_PHYSICAL_BLOCK_BYTES,
+		       ST11_PHYSICAL_BLOCK_BYTES);
+
+		st_ab_session_t s;
+		st_ab_open_result_t open_res =
+			st_ab_session_open_replace(&s, cur_a, cur_b, &layout, FIXTURE_SONG_A_BLOCKS);
+
+		if (open_res != ST_AB_OPEN_OK) {
+			all_opens_ok = false;
+			break;
+		}
+		CHECK(s.inactive_song_slot == expected_song_slot[step],
+		      "successive-replacement step %d: destination songSlot == %s, matching the fixture's own "
+		      "declared songSlot",
+		      step, expected_song_slot[step] == ST11_SLOT_A ? "A" : "B");
+		CHECK(s.inactive_index_slot == expected_index_slot[step],
+		      "successive-replacement step %d: destination indexSlot == %s, matching the fixture's own "
+		      "declared indexSlot",
+		      step, expected_index_slot[step] == ST11_SLOT_A ? "A" : "B");
+
+		uint32_t dest_song_start =
+			(s.inactive_song_slot == ST11_SLOT_A) ? layout.song_a_start : layout.song_b_start;
+		uint32_t dest_index_block =
+			(s.inactive_index_slot == ST11_SLOT_A) ? layout.index_a_start : layout.index_b_start;
+
+		uint32_t stem_checksums[ST11_STEM_COUNT];
+		uint32_t song_checksum;
+		uint8_t sector[ST11_SECTOR_BYTES];
+		uint32_t frame_count = 100u + (uint32_t)step; /* distinct real content per step */
+
+		build_one_sector_song(sector, frame_count, stem_checksums, &song_checksum);
+
+		uint32_t k;
+		bool writes_ok = true;
+
+		for (k = 0; k < ST11_BLOCKS_PER_SECTOR; k++) {
+			if (st_ab_session_check_write(&s, dest_song_start + k,
+						       sector + (size_t)k * ST11_PHYSICAL_BLOCK_BYTES) !=
+			    ST_AB_WRITE_OK) {
+				writes_ok = false;
+			}
+			memcpy(g_mock_device + (size_t)(dest_song_start + k) * ST11_PHYSICAL_BLOCK_BYTES,
+			       sector + (size_t)k * ST11_PHYSICAL_BLOCK_BYTES, ST11_PHYSICAL_BLOCK_BYTES);
+		}
+		CHECK(writes_ok, "successive-replacement step %d: real song write accepted", step);
+
+		uint8_t commit_block[ST11_PHYSICAL_BLOCK_BYTES];
+		st_stix_record_t candidate;
+
+		build_stix_block(commit_block, ST11_INDEX_MAGIC, (uint8_t)s.inactive_index_slot,
+				  (uint8_t)s.inactive_song_slot, true, expected_generation[step], dest_song_start,
+				  ST11_BLOCKS_PER_SECTOR, frame_count, 1u, stem_checksums, song_checksum,
+				  &candidate);
+
+		bool verified = st_ab_session_verify_song_before_commit(&s, &candidate, mock_read_block, NULL,
+									 sector);
+
+		CHECK(verified, "successive-replacement step %d: real verify_song_before_commit succeeds", step);
+		st_ab_session_mark_song_verified(&s);
+
+		st_ab_write_check_t wr = st_ab_session_check_write(&s, dest_index_block, commit_block);
+
+		CHECK(wr == ST_AB_WRITE_OK,
+		      "successive-replacement step %d: magic-committing write accepted at generation %u", step,
+		      expected_generation[step]);
+		memcpy(g_mock_device + (size_t)dest_index_block * ST11_PHYSICAL_BLOCK_BYTES, commit_block,
+		       ST11_PHYSICAL_BLOCK_BYTES);
+
+		/* The rollback copy (the slot this session never touched) must
+		 * independently validate at exactly generation-1, matching the
+		 * fixture's own declared rollbackGeneration for this step. */
+		uint32_t rollback_slot = (s.inactive_index_slot == ST11_SLOT_A) ? ST11_SLOT_B : ST11_SLOT_A;
+		uint32_t rollback_block = (rollback_slot == ST11_SLOT_A) ? layout.index_a_start : layout.index_b_start;
+		uint8_t rollback_bytes[ST11_PHYSICAL_BLOCK_BYTES];
+
+		memcpy(rollback_bytes, g_mock_device + (size_t)rollback_block * ST11_PHYSICAL_BLOCK_BYTES,
+		       ST11_PHYSICAL_BLOCK_BYTES);
+
+		st_stix_record_t rollback_rec;
+		st_stix_validity_t rv = st_stix_validate(rollback_bytes, (uint8_t)rollback_slot, layout.song_a_start,
+							  layout.song_a_blocks, layout.song_b_start,
+							  layout.song_b_blocks, &rollback_rec);
+		uint32_t expected_rollback_gen = expected_generation[step] - 1u;
+
+		CHECK(rv == ST_STIX_VALID && rollback_rec.generation_lo == expected_rollback_gen,
+		      "successive-replacement step %d: rollback copy independently validates at generation %u, "
+		      "matching the fixture's own declared rollbackGeneration",
+		      step, expected_rollback_gen);
+
+		/* Independently re-derive the selector's own view after this
+		 * commit, matching the fixture's own declared
+		 * selectedGenerationAfterReboot. */
+		uint8_t post_a[ST11_PHYSICAL_BLOCK_BYTES];
+		uint8_t post_b[ST11_PHYSICAL_BLOCK_BYTES];
+
+		memcpy(post_a, g_mock_device + (size_t)layout.index_a_start * ST11_PHYSICAL_BLOCK_BYTES,
+		       ST11_PHYSICAL_BLOCK_BYTES);
+		memcpy(post_b, g_mock_device + (size_t)layout.index_b_start * ST11_PHYSICAL_BLOCK_BYTES,
+		       ST11_PHYSICAL_BLOCK_BYTES);
+
+		st_stix_library_state_t lib;
+
+		st_stix_read_library(post_a, post_b, layout.song_a_start, layout.song_a_blocks, layout.song_b_start,
+				      layout.song_b_blocks, &lib);
+
+		CHECK(lib.status == ST_STIX_LIB_OK && lib.generation == expected_generation[step],
+		      "successive-replacement step %d: selectedGenerationAfterReboot == %u, matching the fixture's "
+		      "own declared value",
+		      step, expected_generation[step]);
+	}
+	CHECK(all_opens_ok, "successive-replacement: every one of the 5 successive REPLACE sessions opened "
+			     "successfully");
+
+	/*
+	 * The fixture's own "rollback" object: corruptedIndexSlot=B,
+	 * corruptedGeneration=6 (step4's own commit -- matches above),
+	 * selectedIndexSlot=A, selectedGeneration=5, selectedSongSlot=B
+	 * (step3's own commit). Reproduced with the SAME real one-CRC-byte
+	 * corruption technique test_corrupt_newest_index_fallback() above
+	 * already applies to a real frozen fixture.
+	 */
+	uint8_t corrupted_b[ST11_PHYSICAL_BLOCK_BYTES];
+
+	memcpy(corrupted_b, g_mock_device + (size_t)layout.index_b_start * ST11_PHYSICAL_BLOCK_BYTES,
+	       ST11_PHYSICAL_BLOCK_BYTES);
+	corrupted_b[ST11_IX_OFF_CRC32] ^= 0xffu; /* flip the CRC field's LSB -- guaranteed to invalidate a valid CRC */
+
+	st_stix_record_t rollback_selected;
+	st_stix_select_t rsel = st_stix_select_active(g_mock_device + (size_t)layout.index_a_start *
+								ST11_PHYSICAL_BLOCK_BYTES,
+						       corrupted_b, layout.song_a_start, layout.song_a_blocks,
+						       layout.song_b_start, layout.song_b_blocks, &rollback_selected);
+
+	CHECK(rsel == ST_STIX_SELECT_A,
+	      "successive-replacement rollback: index B (generation 6, one CRC byte corrupted) is rejected; "
+	      "selector falls back to index A -- matching the fixture's own declared selectedIndexSlot=A");
+	CHECK(rollback_selected.generation_lo == 5u,
+	      "successive-replacement rollback: resolved generation == 5, matching the fixture's own declared "
+	      "selectedGeneration");
+	CHECK(rollback_selected.song_slot == ST11_SLOT_B,
+	      "successive-replacement rollback: resolved songSlot == B, matching the fixture's own declared "
+	      "selectedSongSlot");
+}
+
+/*
  * The open-time gates: NOT_INITIALIZED / ALREADY_INITIALIZED /
  * NOT_CONFIRMED / CAPACITY -- each refuses BEFORE any write is ever
  * attempted, and each is a distinct wrong-precondition a real caller can
@@ -1306,6 +1541,7 @@ int main(void)
 	RUN(test_region_of_block_matches_fixture_layout);
 	RUN(test_ab_session_open_and_negative_writes);
 	RUN(test_ab_session_ceiling_allows_smaller_song);
+	RUN(test_successive_replacement_matches_fixture);
 	RUN(test_ab_session_open_errors);
 
 	printf("\n");
