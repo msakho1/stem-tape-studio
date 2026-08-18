@@ -41,7 +41,8 @@ async function run() {
   const decoded = decodeSectors(sectors, song.frames);
 
   const stems = [];
-  for (const s of song.stems) {
+  for (let i = 0; i < song.stems.length; i++) {
+    const s = song.stems[i]!;
     stems.push({
       name: s.name,
       sourceRate: s.source.sampleRate,
@@ -56,6 +57,7 @@ async function run() {
       clipped: s.clipped,
       checksum: s.checksum >>> 0,
       sha256: await sha256Hex([s.pcm24]),
+      roundTripSha256: await sha256Hex([decoded.stems[i]!]),
     });
   }
 
@@ -72,7 +74,8 @@ async function run() {
     sectorCount: sectors.length,
     sectorBytes: sectors.reduce((a, s) => a + s.length, 0),
     sectorsSha256: await sha256Hex(sectors),
-    roundTripFrames: decoded.frames ?? song.frames,
+    roundTripFrames: decoded.frames,
+    roundTripBpm: decoded.bpm,
     stems,
     audioContextRate: ac.sampleRate,
   };
