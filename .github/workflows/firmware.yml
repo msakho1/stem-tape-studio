@@ -423,6 +423,20 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Safety gate parser self-test (needs only Python, run before the SDK/build)
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          mkdir -p audit
+          python3 .github/scripts/stemtape_player_safety_gate_parser_selftest.py \
+            | tee audit/safety-gate-parser-selftest.txt
+          {
+            echo '### STRICT persistence safety gate: function-name parser self-test'
+            echo '```text'
+            grep -E '^\[|^[0-9]+ checks|^PARSER' audit/safety-gate-parser-selftest.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Set up Zephyr v4.3.1 + SDK 0.17.4 (arm-zephyr-eabi only)
         uses: zephyrproject-rtos/action-zephyr-setup@be8136a8bba01580485d98b7ad2d32477c36a49a  # v1.0.15
         with:
