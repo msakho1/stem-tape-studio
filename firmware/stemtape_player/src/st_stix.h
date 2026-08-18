@@ -121,6 +121,25 @@ st_stix_validity_t st_stix_validate(const uint8_t block[ST11_PHYSICAL_BLOCK_BYTE
 				     uint32_t song_a_blocks, uint32_t song_b_start,
 				     uint32_t song_b_blocks, st_stix_record_t *record_out);
 
+/*
+ * Exactly st_stix_validate() MINUS the magic check -- every other rule
+ * (CRC, version, slot identity, song metadata, bounds) still applies
+ * identically, including to the CRC itself (which always treats the
+ * magic bytes as zero regardless of what they actually hold, so this
+ * validates an UNCOMMITTED record -- magic == 0, step 13 of the 22-step
+ * replacement sequence -- exactly as strictly as a committed one). Used
+ * by the write-safety session gate (st_ab_session.h) to validate an
+ * in-flight uncommitted index write before it is on disk, when requiring
+ * magic == ST11_INDEX_MAGIC would be wrong by construction. Never call
+ * this to decide whether a record may be SELECTED as active -- only
+ * st_stix_validate() (which does require the real magic) may decide
+ * that.
+ */
+st_stix_validity_t st_stix_validate_fields_only(const uint8_t block[ST11_PHYSICAL_BLOCK_BYTES],
+						 uint8_t expected_slot_identity, uint32_t song_a_start,
+						 uint32_t song_a_blocks, uint32_t song_b_start,
+						 uint32_t song_b_blocks, st_stix_record_t *record_out);
+
 typedef enum {
 	ST_STIX_SELECT_A = 0,
 	ST_STIX_SELECT_B = 1,

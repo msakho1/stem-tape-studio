@@ -141,6 +141,17 @@ st_stix_validity_t st_stix_validate(const uint8_t block[ST11_PHYSICAL_BLOCK_BYTE
 	if (record_out->magic != ST11_INDEX_MAGIC) {
 		return ST_STIX_ERR_MAGIC;
 	}
+	return st_stix_validate_fields_only(block, expected_slot_identity, song_a_start, song_a_blocks,
+					     song_b_start, song_b_blocks, record_out);
+}
+
+st_stix_validity_t st_stix_validate_fields_only(const uint8_t block[ST11_PHYSICAL_BLOCK_BYTES],
+						 uint8_t expected_slot_identity, uint32_t song_a_start,
+						 uint32_t song_a_blocks, uint32_t song_b_start,
+						 uint32_t song_b_blocks, st_stix_record_t *record_out)
+{
+	st_stix_deserialize(block, record_out);
+
 	if (st_stix_block_crc(block) != record_out->crc32) {
 		return ST_STIX_ERR_CRC;
 	}

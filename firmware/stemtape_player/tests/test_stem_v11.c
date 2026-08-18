@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "st_ab_session.h"
 #include "st_checksum32.h"
 #include "st_crc32.h"
 #include "st_sector_v11.h"
@@ -636,6 +637,395 @@ static void test_region_of_block_matches_fixture_layout(void)
 	CHECK(st11_region_of_block(&layout, 0xFFFFFFFFu) == ST11_REGION_NONE, "block 0xffffffff -> NONE (fails closed, no overflow)");
 }
 
+/* ========================================================================
+ * st_ab_session.c: the STATEFUL A/B write-safety session gate.
+ *
+ * Unlike everything above (which proves the pure codecs against frozen
+ * fixtures), this section builds a small SYNTHETIC library and song in
+ * memory -- the session gate's whole job is enforcing a per-session
+ * destination snapshot, which has no single frozen fixture to compare
+ * against. Every synthetic record below is still built through the real
+ * st_stix_serialize()/st_stix_block_crc() machinery (never hand-poked
+ * bytes), and every song checksum is computed through the real
+ * st11_sector_encode()/st_checksum32_update() machinery -- only the
+ * CONTENT is synthetic, not the encoding.
+ * ======================================================================== */
+
+/* A 272-block synthetic device, addressed exactly like
+ * handoff/v1.1/binaries/stcp-capability-response.bin's own mock device:
+ * index A=[0,1) index B=[1,1) song A=[16,144) song B=[144,272). Read back
+ * by mock_read_block() for st_ab_session_verify_song_before_commit()'s
+ * injected I/O -- this is the ONLY place in this test file real (in-memory)
+ * storage I/O happens. */
+static uint8_t g_mock_device[272u * ST11_PHYSICAL_BLOCK_BYTES];
+
+static int mock_read_block(uint32_t block, uint8_t out[ST11_PHYSICAL_BLOCK_BYTES], void *ctx)
+{
+	(void)ctx;
+	if (block >= 272u) {
+		return -1;
+	}
+	memcpy(out, g_mock_device + (size_t)block * ST11_PHYSICAL_BLOCK_BYTES, ST11_PHYSICAL_BLOCK_BYTES);
+	return 0;
+}
+
+/* Builds one fully self-consistent STIX v2 record (real CRC-32, computed
+ * the same two-pass way test_index_record_crc_fixture() proves the real
+ * fixture format uses) into `out`, and -- if `record_out` is non-NULL --
+ * also hands back the struct so a caller can pass it directly to
+ * st_ab_session_verify_song_before_commit() without re-parsing its own
+ * bytes. `song_present == false` leaves every song/audio field at its
+ * required-zero value (matching st_stix_validate_fields_only()'s
+ * SONG_METADATA rule for an empty record). */
+static void build_stix_block(uint8_t out[ST11_PHYSICAL_BLOCK_BYTES], uint32_t magic, uint8_t slot_identity,
+			      uint8_t song_slot, bool song_present, uint64_t generation,
+			      uint32_t song_start_block, uint32_t song_block_count, uint32_t frames,
+			      uint32_t sector_count, const uint32_t stem_checksums[ST11_STEM_COUNT],
+			      uint32_t song_checksum, st_stix_record_t *record_out)
+{
+	st_stix_record_t r;
+	uint32_t s;
+
+	memset(&r, 0, sizeof(r));
+	r.magic = magic;
+	r.index_version = ST11_STIX_VERSION;
+	r.format_major = ST11_FORMAT_MAJOR;
+	r.format_minor = ST11_FORMAT_MINOR;
+	r.slot_identity = slot_identity;
+	r.song_slot = song_slot;
+	r.flags = song_present ? ST11_IX_FLAG_SONG_PRESENT : 0u;
+	r.generation_lo = (uint32_t)(generation & 0xffffffffu);
+	r.generation_hi = (uint32_t)(generation >> 32);
+	if (song_present) {
+		r.song_start_block = song_start_block;
+		r.song_block_count = song_block_count;
+		r.frames = frames;
+		r.sector_count = sector_count;
+		r.sample_rate = ST11_SAMPLE_RATE_HZ;
+		r.channels = ST11_CHANNELS_PER_STEM;
+		r.bit_depth = ST11_PCM_BIT_DEPTH;
+		r.bpm_q8 = 120u * 256u;
+		for (s = 0; s < ST11_STEM_COUNT; s++) {
+			r.original_frames[s] = frames;
+			r.stem_checksums[s] = stem_checksums[s];
+		}
+		r.song_checksum = song_checksum;
+	}
+	strncpy(r.title, "Session Test", ST11_INDEX_TEXT_BYTES);
+	strncpy(r.artist, "Fixture", ST11_INDEX_TEXT_BYTES);
+
+	r.crc32 = 0;
+	st_stix_serialize(&r, out);
+	r.crc32 = st_stix_block_crc(out);
+	st_stix_serialize(&r, out);
+
+	if (record_out) {
+		*record_out = r;
+	}
+}
+
+/* Encodes a single, deterministic ST11_SECTOR_BYTES sector (sectorIndex=0,
+ * firstFrame=0, `frame_count` real frames, no padding needed since one
+ * sector covers the whole song) via the real st11_sector_encode(), and
+ * recomputes its per-stem/song FNV-1a checksums the same way
+ * test_song_sectors_fixture() proves matches the companion's own real
+ * fixture checksums -- so a session-gate test that later corrupts one
+ * declared checksum is corrupting a value proven correct in the first
+ * place, not merely asserting whatever the code happens to produce. */
+static void build_one_sector_song(uint8_t sector_out[ST11_SECTOR_BYTES], uint32_t frame_count,
+				   uint32_t stem_checksum_out[ST11_STEM_COUNT], uint32_t *song_checksum_out)
+{
+	static st11_audio_frame_t frames[ST11_FRAMES_PER_SECTOR];
+	uint32_t f, s;
+
+	memset(frames, 0, sizeof(frames));
+	for (f = 0; f < frame_count; f++) {
+		for (s = 0; s < ST11_STEM_COUNT; s++) {
+			int32_t l = (int32_t)(f * 4u + s) * 37 - 1000;
+			int32_t r = -l + 3;
+
+			frames[f].stem_l[s] = l;
+			frames[f].stem_r[s] = r;
+		}
+	}
+
+	st11_sector_encode(0u, 0u, frame_count, 120u * 256u, 0u, frames, sector_out);
+
+	uint32_t stem_hash[ST11_STEM_COUNT];
+
+	for (s = 0; s < ST11_STEM_COUNT; s++) {
+		stem_hash[s] = ST_CHECKSUM32_INIT;
+	}
+	for (f = 0; f < frame_count; f++) {
+		for (s = 0; s < ST11_STEM_COUNT; s++) {
+			uint8_t bytes[6];
+			int32_t l = frames[f].stem_l[s];
+			int32_t r = frames[f].stem_r[s];
+
+			bytes[0] = (uint8_t)(l & 0xff);
+			bytes[1] = (uint8_t)((l >> 8) & 0xff);
+			bytes[2] = (uint8_t)((l >> 16) & 0xff);
+			bytes[3] = (uint8_t)(r & 0xff);
+			bytes[4] = (uint8_t)((r >> 8) & 0xff);
+			bytes[5] = (uint8_t)((r >> 16) & 0xff);
+			stem_hash[s] = st_checksum32_update(stem_hash[s], bytes, sizeof(bytes));
+		}
+	}
+
+	uint8_t digest[ST11_STEM_COUNT * 4];
+
+	for (s = 0; s < ST11_STEM_COUNT; s++) {
+		stem_checksum_out[s] = stem_hash[s];
+		digest[s * 4 + 0] = (uint8_t)(stem_hash[s] & 0xff);
+		digest[s * 4 + 1] = (uint8_t)((stem_hash[s] >> 8) & 0xff);
+		digest[s * 4 + 2] = (uint8_t)((stem_hash[s] >> 16) & 0xff);
+		digest[s * 4 + 3] = (uint8_t)((stem_hash[s] >> 24) & 0xff);
+	}
+	*song_checksum_out = st_checksum32_compute(digest, sizeof(digest));
+}
+
+/*
+ * The core of the user's required correction: proves the write gate
+ * enforces a FROZEN per-session A/B destination pair, not merely "any
+ * address inside the four v1.1 regions". Builds a realistic active
+ * library (index A active at generation 5, its song committed in song
+ * region B) and exercises every rejection the directive explicitly lists
+ * -- active song, active index, unrelated storage, wrong inactive slot,
+ * invalid generation, invalid commit record -- plus the positive path
+ * through to a real commit and the single-use closure that follows,
+ * covering both the newly-frozen pair AND the just-superseded former-
+ * active/rollback pair.
+ */
+static void test_ab_session_open_and_negative_writes(void)
+{
+	memset(g_mock_device, 0, sizeof(g_mock_device));
+
+	st11_region_layout_t layout;
+	bool layout_ok = st11_storage_layout_compute(0u, 272u, &layout);
+
+	CHECK(layout_ok, "272-block synthetic device: layout computation succeeds");
+	CHECK(layout.song_a_start == FIXTURE_SONG_A_START && layout.song_a_blocks == FIXTURE_SONG_A_BLOCKS &&
+		      layout.song_b_start == FIXTURE_SONG_B_START && layout.song_b_blocks == FIXTURE_SONG_B_BLOCKS,
+	      "272-block synthetic device: layout matches the real stcp-capability-response.bin geometry");
+
+	/* The CURRENTLY ACTIVE library: index A, generation 5, song committed
+	 * in song region B (one sector, 100 frames). Index B is blank
+	 * (never written) -- exactly one valid record, so A wins outright. */
+	uint32_t active_stem_checksums[ST11_STEM_COUNT];
+	uint32_t active_song_checksum;
+	uint8_t active_song_sector[ST11_SECTOR_BYTES];
+
+	build_one_sector_song(active_song_sector, 100u, active_stem_checksums, &active_song_checksum);
+	memcpy(g_mock_device + (size_t)FIXTURE_SONG_B_START * ST11_PHYSICAL_BLOCK_BYTES, active_song_sector,
+	       ST11_SECTOR_BYTES);
+
+	uint8_t block_a[ST11_PHYSICAL_BLOCK_BYTES];
+	uint8_t block_b[ST11_PHYSICAL_BLOCK_BYTES];
+
+	build_stix_block(block_a, ST11_INDEX_MAGIC, ST11_SLOT_A, ST11_SLOT_B, true, 5u, FIXTURE_SONG_B_START,
+			  ST11_BLOCKS_PER_SECTOR, 100u, 1u, active_stem_checksums, active_song_checksum, NULL);
+	memset(block_b, 0, sizeof(block_b));
+	memcpy(g_mock_device + 0u, block_a, ST11_PHYSICAL_BLOCK_BYTES);
+	memcpy(g_mock_device + (size_t)1u * ST11_PHYSICAL_BLOCK_BYTES, block_b, ST11_PHYSICAL_BLOCK_BYTES);
+
+	st_ab_session_t s;
+	st_ab_open_result_t open_res = st_ab_session_open_replace(&s, block_a, block_b, &layout,
+								    ST11_BLOCKS_PER_SECTOR);
+
+	CHECK(open_res == ST_AB_OPEN_OK, "open_replace: active-A/generation-5/song-in-B library opens OK");
+	CHECK(s.active_index_slot == ST11_SLOT_A && s.active_song_slot == ST11_SLOT_B,
+	      "open_replace: active pair correctly identified as index A / song B");
+	CHECK(s.inactive_index_slot == ST11_SLOT_B && s.inactive_song_slot == ST11_SLOT_A,
+	      "open_replace: frozen destination correctly complemented to index B / song A "
+	      "(song WAS present, so song_slot is complemented too)");
+	CHECK(s.active_generation == 5u, "open_replace: active_generation == 5");
+
+	uint8_t dummy[ST11_PHYSICAL_BLOCK_BYTES];
+
+	memset(dummy, 0, sizeof(dummy));
+
+	CHECK(st_ab_session_check_write(&s, FIXTURE_SONG_B_START, dummy) == ST_AB_WRITE_ERR_ACTIVE_REGION,
+	      "REJECT: write to the active song (region B, its first block) -- ACTIVE_REGION");
+	CHECK(st_ab_session_check_write(&s, 0u, dummy) == ST_AB_WRITE_ERR_ACTIVE_REGION,
+	      "REJECT: write to the active index (block 0, index A) -- ACTIVE_REGION");
+	CHECK(st_ab_session_check_write(&s, 5u, dummy) == ST_AB_WRITE_ERR_OUTSIDE_FROZEN_PAIR,
+	      "REJECT: write to unrelated storage (block 5, the alignment gap -- not in any region) "
+	      "-- OUTSIDE_FROZEN_PAIR");
+
+	/* The NEW song this session is uploading: a different one-sector,
+	 * 100-frame song, destined for the frozen song region (A). */
+	uint32_t new_stem_checksums[ST11_STEM_COUNT];
+	uint32_t new_song_checksum;
+	uint8_t new_song_sector[ST11_SECTOR_BYTES];
+
+	build_one_sector_song(new_song_sector, 100u, new_stem_checksums, &new_song_checksum);
+
+	uint32_t k;
+	bool all_frozen_song_writes_ok = true;
+
+	for (k = 0; k < ST11_BLOCKS_PER_SECTOR; k++) {
+		uint32_t blk = FIXTURE_SONG_A_START + k;
+		const uint8_t *payload = new_song_sector + (size_t)k * ST11_PHYSICAL_BLOCK_BYTES;
+
+		if (st_ab_session_check_write(&s, blk, payload) != ST_AB_WRITE_OK) {
+			all_frozen_song_writes_ok = false;
+		}
+		memcpy(g_mock_device + (size_t)blk * ST11_PHYSICAL_BLOCK_BYTES, payload, ST11_PHYSICAL_BLOCK_BYTES);
+	}
+	CHECK(all_frozen_song_writes_ok,
+	      "ACCEPT: all 16 blocks of the new song, written to the frozen destination (song A) -- OK");
+
+	/* WRONG INACTIVE SLOT: a structurally valid, correctly-CRC'd,
+	 * correctly-addressed (slot_identity == B, the frozen index slot)
+	 * uncommitted record whose OWN song_slot field names song B (the
+	 * ACTIVE song slot) instead of this session's frozen song A. */
+	uint8_t wrong_slot_block[ST11_PHYSICAL_BLOCK_BYTES];
+
+	build_stix_block(wrong_slot_block, 0u, ST11_SLOT_B, ST11_SLOT_B, true, 6u, FIXTURE_SONG_B_START,
+			  ST11_BLOCKS_PER_SECTOR, 100u, 1u, new_stem_checksums, new_song_checksum, NULL);
+	CHECK(st_ab_session_check_write(&s, 1u, wrong_slot_block) == ST_AB_WRITE_ERR_BAD_COMMIT_RECORD,
+	      "REJECT: commit-record write to the frozen index block, but its own songSlot names the "
+	      "WRONG (active) song slot -- BAD_COMMIT_RECORD");
+
+	/* INVALID GENERATION: correctly addressed AND correctly targeted
+	 * (song_slot == A, this session's real frozen song), but declares
+	 * generation 999 instead of active_generation+1 (6). */
+	uint8_t bad_generation_block[ST11_PHYSICAL_BLOCK_BYTES];
+
+	build_stix_block(bad_generation_block, 0u, ST11_SLOT_B, ST11_SLOT_A, true, 999u, FIXTURE_SONG_A_START,
+			  ST11_BLOCKS_PER_SECTOR, 100u, 1u, new_stem_checksums, new_song_checksum, NULL);
+	CHECK(st_ab_session_check_write(&s, 1u, bad_generation_block) == ST_AB_WRITE_ERR_WRONG_GENERATION,
+	      "REJECT: commit-record write correctly targeted but generation 999 != active_generation+1 (6) "
+	      "-- WRONG_GENERATION");
+
+	/* INVALID COMMIT RECORD: plain garbage bytes at the frozen index
+	 * destination -- fails CRC (and everything else) outright. */
+	uint8_t garbage_block[ST11_PHYSICAL_BLOCK_BYTES];
+
+	memset(garbage_block, 0xAA, sizeof(garbage_block));
+	CHECK(st_ab_session_check_write(&s, 1u, garbage_block) == ST_AB_WRITE_ERR_BAD_COMMIT_RECORD,
+	      "REJECT: garbage bytes at the frozen index destination -- BAD_COMMIT_RECORD (fails CRC)");
+
+	/* The REAL candidate: correctly addressed, correctly targeted,
+	 * correct generation (6), real checksums matching the song bytes
+	 * actually written to the frozen song region above. */
+	uint8_t draft_block[ST11_PHYSICAL_BLOCK_BYTES];
+	st_stix_record_t candidate;
+
+	build_stix_block(draft_block, 0u, ST11_SLOT_B, ST11_SLOT_A, true, 6u, FIXTURE_SONG_A_START,
+			  ST11_BLOCKS_PER_SECTOR, 100u, 1u, new_stem_checksums, new_song_checksum, &candidate);
+	CHECK(st_ab_session_check_write(&s, 1u, draft_block) == ST_AB_WRITE_OK,
+	      "ACCEPT: well-formed uncommitted (magic=0) draft record at the frozen index destination -- OK");
+	memcpy(g_mock_device + (size_t)1u * ST11_PHYSICAL_BLOCK_BYTES, draft_block, ST11_PHYSICAL_BLOCK_BYTES);
+
+	uint8_t commit_block[ST11_PHYSICAL_BLOCK_BYTES];
+	st_stix_record_t commit_candidate;
+
+	build_stix_block(commit_block, ST11_INDEX_MAGIC, ST11_SLOT_B, ST11_SLOT_A, true, 6u, FIXTURE_SONG_A_START,
+			  ST11_BLOCKS_PER_SECTOR, 100u, 1u, new_stem_checksums, new_song_checksum, &commit_candidate);
+	CHECK(st_ab_session_check_write(&s, 1u, commit_block) == ST_AB_WRITE_ERR_SONG_NOT_VERIFIED,
+	      "REJECT: the magic-committing write, attempted BEFORE st_ab_session_verify_song_before_commit() "
+	      "was ever run -- SONG_NOT_VERIFIED (never activates a record on the companion's word alone)");
+
+	uint8_t scratch_sector[ST11_SECTOR_BYTES];
+	bool verified = st_ab_session_verify_song_before_commit(&s, &candidate, mock_read_block, NULL,
+								 scratch_sector);
+
+	CHECK(verified,
+	      "verify_song_before_commit: recomputed checksums from the REAL bytes on the mock device "
+	      "match the candidate's declared checksums -- true");
+
+	st_stix_record_t corrupted_candidate = candidate;
+
+	corrupted_candidate.stem_checksums[0] += 1u;
+	bool verified_corrupt = st_ab_session_verify_song_before_commit(&s, &corrupted_candidate, mock_read_block,
+									  NULL, scratch_sector);
+
+	CHECK(!verified_corrupt,
+	      "verify_song_before_commit: a candidate with one declared stem checksum tampered "
+	      "does NOT verify against the real device bytes -- false");
+
+	st_ab_session_mark_song_verified(&s);
+	CHECK(st_ab_session_check_write(&s, 1u, commit_block) == ST_AB_WRITE_OK,
+	      "ACCEPT: the SAME magic-committing write, now AFTER verify_song_before_commit() + "
+	      "mark_song_verified() -- OK");
+
+	/* Single-use closure: EVERY further write is refused now, including
+	 * to the pair just committed AND to the former-active/rollback pair
+	 * (docs: "no additional writes to the former active pair immediately
+	 * after the new magic lands"). */
+	CHECK(st_ab_session_check_write(&s, FIXTURE_SONG_A_START, dummy) == ST_AB_WRITE_ERR_SESSION_CLOSED,
+	      "REJECT after commit: write to the just-committed frozen song (A) -- SESSION_CLOSED");
+	CHECK(st_ab_session_check_write(&s, 1u, draft_block) == ST_AB_WRITE_ERR_SESSION_CLOSED,
+	      "REJECT after commit: write to the just-committed frozen index (B) -- SESSION_CLOSED");
+	CHECK(st_ab_session_check_write(&s, FIXTURE_SONG_B_START, dummy) == ST_AB_WRITE_ERR_SESSION_CLOSED,
+	      "REJECT after commit: write to the former-active song (B), now the rollback copy -- SESSION_CLOSED");
+	CHECK(st_ab_session_check_write(&s, 0u, dummy) == ST_AB_WRITE_ERR_SESSION_CLOSED,
+	      "REJECT after commit: write to the former-active index (A), now the rollback copy -- SESSION_CLOSED");
+
+	(void)commit_candidate;
+}
+
+/*
+ * The open-time gates: NOT_INITIALIZED / ALREADY_INITIALIZED /
+ * NOT_CONFIRMED / CAPACITY -- each refuses BEFORE any write is ever
+ * attempted, and each is a distinct wrong-precondition a real caller can
+ * hit (companion tries to upload with no active song yet; companion tries
+ * explicit-init on an already-initialized device; explicit-init without a
+ * confirmed destructive token; a song too big for the frozen region).
+ */
+static void test_ab_session_open_errors(void)
+{
+	st11_region_layout_t layout;
+
+	CHECK(st11_storage_layout_compute(0u, 272u, &layout), "layout computation succeeds (open-errors test)");
+
+	uint8_t blank_a[ST11_PHYSICAL_BLOCK_BYTES];
+	uint8_t blank_b[ST11_PHYSICAL_BLOCK_BYTES];
+
+	memset(blank_a, 0, sizeof(blank_a));
+	memset(blank_b, 0, sizeof(blank_b));
+
+	st_ab_session_t s1;
+
+	CHECK(st_ab_session_open_replace(&s1, blank_a, blank_b, &layout, ST11_BLOCKS_PER_SECTOR) ==
+		      ST_AB_OPEN_ERR_NOT_INITIALIZED,
+	      "open_replace on a blank (never-initialized) library -- NOT_INITIALIZED "
+	      "(there is no valid active record to replace)");
+
+	st_ab_session_t s2;
+
+	CHECK(st_ab_session_open_init(&s2, blank_a, blank_b, &layout, false) == ST_AB_OPEN_ERR_NOT_CONFIRMED,
+	      "open_init on a blank library WITHOUT an explicit confirmation -- NOT_CONFIRMED");
+
+	st_ab_session_t s3;
+	st_ab_open_result_t init_res = st_ab_session_open_init(&s3, blank_a, blank_b, &layout, true);
+
+	CHECK(init_res == ST_AB_OPEN_OK, "open_init on a blank library, confirmed -- OK");
+	CHECK(s3.kind == ST_AB_SESSION_INIT && s3.inactive_index_slot == ST11_SLOT_A &&
+		      s3.inactive_song_slot == ST11_SLOT_A,
+	      "open_init: targets index A / no song region (INIT never writes a song region)");
+
+	uint32_t stem_checksums[ST11_STEM_COUNT] = { 0u, 0u, 0u, 0u };
+	uint8_t valid_a[ST11_PHYSICAL_BLOCK_BYTES];
+
+	build_stix_block(valid_a, ST11_INDEX_MAGIC, ST11_SLOT_A, ST11_SLOT_A, false, 1u, 0u, 0u, 0u, 0u,
+			  stem_checksums, 0u, NULL);
+
+	st_ab_session_t s4;
+
+	CHECK(st_ab_session_open_init(&s4, valid_a, blank_b, &layout, true) == ST_AB_OPEN_ERR_ALREADY_INITIALIZED,
+	      "open_init on an already-valid library (index A generation 1, no song) -- "
+	      "ALREADY_INITIALIZED (refuses to clobber a valid library)");
+
+	st_ab_session_t s5;
+
+	CHECK(st_ab_session_open_replace(&s5, valid_a, blank_b, &layout, FIXTURE_SONG_B_BLOCKS + 1u) ==
+		      ST_AB_OPEN_ERR_CAPACITY,
+	      "open_replace with needed_song_blocks one more than the frozen inactive song region's "
+	      "real capacity -- CAPACITY");
+}
+
 int main(void)
 {
 	RUN(test_song_sectors_fixture);
@@ -651,6 +1041,8 @@ int main(void)
 	RUN(test_stcp_region_layout_matches_fixture);
 	RUN(test_stcp_build_matches_fixture_byte_for_byte);
 	RUN(test_region_of_block_matches_fixture_layout);
+	RUN(test_ab_session_open_and_negative_writes);
+	RUN(test_ab_session_open_errors);
 
 	printf("\n");
 	printf("%d distinct test cases, %d assertion checks\n", g_test_cases, g_checks);
