@@ -543,6 +543,62 @@ static void test_index_final_magic_block_matches_uncommitted_except_magic(void)
 	free(uncommitted_block);
 }
 
+/*
+ * Cross-contract check against handoff/v1.1/transcripts/corrupt-newest-
+ * index-fallback.json (SHA-256 e9d35aadbc3129f0574cbe88ced8e150a4bc0b5220c
+ * c030604f86319ee3e8992, matching its own line in handoff/v1.1/
+ * SHA256SUMS.txt exactly -- verified directly, not merely assumed, since
+ * "verify every fixture's SHA-256 before use" applies here too even though
+ * this file has no `entries` field and is never routed through the wire-
+ * transcript sidecar mechanism). Its own note: "The newest committed index
+ * record is corrupted (one CRC byte flipped). The shared selector falls
+ * back to the immediately previous complete song." Declared:
+ * corruptedIndexSlot=0(A), corruptedGeneration=3, explanation "CRC
+ * mismatch (stored 0x34f5b986, computed 0x34f5b979)".
+ *
+ * Reconstructed here from REAL fixture bytes only, never fabricated:
+ * 0x34f5b979 == 888519033 decimal == index-a-valid.bin's own already-
+ * verified crc32 field (see test_stix_parse_index_a_valid() above,
+ * "crc32 field == 888519033") -- i.e. this fixture's "computed" value IS
+ * index-a-valid.bin's real, correct CRC. Directly confirmed (byte-level,
+ * outside this test, before writing it) that index-a-valid.bin's own byte
+ * at offset ST11_IX_OFF_CRC32 (252) -- the little-endian crc32 field's
+ * LSB -- is 0x79, and that changing ONLY that one byte to 0x86 produces
+ * exactly the fixture's declared stored value 0x34f5b986. So "one CRC byte
+ * flipped" is reproduced here as literally and precisely as the fixture
+ * describes: the real index-a-valid.bin bytes, with byte[252] changed
+ * 0x79 -> 0x86, nothing else touched.
+ */
+static void test_corrupt_newest_index_fallback(void)
+{
+	size_t len_a, len_b;
+	uint8_t *block_a = read_fixture("handoff/v1.1/binaries/index-a-valid.bin", &len_a);
+	uint8_t *block_b = read_fixture("handoff/v1.1/binaries/index-b-valid.bin", &len_b);
+
+	CHECK(block_a[ST11_IX_OFF_CRC32] == 0x79u,
+	      "index-a-valid.bin: byte at offset 252 (crc32 field LSB) is 0x79 before corruption, matching "
+	      "the fixture's declared \"computed 0x34f5b979\"");
+	block_a[ST11_IX_OFF_CRC32] = 0x86u; /* the one flipped byte -- corruptedGeneration=3 (index-a-valid.bin's own generation) */
+
+	st_stix_record_t selected;
+	st_stix_select_t sel = st_stix_select_active(block_a, block_b, FIXTURE_SONG_A_START, FIXTURE_SONG_A_BLOCKS,
+						      FIXTURE_SONG_B_START, FIXTURE_SONG_B_BLOCKS, &selected);
+
+	CHECK(sel == ST_STIX_SELECT_B,
+	      "corrupt-newest-index-fallback.json: region A (generation 3, one CRC byte corrupted) is rejected; "
+	      "selector falls back to region B -- SELECT_B, matching declared activeIndexSlot=1(B)");
+	CHECK(selected.generation_lo == 2u,
+	      "corrupt-newest-index-fallback.json: resolved generation == 2, matching the fixture's declared "
+	      "generation -- no initialization required");
+	CHECK(selected.song_slot == ST11_SLOT_A,
+	      "corrupt-newest-index-fallback.json: resolved songSlot == A (0), matching declared activeSongSlot");
+	CHECK(strncmp(selected.title, "HANDOFF ONE", ST11_INDEX_TEXT_BYTES) == 0,
+	      "corrupt-newest-index-fallback.json: resolved title == \"HANDOFF ONE\", matching the declared result");
+
+	free(block_a);
+	free(block_b);
+}
+
 static void test_stix_storage_initialized_empty(void)
 {
 	size_t len;
@@ -1240,6 +1296,7 @@ int main(void)
 	RUN(test_stix_validate_uncommitted);
 	RUN(test_magic_write_cases_case_a_torn_write_no_bytes_applied);
 	RUN(test_index_final_magic_block_matches_uncommitted_except_magic);
+	RUN(test_corrupt_newest_index_fallback);
 	RUN(test_stix_storage_initialized_empty);
 	RUN(test_stix_select_active_two_generations);
 	RUN(test_stix_read_library_fresh_init);

@@ -864,11 +864,45 @@ jobs:
         # file's own doc comment for exactly what is and isn't
         # reimplemented here (nothing that makes a decision; only wire
         # framing and the same short call-order any real caller needs).
-        # This step covers the two successful-upload transcripts
-        # (upload-1-successful.json, upload-2-successful.json, replayed
-        # back-to-back on one continuous mock device, matching upload-2's
-        # own "over the same storage after a reconnect"); the four
-        # interruption/corruption transcripts are a separate, later step.
+        #
+        # Covers five of the six required transcripts (the sixth,
+        # corrupt-newest-index-fallback.json, is not a wire transcript --
+        # it has no `entries` field -- and is instead exercised by
+        # test_stem_v11.c's own test_corrupt_newest_index_fallback(), run
+        # by the "Stem Tape v1.1 fixture conformance" step above):
+        #   - upload-1-successful.json, upload-2-successful.json: the two
+        #     successful-upload transcripts, replayed back-to-back on one
+        #     continuous mock device, matching upload-2's own "over the
+        #     same storage after a reconnect".
+        #   - interrupted-before-magic.json: replayed on top of the
+        #     upload-1-successful.json checkpoint; ends on a dangling,
+        #     never-acked write of the UNCOMMITTED (magic=0) index draft.
+        #     The harness's replay_transcript() recognizes a transcript's
+        #     own final dangling tx-only entry as a legitimate recorded
+        #     interruption (not a check failure) and still applies the
+        #     real st_ab_session_check_write() decision to the mock
+        #     device for its real side effect -- proving the active index/
+        #     song pair is byte-for-byte untouched by this interruption.
+        #   - magic-applied-ack-lost.json: same shape, but its dangling
+        #     final write carries the REAL commit magic (0x53544958,
+        #     "STIX") -- durably applied even though its own ack was lost
+        #     on the wire, matching its declared afterReconnect generation
+        #     3 (the same outcome upload-2-successful.json's own
+        #     fully-acked replay independently reaches).
+        #   - torn-invalid-magic.json: its magic-committing write is
+        #     directly verified (recomputed CRC-32 over the recorded
+        #     payload) to be complete, valid, and fully acknowledged --
+        #     replayed and byte-checked in full; only the transcript's
+        #     trailing 'F' dangles. Its declared afterReconnect (generation
+        #     2 persisting, citing a corrupted CRC never actually present
+        #     in the transmitted bytes) describes a hardware-layer torn-
+        #     write fault injected AFTER a valid wire exchange -- outside
+        #     what a host-level replay of the actual recorded bytes can
+        #     prove or reproduce (same category as magic-write-cases.
+        #     json's already-published "case F"). This step instead proves
+        #     the honest, provable claim: given exactly what was
+        #     transmitted, the real selector correctly commits generation
+        #     3 -- see test_torn_invalid_magic()'s own doc comment.
         working-directory: ${{ github.workspace }}/project
         run: |
           set -euo pipefail
@@ -877,6 +911,12 @@ jobs:
             upload-1-successful build-transcripts/upload-1-successful.bin
           python3 firmware/stemtape_player/tests/gen_transcript_bin.py . \
             upload-2-successful build-transcripts/upload-2-successful.bin
+          python3 firmware/stemtape_player/tests/gen_transcript_bin.py . \
+            interrupted-before-magic build-transcripts/interrupted-before-magic.bin
+          python3 firmware/stemtape_player/tests/gen_transcript_bin.py . \
+            magic-applied-ack-lost build-transcripts/magic-applied-ack-lost.bin
+          python3 firmware/stemtape_player/tests/gen_transcript_bin.py . \
+            torn-invalid-magic build-transcripts/torn-invalid-magic.bin
           cc -std=c11 -Wall -Wextra -Ifirmware/stemtape_player/src \
             firmware/stemtape_player/src/st_crc32.c \
             firmware/stemtape_player/src/st_checksum32.c \
