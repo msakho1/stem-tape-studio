@@ -13,7 +13,7 @@
  * The test FAILS on any transmitted-byte difference; the comparison artifact is
  * written either way so a failure is inspectable.
  */
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
