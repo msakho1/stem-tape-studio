@@ -1217,7 +1217,19 @@ static int xfer_header_write(uint32_t sector, const uint8_t data[ST_SECTOR_BYTES
  * the real card. Its only caller is xfer_do_commit() above, itself only
  * ever reached after the transaction is confirmed open and verified
  * (see xfer_do_commit() below). */
-static int xfer_songdata_write(uint32_t sector, const uint8_t data[ST_SECTOR_BYTES], void *ctx)
+/* __attribute__((noinline)): this function's single call site (inside
+ * xfer_do_commit()'s copy loop) makes it an -Os inlining candidate once
+ * enough surrounding code shrinks (confirmed by a real CI run after the RAM
+ * fixes above) -- but unlike trk_blk()/xfer_service()/uac2_dev/midi_dev
+ * (where inlining was accepted and the symbol-presence check simply
+ * dropped), this specific function is looked up BY NAME in the STRICT
+ * persistence safety gate's disassembly scan (ALLOWED_WRITE_FUNCS in
+ * .github/scripts/stemtape_player_safety_gate.py) to prove its bounds-check
+ * pattern. Inlining it would silently remove that evidence rather than
+ * just a reachability nicety, so it stays a real, separately-named symbol
+ * on purpose. */
+static int __attribute__((noinline))
+xfer_songdata_write(uint32_t sector, const uint8_t data[ST_SECTOR_BYTES], void *ctx)
 {
 	ARG_UNUSED(ctx);
 	uint32_t blk;
@@ -1269,7 +1281,15 @@ static bool xfer_lib_save(void)
  * nothing above this point in the sequence writes g_lib or the library
  * header sectors at all.
  */
-static bool xfer_do_commit(void)
+/* __attribute__((noinline)): same reasoning as xfer_songdata_write() above
+ * -- single call site (the 'C' verb branch in xfer_service()), an -Os
+ * inlining candidate once nearby code shrinks, but this function's name is
+ * how the STRICT persistence safety gate's pass D (eMMC write call-site
+ * provenance) classifies xfer_songdata_write()'s call site as belonging to
+ * the validated commit path. Inlining it into xfer_service() would rename
+ * that call site out from under the gate's classification, not just remove
+ * a reachability nicety. */
+static bool __attribute__((noinline)) xfer_do_commit(void)
 {
 	st_slot_meta_t slot_meta;
 	uint32_t start_sector;
