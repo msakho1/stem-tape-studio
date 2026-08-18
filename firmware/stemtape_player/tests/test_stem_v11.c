@@ -608,6 +608,34 @@ static void test_stcp_build_matches_fixture_byte_for_byte(void)
 	free(fixture);
 }
 
+/* ========================================================================
+ * st11_region_of_block(): THE firmware-side safety boundary for v1.1 --
+ * the wire transport is the unchanged classic Tape Looper 'W'/'R'/'F'
+ * (docs section 1), with no new staging verb, so bounds-checking every
+ * raw block write against the real, capability-reported region layout is
+ * the entire firmware-side write-safety gate for this contract. Uses the
+ * same real fixture layout as test_stcp_region_layout_matches_fixture.
+ * ======================================================================== */
+static void test_region_of_block_matches_fixture_layout(void)
+{
+	st11_region_layout_t layout;
+	bool ok = st11_storage_layout_compute(0u, 272u, &layout);
+
+	CHECK(ok, "region layout for the region-bounds test computes successfully");
+
+	CHECK(st11_region_of_block(&layout, 0u) == ST11_REGION_INDEX_A, "block 0 -> INDEX_A");
+	CHECK(st11_region_of_block(&layout, 1u) == ST11_REGION_INDEX_B, "block 1 -> INDEX_B");
+	CHECK(st11_region_of_block(&layout, 2u) == ST11_REGION_NONE,
+	      "block 2 -> NONE (the alignment gap between index B and song A's sector-aligned start)");
+	CHECK(st11_region_of_block(&layout, 15u) == ST11_REGION_NONE, "block 15 -> NONE (still in the gap)");
+	CHECK(st11_region_of_block(&layout, 16u) == ST11_REGION_SONG_A, "block 16 -> SONG_A (song A's first block)");
+	CHECK(st11_region_of_block(&layout, 143u) == ST11_REGION_SONG_A, "block 143 -> SONG_A (song A's last block)");
+	CHECK(st11_region_of_block(&layout, 144u) == ST11_REGION_SONG_B, "block 144 -> SONG_B (song B's first block)");
+	CHECK(st11_region_of_block(&layout, 271u) == ST11_REGION_SONG_B, "block 271 -> SONG_B (song B's last block, deviceBlocks-1)");
+	CHECK(st11_region_of_block(&layout, 272u) == ST11_REGION_NONE, "block 272 -> NONE (one past the end of the device)");
+	CHECK(st11_region_of_block(&layout, 0xFFFFFFFFu) == ST11_REGION_NONE, "block 0xffffffff -> NONE (fails closed, no overflow)");
+}
+
 int main(void)
 {
 	RUN(test_song_sectors_fixture);
@@ -622,6 +650,7 @@ int main(void)
 	RUN(test_stix_read_library_active_generation_three);
 	RUN(test_stcp_region_layout_matches_fixture);
 	RUN(test_stcp_build_matches_fixture_byte_for_byte);
+	RUN(test_region_of_block_matches_fixture_layout);
 
 	printf("\n");
 	printf("%d distinct test cases, %d assertion checks\n", g_test_cases, g_checks);

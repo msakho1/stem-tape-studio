@@ -107,4 +107,26 @@ typedef struct {
  */
 bool st11_stcp_parse(const uint8_t in[4 + ST11_CAPS_BYTES], st11_stcp_reply_t *out);
 
+typedef enum {
+	ST11_REGION_INDEX_A,
+	ST11_REGION_INDEX_B,
+	ST11_REGION_SONG_A,
+	ST11_REGION_SONG_B,
+	ST11_REGION_NONE, /* outside every permitted v1.1 region -- must never be written */
+} st11_region_id_t;
+
+/*
+ * THE bounds gate a real 'W'/'R' handler must call before ever touching
+ * eMMC (docs section 1: the wire transport is the unchanged classic Tape
+ * Looper 'W'/'R'/'F' -- there is no new staging verb in v1.1; the
+ * companion does ALL retry/verify/ordering logic on its own side and just
+ * issues raw block writes, so bounds-checking against the real,
+ * capability-reported region layout is the ENTIRE firmware-side safety
+ * boundary for this contract. Fails closed: any block not inside exactly
+ * one of the four regions in `layout` is ST11_REGION_NONE, including gaps
+ * between regions (e.g. between the index regions and the sector-aligned
+ * start of song A) and anything past the last song region.
+ */
+st11_region_id_t st11_region_of_block(const st11_region_layout_t *layout, uint32_t block);
+
 #endif /* STEMTAPE_PLAYER_STCP_H_ */

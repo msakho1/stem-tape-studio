@@ -142,3 +142,25 @@ bool st11_stcp_parse(const uint8_t in[4 + ST11_CAPS_BYTES], st11_stcp_reply_t *o
 	out->stix_version = get_u16le(p, ST11_CAPS_OFF_STIX_VERSION);
 	return true;
 }
+
+static bool block_in_region(uint32_t block, uint32_t start, uint32_t blocks)
+{
+	return block >= start && block < start + blocks;
+}
+
+st11_region_id_t st11_region_of_block(const st11_region_layout_t *layout, uint32_t block)
+{
+	if (block_in_region(block, layout->index_a_start, layout->index_a_blocks)) {
+		return ST11_REGION_INDEX_A;
+	}
+	if (block_in_region(block, layout->index_b_start, layout->index_b_blocks)) {
+		return ST11_REGION_INDEX_B;
+	}
+	if (block_in_region(block, layout->song_a_start, layout->song_a_blocks)) {
+		return ST11_REGION_SONG_A;
+	}
+	if (block_in_region(block, layout->song_b_start, layout->song_b_blocks)) {
+		return ST11_REGION_SONG_B;
+	}
+	return ST11_REGION_NONE;
+}
