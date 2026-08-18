@@ -1,0 +1,69 @@
+{
+  "uploads": [
+    {
+      "step": 0,
+      "title": "ONE (baseline)",
+      "songSlot": "A",
+      "indexSlot": "B",
+      "generation": 2,
+      "songRegionSha256": "7d8f6ef634c0bc190010d26dc13c713c7b90fb3bd062c7f5e183d8f076ff9fa3",
+      "indexSha256": "8234af1f53024c6b756eebc43096ff5b341da1de1f9a0edd73b3b18785cb0437",
+      "selectedGenerationAfterReboot": 2,
+      "rollbackGeneration": 1
+    },
+    {
+      "step": 1,
+      "title": "S1",
+      "songSlot": "B",
+      "indexSlot": "A",
+      "generation": 3,
+      "songRegionSha256": "63aec392788989f6e9bd911aab7bb7325936b0be40cea937a487c56fabfeca73",
+      "indexSha256": "27b25df0352e089109b5a06ffdfcbdee428397a435e8e33759d7f14710746d60",
+      "selectedGenerationAfterReboot": 3,
+      "rollbackGeneration": 2
+    },
+    {
+      "step": 2,
+      "title": "S2",
+      "songSlot": "A",
+      "indexSlot": "B",
+      "generation": 4,
+      "songRegionSha256": "6f7ec78807085c2d90ad4934b7dbab5c761b50c8c60ed37eafd8305c0e695aee",
+      "indexSha256": "f8732b1b6400650cc425a18dd0dc73c4a6331e46a3a1dafd4a249a5a958ecc49",
+      "selectedGenerationAfterReboot": 4,
+      "rollbackGeneration": 3
+    },
+    {
+      "step": 3,
+      "title": "S3",
+      "songSlot": "B",
+      "indexSlot": "A",
+      "generation": 5,
+      "songRegionSha256": "e69da3eb9db3e367477fd1316b716066e20748919403bebb8ca41b956ea0cdbf",
+      "indexSha256": "5f408e1c0c301cc576ea6d1b7fe0cd9cfd331bf20cc66762a5c17818de07ecf0",
+      "selectedGenerationAfterReboot": 5,
+      "rollbackGeneration": 4
+    },
+    {
+      "step": 4,
+      "title": "S4",
+      "songSlot": "A",
+      "indexSlot": "B",
+      "generation": 6,
+      "songRegionSha256": "b97ba2298b0578309a0619fefe9d523a61215b6553903a2de12292af57579048",
+      "indexSha256": "7dfcf7d7d46ceee8bcf0323469a089f8cd278dce690e7ad25361f74bf6e036e5",
+      "selectedGenerationAfterReboot": 6,
+      "rollbackGeneration": 5
+    }
+  ],
+  "rollback": {
+    "corruptedIndexSlot": "B",
+    "corruptedGeneration": 6,
+    "selectedIndexSlot": "A",
+    "selectedGeneration": 5,
+    "selectedSongSlot": "B",
+    "selectedSongSha256": "e69da3eb9db3e367477fd1316b716066e20748919403bebb8ca41b956ea0cdbf",
+    "requiresInitialization": false,
+    "explanation": "Only index A is valid (generation 5); index B is ignored: CRC mismatch (stored 0xcf2a4b59, computed 0xcf2a4ba6)."
+  }
+}
