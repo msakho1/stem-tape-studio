@@ -146,4 +146,52 @@ st_stix_select_t st_stix_select_active(const uint8_t block_a[ST11_PHYSICAL_BLOCK
 					uint32_t song_b_start, uint32_t song_b_blocks,
 					st_stix_record_t *selected_out);
 
+typedef enum {
+	ST_STIX_LIB_OK = 0,
+	ST_STIX_LIB_BLANK,   /* both index blocks are all-zero: never initialized */
+	ST_STIX_LIB_CORRUPT, /* both invalid, but not blank */
+} st_stix_lib_status_t;
+
+/*
+ * The full library-selection result a real replacement sequence needs --
+ * st_stix_select_active() plus the two DESTINATION slots for the next
+ * replacement. Mirrors the companion's own LibraryState exactly (see
+ * src/sp1/activeIndex.ts's selectActiveIndex(), not committed to this
+ * repo but consulted for this exact rule -- verified against real
+ * fixtures below):
+ *
+ *   inactive_index_slot = complement(active record's slot_identity),
+ *     ALWAYS (regardless of whether a song is present).
+ *   inactive_song_slot  = complement(active record's song_slot) IF that
+ *     record has SONG_PRESENT set; otherwise (no song ever committed
+ *     through this record) inactive_song_slot = the record's song_slot
+ *     field AS-IS, UNCOMPLEMENTED -- so a fresh explicit-init record
+ *     (generation 1, no song, song_slot=A by convention) sends the very
+ *     first real upload to song slot A, matching
+ *     docs/stem-tape-transfer-v1.1.md section 5's own worked example
+ *     ("Uploads therefore alternate: song A/index B, song B/index A, ...").
+ *
+ * When status != ST_STIX_LIB_OK (blank or corrupt), both inactive slots
+ * default to ST11_SLOT_A (matching the companion's own fallback), and
+ * `active`/generation/active_index_slot/active_song_slot are all
+ * "none" (ST11_NO_SLOT / 0) -- a caller must still refuse to write
+ * (requires_initialization is set) even though the slots default in a
+ * well-defined way.
+ */
+typedef struct {
+	st_stix_lib_status_t status;
+	bool requires_initialization;
+	uint32_t active_index_slot; /* ST11_SLOT_A/B, or ST11_NO_SLOT if status != OK */
+	uint32_t active_song_slot;  /* ST11_SLOT_A/B, or ST11_NO_SLOT if no song present/status != OK */
+	uint64_t generation;        /* 0 if status != OK */
+	uint32_t inactive_index_slot; /* always ST11_SLOT_A or ST11_SLOT_B */
+	uint32_t inactive_song_slot;  /* always ST11_SLOT_A or ST11_SLOT_B */
+	st_stix_record_t active;      /* valid iff status == ST_STIX_LIB_OK */
+} st_stix_library_state_t;
+
+void st_stix_read_library(const uint8_t block_a[ST11_PHYSICAL_BLOCK_BYTES],
+			   const uint8_t block_b[ST11_PHYSICAL_BLOCK_BYTES], uint32_t song_a_start,
+			   uint32_t song_a_blocks, uint32_t song_b_start, uint32_t song_b_blocks,
+			   st_stix_library_state_t *out);
+
 #endif /* STEMTAPE_PLAYER_STIX_H_ */

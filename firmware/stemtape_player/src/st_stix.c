@@ -231,3 +231,55 @@ st_stix_select_t st_stix_select_active(const uint8_t block_a[ST11_PHYSICAL_BLOCK
 	}
 	return ST_STIX_SELECT_NONE;
 }
+
+static bool block_all_zero(const uint8_t block[ST11_PHYSICAL_BLOCK_BYTES])
+{
+	uint32_t i;
+
+	for (i = 0; i < ST11_PHYSICAL_BLOCK_BYTES; i++) {
+		if (block[i] != 0) {
+			return false;
+		}
+	}
+	return true;
+}
+
+void st_stix_read_library(const uint8_t block_a[ST11_PHYSICAL_BLOCK_BYTES],
+			   const uint8_t block_b[ST11_PHYSICAL_BLOCK_BYTES], uint32_t song_a_start,
+			   uint32_t song_a_blocks, uint32_t song_b_start, uint32_t song_b_blocks,
+			   st_stix_library_state_t *out)
+{
+	st_stix_record_t selected;
+	st_stix_select_t sel = st_stix_select_active(block_a, block_b, song_a_start, song_a_blocks,
+						      song_b_start, song_b_blocks, &selected);
+
+	if (sel == ST_STIX_SELECT_NONE) {
+		bool blank = block_all_zero(block_a) && block_all_zero(block_b);
+
+		out->status = blank ? ST_STIX_LIB_BLANK : ST_STIX_LIB_CORRUPT;
+		out->requires_initialization = true;
+		out->active_index_slot = ST11_NO_SLOT;
+		out->active_song_slot = ST11_NO_SLOT;
+		out->generation = 0;
+		out->inactive_index_slot = ST11_SLOT_A; /* matches the companion's own fallback */
+		out->inactive_song_slot = ST11_SLOT_A;
+		memset(&out->active, 0, sizeof(out->active));
+		return;
+	}
+
+	bool present = (selected.flags & ST11_IX_FLAG_SONG_PRESENT) != 0u;
+
+	out->status = ST_STIX_LIB_OK;
+	out->requires_initialization = false;
+	out->active_index_slot = (sel == ST_STIX_SELECT_A) ? ST11_SLOT_A : ST11_SLOT_B;
+	out->active_song_slot = present ? selected.song_slot : ST11_NO_SLOT;
+	out->generation = generation64(&selected);
+	out->inactive_index_slot = (out->active_index_slot == ST11_SLOT_A) ? ST11_SLOT_B : ST11_SLOT_A;
+	/* The companion's own rule (src/sp1/activeIndex.ts selectActiveIndex(),
+	 * verified against real fixtures in tests/test_stem_v11.c): only
+	 * complement song_slot when a song is actually present; an empty
+	 * record's song_slot names the destination AS-IS. */
+	out->inactive_song_slot = present ? (selected.song_slot == ST11_SLOT_A ? ST11_SLOT_B : ST11_SLOT_A)
+					  : selected.song_slot;
+	out->active = selected;
+}

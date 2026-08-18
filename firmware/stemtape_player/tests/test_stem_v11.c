@@ -482,6 +482,58 @@ static void test_stix_select_active_two_generations(void)
 }
 
 /* ========================================================================
+ * st_stix_read_library(): the destination-slot rule, verified against real
+ * fixtures. Ground truth for the "not present -> don't complement song_slot"
+ * special case comes from the companion's own src/sp1/activeIndex.ts
+ * selectActiveIndex() (read for reference, not committed to this repo) --
+ * confirmed here to reproduce both a fresh-init library and a real
+ * generation-3-active library exactly as that source computes them.
+ * ======================================================================== */
+static void test_stix_read_library_fresh_init(void)
+{
+	size_t len;
+	uint8_t *data = read_fixture("handoff/v1.1/binaries/storage-initialized-empty.bin", &len);
+	st_stix_library_state_t lib;
+
+	st_stix_read_library(data, data + ST11_PHYSICAL_BLOCK_BYTES, FIXTURE_SONG_A_START,
+			      FIXTURE_SONG_A_BLOCKS, FIXTURE_SONG_B_START, FIXTURE_SONG_B_BLOCKS, &lib);
+
+	CHECK(lib.status == ST_STIX_LIB_OK, "fresh-init library: status OK (region A is valid)");
+	CHECK(!lib.requires_initialization, "fresh-init library: does NOT require re-initialization");
+	CHECK(lib.active_index_slot == ST11_SLOT_A, "fresh-init library: active index slot == A");
+	CHECK(lib.active_song_slot == ST11_NO_SLOT, "fresh-init library: active song slot == NO_SLOT (no song yet)");
+	CHECK(lib.generation == 1u, "fresh-init library: generation == 1");
+	CHECK(lib.inactive_index_slot == ST11_SLOT_B, "fresh-init library: inactive index slot == B");
+	CHECK(lib.inactive_song_slot == ST11_SLOT_A,
+	      "fresh-init library: inactive song slot == A, UNCOMPLEMENTED (no song present yet) -- "
+	      "matches docs section 5's worked example, first upload is 'song A/index B'");
+
+	free(data);
+}
+
+static void test_stix_read_library_active_generation_three(void)
+{
+	size_t len_a, len_b;
+	uint8_t *block_a = read_fixture("handoff/v1.1/binaries/index-a-valid.bin", &len_a);
+	uint8_t *block_b = read_fixture("handoff/v1.1/binaries/index-b-valid.bin", &len_b);
+	st_stix_library_state_t lib;
+
+	st_stix_read_library(block_a, block_b, FIXTURE_SONG_A_START, FIXTURE_SONG_A_BLOCKS, FIXTURE_SONG_B_START,
+			      FIXTURE_SONG_B_BLOCKS, &lib);
+
+	CHECK(lib.status == ST_STIX_LIB_OK, "gen-3-active library: status OK");
+	CHECK(lib.active_index_slot == ST11_SLOT_A, "gen-3-active library: active index slot == A (generation 3 wins)");
+	CHECK(lib.active_song_slot == ST11_SLOT_B, "gen-3-active library: active song slot == B (index-a-valid's own songSlot)");
+	CHECK(lib.generation == 3u, "gen-3-active library: generation == 3");
+	CHECK(lib.inactive_index_slot == ST11_SLOT_B, "gen-3-active library: inactive index slot == B");
+	CHECK(lib.inactive_song_slot == ST11_SLOT_A,
+	      "gen-3-active library: inactive song slot == A, COMPLEMENTED (a song IS present, unlike the fresh-init case)");
+
+	free(block_a);
+	free(block_b);
+}
+
+/* ========================================================================
  * st_stcp.c: A/B region layout + Q -> STCP reply vs
  * handoff/v1.1/binaries/stcp-capability-response.bin.
  *
@@ -566,6 +618,8 @@ int main(void)
 	RUN(test_stix_validate_uncommitted);
 	RUN(test_stix_storage_initialized_empty);
 	RUN(test_stix_select_active_two_generations);
+	RUN(test_stix_read_library_fresh_init);
+	RUN(test_stix_read_library_active_generation_three);
 	RUN(test_stcp_region_layout_matches_fixture);
 	RUN(test_stcp_build_matches_fixture_byte_for_byte);
 
