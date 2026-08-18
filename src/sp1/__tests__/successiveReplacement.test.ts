@@ -18,7 +18,7 @@ import {
   storedSong,
   withFirstSong,
 } from "./abHarness";
-import { IX_OFF, SLOT_A, SLOT_B, slotName } from "../stemTapeFormat";
+import { IX_OFF, SLOT_A, SLOT_B, sectorsForFrames, slotName } from "../stemTapeFormat";
 import type { CanonicalSong } from "../song";
 
 const FRAMES = 680;
@@ -27,7 +27,18 @@ const REPORT_DIR = "handoff/v1.1/reports";
 describe("successive A/B replacement", () => {
   it("four successive songs alternate slots, and a corrupt newest index rolls back", async () => {
     const base = await withFirstSong(FRAMES);
-    const rows: Record<string, unknown>[] = [];
+    interface Row {
+      step: number;
+      title: string;
+      songSlot: "A" | "B";
+      indexSlot: "A" | "B";
+      generation: number;
+      songRegionSha256: string;
+      indexSha256: string;
+      selectedGenerationAfterReboot: number;
+      rollbackGeneration: number;
+    }
+    const rows: Row[] = [];
     let previous: { song: CanonicalSong; generation: number } = { song: base.one, generation: base.generation };
     let mock = base.mock;
     let t = base.t;
@@ -38,7 +49,7 @@ describe("successive A/B replacement", () => {
       songSlot: slotName(base.activeSongSlot),
       indexSlot: slotName(base.activeIndexSlot),
       generation: base.generation,
-      songRegionSha256: sha256(storedSong(mock, base.caps, base.activeSongSlot, base.one.sectors.length)),
+      songRegionSha256: sha256(storedSong(mock, base.caps, base.activeSongSlot, sectorsForFrames(base.one.frames))),
       indexSha256: sha256(mock.block(base.caps.index[base.activeIndexSlot].start)),
       selectedGenerationAfterReboot: base.generation,
       rollbackGeneration: 1,
@@ -68,7 +79,7 @@ describe("successive A/B replacement", () => {
         songSlot: slotName(r.targetSongSlot!),
         indexSlot: slotName(r.targetIndexSlot!),
         generation: r.generation,
-        songRegionSha256: sha256(storedSong(m2, base.caps, r.targetSongSlot!, s.sectors.length)),
+        songRegionSha256: sha256(storedSong(m2, base.caps, r.targetSongSlot!, sectorsForFrames(s.frames))),
         indexSha256: sha256(m2.block(base.caps.index[r.targetIndexSlot!].start)),
         selectedGenerationAfterReboot: lib.generation,
         rollbackGeneration: other.record.generation,
@@ -79,7 +90,7 @@ describe("successive A/B replacement", () => {
       mock = m2;
       t = t2;
       // The song bytes on the device match the canonical image exactly.
-      expect(sha256(storedSong(m2, base.caps, r.targetSongSlot!, s.sectors.length))).toBe(sha256(songImage(s)));
+      expect(sha256(storedSong(m2, base.caps, r.targetSongSlot!, sectorsForFrames(s.frames)))).toBe(sha256(songImage(s)));
     }
 
     expect(rows.slice(1).map((r) => r.songSlot)).toEqual(["B", "A", "B", "A"]);
