@@ -628,13 +628,19 @@ jobs:
         working-directory: ${{ github.workspace }}/project
         run: |
           set -euo pipefail
-          # PHASE 1 (safe read-only player): proves both that the preserved
-          # playback/storage-read/control runtime is actually linked into
-          # this build's final ELF, AND that recording/UAC2-input/write
-          # capability is genuinely ABSENT from it -- not merely "unused at
-          # runtime" but not present in the object file at all. Fails closed
-          # (missing nm.txt, any missing required symbol, or any forbidden
-          # symbol present = CI failure).
+          # Current vertical slice (Gate 1 USB audio playback + USB-MIDI
+          # receive, Gate 2 real 4-stem song transfer/commit): proves both
+          # that the preserved playback/storage-read/control runtime AND the
+          # allowed new capability (USB audio PLAYBACK, incoming USB MIDI,
+          # region-bounded song staging, and a verified/validated eMMC
+          # commit through the named transfer path below) are actually
+          # linked into this build's final ELF, AND that RECORDING/OVERDUB
+          # capability -- a live capture-to-storage ring, USB-audio-to-
+          # storage, or any persistent write outside the validated,
+          # region-bounded commit path -- is genuinely ABSENT from it, not
+          # merely "unused at runtime" but not present in the object file at
+          # all. Fails closed (missing nm.txt, any missing required symbol,
+          # or any forbidden symbol present = CI failure).
           test -s audit/nm.txt
           missing=0
           # nm marks a function's own text symbol lowercase 't' when it has
@@ -748,9 +754,11 @@ jobs:
           # symbol type -- function OR data/bss) means recording, overdub,
           # a live capture-to-storage path, or a raw persistent-write
           # capability outside the validated commit path leaked back into
-          # the link, which this target must never allow. Restoring UAC2
-          # playback and USB-MIDI receive (GATE 1) is explicitly NOT
-          # recording -- these stay forbidden exactly as in Phase 1.
+          # the link, which this target must never allow. USB audio
+          # PLAYBACK and incoming USB MIDI (GATE 1) and the validated,
+          # region-bounded eMMC song-commit path (GATE 2) are the allowed,
+          # required new capability this vertical slice adds -- none of
+          # that is recording, and recording itself stays forbidden.
           absent() {
             if grep -qE "[[:space:]]${1}\$" audit/nm.txt; then
               echo "FORBIDDEN symbol present in final ELF: $1" >&2
@@ -776,7 +784,7 @@ jobs:
             echo "one or more required runtime symbols are missing, or one or more forbidden symbols are present, in the final ELF" >&2
             exit 1
           fi
-          echo "all required Stem Tape Phase 1 runtime symbols are linked, and all forbidden (recording/UAC2/write) symbols are confirmed absent, in zephyr.elf"
+          echo "all required Stem Tape runtime symbols are linked (USB audio playback, USB MIDI receive, and the validated eMMC song-commit path), and all forbidden recording/overdub symbols are confirmed absent, in zephyr.elf"
 
       - name: Effective configuration assertion (fail-closed)
         # Checks the REAL effective .config the build actually used (not

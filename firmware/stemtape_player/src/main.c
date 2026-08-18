@@ -1217,18 +1217,27 @@ static int xfer_header_write(uint32_t sector, const uint8_t data[ST_SECTOR_BYTES
  * the real card. Its only caller is xfer_do_commit() above, itself only
  * ever reached after the transaction is confirmed open and verified
  * (see xfer_do_commit() below). */
-/* __attribute__((noinline)): this function's single call site (inside
- * xfer_do_commit()'s copy loop) makes it an -Os inlining candidate once
- * enough surrounding code shrinks (confirmed by a real CI run after the RAM
- * fixes above) -- but unlike trk_blk()/xfer_service()/uac2_dev/midi_dev
- * (where inlining was accepted and the symbol-presence check simply
- * dropped), this specific function is looked up BY NAME in the STRICT
- * persistence safety gate's disassembly scan (ALLOWED_WRITE_FUNCS in
+/* __attribute__((noinline, noclone)): this function's single call site
+ * (inside xfer_do_commit()'s copy loop) makes it an -Os inlining candidate
+ * once enough surrounding code shrinks (confirmed by a real CI run after
+ * the RAM fixes above) -- but unlike trk_blk()/xfer_service()/uac2_dev/
+ * midi_dev (where inlining was accepted and the symbol-presence check
+ * simply dropped), this specific function is looked up BY NAME in the
+ * STRICT persistence safety gate's disassembly scan (ALLOWED_WRITE_FUNCS in
  * .github/scripts/stemtape_player_safety_gate.py) to prove its bounds-check
  * pattern. Inlining it would silently remove that evidence rather than
  * just a reachability nicety, so it stays a real, separately-named symbol
- * on purpose. */
-static int __attribute__((noinline))
+ * on purpose.
+ *
+ * noinline alone was NOT enough (confirmed by a real CI run: xfer_do_commit
+ * came back with plain noinline, xfer_songdata_write did not) -- its one
+ * call site passes a compile-time-constant `ctx` (always NULL) and an
+ * effectively address-constant `data` (always s_commit_copy_buf), which is
+ * exactly the shape GCC's interprocedural constant propagation specializes
+ * into a differently-named clone (e.g. xfer_songdata_write.constprop.0),
+ * independent of inlining. noclone disables that cloning so the ORIGINAL
+ * symbol name survives. */
+static int __attribute__((noinline, noclone))
 xfer_songdata_write(uint32_t sector, const uint8_t data[ST_SECTOR_BYTES], void *ctx)
 {
 	ARG_UNUSED(ctx);
@@ -1281,15 +1290,20 @@ static bool xfer_lib_save(void)
  * nothing above this point in the sequence writes g_lib or the library
  * header sectors at all.
  */
-/* __attribute__((noinline)): same reasoning as xfer_songdata_write() above
- * -- single call site (the 'C' verb branch in xfer_service()), an -Os
+/* __attribute__((noinline, noclone)): same reasoning as xfer_songdata_write()
+ * above -- single call site (the 'C' verb branch in xfer_service()), an -Os
  * inlining candidate once nearby code shrinks, but this function's name is
  * how the STRICT persistence safety gate's pass D (eMMC write call-site
  * provenance) classifies xfer_songdata_write()'s call site as belonging to
  * the validated commit path. Inlining it into xfer_service() would rename
  * that call site out from under the gate's classification, not just remove
- * a reachability nicety. */
-static bool __attribute__((noinline)) xfer_do_commit(void)
+ * a reachability nicety. This one's call site takes no arguments (`xfer_do_
+ * commit()`), so it isn't an interprocedural-constant-propagation clone
+ * candidate the way xfer_songdata_write() was (confirmed: plain noinline
+ * alone already kept it present in a real CI run) -- noclone is added
+ * anyway, defensively, so this doesn't quietly break the same way under a
+ * future toolchain/optimization change. */
+static bool __attribute__((noinline, noclone)) xfer_do_commit(void)
 {
 	st_slot_meta_t slot_meta;
 	uint32_t start_sector;
