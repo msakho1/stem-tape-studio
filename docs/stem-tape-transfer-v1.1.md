@@ -184,3 +184,143 @@ A firmware implementing this contract must:
 - `src/sp1/__tests__/endToEndFixtures.test.ts` — four real WAVs to device bytes.
 - `src/sp1/__tests__/unknownOutcome.test.ts` — interruption matrix, successive
   uploads, torn magic write, corrupt-storage classification.
+
+## 12. Generated numeric appendix
+
+Generated from `src/sp1/stemTapeFormat.ts`, `protocol.ts` and `transport.ts`
+by `src/sp1/__tests__/docAppendix.ts`; asserted verbatim by
+`src/sp1/__tests__/docContract.test.ts`. All multi-byte fields are
+**little-endian**. Do not edit by hand.
+
+### 12.1 Transport
+
+| item | value |
+| --- | --- |
+| physical block | 512 B |
+| baud rate | 115200 |
+| entry magic | `SP1XFER!` |
+| read ack | 0x72 |
+| write ack | 0x77 |
+| flush ack | 0x66 |
+| capability command | 0x51 `Q` |
+| capability tag | `STCP` |
+| capability payload | 96 B |
+| per-block write retries | 3 |
+
+### 12.2 Versions and identity
+
+| item | value |
+| --- | --- |
+| firmware id | 0x53544657 `STFW` |
+| protocol | 1.1 |
+| format | 1.1 |
+| STIX index version | 2 |
+| index magic | 0x53544958 `STIX` |
+| slot A / slot B | 0 / 1 |
+| "no slot" sentinel | 0xffffffff |
+
+### 12.3 Audio geometry
+
+| item | value |
+| --- | --- |
+| sample rate | 48000 Hz |
+| stems x channels | 4 x 2 |
+| bit depth | 24-bit (3 B/sample) |
+| bytes per frame | 24 |
+| blocks per sector | 16 |
+| sector | 8192 B = 32 B header + 8160 B payload |
+| frames per sector | 340 |
+| region alignment | 512 B |
+
+### 12.4 Capability flags
+
+| flag | bit | required |
+| --- | ---: | --- |
+| FOUR_STEMS | 0 | yes |
+| STEREO | 1 | yes |
+| RATE_48K | 2 | yes |
+| DEPTH_24 | 3 | yes |
+| INDEX_EXTENSION | 4 | yes |
+| BPM_DOWNBEAT | 5 | yes |
+| STAGING_COW | 6 | no |
+| EXPLICIT_INIT | 7 | yes |
+| DUAL_SONG_SLOTS | 8 | yes |
+| DUAL_INDEX_SLOTS | 9 | yes |
+| GENERATION_COMMIT | 10 | yes |
+| CRASH_SAFE_REPLACE | 11 | yes |
+| **REQUIRED_CAP_FLAGS** | | 0x00000fbf |
+
+### 12.5 STCP capability record offsets
+
+| field | offset | size |
+| --- | ---: | ---: |
+| firmwareId | 0 | 4 |
+| protoMajor | 4 | 2 |
+| protoMinor | 6 | 2 |
+| formatMajor | 8 | 2 |
+| formatMinor | 10 | 2 |
+| flags | 12 | 4 |
+| sampleRate | 16 | 4 |
+| blockSize | 20 | 4 |
+| sectorBytes | 24 | 4 |
+| alignment | 28 | 4 |
+| deviceBlocks | 32 | 4 |
+| songAStart | 36 | 4 |
+| songABlocks | 40 | 4 |
+| songBStart | 44 | 4 |
+| songBBlocks | 48 | 4 |
+| indexAStart | 52 | 4 |
+| indexABlocks | 56 | 4 |
+| indexBStart | 60 | 4 |
+| indexBBlocks | 64 | 4 |
+| activeIndexSlot | 68 | 4 |
+| activeSongSlot | 72 | 4 |
+| activeGenerationLo | 76 | 4 |
+| activeGenerationHi | 80 | 4 |
+| stixVersion | 84 | 2 |
+| reserved | 86 | 10 |
+| **total** | | 96 |
+
+### 12.6 STIX v2 index record offsets
+
+| field | offset | size |
+| --- | ---: | ---: |
+| magic | 0 | 4 |
+| indexVersion | 4 | 2 |
+| formatMajor | 6 | 2 |
+| formatMinor | 8 | 2 |
+| slotIdentity | 10 | 1 |
+| songSlot | 11 | 1 |
+| flags | 12 | 2 |
+| reserved0 | 14 | 2 |
+| generationLo | 16 | 4 |
+| generationHi | 20 | 4 |
+| songStartBlock | 24 | 4 |
+| songBlockCount | 28 | 4 |
+| frames | 32 | 4 |
+| sectorCount | 36 | 4 |
+| sampleRate | 40 | 4 |
+| channels | 44 | 2 |
+| bitDepth | 46 | 2 |
+| bpmQ8 | 48 | 4 |
+| downbeatFrame | 52 | 4 |
+| originalFrames | 56 | 16 |
+| stemChecksums | 72 | 16 |
+| songChecksum | 88 | 4 |
+| title | 92 | 60 |
+| artist | 152 | 60 |
+| reserved1 | 212 | 40 |
+| crc32 | 252 | 4 |
+| **total** | | 256 |
+
+Index flags: SONG_PRESENT = bit 0.
+
+### 12.7 CRC and commit rules
+
+- CRC-32 (IEEE 802.3) covers record bytes [0, 252).
+- Bytes [0, 4) — the validity magic — are normalized to zero while computing it.
+- The CRC field itself at offset 252 is excluded; bytes 256..512 of the index block must be zero.
+- Generation is an unsigned 64-bit lo/hi pair, starts at 1, increments by 1 per commit, compared numerically; strictly greater wins, tie resolves to slot A.
+- The magic 0x53544958 is written LAST and is the sole commit point; a record with magic 0 is a complete but uncommitted record sharing the committed record's CRC.
+- Initialization is legal only when BOTH index records are invalid or blank, and is always explicit.
+- After reconnect the outcome is decided only by reparsing both stored records with the shared selector: a valid new generation is `committed`, a valid previous generation is `failed`, both invalid is `corrupt`.

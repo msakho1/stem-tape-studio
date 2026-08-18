@@ -43,8 +43,17 @@ function onMagic(mock: MockSp1, action: WriteAction) {
   mock.opts.onWrite = ({ data }) => (isMagic(data) ? action : undefined);
 }
 
+/** The five physically distinct commit categories the contract distinguishes. */
+type CommitCategory =
+  | "no-final-bytes-applied"
+  | "valid-magic-prefix-intact-body"
+  | "body-corrupted-or-crc-invalid"
+  | "complete-block-ack-lost"
+  | "non-durable-write";
+
 interface CaseResult {
   id: string;
+  category: CommitCategory;
   description: string;
   expected: "previous" | "new";
   observed: "previous" | "new";
@@ -59,6 +68,7 @@ const table: CaseResult[] = [];
 async function runCase(
   base: Baseline,
   id: string,
+  category: CommitCategory,
   description: string,
   expected: "previous" | "new",
   inject: (mock: MockSp1) => void,
@@ -100,6 +110,7 @@ async function runCase(
 
   table.push({
     id,
+    category,
     description,
     expected,
     observed: isNew ? "new" : "previous",
@@ -114,13 +125,19 @@ describe("magic-write cases, split", () => {
   it("A–F each resolve to exactly one complete generation", async () => {
     const base = await withFirstSong(FRAMES);
 
-    await runCase(base, "A", "no bytes of the final block are applied", "previous", (m) =>
-      onMagic(m, { apply: "none", ack: "none", disconnect: true }),
+    await runCase(
+      base,
+      "A",
+      "no-final-bytes-applied",
+      "no bytes of the final block are applied",
+      "previous",
+      (m) => onMagic(m, { apply: "none", ack: "none", disconnect: true }),
     );
 
     await runCase(
       base,
       "B",
+      "valid-magic-prefix-intact-body",
       "only the validity-magic bytes are applied and the record is fully valid",
       "new",
       (m) => onMagic(m, { apply: "partial", partialBytes: 4, ack: "ok", disconnect: true }),
@@ -131,45 +148,110 @@ describe("magic-write cases, split", () => {
     // four magic bytes at offset 0, so a prefix tear is either case A or case B.
     // Case C therefore models the destructive variant — a torn program cycle
     // that lands the magic but corrupts the record body.
-    await runCase(base, "C", "a partial block is applied that produces an invalid CRC / structure", "previous", (m) =>
-      onMagic(m, {
-        apply: "partial",
-        partialBytes: 200,
-        ack: "ok",
-        disconnect: true,
-        mangle: (d) => {
-          d[100] = d[100]! ^ 0xff; // body byte inside CRC coverage
-          return d;
-        },
-      }),
+    await runCase(
+      base,
+      "C",
+      "body-corrupted-or-crc-invalid",
+      "a partial block is applied that produces an invalid CRC / structure",
+      "previous",
+      (m) =>
+        onMagic(m, {
+          apply: "partial",
+          partialBytes: 200,
+          ack: "ok",
+          disconnect: true,
+          mangle: (d) => {
+            d[100] = d[100]! ^ 0xff; // body byte inside CRC coverage
+            return d;
+          },
+        }),
     );
 
-    await runCase(base, "C2", "a clean prefix tear that lands only the magic bytes stays valid", "new", (m) =>
-      onMagic(m, { apply: "partial", partialBytes: 64, ack: "ok", disconnect: true }),
+    await runCase(
+      base,
+      "C2",
+      "valid-magic-prefix-intact-body",
+      "a clean prefix tear that lands only the magic bytes stays valid",
+      "new",
+      (m) => onMagic(m, { apply: "partial", partialBytes: 64, ack: "ok", disconnect: true }),
     );
 
-    await runCase(base, "D", "the complete final block lands but the acknowledgement is lost", "new", (m) =>
-      onMagic(m, { apply: "full", ack: "none", disconnect: true }),
+    await runCase(
+      base,
+      "D",
+      "complete-block-ack-lost",
+      "the complete final block lands but the acknowledgement is lost",
+      "new",
+      (m) => onMagic(m, { apply: "full", ack: "none", disconnect: true }),
     );
 
-    await runCase(base, "E", "the final block and flush succeed but the confirmation is lost", "new", (m) => {
-      let seen = false;
-      m.opts.onWrite = ({ data }) => {
-        if (isMagic(data)) seen = true;
-        return undefined;
-      };
-      m.opts.onFlush = () => (seen ? { ack: "ok", disconnect: true } : undefined);
-    });
+    await runCase(
+      base,
+      "E",
+      "complete-block-ack-lost",
+      "the final block and flush succeed but the confirmation is lost",
+      "new",
+      (m) => {
+        let seen = false;
+        m.opts.onWrite = ({ data }) => {
+          if (isMagic(data)) seen = true;
+          return undefined;
+        };
+        m.opts.onFlush = () => (seen ? { ack: "ok", disconnect: true } : undefined);
+      },
+    );
 
-    await runCase(base, "F", "the final block is acknowledged but not durably applied", "previous", (m) =>
-      onMagic(m, { apply: "none", ack: "ok", disconnect: true }),
+    await runCase(
+      base,
+      "F",
+      "non-durable-write",
+      "the final block is acknowledged but not durably applied",
+      "previous",
+      (m) => onMagic(m, { apply: "none", ack: "ok", disconnect: true }),
     );
 
     expect(table.map((r) => r.id)).toEqual(["A", "B", "C", "C2", "D", "E", "F"]);
     expect(table.every((r) => r.observed === r.expected)).toBe(true);
     expect(table.some((r) => r.bothGenerationsInvalid)).toBe(false);
 
+    // All five commit categories are exercised, and each category always
+    // resolves to the same generation — proved by reparsing stored blocks after
+    // reboot, never by mock-internal state.
+    const byCategory: Record<string, { cases: string[]; resolvesTo: string[] }> = {};
+    for (const r of table) {
+      const e = (byCategory[r.category] ??= { cases: [], resolvesTo: [] });
+      e.cases.push(r.id);
+      if (!e.resolvesTo.includes(r.observed)) e.resolvesTo.push(r.observed);
+    }
+    expect(Object.keys(byCategory).sort()).toEqual([
+      "body-corrupted-or-crc-invalid",
+      "complete-block-ack-lost",
+      "no-final-bytes-applied",
+      "non-durable-write",
+      "valid-magic-prefix-intact-body",
+    ]);
+    expect(
+      Object.fromEntries(Object.entries(byCategory).map(([k, v]) => [k, v.resolvesTo])),
+    ).toEqual({
+      "no-final-bytes-applied": ["previous"],
+      "valid-magic-prefix-intact-body": ["new"],
+      "body-corrupted-or-crc-invalid": ["previous"],
+      "complete-block-ack-lost": ["new"],
+      "non-durable-write": ["previous"],
+    });
+
     mkdirSync(REPORT_DIR, { recursive: true });
-    writeFileSync(`${REPORT_DIR}/magic-write-cases.json`, JSON.stringify({ cases: table }, null, 2) + "\n");
+    writeFileSync(
+      `${REPORT_DIR}/magic-write-cases.json`,
+      JSON.stringify(
+        {
+          note: "Every result is produced by rebooting the mock from its stored blocks and reparsing them through the production selector. No hidden mock state is consulted.",
+          byCategory,
+          cases: table,
+        },
+        null,
+        2,
+      ) + "\n",
+    );
   }, 120000);
 });
