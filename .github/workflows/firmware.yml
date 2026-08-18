@@ -590,6 +590,8 @@ jobs:
             firmware/stemtape_player/src/st_scrub.c \
             firmware/stemtape_player/src/st_led_pattern.c \
             firmware/stemtape_player/src/st_midi_queue.c \
+            firmware/stemtape_player/src/st_library_io.c \
+            firmware/stemtape_player/src/st_xfer_wire.c \
             firmware/stemtape_player/tests/test_stemtape_player.c \
             -lm -o audit/test_stemtape_player
           ./audit/test_stemtape_player | tail -c 4000 | tee audit/stemtape-player-selftest.txt
@@ -713,6 +715,34 @@ jobs:
           check midi_service
           check st_midi_decode_ump32
           check st_midi_queue_push
+          # GATE 2: real 4-stem song transfer -- the three region-bounded
+          # eMMC write adapters (proven bounded by the STRICT persistence
+          # safety gate step below), the read adapter, the commit engine,
+          # and the pure transfer/library-header/wire modules they call.
+          check xfer_sector_read
+          check xfer_staging_write
+          check xfer_header_write
+          check xfer_songdata_write
+          check xfer_lib_save
+          check xfer_do_commit
+          check st_xfer_begin
+          check st_xfer_stage_sector
+          check st_xfer_verify
+          check st_xfer_commit_precheck
+          check st_xfer_build_slot_meta
+          check st_libio_load
+          check st_libio_save
+          check st_xfer_wire_decode_begin_req
+          # st_storage_sector_to_block()/st_storage_next_free_song_sector()
+          # are deliberately NOT checked here: both are `static inline` in
+          # st_storage_layout.h, the same pattern already CONFIRMED (by a
+          # real CI run, not anticipated) to leave no standalone -Os symbol
+          # for trk_blk()/xfer_service() and uac2_dev/midi_dev above -- so
+          # this applies that same lesson proactively rather than waiting
+          # for a predictable repeat failure. Their reachability is proven
+          # by their callers
+          # above (xfer_sector_read/xfer_staging_write/xfer_header_write/
+          # xfer_songdata_write/xfer_do_commit), which ARE checked.
 
           # REQUIRED-ABSENT: any of these appearing in the final ELF (any nm
           # symbol type -- function OR data/bss) means recording, overdub,
@@ -817,21 +847,21 @@ jobs:
         # DIFFERENT, still strictly fail-closed gate, scoped to this target:
         # every other forbidden category (internal-flash, NVMC, UICR/
         # APPROTECT, any OTHER disk/filesystem/NVS subsystem, MCUboot) stays
-        # exactly as forbidden as it is for stemtape-m0, and eMMC writes are
-        # allowed ONLY when proven -- by real call-site/brace-depth tracing,
-        # evidence printed below -- to be either unmodified classic Tape
-        # Looper persistence behavior (matched call-for-call against the
-        # untouched firmware/src/main.c baseline) or newly reachable only
-        # after st_stem_validate_commit(...) has returned ST_STEM_OK.
-        # m0_safety_gate.py itself is untouched and still strictly applied,
-        # unchanged, to the stemtape-m0 job below.
+        # exactly as forbidden as it is for stemtape-m0, and GATE 2's real
+        # emmc_write_blocks call sites are allowed ONLY when proven -- by
+        # real source inspection, evidence printed below -- to be inside one
+        # of the three purpose-built, independently region-bounded eMMC
+        # adapter functions (xfer_staging_write/xfer_header_write/
+        # xfer_songdata_write), each with its own real bounds-check pattern
+        # confirmed present in its own source body. m0_safety_gate.py itself
+        # is untouched and still strictly applied, unchanged, to the
+        # stemtape-m0 job below.
         working-directory: ${{ github.workspace }}/project
         run: |
           set -euo pipefail
           set +e
           python3 .github/scripts/stemtape_player_safety_gate.py \
             audit/nm.txt audit/objdump-d.txt build-stemtape-player/zephyr/.config \
-            firmware/src/main.c \
             audit/safety-gate.md 2>&1 | tee audit/safety-gate.txt
           gate_rc=${PIPESTATUS[0]}
           set -e
@@ -886,10 +916,6 @@ jobs:
              .github/scripts/m0_persistence_audit.py \
              .github/scripts/stemtape_player_safety_gate.py \
              .github/scripts/stemtape_player_usb_descriptor_assertions.py audit/src/workflow/
-          # the classic Tape Looper baseline the safety gate diffs eMMC
-          # write call sites against (see the gate's own module docstring).
-          mkdir -p audit/src/classic-baseline
-          cp firmware/src/main.c audit/src/classic-baseline/
           cp docs/stem-tape-transfer-v1.md docs/stem-tape-transfer-v1-fixtures.json audit/src/docs/ 2>/dev/null || true
           if [ -f audit/stemtape_player.bin ]; then
             stat -c '%n %s bytes' audit/stemtape_player.bin | tee -a "$GITHUB_STEP_SUMMARY"

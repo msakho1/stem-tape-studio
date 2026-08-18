@@ -229,6 +229,37 @@ static inline uint32_t st_storage_song_sectors(uint32_t frame_count)
 			   ST_SECTOR_FRAME_CAPACITY);
 }
 
+/*
+ * Song-data allocator: a simple monotonic ("log-structured", never
+ * reused/compacted in this release) bump allocator computed directly from
+ * the EXISTING committed slots -- no separate watermark field, so no wire-
+ * format change is needed to add it. A freshly committed song's
+ * start_sector is always st_storage_next_free_song_sector(h) BEFORE that
+ * slot's own record is written; deleting a slot does not reclaim its
+ * sectors (documented limitation -- a compacting allocator is out of
+ * scope for this release, and re-uploading to a slot always gets a fresh
+ * range past every other committed song, so the previously committed
+ * song's bytes are simply never referenced again, never overwritten out
+ * from under a still-playing stream).
+ */
+static inline uint32_t st_storage_next_free_song_sector(const st_library_header_t *h)
+{
+	uint32_t next = ST_SONG_DATA_SECTOR0;
+	uint32_t i;
+
+	for (i = 0; i < h->slot_count; i++) {
+		if (h->slot[i].frame_count == 0u) {
+			continue; /* empty slot: no sectors reserved */
+		}
+		uint32_t end = h->slot[i].start_sector +
+				st_storage_song_sectors(h->slot[i].frame_count);
+		if (end > next) {
+			next = end;
+		}
+	}
+	return next;
+}
+
 /* ---- explicit serialization (st_storage_layout.c) ---- */
 
 /* Serializes the fixed header fields + exactly `h->slot_count` slot

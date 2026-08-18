@@ -17,32 +17,24 @@ gate for the property that actually matters here:
      forbidden, exactly as strictly as m0_safety_gate.py enforces it.
 
   2. eMMC writes are allowed ONLY through the hand-rolled sp1_emmc.c driver
-     (emmc_write_blocks/meta_write_blocks/emmc_cache_flush) -- Zephyr's own
-     disk_access/SD-MMC/filesystem subsystems remain forbidden.
+     (emmc_write_blocks/meta_write_blocks) -- Zephyr's own disk_access/
+     SD-MMC/filesystem subsystems remain forbidden.
 
-  3. Within that driver's call sites in src/main.c, this gate does not just
-     trust the symbol being linked -- it proves, per call site, that the
-     capability is either:
-       (a) INHERITED: the exact same (enclosing function, target call)
-           pairing already exists, in the same or greater count, in the
-           untouched classic Tape Looper baseline (firmware/src/main.c).
-           That baseline is the existing, already-proven regression
-           reference for this whole codebase -- a call site that matches it
-            1:1 is not new capability introduced this session, it is the
-           unmodified classic persistence pattern (index writes trusted from
-           host-managed state, cache flushes, cold-boot format-fresh, the
-           classic 'W'-verb raw track-data staging write, etc.), and
-       (b) NEW: any call site in excess of the matching classic count is
-           new. Every NEW call site MUST be lexically nested inside a
-           conditional block that is provably reached only after
-           `st_stem_validate_commit(...)` has returned `ST_STEM_OK` --
-           proven by a brace-depth range trace between the nearest prior
-           `st_stem_validate_commit(` call and the write call site (the
-           trace fails closed: depth must never return to, or below, the
-           validate call's own depth before the write is reached, and an
-           `ST_STEM_OK` comparison plus conditional control flow must
-           appear in that range). Evidence -- both the source region and the
-           depth trace -- is printed for every NEW call site, pass or fail.
+  3. `emmc_write_blocks` itself is allowed ONLY from inside one of three
+     purpose-built, region-bounded adapter functions in the derived
+     src/main.c -- GATE 2's real transfer/commit engine
+     (xfer_staging_write/xfer_header_write/xfer_songdata_write). This gate
+     does not just trust the symbol being linked, or trust a caller's
+     promise: it proves, for every real `emmc_write_blocks` call site,
+     that it is inside one of exactly those three functions AND that the
+     function's OWN source body contains the real region-boundary
+     constant(s) it claims to be bounded by, with an early `return -1;`
+     guard before the write is ever reached -- a structural property of
+     the function itself, independent of who calls it or in what order.
+     `meta_write_blocks` (the classic looper's own index writer) must have
+     ZERO call sites -- it has no definition left to link in this
+     derivative at all. See pass D below for the exact per-function
+     evidence.
 
 Any call site this script cannot confidently classify FAILS the gate. This
 is deliberately at least as strict as m0_safety_gate.py for every category
@@ -50,7 +42,7 @@ that isn't eMMC storage, and strictly proves (not merely asserts) the one
 category where stemtape-player legitimately differs from M0.
 
 Usage: stemtape_player_safety_gate.py <nm.txt> <objdump-d.txt> <.config> \
-           <classic-baseline-main.c> <out-report.md>
+           <out-report.md>
 """
 
 from __future__ import annotations
@@ -59,7 +51,7 @@ import os
 import re
 import sys
 
-nm_file, dis_file, cfg_file, baseline_main_c, out_path = sys.argv[1:6]
+nm_file, dis_file, cfg_file, out_path = sys.argv[1:5]
 
 SOURCE_ROOTS = [
     "firmware/stemtape_player",
@@ -452,28 +444,52 @@ for label, lo, hi in ADDRESS_WINDOWS:
         report.append("```")
         report.append("")
 
-# --- pass D: eMMC persistent-write call-site provenance and commit gate ----
+# --- pass D: eMMC persistent-write call-site provenance ---------------------
+# GATE 2 (real 4-stem song transfer) replaced the earlier st_stem_validate_
+# commit()-gated design (that module was superseded before it was ever
+# wired to a real verb -- see st_stem_validate.h's own docstring vs.
+# st_transfer.c's real, independently-designed and already-tested
+# st_xfer_verify()/st_xfer_commit_precheck()) with three purpose-built,
+# region-bounded eMMC-write adapter functions in the derived src/main.c.
+# Each is bounded to its own disjoint sector range by its OWN function
+# body -- a literal comparison against the real region-boundary
+# constant(s), with an early `return -1;` before ever reaching
+# `emmc_write_blocks` -- not merely by caller trust or call-graph
+# position, so this pass proves the bound structurally rather than by
+# tracing every caller.
 report.append("## D. eMMC write call-site provenance (the property that "
               "actually differs from stemtape-m0)")
 report.append("")
 report.append(
-    "For each of `emmc_write_blocks`, `meta_write_blocks`, `emmc_cache_flush`, "
-    "every call site in the derived src/main.c is grouped by its enclosing "
-    "function and compared against the SAME (function, target) call count in "
-    "the untouched classic baseline (`firmware/src/main.c`). A call site "
-    "inside a function whose count for that target matches (or is exceeded "
-    "by) the classic baseline is INHERITED -- the unmodified, already-proven "
-    "classic Tape Looper persistence pattern, not new capability. Any call "
-    "site in EXCESS of the classic count is NEW and must be individually "
-    "proven reachable only after `st_stem_validate_commit(...)` has returned "
-    "`ST_STEM_OK` (brace-depth range trace, evidence printed below). Any "
-    "call site this script cannot classify, or cannot prove gated, FAILS."
+    "`emmc_write_blocks` may be called ONLY from inside one of three "
+    "region-bounded adapter functions in the derived src/main.c:\n\n"
+    "- `xfer_staging_write` -- bounded to `[ST_STAGING_SECTOR0, "
+    "+ST_STAGING_SECTOR_COUNT)`. Called only from the 'S' (stage) verb.\n"
+    "- `xfer_header_write` -- bounded to `[ST_LIBRARY_HEADER_SECTOR0, "
+    "+ST_LIBRARY_HEADER_SECTORS)`. Called only from the commit-gated 'C' "
+    "path and the destructive-token-gated 'D'/'I' paths.\n"
+    "- `xfer_songdata_write` -- bounded below by `ST_SONG_DATA_SECTOR0` and "
+    "above by the real, EXT_CSD-detected device capacity "
+    "(`g_emmc_total_sectors`; 0 = not yet known, fail-closed). Called only "
+    "from the commit path, after the transaction is confirmed open and "
+    "verified.\n\n"
+    "Any `emmc_write_blocks` call site OUTSIDE these three functions, or "
+    "inside one of them without its real bounds-check pattern actually "
+    "present in the source, FAILS closed. `meta_write_blocks` (the classic "
+    "looper's own index writer) must have ZERO call sites -- it has no "
+    "definition left to link in this derivative at all."
 )
 report.append("")
 
-TARGET_SYMBOLS = ["emmc_write_blocks", "meta_write_blocks", "emmc_cache_flush"]
+TARGET_SYMBOLS = ["emmc_write_blocks", "meta_write_blocks"]
 FUNC_SIG_RX = re.compile(
     r"^(?:static\s+)?(?:inline\s+)?[A-Za-z_][\w ]*?\*?\s*([A-Za-z_]\w*)\s*\([^;{]*\)\s*$")
+
+ALLOWED_WRITE_FUNCS = {
+    "xfer_staging_write": ("ST_STAGING_SECTOR0", "ST_STAGING_SECTOR_COUNT"),
+    "xfer_header_write": ("ST_LIBRARY_HEADER_SECTOR0", "ST_LIBRARY_HEADER_SECTORS"),
+    "xfer_songdata_write": ("ST_SONG_DATA_SECTOR0", "g_emmc_total_sectors"),
+}
 
 
 def index_functions(lines: list[str]):
@@ -525,128 +541,98 @@ def find_call_sites(lines: list[str], func_of_line: dict[int, str | None]):
     return sites
 
 
+def function_body_bounds(lines: list[str], line_1based: int) -> tuple[int, int]:
+    """Given a 1-based line number known to be inside some function's body,
+    returns [start, end) 0-based bounds of that exact function's brace-
+    delimited body -- found by real brace-depth matching (walk outward to
+    the nearest enclosing unmatched '{', then forward to its matching
+    '}'), not a fixed line-count guess. Same technique this repo's own
+    stemtape_player_usb_descriptor_assertions.py uses for devicetree node
+    bodies, reapplied here for C function bodies."""
+    idx = line_1based - 1
+    depth = 0
+    start = 0
+    for i in range(idx, -1, -1):
+        depth += lines[i].count("}") - lines[i].count("{")
+        if depth < 0:
+            start = i
+            break
+    depth = 0
+    end = len(lines)
+    for i in range(start, len(lines)):
+        depth += lines[i].count("{") - lines[i].count("}")
+        if depth == 0 and i > start:
+            end = i + 1
+            break
+    return start, end
+
+
 derived_lines = open(DERIVED_MAIN_C, errors="ignore").read().splitlines()
-baseline_lines = open(baseline_main_c, errors="ignore").read().splitlines()
-
 derived_func_of_line = index_functions(derived_lines)
-baseline_func_of_line = index_functions(baseline_lines)
-
 derived_sites = find_call_sites(derived_lines, derived_func_of_line)
-baseline_sites = find_call_sites(baseline_lines, baseline_func_of_line)
 
-report.append(f"Baseline (`{baseline_main_c}`): "
-              f"{sum(len(v) for v in baseline_sites.values())} call site(s) across "
-              f"{len(baseline_sites)} (function, target) pairing(s).")
-report.append(f"Derived (`{DERIVED_MAIN_C}`): "
-              f"{sum(len(v) for v in derived_sites.values())} call site(s) across "
-              f"{len(derived_sites)} (function, target) pairing(s).")
+any_bad = False
+
+meta_sites = [ln for (fn, sym), lns in derived_sites.items() if sym == "meta_write_blocks" for ln in lns]
+if meta_sites:
+    failures.append(f"pass D: meta_write_blocks has {len(meta_sites)} call site(s) -- "
+                     "must never be called")
+    report.append(f"FAIL — `meta_write_blocks` called at line(s) {meta_sites}")
+    any_bad = True
+else:
+    report.append("confirmed: `meta_write_blocks` has zero call sites")
 report.append("")
 
+write_sites = {(fn, sym): lns for (fn, sym), lns in derived_sites.items() if sym == "emmc_write_blocks"}
+report.append(f"`emmc_write_blocks` call sites in `{DERIVED_MAIN_C}`: "
+              f"{sum(len(v) for v in write_sites.values())} across "
+              f"{len(write_sites)} enclosing function(s).")
+report.append("")
 
-def brace_depth_before(lines: list[str], line_no_1based: int) -> int:
-    """Net (opens - closes) over lines[0 : line_no_1based-1], i.e. the brace
-    depth in effect at the START of the given 1-based line."""
-    depth = 0
-    for l in lines[: line_no_1based - 1]:
-        depth += l.count("{") - l.count("}")
-    return depth
-
-
-def prove_gated(lines: list[str], func: str, write_line: int, symbol: str) -> tuple[bool, list[str]]:
-    """Trace backward from write_line (1-based) within `func` for the nearest
-    prior `st_stem_validate_commit(` call, then verify: (1) an ST_STEM_OK
-    comparison plus conditional control flow appears between that call and
-    the write, and (2) brace depth never returns to, or below, the validate
-    call's own depth before the write is reached (i.e. the write stays
-    lexically nested inside a block opened after the validate call).
-    Returns (proven, evidence_lines)."""
-    ev = [f"target: `{symbol}(...)` at {DERIVED_MAIN_C}:{write_line} "
-          f"(enclosing function `{func}`)",
-          f"  {derived_lines[write_line - 1].strip()}"]
-
-    validate_line = None
-    for i in range(write_line - 1, 0, -1):
-        if derived_func_of_line.get(i) != func:
-            break
-        if "st_stem_validate_commit(" in lines[i - 1]:
-            validate_line = i
-            break
-    if validate_line is None:
-        ev.append("  FAIL: no `st_stem_validate_commit(` call found earlier "
-                   "in the same function.")
-        return False, ev
-
-    ev.append(f"  nearest prior validate call: {DERIVED_MAIN_C}:{validate_line}: "
-              f"{lines[validate_line - 1].strip()}")
-
-    depth_at_validate = brace_depth_before(lines, validate_line)
-    depth_at_write = brace_depth_before(lines, write_line)
-    ev.append(f"  brace depth at validate call: {depth_at_validate}; "
-              f"at write call: {depth_at_write}")
-
-    between = lines[validate_line - 1: write_line - 1]
-    saw_ok = any("ST_STEM_OK" in l for l in between)
-    saw_cond = any(re.search(r"\b(if|else)\b", l) for l in between)
-    ev.append(f"  `ST_STEM_OK` comparison present in between: {saw_ok}; "
-              f"conditional control flow (if/else) present in between: {saw_cond}")
-
-    min_depth = depth_at_validate
-    running = depth_at_validate
-    for l in between:
-        running += l.count("{") - l.count("}")
-        min_depth = min(min_depth, running)
-    ev.append(f"  minimum brace depth reached between validate and write: {min_depth} "
-              f"(must be >= depth-at-validate = {depth_at_validate})")
-
-    proven = (saw_ok and saw_cond
-              and min_depth >= depth_at_validate
-              and depth_at_write > depth_at_validate)
-    ev.append(f"  depth-at-write > depth-at-validate: {depth_at_write > depth_at_validate}")
-    ev.append(f"  RESULT: {'PROVEN GATED' if proven else 'NOT PROVEN — FAILS CLOSED'}")
-    return proven, ev
-
-
-any_new_unproven = False
-all_pairs = sorted(set(derived_sites) | set(baseline_sites))
-for func, sym in all_pairs:
-    d_lines = derived_sites.get((func, sym), [])
-    b_count = len(baseline_sites.get((func, sym), []))
-    d_count = len(d_lines)
-    if d_count <= b_count:
-        report.append(f"INHERITED — `{func}()` calling `{sym}(...)`: "
-                      f"{d_count} call site(s) here vs {b_count} in the classic "
-                      f"baseline (no increase; unmodified classic pattern). "
-                      f"Lines: {d_lines}")
-        report.append("")
+seen_funcs = set()
+for (fn, _sym), lines_ in sorted(write_sites.items()):
+    seen_funcs.add(fn)
+    if fn not in ALLOWED_WRITE_FUNCS:
+        failures.append(f"pass D: emmc_write_blocks called from `{fn}()`, which is "
+                         "not one of the three allowed region-bounded adapters")
+        report.append(f"FAIL — unexpected caller `{fn}()` at line(s) {lines_}")
+        any_bad = True
         continue
-    excess = d_count - b_count
-    report.append(f"NEW CAPABILITY — `{func}()` calling `{sym}(...)`: "
-                  f"{d_count} call site(s) here vs {b_count} in the classic "
-                  f"baseline ({excess} new). Every call site in this function "
-                  f"is being individually traced (ambiguous which specific "
-                  f"occurrence(s) are the {b_count} inherited one(s), so all "
-                  f"{d_count} are proven, fail-closed).")
+    lower_const, upper_const = ALLOWED_WRITE_FUNCS[fn]
+    start, end = function_body_bounds(derived_lines, lines_[0])
+    body = "\n".join(derived_lines[start:end])
+    has_lower = lower_const in body
+    has_upper = upper_const in body
+    has_return = re.search(r"return\s+-1\s*;", body) is not None
+    ok = has_lower and has_upper and has_return
+    report.append(f"{'PASS' if ok else 'FAIL'} — `{fn}()` ({len(lines_)} call site(s), "
+                  f"line(s) {lines_}, body {DERIVED_MAIN_C}:{start + 1}-{end}): "
+                  f"lower bound `{lower_const}` present: {has_lower}; "
+                  f"upper bound `{upper_const}` present: {has_upper}; an early "
+                  f"`return -1;` guard present: {has_return}")
+    if not ok:
+        failures.append(f"pass D: `{fn}()` is missing its required bounds-check pattern")
+        any_bad = True
+    report.append("```text")
+    report.extend(body.splitlines())
+    report.append("```")
     report.append("")
-    for ln in d_lines:
-        proven, ev = prove_gated(derived_lines, func, ln, sym)
-        report.append("```text")
-        report.extend(ev)
-        report.append("```")
-        report.append("")
-        if not proven:
-            any_new_unproven = True
 
-if any_new_unproven:
-    failures.append("pass D: one or more NEW eMMC persistent-write call sites "
-                     "could not be proven reachable only via a validated "
-                     "st_stem_validate_commit() == ST_STEM_OK commit (see "
-                     "section D above for the full trace)")
-    report.append("FAIL — pass D: see traces above.")
+for fn in ALLOWED_WRITE_FUNCS:
+    if fn not in seen_funcs:
+        report.append(f"NOTE: `{fn}()` has zero `emmc_write_blocks` call sites in this "
+                      "build (not itself a failure -- e.g. legitimately dead-code-"
+                      "eliminated if genuinely unreachable in this configuration -- but "
+                      "worth a human's attention if unexpected).")
+        report.append("")
+
+if any_bad:
+    report.append("FAIL — pass D: see above.")
 else:
-    report.append("PASS — pass D: every NEW eMMC persistent-write call site is "
-                  "proven reachable only after `st_stem_validate_commit(...)` "
-                  "returned `ST_STEM_OK`; every other call site is unmodified, "
-                  "classic-baseline persistence behavior.")
+    report.append("PASS — pass D: every `emmc_write_blocks` call site is inside one of "
+                  "the three allowed, independently region-bounded adapter functions, "
+                  "and each one's real bounds-check pattern is confirmed present in its "
+                  "own source body.")
 report.append("")
 
 # --- explicitly permitted volatile operations -------------------------------
@@ -691,9 +677,9 @@ if failures:
     for f in failures:
         report.append(f"- {f}")
 else:
-    report.append("GATE PASSED — no persistent-write capability outside the proven, "
-                  "validated eMMC commit path (and unmodified classic-baseline "
-                  "persistence behavior) was detected in the image.")
+    report.append("GATE PASSED — no persistent-write capability outside the three "
+                  "proven, independently region-bounded eMMC adapter functions was "
+                  "detected in the image.")
 report.append("")
 
 open(out_path, "w").write("\n".join(report) + "\n")

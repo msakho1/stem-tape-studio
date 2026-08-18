@@ -25,6 +25,7 @@
 #include "st_fx_catalog.h"
 #include "st_gesture.h"
 #include "st_led_pattern.h"
+#include "st_library_io.h"
 #include "st_midi_queue.h"
 #include "st_scrub.h"
 #include "st_sector_codec.h"
@@ -32,6 +33,7 @@
 #include "st_storage_layout.h"
 #include "st_transfer.h"
 #include "st_transfer_protocol.h"
+#include "st_xfer_wire.h"
 
 static int g_checks;
 static int g_failures;
@@ -582,6 +584,328 @@ static void test_transfer_bad_slot_and_oversize(void)
 	meta.downbeat_frame = 500u; /* must be < frame_count */
 	CHECK(st_xfer_begin(&t, 0u, &meta, 16u, &resume) == ST_XFER_ERR_BAD_TIMING,
 	      "a downbeat_frame at or past the end of the song is rejected");
+}
+
+/* ========================================================================
+ * st_library_io: torn-write-safe two-copy library header load/save
+ * ======================================================================== */
+#define LIBIO_MOCK_SECTORS (ST_LIBRARY_HEADER_SECTORS)
+typedef struct {
+	uint8_t data[LIBIO_MOCK_SECTORS][ST_SECTOR_BYTES];
+	bool    present[LIBIO_MOCK_SECTORS]; /* has anything ever been written here */
+	bool    fail_write_sector[LIBIO_MOCK_SECTORS];
+} libio_mock_t;
+
+static int libio_mock_write(uint32_t sector, const uint8_t d[ST_SECTOR_BYTES], void *ctx)
+{
+	libio_mock_t *m = (libio_mock_t *)ctx;
+
+	if (sector >= LIBIO_MOCK_SECTORS || m->fail_write_sector[sector]) {
+		return -1;
+	}
+	memcpy(m->data[sector], d, ST_SECTOR_BYTES);
+	m->present[sector] = true;
+	return 0;
+}
+
+static int libio_mock_read(uint32_t sector, uint8_t out[ST_SECTOR_BYTES], void *ctx)
+{
+	libio_mock_t *m = (libio_mock_t *)ctx;
+
+	if (sector >= LIBIO_MOCK_SECTORS) {
+		return -1;
+	}
+	if (!m->present[sector]) {
+		memset(out, 0, ST_SECTOR_BYTES); /* blank media: all zeros, like an erased card */
+	} else {
+		memcpy(out, m->data[sector], ST_SECTOR_BYTES);
+	}
+	return 0;
+}
+
+static void libio_build_sample_header(st_library_header_t *h, uint32_t song_id, const char *title)
+{
+	memset(h, 0, sizeof(*h));
+	h->magic = ST_LIBRARY_HEADER_MAGIC;
+	h->layout_version = ST_STORAGE_LAYOUT_VERSION;
+	h->slot_count = 4u;
+	h->current_slot = 1u;
+	h->slot[1].song_id_hash = song_id;
+	h->slot[1].frame_count = 48000u;
+	h->slot[1].start_sector = 123u;
+	h->slot[1].stem_present_mask = 0x0Fu;
+	strncpy(h->slot[1].title, title, sizeof(h->slot[1].title) - 1);
+}
+
+static void test_libio_fresh_on_blank_media(void)
+{
+	libio_mock_t m;
+	st_library_header_t h;
+	int trusted = -99;
+
+	memset(&m, 0, sizeof(m));
+	CHECK(st_libio_load(&h, 12u, &trusted, libio_mock_read, &m) == ST_LIBIO_FRESH,
+	      "blank (never-written) media loads as FRESH, not an error");
+	CHECK(trusted == -1, "FRESH reports no trusted copy");
+	CHECK(h.magic == ST_LIBRARY_HEADER_MAGIC && h.slot_count == 12u && h.generation == 0u,
+	      "a fresh header is seeded with the real capacity-detected slot_count, not a placeholder");
+	CHECK(h.slot[0].frame_count == 0u, "every slot in a fresh header is empty");
+}
+
+static void test_libio_save_then_load_round_trip(void)
+{
+	libio_mock_t m;
+	st_library_header_t h, loaded;
+	int trusted = -99;
+
+	memset(&m, 0, sizeof(m));
+	libio_build_sample_header(&h, 0xABCD1234u, "Round Trip Song");
+
+	CHECK(st_libio_save(&h, -1, libio_mock_write, &m) == true,
+	      "save succeeds against blank media (trusted_copy -1: order doesn't matter)");
+	CHECK(h.generation == 1u, "save() bumps the generation it was given (visible to the caller)");
+
+	CHECK(st_libio_load(&loaded, 99u, &trusted, libio_mock_read, &m) == ST_LIBIO_LOADED,
+	      "a just-saved header loads back as LOADED");
+	CHECK(trusted == 0 || trusted == 1, "a real trusted copy index is reported");
+	CHECK(loaded.generation == 1u, "the loaded generation matches what was saved");
+	CHECK(loaded.slot_count == 4u && loaded.current_slot == 1u,
+	      "loaded fixed fields match exactly");
+	CHECK(loaded.slot[1].song_id_hash == 0xABCD1234u && loaded.slot[1].start_sector == 123u,
+	      "loaded slot record fields match exactly");
+	CHECK(strcmp(loaded.slot[1].title, "Round Trip Song") == 0,
+	      "loaded slot title matches exactly");
+}
+
+static void test_libio_corrupt_single_copy_falls_back(void)
+{
+	libio_mock_t m;
+	st_library_header_t h, loaded;
+	int trusted = -99;
+	uint32_t copy1_sector0 = ST_LIBRARY_HEADER_SECTOR0 + ST_LIBRARY_HEADER_SECTORS_PER_COPY;
+
+	memset(&m, 0, sizeof(m));
+	libio_build_sample_header(&h, 0x1111u, "Corrupt Test");
+	(void)st_libio_save(&h, -1, libio_mock_write, &m);
+
+	/* Flip a byte in copy 1's first sector -- its header_crc32 (or magic)
+	 * check must now fail deserialize. */
+	m.data[copy1_sector0][0] ^= 0xFFu;
+	CHECK(st_libio_load(&loaded, 4u, &trusted, libio_mock_read, &m) == ST_LIBIO_LOADED,
+	      "one corrupt copy still loads -- the other copy is used");
+	CHECK(trusted == 0, "falls back to copy 0 when copy 1 is corrupt");
+	CHECK(loaded.slot[1].song_id_hash == 0x1111u, "the recovered data is the real, uncorrupted content");
+
+	/* Now corrupt copy 0 instead (leave copy 1 alone -- but copy 1 is the
+	 * one we just corrupted above; write a fresh, both-valid state first). */
+	memset(&m, 0, sizeof(m));
+	libio_build_sample_header(&h, 0x2222u, "Corrupt Test 2");
+	(void)st_libio_save(&h, -1, libio_mock_write, &m);
+	m.data[ST_LIBRARY_HEADER_SECTOR0][0] ^= 0xFFu; /* corrupt copy 0's first sector */
+	CHECK(st_libio_load(&loaded, 4u, &trusted, libio_mock_read, &m) == ST_LIBIO_LOADED,
+	      "corrupting copy 0 instead still loads -- copy 1 is used");
+	CHECK(trusted == 1, "falls back to copy 1 when copy 0 is corrupt");
+	CHECK(loaded.slot[1].song_id_hash == 0x2222u, "the recovered data is the real, uncorrupted content");
+
+	/* Corrupt BOTH copies: neither validates. */
+	m.data[copy1_sector0][0] ^= 0xFFu;
+	CHECK(st_libio_load(&loaded, 7u, &trusted, libio_mock_read, &m) == ST_LIBIO_FRESH,
+	      "corrupting both copies falls all the way back to FRESH, never fabricated old data");
+	CHECK(trusted == -1, "FRESH reports no trusted copy");
+}
+
+/* The write order (untrusted copy first, previously-trusted copy second)
+ * guarantees exactly one thing about a failure DURING save(): if the
+ * FIRST write (to the untrusted copy) fails, save() bails out immediately
+ * -- see st_libio_save() -- WITHOUT ever attempting the second (trusted)
+ * copy, so the trusted copy is left completely untouched and its old,
+ * valid content is the definite, guaranteed survivor. */
+static void test_libio_write_failure_on_first_copy_preserves_old_data(void)
+{
+	libio_mock_t m;
+	st_library_header_t h, loaded;
+	int trusted = -99;
+	uint32_t i;
+	uint32_t untrusted_copy, untrusted_base;
+
+	memset(&m, 0, sizeof(m));
+	libio_build_sample_header(&h, 0x5555u, "Generation One");
+	CHECK(st_libio_save(&h, -1, libio_mock_write, &m) == true, "first save succeeds cleanly");
+	CHECK(st_libio_load(&loaded, 4u, &trusted, libio_mock_read, &m) == ST_LIBIO_LOADED,
+	      "generation-one header loads back");
+
+	untrusted_copy = (uint32_t)(1 - trusted);
+	untrusted_base = ST_LIBRARY_HEADER_SECTOR0 + untrusted_copy * ST_LIBRARY_HEADER_SECTORS_PER_COPY;
+	for (i = 0; i < ST_LIBRARY_HEADER_SECTORS_PER_COPY; i++) {
+		m.fail_write_sector[untrusted_base + i] = true;
+	}
+
+	libio_build_sample_header(&h, 0x6666u, "Generation Two (never lands)");
+	h.generation = loaded.generation; /* save() bumps it itself, matching the real caller contract */
+	CHECK(st_libio_save(&h, trusted, libio_mock_write, &m) == false,
+	      "a write failure on the FIRST (untrusted) copy makes save() report failure "
+	      "without ever touching the trusted copy");
+
+	CHECK(st_libio_load(&loaded, 4u, &trusted, libio_mock_read, &m) == ST_LIBIO_LOADED,
+	      "the media is still loadable after the failed save");
+	CHECK(loaded.slot[1].song_id_hash == 0x5555u && loaded.generation == 1u,
+	      "the previously-committed (generation one) content survives completely intact -- "
+	      "the failed attempt never reached the trusted copy at all");
+}
+
+/* A failure on the SECOND write (the previously-trusted copy, AFTER the
+ * untrusted copy's write already succeeded) is a different, weaker-but-
+ * still-real guarantee: save() still reports failure (the caller must not
+ * treat it as a successful commit), but the untrusted copy may already
+ * hold a complete, validly-written NEWER generation -- this is not
+ * corruption (every byte written was a real, complete, CRC-valid record),
+ * so the only thing this test asserts is what st_libio_save() actually
+ * promises: the media is NEVER left both-invalid/ambiguous -- a load
+ * afterward always succeeds and returns one CRC-valid, complete
+ * generation, never a torn mix of old and new. */
+static void test_libio_write_failure_on_second_copy_never_leaves_both_invalid(void)
+{
+	libio_mock_t m;
+	st_library_header_t h, loaded;
+	int trusted = -99;
+	uint32_t i;
+	uint32_t trusted_base;
+
+	memset(&m, 0, sizeof(m));
+	libio_build_sample_header(&h, 0x5555u, "Generation One");
+	CHECK(st_libio_save(&h, -1, libio_mock_write, &m) == true, "first save succeeds cleanly");
+	CHECK(st_libio_load(&loaded, 4u, &trusted, libio_mock_read, &m) == ST_LIBIO_LOADED,
+	      "generation-one header loads back");
+
+	trusted_base = ST_LIBRARY_HEADER_SECTOR0 + (uint32_t)trusted * ST_LIBRARY_HEADER_SECTORS_PER_COPY;
+	for (i = 0; i < ST_LIBRARY_HEADER_SECTORS_PER_COPY; i++) {
+		m.fail_write_sector[trusted_base + i] = true;
+	}
+
+	libio_build_sample_header(&h, 0x6666u, "Generation Two");
+	h.generation = loaded.generation;
+	CHECK(st_libio_save(&h, trusted, libio_mock_write, &m) == false,
+	      "a write failure on the second (previously-trusted) copy still makes save() report failure");
+
+	CHECK(st_libio_load(&loaded, 4u, &trusted, libio_mock_read, &m) == ST_LIBIO_LOADED,
+	      "the media is still loadable -- never both-invalid, never a torn/ambiguous state");
+	CHECK(loaded.slot[1].song_id_hash == 0x5555u || loaded.slot[1].song_id_hash == 0x6666u,
+	      "the surviving content is one complete, real generation (old or new), never a mix");
+}
+
+static void test_storage_next_free_song_sector(void)
+{
+	st_library_header_t h;
+
+	memset(&h, 0, sizeof(h));
+	h.slot_count = 4u;
+	CHECK(st_storage_next_free_song_sector(&h) == ST_SONG_DATA_SECTOR0,
+	      "an all-empty library allocates from the very start of the song-data region");
+
+	h.slot[0].frame_count = ST_SECTOR_FRAME_CAPACITY * 2u; /* exactly 2 sectors */
+	h.slot[0].start_sector = ST_SONG_DATA_SECTOR0;
+	CHECK(st_storage_next_free_song_sector(&h) == ST_SONG_DATA_SECTOR0 + 2u,
+	      "the next allocation starts immediately after the one committed slot's real span");
+
+	/* A second, non-contiguous slot (as if slot 2 was uploaded before slot
+	 * 1) -- the allocator must take the MAX end, not just the last slot
+	 * examined, and must ignore still-empty slots entirely. */
+	h.slot[2].frame_count = ST_SECTOR_FRAME_CAPACITY * 5u; /* 5 sectors */
+	h.slot[2].start_sector = ST_SONG_DATA_SECTOR0 + 100u;
+	CHECK(st_storage_next_free_song_sector(&h) == ST_SONG_DATA_SECTOR0 + 105u,
+	      "the allocator returns the true maximum end across every committed slot, "
+	      "not just the highest-indexed one");
+}
+
+/* ========================================================================
+ * st_xfer_wire: pure byte-level (de)serialization for the V/B/D wire
+ * payloads -- the SAME parser main.c's real xfer_service() calls.
+ * ======================================================================== */
+static void test_xfer_wire_version_roundtrip(void)
+{
+	uint8_t rsp[16];
+
+	st_xfer_wire_encode_version(rsp, ST_XFER_CAP_TRANSACTIONAL_SLOTS | ST_XFER_CAP_CRC32);
+	CHECK(memcmp(rsp, "STV1", 4) == 0, "version response starts with the STV1 magic");
+	CHECK(rsp[4] == ST_XFER_PROTOCOL_MINOR, "byte 4 is the protocol minor version");
+	CHECK(rsp[5] == ST_STORAGE_LAYOUT_VERSION, "byte 5 is the storage layout version");
+	CHECK(rsp[6] == 0 && rsp[7] == 0, "bytes 6..7 are reserved zero");
+	uint32_t cap = (uint32_t)rsp[8] | ((uint32_t)rsp[9] << 8) |
+		       ((uint32_t)rsp[10] << 16) | ((uint32_t)rsp[11] << 24);
+	CHECK(cap == (ST_XFER_CAP_TRANSACTIONAL_SLOTS | ST_XFER_CAP_CRC32),
+	      "bytes 8..11 carry the real capability flags, little-endian");
+	uint32_t sector_bytes = (uint32_t)rsp[12] | ((uint32_t)rsp[13] << 8) |
+				 ((uint32_t)rsp[14] << 16) | ((uint32_t)rsp[15] << 24);
+	CHECK(sector_bytes == ST_SECTOR_BYTES, "bytes 12..15 carry ST_SECTOR_BYTES, little-endian");
+}
+
+static void test_xfer_wire_begin_req_roundtrip(void)
+{
+	uint8_t buf[ST_XFER_WIRE_BEGIN_REQ_LEN];
+	uint8_t *p = buf;
+	uint16_t slot_out;
+	st_xfer_song_meta_t meta;
+	uint32_t i;
+
+	/* Hand-build one real request, field by field, independent of the
+	 * encoder (there is no encoder -- the companion tool builds this; the
+	 * firmware only ever decodes) -- proves the DECODER's byte offsets
+	 * are right, not just that encode+decode are mutually consistent. */
+	*p++ = (uint8_t)(7u & 0xFFu); *p++ = (uint8_t)((7u >> 8) & 0xFFu); /* slot = 7 */
+	*p++ = 0x11; *p++ = 0x22; *p++ = 0x33; *p++ = 0x44;                /* song_id_hash */
+	*p++ = 0x00; *p++ = 0xC0; *p++ = 0x02; *p++ = 0x00;                /* frame_count = 180224 */
+	*p++ = 0xAA; *p++ = 0xBB; *p++ = 0xCC; *p++ = 0xDD;                /* expected_crc32 */
+	*p++ = 0x0Fu;                                                      /* stem_present_mask */
+	for (i = 0; i < 4u; i++) { *p++ = 0x10; *p++ = 0x00; *p++ = 0x00; *p++ = 0x00; } /* content_frames[i]=0x10 */
+	for (i = 0; i < 4u; i++) { *p++ = (uint8_t)(0x20u + i); *p++ = 0x00; *p++ = 0x00; *p++ = 0x00; }
+	*p++ = 0x60; *p++ = 0x00;                                          /* bpm_q8 = 0x0060 (~0.375 -- fixture value) */
+	*p++ = 0x05; *p++ = 0x00; *p++ = 0x00; *p++ = 0x00;                /* downbeat_frame = 5 */
+	memcpy(p, "Wire Test Title", 15); memset(p + 15, 0, 32 - 15); p += 32;
+	memcpy(p, "Wire Test Artist", 16); memset(p + 16, 0, 32 - 16); p += 32;
+	CHECK((uint32_t)(p - buf) == ST_XFER_WIRE_BEGIN_REQ_LEN, "hand-built fixture is exactly the declared length");
+
+	CHECK(st_xfer_wire_decode_begin_req(buf, sizeof(buf), &slot_out, &meta) == true,
+	      "a full-length, well-formed request decodes");
+	CHECK(slot_out == 7u, "slot index decodes correctly");
+	CHECK(meta.song_id_hash == 0x44332211u, "song_id_hash decodes little-endian");
+	CHECK(meta.frame_count == 180224u, "frame_count decodes little-endian");
+	CHECK(meta.expected_crc32 == 0xDDCCBBAAu, "expected_crc32 decodes little-endian");
+	CHECK(meta.stem_present_mask == 0x0Fu, "stem_present_mask decodes");
+	CHECK(meta.stem_content_frames[0] == 0x10u && meta.stem_content_frames[3] == 0x10u,
+	      "every stem_content_frames[] entry decodes");
+	CHECK(meta.stem_crc32[0] == 0x20u && meta.stem_crc32[3] == 0x23u,
+	      "every stem_crc32[] entry decodes independently");
+	CHECK(meta.bpm_q8 == 0x0060u, "bpm_q8 decodes little-endian");
+	CHECK(meta.downbeat_frame == 5u, "downbeat_frame decodes");
+	CHECK(strcmp(meta.title, "Wire Test Title") == 0, "title decodes and is null-terminated");
+	CHECK(strcmp(meta.artist, "Wire Test Artist") == 0, "artist decodes and is null-terminated");
+
+	CHECK(st_xfer_wire_decode_begin_req(buf, ST_XFER_WIRE_BEGIN_REQ_LEN - 1u, &slot_out, &meta) == false,
+	      "a truncated request (one byte short) is rejected, not partially decoded");
+}
+
+static void test_xfer_wire_begin_rsp_and_delete_req(void)
+{
+	uint8_t rsp[ST_XFER_WIRE_BEGIN_RSP_LEN];
+	uint8_t req[ST_XFER_WIRE_DELETE_REQ_LEN];
+	uint16_t slot_out;
+	const uint8_t *token;
+
+	st_xfer_wire_encode_begin_rsp(rsp, 0x01020304u);
+	CHECK(rsp[0] == ST_XFER_RSP_BEGIN_OK, "begin response leads with the 'b' status byte");
+	uint32_t resume = (uint32_t)rsp[1] | ((uint32_t)rsp[2] << 8) |
+			   ((uint32_t)rsp[3] << 16) | ((uint32_t)rsp[4] << 24);
+	CHECK(resume == 0x01020304u, "resume_sector encodes little-endian");
+
+	req[0] = 0x05; req[1] = 0x00; /* slot = 5 */
+	memcpy(req + 2, ST_DESTRUCTIVE_CONFIRM_TOKEN, ST_DESTRUCTIVE_CONFIRM_LEN);
+	CHECK(st_xfer_wire_decode_delete_req(req, sizeof(req), &slot_out, &token) == true,
+	      "a full-length delete request decodes");
+	CHECK(slot_out == 5u, "delete request slot index decodes");
+	CHECK(st_xfer_check_token(token, ST_DESTRUCTIVE_CONFIRM_LEN) == true,
+	      "the decoded token pointer is usable directly with st_xfer_check_token()");
+	CHECK(st_xfer_wire_decode_delete_req(req, ST_XFER_WIRE_DELETE_REQ_LEN - 1u, &slot_out, &token) == false,
+	      "a truncated delete request is rejected");
 }
 
 /* ========================================================================
@@ -1646,6 +1970,17 @@ int main(void)
 	RUN(test_transfer_interrupted_upload_never_commits);
 	RUN(test_transfer_abort_and_token);
 	RUN(test_transfer_bad_slot_and_oversize);
+
+	RUN(test_libio_fresh_on_blank_media);
+	RUN(test_libio_save_then_load_round_trip);
+	RUN(test_libio_corrupt_single_copy_falls_back);
+	RUN(test_libio_write_failure_on_first_copy_preserves_old_data);
+	RUN(test_libio_write_failure_on_second_copy_never_leaves_both_invalid);
+	RUN(test_storage_next_free_song_sector);
+
+	RUN(test_xfer_wire_version_roundtrip);
+	RUN(test_xfer_wire_begin_req_roundtrip);
+	RUN(test_xfer_wire_begin_rsp_and_delete_req);
 
 	RUN(test_stem_validate_accepts_valid_commit);
 	RUN(test_stem_validate_rejects_missing_stem);

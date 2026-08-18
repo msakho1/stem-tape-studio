@@ -110,19 +110,26 @@ every committed slot's sectors:
 
 | Cmd | Name | Request payload | Response |
 |---|---|---|---|
-| `B` | Begin | slot index (u16), frame_count (u64), payload_crc32 (u32), stem presence bitmask (u8) | `b` + staged byte offset to resume from (0 for a fresh begin; nonzero replays a `B` sent again for an interrupted upload — see "Resume" below) |
+| `B` | Begin | exactly `ST_XFER_WIRE_BEGIN_REQ_LEN` (117) bytes: slot index (u16), then the full song declaration field-by-field -- song_id_hash (u32), frame_count (u32), expected_crc32 (u32), stem_present_mask (u8), stem_content_frames[4] (u32 each), stem_crc32[4] (u32 each, one independent checksum per stem), bpm_q8 (u16), downbeat_frame (u32), title[32], artist[32] -- see `st_xfer_wire.h`/`st_transfer.h`'s `st_xfer_song_meta_t` for the authoritative field list | `b` + resume **sector index** (u32 LE) to resume from (0 for a fresh begin; nonzero replays a `B` sent again for an interrupted upload — see "Resume" below) |
 | `S` | Stage sector | sector index within the transfer (u32), `ST_SECTOR_BYTES` of data, sector crc32 (u32) | `s` (crc verified and written) or `e` (crc mismatch or out of range — the host must resend that sector, the transaction stays open) |
-| `K` | Verify | — | `k` (full-payload CRC over the staged sectors matches the `B` payload_crc32) or `e` (mismatch — transaction stays open, nothing is committed) |
-| `C` | Commit / finalize | — | `c` (flushed to eMMC, slot metadata written **last**, song now visible) or `e` (refused — verify was not run, or a mismatch was pending) |
+| `K` | Verify | — | `k` (full-payload CRC over the staged sectors matches `B`'s expected_crc32, AND every stem's independently-decoded CRC matches its declared stem_crc32) or `e` (mismatch — transaction stays open, nothing is committed) |
+| `C` | Commit / finalize | — | `c` (staged sectors copied to their permanent song-data home, eMMC write cache flushed, slot metadata written **last**, song now visible) or `e` (refused — verify was not run, a mismatch was pending, or the copy/flush/metadata-write failed) |
 | `A` | Abort | — | `a` (staging discarded, target slot's previously committed song, if any, is untouched) |
 | `X` (existing) | (unchanged from the classic protocol) also exits transfer mode | — | — |
-| `D` | Delete | slot index (u16), destructive-confirmation token (see below) | `d` (slot metadata cleared; sectors are left as-is until reused, never zero-filled synchronously) or `e` |
+| `D` | Delete | exactly `ST_XFER_WIRE_DELETE_REQ_LEN` (10) bytes: slot index (u16), destructive-confirmation token (see below) | `d` (slot metadata cleared; sectors are left as-is until reused, never zero-filled synchronously) or `e` |
 | `I` | Initialize / convert storage | destructive-confirmation token (see below) | `i` (library header (re)written; **every existing committed slot is discarded**) or `e` |
 
-**Resume.** Because `B` reports the already-staged byte offset for the
-requested slot when the SAME `(slot, frame_count, payload_crc32)` tuple is
+(This table was originally written before `st_xfer_song_meta_t`'s field
+set was finalized against the directive's per-stem independent length +
+checksum and title/artist requirements; it undersized `frame_count` as
+u64 and omitted several fields the firmware's real `st_xfer_wire.c` now
+decodes. The byte layout above is the authoritative, implemented one --
+`st_xfer_wire.h`'s own doc comments are the canonical reference.)
+
+**Resume.** Because `B` reports the already-staged sector index for the
+requested slot when the SAME `(slot, frame_count, expected_crc32)` tuple is
 sent again, a companion tool that lost its connection mid-upload simply
-re-sends `B` and continues `S` from the reported offset — it never needs
+re-sends `B` and continues `S` from the reported sector — it never needs
 to restart a large upload from zero. A `B` with a *different* tuple for a
 slot that already has an open transaction discards the old staging data
 first (one upload attempt at a time per slot).
@@ -191,7 +198,14 @@ keep both in sync if either changes.
   `st_slot_meta_t`.
 
 No physical device has been used to transfer a song under this protocol.
-The transactional state machine (`st_transfer.c`) is verified by host
-tests against a mocked sector-storage backend; the real eMMC read/write
-binding is deferred — see the firmware README's "Deferred beyond this
-release" section.
+The transactional state machine (`st_transfer.c`), the two-copy library
+header load/save (`st_library_io.c`), and the wire (de)serialization
+(`st_xfer_wire.c`) are each verified by host tests against a mocked
+sector-storage backend; the real eMMC read/write binding (`xfer_sector_
+read`/`xfer_staging_write`/`xfer_header_write`/`xfer_songdata_write` in
+`firmware/stemtape_player/src/main.c`, wired into `xfer_service()`'s real
+`V`/`B`/`S`/`K`/`C`/`A`/`D`/`I` handlers) is implemented and linked into a
+real, CI-built firmware image -- but has likewise only been exercised
+against the same host-side mocks, never a physical SP-1 unit or a real
+companion tool. See the release report for the exact CI evidence and the
+handoff section for what a real hardware test would need to confirm.
