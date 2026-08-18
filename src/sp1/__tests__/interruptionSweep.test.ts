@@ -147,13 +147,16 @@ describe("exhaustive interruption sweep (v1.1 A/B)", () => {
         expect(lib.slots.some((s) => s.validation.valid)).toBe(true);
         expect(lib.status).toBe("ok");
 
-        // 2. The active record is exactly one of the two complete songs.
+        // 2. The active record is exactly one of the two complete songs, and the
+        //    selector resolved to exactly ONE valid generation.
         const a = lib.active!;
         expect(a.songPresent).toBe(true);
         const isOld = a.songChecksum === b.one.checksum && a.generation === b.generation;
         const isNew = a.songChecksum === two.checksum && a.generation === b.generation + 1;
         expect(isOld || isNew).toBe(true);
         expect(isOld && isNew).toBe(false);
+        const selectedValidGenerations = [isOld, isNew].filter(Boolean).length;
+        expect(selectedValidGenerations).toBe(1);
 
         // 3. The selected index references INTACT song data, byte for byte.
         const stored = storedSong(m2, b.caps, a.songSlot, a.sectorCount);
@@ -179,6 +182,7 @@ describe("exhaustive interruption sweep (v1.1 A/B)", () => {
           outcome: res.outcome,
           active: isOld ? "previous" : "new",
           activeGeneration: a.generation,
+          selectedValidGenerations,
           priorBytesUnchanged,
         });
       }
@@ -187,33 +191,66 @@ describe("exhaustive interruption sweep (v1.1 A/B)", () => {
     expect(results.length).toBe(total);
 
     const byPhase: Record<string, { points: number; previous: number; new: number }> = {};
+    const byOutcome: Record<string, number> = {};
     for (const r of results) {
       const e = (byPhase[r.phase] ??= { points: 0, previous: 0, new: 0 });
       e.points++;
       if (r.active === "previous") e.previous++;
       else e.new++;
+      byOutcome[r.outcome] = (byOutcome[r.outcome] ?? 0) + 1;
     }
 
-    mkdirSync(REPORT_DIR, { recursive: true });
-    writeFileSync(
-      `${REPORT_DIR}/interruption-sweep.json`,
-      JSON.stringify(
-        {
-          note: "Exhaustive interruption sweep over one deterministic replacement upload (mock device only).",
-          frames: FRAMES,
-          protocolOperations: ops.length,
-          injectedInterruptionPoints: total,
-          byPhase,
-          results,
-        },
-        null,
-        2,
-      ) + "\n",
-    );
+    const totals = {
+      totalPoints: results.length,
+      previousSurvived: results.filter((r) => r.active === "previous").length,
+      newCommitted: results.filter((r) => r.active === "new").length,
+      /**
+       * Client-facing UploadOutcome strings. These are NOT the same axis as
+       * previous/new: an interrupted upload whose outcome is "unknown" may still
+       * resolve, after reboot, to either generation. Conflating the count of
+       * outcome === "failed" with the count of previous-survived points was the
+       * source of the earlier 137 vs 139 discrepancy.
+       */
+      byOutcome,
+    };
 
+    /* ---- reconciliation assertions (section 1) ---- */
+    const phaseEntries = Object.entries(byPhase);
+    // Total phase points equal the injected point count.
+    expect(phaseEntries.reduce((n, [, e]) => n + e.points, 0)).toBe(total);
+    expect(totals.totalPoints).toBe(146);
+    // Per phase: previous + new === points.
+    for (const [phase, e] of phaseEntries) {
+      expect({ phase, sum: e.previous + e.new }).toEqual({ phase, sum: e.points });
+    }
+    // Global previous + global new === total points.
+    expect(totals.previousSurvived + totals.newCommitted).toBe(totals.totalPoints);
+    expect(phaseEntries.reduce((n, [, e]) => n + e.previous, 0)).toBe(totals.previousSurvived);
+    expect(phaseEntries.reduce((n, [, e]) => n + e.new, 0)).toBe(totals.newCommitted);
+    // Outcome tally is a separate axis and must also sum to the total.
+    expect(Object.values(byOutcome).reduce((n, v) => n + v, 0)).toBe(totals.totalPoints);
+    // Exactly one selected valid generation at every point.
+    expect(results.every((r) => r.selectedValidGenerations === 1)).toBe(true);
     // No point may ever produce a partial or missing song.
     expect(results.every((r) => r.active === "previous" || r.active === "new")).toBe(true);
     // Every "previous survives" point proves it by byte hash, not generation.
     expect(results.filter((r) => r.active === "previous").every((r) => r.priorBytesUnchanged)).toBe(true);
+
+    const report = {
+      note: "Exhaustive interruption sweep over one deterministic replacement upload (mock device only).",
+      frames: FRAMES,
+      protocolOperations: ops.length,
+      injectedInterruptionPoints: total,
+      totals,
+      byPhase,
+      results,
+    };
+
+    mkdirSync(REPORT_DIR, { recursive: true });
+    writeFileSync(`${REPORT_DIR}/interruption-sweep.json`, JSON.stringify(report, null, 2) + "\n");
+    // The human-readable summary is GENERATED from the machine report, never
+    // transcribed by hand.
+    writeFileSync(`${REPORT_DIR}/interruption-sweep.md`, renderSweepMarkdown(report));
   }, 600000);
+
 });
