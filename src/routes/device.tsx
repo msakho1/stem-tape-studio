@@ -28,6 +28,7 @@ import {
   writeStateWording,
 } from "@/sp1/wording";
 import { sectorsForFrames, BLOCKS_PER_SECTOR, PHYSICAL_BLOCK_BYTES, SECTOR_BYTES, SAMPLE_RATE } from "@/sp1/stemTapeFormat";
+import { assessCapacity, uploadEnabled, type CapabilityQueryState } from "@/sp1/capacity";
 import { sha256Hex } from "@/sp1/digest";
 import { encodeSong } from "@/sp1/sector";
 
@@ -68,6 +69,7 @@ function DevicePage() {
   const [verdict, setVerdict] = useState<CompatibilityVerdict>(() => readOnlyVerdict());
   const [mockMode, setMockMode] = useState(false);
   const [description, setDescription] = useState<ReturnType<StemTapeTransport["describe"]> | null>(null);
+  const [queryState, setQueryState] = useState<CapabilityQueryState>("none");
   const [slot, setSlot] = useState(0);
   const [files, setFiles] = useState<Files>({});
   const [decoded, setDecoded] = useState<Decoded>({});
@@ -123,6 +125,7 @@ function DevicePage() {
       return; // picker dismissed
     }
     setBusy(true);
+    setQueryState("pending");
     say("Opening the serial port…");
     try {
       await port.open({ baudRate: BAUD_RATE });
@@ -142,6 +145,7 @@ function DevicePage() {
       const t = new StemTapeTransport(session, caps, { kind: injected ? "mock" : "physical" });
       transportRef.current = t;
       setVerdict(t.verdict);
+      setQueryState(t.verdict.writable ? "compatible" : "unverified");
       setMockMode(!!injected);
       await t.readIndex();
 
@@ -158,6 +162,7 @@ function DevicePage() {
       transportRef.current = null;
       setSongs(null);
       setDescription(null);
+      setQueryState("none");
     } finally {
       setBusy(false);
     }
@@ -170,6 +175,8 @@ function DevicePage() {
     transportRef.current = null;
     setSongs(null);
     setDescription(null);
+    setQueryState("none");
+    setVerdict(readOnlyVerdict());
     setStatus("Not connected");
     say("Exited transfer mode and released the port. The SP-1 has resumed.");
   }, [say]);
@@ -380,7 +387,11 @@ function DevicePage() {
 
   const connected = !!songs && !!description;
   const requiredSectors = song ? sectorsForFrames(song.frames) : 0;
-  const capacityOk = !!description && requiredSectors > 0 && requiredSectors <= description.sectorsPerSong;
+  const capacity = assessCapacity({
+    requiredSectors,
+    availableSectors: connected && description ? description.sectorsPerSong : null,
+    queryState: connected ? queryState : queryState === "pending" ? "pending" : "none",
+  });
   const anyWriteOccurred = !!result && result.writtenBlocks > 0;
   const stageIndex = result ? 4 : busy && progress ? 3 : song ? 2 : allFour ? 1 : connected ? 1 : 0;
   const nextStep = !connected
@@ -671,9 +682,13 @@ function DevicePage() {
               at {song.metadata.downbeatSeconds}s. Four stems, 48 kHz stereo 24-bit.
             </p>
             <p className="mt-1 font-mono text-[12px] text-[var(--ink-dim)]" data-testid="capacity">
-              {requiredSectors} sectors of {description ? description.sectorsPerSong : "?"} available in the inactive
-              staging slot · {capacityOk ? "fits" : "does NOT fit — no data will be written"}
+              {capacity.line}
             </p>
+            {capacity.note && (
+              <p className="mt-1 font-mono text-[12px] text-[var(--ink-faint)]" data-testid="capacity-note">
+                {capacity.note}
+              </p>
+            )}
             <button className="st-btn mt-3" onClick={() => setShowTech((v) => !v)} data-testid="tech-toggle">
               {showTech ? "Hide technical detail" : "Show technical detail"}
             </button>
@@ -702,7 +717,15 @@ function DevicePage() {
             <button
               className="st-btn"
               data-testid="upload"
-              disabled={!connected || !song || busy || mutationLocked}
+              disabled={
+                !uploadEnabled({
+                  deviceConnected: connected,
+                  capabilitiesNegotiated: verdict.writable,
+                  capacity: capacity.status,
+                  songPrepared: !!song,
+                  transferActive: busy,
+                })
+              }
               onClick={() => void startUpload()}
             >
               Upload to song {slot + 1}
