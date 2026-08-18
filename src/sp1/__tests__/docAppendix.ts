@@ -160,7 +160,9 @@ export function buildAppendix(): string {
     "| --- | ---: | --- |",
   );
   for (const [name, bit] of Object.entries(CAP_FLAG)) {
-    L.push(`| ${name} | ${Math.log2(bit)} | ${(REQUIRED_CAP_FLAGS & bit) === bit ? "yes" : "no"} |`);
+    L.push(
+      `| ${name} | ${Math.log2(bit)} | ${(REQUIRED_CAP_FLAGS & bit) === bit ? "yes" : "no"} |`,
+    );
   }
   L.push(
     `| **REQUIRED_CAP_FLAGS** | | ${hex(REQUIRED_CAP_FLAGS)} |`,

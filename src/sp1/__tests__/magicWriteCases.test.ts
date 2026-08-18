@@ -125,8 +125,13 @@ describe("magic-write cases, split", () => {
   it("A–F each resolve to exactly one complete generation", async () => {
     const base = await withFirstSong(FRAMES);
 
-    await runCase(base, "A", "no-final-bytes-applied", "no bytes of the final block are applied", "previous", (m) =>
-      onMagic(m, { apply: "none", ack: "none", disconnect: true }),
+    await runCase(
+      base,
+      "A",
+      "no-final-bytes-applied",
+      "no bytes of the final block are applied",
+      "previous",
+      (m) => onMagic(m, { apply: "none", ack: "none", disconnect: true }),
     );
 
     await runCase(
@@ -143,38 +148,66 @@ describe("magic-write cases, split", () => {
     // four magic bytes at offset 0, so a prefix tear is either case A or case B.
     // Case C therefore models the destructive variant — a torn program cycle
     // that lands the magic but corrupts the record body.
-    await runCase(base, "C", "body-corrupted-or-crc-invalid", "a partial block is applied that produces an invalid CRC / structure", "previous", (m) =>
-      onMagic(m, {
-        apply: "partial",
-        partialBytes: 200,
-        ack: "ok",
-        disconnect: true,
-        mangle: (d) => {
-          d[100] = d[100]! ^ 0xff; // body byte inside CRC coverage
-          return d;
-        },
-      }),
+    await runCase(
+      base,
+      "C",
+      "body-corrupted-or-crc-invalid",
+      "a partial block is applied that produces an invalid CRC / structure",
+      "previous",
+      (m) =>
+        onMagic(m, {
+          apply: "partial",
+          partialBytes: 200,
+          ack: "ok",
+          disconnect: true,
+          mangle: (d) => {
+            d[100] = d[100]! ^ 0xff; // body byte inside CRC coverage
+            return d;
+          },
+        }),
     );
 
-    await runCase(base, "C2", "valid-magic-prefix-intact-body", "a clean prefix tear that lands only the magic bytes stays valid", "new", (m) =>
-      onMagic(m, { apply: "partial", partialBytes: 64, ack: "ok", disconnect: true }),
+    await runCase(
+      base,
+      "C2",
+      "valid-magic-prefix-intact-body",
+      "a clean prefix tear that lands only the magic bytes stays valid",
+      "new",
+      (m) => onMagic(m, { apply: "partial", partialBytes: 64, ack: "ok", disconnect: true }),
     );
 
-    await runCase(base, "D", "complete-block-ack-lost", "the complete final block lands but the acknowledgement is lost", "new", (m) =>
-      onMagic(m, { apply: "full", ack: "none", disconnect: true }),
+    await runCase(
+      base,
+      "D",
+      "complete-block-ack-lost",
+      "the complete final block lands but the acknowledgement is lost",
+      "new",
+      (m) => onMagic(m, { apply: "full", ack: "none", disconnect: true }),
     );
 
-    await runCase(base, "E", "complete-block-ack-lost", "the final block and flush succeed but the confirmation is lost", "new", (m) => {
-      let seen = false;
-      m.opts.onWrite = ({ data }) => {
-        if (isMagic(data)) seen = true;
-        return undefined;
-      };
-      m.opts.onFlush = () => (seen ? { ack: "ok", disconnect: true } : undefined);
-    });
+    await runCase(
+      base,
+      "E",
+      "complete-block-ack-lost",
+      "the final block and flush succeed but the confirmation is lost",
+      "new",
+      (m) => {
+        let seen = false;
+        m.opts.onWrite = ({ data }) => {
+          if (isMagic(data)) seen = true;
+          return undefined;
+        };
+        m.opts.onFlush = () => (seen ? { ack: "ok", disconnect: true } : undefined);
+      },
+    );
 
-    await runCase(base, "F", "non-durable-write", "the final block is acknowledged but not durably applied", "previous", (m) =>
-      onMagic(m, { apply: "none", ack: "ok", disconnect: true }),
+    await runCase(
+      base,
+      "F",
+      "non-durable-write",
+      "the final block is acknowledged but not durably applied",
+      "previous",
+      (m) => onMagic(m, { apply: "none", ack: "ok", disconnect: true }),
     );
 
     expect(table.map((r) => r.id)).toEqual(["A", "B", "C", "C2", "D", "E", "F"]);
@@ -197,7 +230,9 @@ describe("magic-write cases, split", () => {
       "non-durable-write",
       "valid-magic-prefix-intact-body",
     ]);
-    expect(Object.fromEntries(Object.entries(byCategory).map(([k, v]) => [k, v.resolvesTo]))).toEqual({
+    expect(
+      Object.fromEntries(Object.entries(byCategory).map(([k, v]) => [k, v.resolvesTo])),
+    ).toEqual({
       "no-final-bytes-applied": ["previous"],
       "valid-magic-prefix-intact-body": ["new"],
       "body-corrupted-or-crc-invalid": ["previous"],
@@ -219,5 +254,4 @@ describe("magic-write cases, split", () => {
       ) + "\n",
     );
   }, 120000);
-
 });

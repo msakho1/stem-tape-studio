@@ -96,7 +96,11 @@ async function traceCleanReplacement(): Promise<{ ops: OpTrace[]; base: number }
     } else if (isSong) {
       phase = "read-back";
     } else if (o.kind === "read") {
-      phase = sawAudioWrite ? (indexWrites >= 2 ? "confirm-read" : "index-read-back") : "preflight-index-read";
+      phase = sawAudioWrite
+        ? indexWrites >= 2
+          ? "confirm-read"
+          : "index-read-back"
+        : "preflight-index-read";
     } else {
       indexWrites++;
       phase = indexWrites === 1 ? "index-write-uncommitted" : "magic-write";
@@ -150,7 +154,8 @@ function renderSweepMarkdown(r: SweepReport): string {
     "| outcome | points |",
     "| --- | ---: |",
   );
-  for (const [outcome, n] of Object.entries(r.totals.byOutcome)) lines.push(`| ${outcome} | ${n} |`);
+  for (const [outcome, n] of Object.entries(r.totals.byOutcome))
+    lines.push(`| ${outcome} | ${n} |`);
   lines.push(
     "",
     "`outcome` is what the companion reported to the operator; previous/new is what",
@@ -162,7 +167,6 @@ function renderSweepMarkdown(r: SweepReport): string {
 }
 
 describe("exhaustive interruption sweep (v1.1 A/B)", () => {
-
   it("interrupting before and after every protocol operation always leaves one complete song active", async () => {
     const { ops } = await traceCleanReplacement();
     const total = ops.length * 2;
@@ -179,7 +183,6 @@ describe("exhaustive interruption sweep (v1.1 A/B)", () => {
       selectedValidGenerations: number;
       priorBytesUnchanged: boolean;
     }[] = [];
-
 
     const baseline = await withFirstSong(FRAMES);
     const two = await song("TWO", FRAMES, 11);
@@ -290,7 +293,9 @@ describe("exhaustive interruption sweep (v1.1 A/B)", () => {
     // No point may ever produce a partial or missing song.
     expect(results.every((r) => r.active === "previous" || r.active === "new")).toBe(true);
     // Every "previous survives" point proves it by byte hash, not generation.
-    expect(results.filter((r) => r.active === "previous").every((r) => r.priorBytesUnchanged)).toBe(true);
+    expect(results.filter((r) => r.active === "previous").every((r) => r.priorBytesUnchanged)).toBe(
+      true,
+    );
 
     const report = {
       note: "Exhaustive interruption sweep over one deterministic replacement upload (mock device only).",
@@ -308,5 +313,4 @@ describe("exhaustive interruption sweep (v1.1 A/B)", () => {
     // transcribed by hand.
     writeFileSync(`${REPORT_DIR}/interruption-sweep.md`, renderSweepMarkdown(report));
   }, 600000);
-
 });

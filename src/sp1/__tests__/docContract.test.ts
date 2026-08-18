@@ -68,9 +68,20 @@ describe("published contract matches the implementation", () => {
       ["title/artist width", doc.includes(`${TEXT_BYTES} bytes each`)],
       ["sector", doc.includes(`${SECTOR_BYTES.toLocaleString("en-US")}-byte logical sector`)],
       ["blocks per sector", doc.includes(`${BLOCKS_PER_SECTOR} × ${PHYSICAL_BLOCK_BYTES}-byte`)],
-      ["sector split", doc.includes(`${SECTOR_HEADER_BYTES}-byte header + ${SECTOR_PAYLOAD_BYTES.toLocaleString("en-US")}-byte payload`)],
-      ["frames per sector", doc.includes(`${FRAMES_PER_SECTOR} frames/sector at ${BYTES_PER_FRAME} B/frame`)],
-      ["audio format", doc.includes(`${SAMPLE_RATE / 1000} kHz · stereo · signed ${PCM_BIT_DEPTH}-bit LE`)],
+      [
+        "sector split",
+        doc.includes(
+          `${SECTOR_HEADER_BYTES}-byte header + ${SECTOR_PAYLOAD_BYTES.toLocaleString("en-US")}-byte payload`,
+        ),
+      ],
+      [
+        "frames per sector",
+        doc.includes(`${FRAMES_PER_SECTOR} frames/sector at ${BYTES_PER_FRAME} B/frame`),
+      ],
+      [
+        "audio format",
+        doc.includes(`${SAMPLE_RATE / 1000} kHz · stereo · signed ${PCM_BIT_DEPTH}-bit LE`),
+      ],
       ["retry budget", doc.includes(`max ${MAX_CHUNK_RETRIES}`)],
       ["sector size rule", doc.includes(`${BLOCKS_PER_SECTOR} × ${PHYSICAL_BLOCK_BYTES} B`)],
       ["little-endian stated", doc.toLowerCase().includes("little-endian")],

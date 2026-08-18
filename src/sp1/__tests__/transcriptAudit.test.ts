@@ -19,14 +19,25 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { MockSp1 } from "./mockSerial";
 import { Recorder, recordPort, hex } from "./recordingPort";
-import { loadGoldenCompanion, goldenCompanionFileSha256, GOLDEN_COMPANION_PATH } from "./goldenCompanion";
+import {
+  loadGoldenCompanion,
+  goldenCompanionFileSha256,
+  GOLDEN_COMPANION_PATH,
+} from "./goldenCompanion";
 import { Sp1Session, Sp1Transport, type SerialLikePort } from "../protocol";
 
 const AUDIT_DIR = resolve(process.cwd(), "audit");
 const block = (seed: number) => Uint8Array.from({ length: 512 }, (_, i) => (i * 13 + seed) & 255);
 
 /** The inherited operation set: discovery, ping, read, write, flush, exit. */
-const OPS = ["handshake", "read block 0", "write block 4", "flush", "read-back block 4", "exit"] as const;
+const OPS = [
+  "handshake",
+  "read block 0",
+  "write block 4",
+  "flush",
+  "read-back block 4",
+  "exit",
+] as const;
 
 function sha(v: unknown) {
   return createHash("sha256").update(JSON.stringify(v)).digest("hex");
@@ -88,7 +99,11 @@ describe("transcript audit artifacts", () => {
       entries: recB.entries,
     };
 
-    const differences: { index: number; original: string | undefined; inherited: string | undefined }[] = [];
+    const differences: {
+      index: number;
+      original: string | undefined;
+      inherited: string | undefined;
+    }[] = [];
     const n = Math.max(recA.txHex.length, recB.txHex.length);
     for (let i = 0; i < n; i++) {
       if (recA.txHex[i] !== recB.txHex[i]) {
@@ -101,7 +116,8 @@ describe("transcript audit artifacts", () => {
     // Command-order difference: positional mismatch of the operation notes.
     const orderLen = Math.max(recA.opNotes.length, recB.opNotes.length);
     let commandOrderDifferenceCount = 0;
-    for (let i = 0; i < orderLen; i++) if (recA.opNotes[i] !== recB.opNotes[i]) commandOrderDifferenceCount++;
+    for (let i = 0; i < orderLen; i++)
+      if (recA.opNotes[i] !== recB.opNotes[i]) commandOrderDifferenceCount++;
     // Device-state difference: blocks whose stored contents differ after the run.
     const touchedBlocks = new Set<number>([...mockA.blocks.keys(), ...mockB.blocks.keys()]);
     const deviceStateDifferenceCount = [...touchedBlocks].filter(
@@ -124,7 +140,11 @@ describe("transcript audit artifacts", () => {
      * transmitted bytes, the command order and the resulting device state.
      */
     const payloadIdentical =
-      JSON.stringify({ operations: original.operations, transmitted: original.transmitted, entries: original.entries }) ===
+      JSON.stringify({
+        operations: original.operations,
+        transmitted: original.transmitted,
+        entries: original.entries,
+      }) ===
       JSON.stringify({
         operations: inherited.operations,
         transmitted: inherited.transmitted,
@@ -164,7 +184,10 @@ describe("transcript audit artifacts", () => {
       verdict: differences.length === 0 ? "identical" : "DIVERGENT",
     };
 
-    writeFileSync(resolve(AUDIT_DIR, "transcript-comparison.json"), JSON.stringify(comparison, null, 2));
+    writeFileSync(
+      resolve(AUDIT_DIR, "transcript-comparison.json"),
+      JSON.stringify(comparison, null, 2),
+    );
 
     expect(comparison.differences).toEqual([]);
     expect(comparison.transmittedSha256.original).toBe(comparison.transmittedSha256.inherited);
@@ -176,5 +199,4 @@ describe("transcript audit artifacts", () => {
     expect(comparison.deviceStateDifferenceCount).toBe(0);
     expect(comparison.payloadIdentical).toBe(true);
   });
-
 });
