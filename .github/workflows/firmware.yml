@@ -540,17 +540,23 @@ jobs:
           if-no-files-found: error
 
   stemtape-player:
-    # Stem Tape Player -- GATE 1: USB audio PLAYBACK (not recording) restored
-    # via UAC2, plus class-compliant incoming USB-MIDI 2.0 for KO II pad cue
-    # control, on top of the safe, read-only four-stem player derived from
-    # the golden Tape Looper (firmware/stemtape_player). Same board/Zephyr
-    # revision/SDK as the other two targets. The UAC2 Windows-feedback patch
-    # the `build` job applies is required again here (CONFIG_USBD_AUDIO2_
-    # CLASS=y). Storage still fails closed -- no format-fresh, no metadata/
-    # settings persistence, no raw 'W' write, no recording, no route from
-    # USB audio or MIDI into eMMC -- see main.c's comments and the strict
-    # persistence safety gate below for the exhaustive removal list. Gate 2
-    # reintroduces a real, validated 4-stem song transfer write path.
+    # Stem Tape Player -- class-compliant incoming USB-MIDI 2.0 for KO II pad
+    # cue control, plus the v1.1 A/B storage engine, on the derived four-stem
+    # player (firmware/stemtape_player). Same board/Zephyr revision/SDK as
+    # the other two targets. UAC2 (USB audio class) playback is REMOVED --
+    # product decision: it was added earlier under the mistaken assumption
+    # that KO II cue control depended on it; cue control actually uses
+    # incoming USB MIDI only, and song loading uses the companion's own
+    # transfer protocol over the CDC console. Stored four-stem playback now
+    # exclusively owns the SP-1 audio output (see main.c's own top-of-file
+    # comment). No Zephyr patch is needed for this job any more (the UAC2
+    # Windows-feedback workaround only concerns the audio class, which this
+    # target no longer builds -- same reasoning as the stemtape-m0 job
+    # above). Storage still fails closed outside the validated v1.1 write
+    # path -- no format-fresh, no metadata/settings persistence, no raw 'W'
+    # write outside st_ab_session's gate, no recording, no route from MIDI
+    # into eMMC -- see main.c's comments and the strict persistence safety
+    # gate below for the exhaustive removal list.
     runs-on: ubuntu-latest
     steps:
       - name: Checkout project
@@ -626,7 +632,6 @@ jobs:
           test -f firmware/stemtape_player/CMakeLists.txt
           test -f firmware/stemtape_player/src/main.c
           test -f firmware/stemtape_player/app.overlay
-          test -f firmware/patches/uac2-windows-fs-feedback.patch
           test -f firmware/west.yml
           test -d firmware/boards/teenageengineering/stem_player
           west topdir
@@ -648,17 +653,6 @@ jobs:
           cp firmware/west.yml                audit/west.yml
           ( cd zephyr && git rev-parse HEAD && cat VERSION ) > audit/zephyr-revision.txt
           west list -f '{name} {path} {revision} {url}' > audit/west-modules.txt
-
-      - name: Apply documented Zephyr patch (UAC2 Windows FS-feedback workaround)
-        # GATE 1 restores the UAC2 playback class to this target (see
-        # prj.conf: CONFIG_USBD_AUDIO2_CLASS=y), so the same patch the
-        # golden `build` job applies to its Zephyr tree is required here too
-        # -- main.c's feedback regulator references uac2_fs_fb_windows_fmt,
-        # exactly like the classic looper.
-        working-directory: ${{ github.workspace }}/project/zephyr
-        run: |
-          set -eux
-          git apply --verbose ../firmware/patches/uac2-windows-fs-feedback.patch
 
       - name: Configure (west build --cmake-only -b stem_player firmware/stemtape_player)
         timeout-minutes: 10
@@ -1070,13 +1064,14 @@ jobs:
           # MIDI clock output thread
           check midi_thread
           check main
-          # GATE 1: USB audio PLAYBACK path (received audio -> normal output,
-          # never storage) -- real callbacks/buffer genuinely linked, not
-          # just a symbol name: see the USB descriptor assertion step below
-          # for interface/endpoint-level proof.
+          # STEM TAPE: UAC2 (USB audio class) playback is REMOVED (see
+          # main.c's own top-of-file comment) -- required-ABSENT checks for
+          # every UAC2 symbol are in the required-absent section below,
+          # alongside the USB descriptor assertion step's own C-level and
+          # devicetree-level proof.
           #
-          # uac2_dev / midi_dev themselves are NOT checked here (confirmed
-          # missing from nm.txt by a real CI run, not anticipated): each is
+          # midi_dev itself is NOT checked here (confirmed missing from
+          # nm.txt by a real CI run, not anticipated): it is a
           # `static const struct device *const` initialized to
           # DEVICE_DT_GET(...), a link-time-constant address that is never
           # address-taken elsewhere in this file -- -Os legitimately
@@ -1085,16 +1080,12 @@ jobs:
           # elimination this gate's own comment above already documents
           # for trk_blk()/xfer_service(). Reachability is proven instead by
           # the retained functions that take/pass the device pointer:
-          # device_is_ready()/usbd_uac2_set_ops()/usbd_midi_set_ops() calls
-          # inside usb_audio_start(), and the *_cb functions below (each
-          # declared `(const struct device *dev, ...)` and registered by
-          # address in sp1_uac2_ops/sp1_midi_ops, which the USB descriptor
-          # assertion step separately proves are wired to real, enabled
-          # devicetree instances).
-          check_any usb_audio_ring
-          check_any uac2_rx_slab
-          check uac2_terminal_update_cb
-          check uac2_data_recv_cb
+          # device_is_ready()/usbd_midi_set_ops() calls inside
+          # usb_audio_start(), and the *_cb functions below (each declared
+          # `(const struct device *dev, ...)` and registered by address in
+          # sp1_midi_ops, which the USB descriptor assertion step
+          # separately proves is wired to a real, enabled devicetree
+          # instance).
           # GATE 1: incoming USB-MIDI receive path (KO II cue control)
           check midi_rx_packet_cb
           check midi_ready_cb
@@ -1162,6 +1153,45 @@ jobs:
           absent g_rring
           absent g_record_arm
           absent g_overdub
+          # STEM TAPE: UAC2 (USB audio class) playback -- runtime callbacks,
+          # buffers, the memory slab, the device pointer, the ops table,
+          # every diagnostic counter, and the Windows feedback-format
+          # negotiation -- is REMOVED (product decision: it was added
+          # earlier under the mistaken assumption that KO II cue control
+          # depended on it; cue control actually uses incoming USB MIDI
+          # only). None of this has a definition left to link at all (see
+          # main.c's own top-of-file comment and prj.conf, which no longer
+          # enables CONFIG_USBD_AUDIO2_CLASS) -- not merely unreachable.
+          # See also the "Effective configuration assertion" and "USB
+          # descriptor assertion" steps below for the Kconfig-level and
+          # C-descriptor/devicetree-level proof.
+          absent usb_audio_ring
+          absent uac2_rx_slab
+          absent uac2_dev
+          absent uac2_terminal_update_cb
+          absent uac2_get_recv_buf
+          absent uac2_data_recv_cb
+          absent uac2_buf_release_cb
+          absent uac2_feedback_cb
+          absent uac2_sof_cb
+          absent sp1_uac2_ops
+          absent g_usb_streaming
+          absent g_fb_value
+          absent g_fill_avg
+          absent g_fb_running
+          absent feedback_reset
+          absent feedback_update
+          absent uac2_fs_fb_windows_fmt
+          absent g_ring_underruns
+          absent g_ring_overflows
+          absent g_usb_pkts
+          absent g_usb_frames
+          absent g_sof_cnt
+          absent g_zero_pad
+          absent g_rx_nobuf
+          absent g_rx_slab_min
+          absent g_usb_lowat
+          absent g_usb_hiwat
           # Stem Tape v1.0 Gate 2 (RETIRED as of this migration -- see
           # docs/stem-tape-transfer-v1.1.md, docs/stem-tape-transfer-v1.md
           # is the old, superseded doc): the single-index transactional
@@ -1191,7 +1221,7 @@ jobs:
             echo "one or more required runtime symbols are missing, or one or more forbidden symbols are present, in the final ELF" >&2
             exit 1
           fi
-          echo "all required Stem Tape runtime symbols are linked (USB audio playback, USB MIDI receive, and the v1.1 Q/A-B-storage capability), and all forbidden recording/overdub AND retired-v1.0-write-path symbols are confirmed absent, in zephyr.elf"
+          echo "all required Stem Tape runtime symbols are linked (USB MIDI receive and the v1.1 Q/A-B-storage capability), and all forbidden recording/overdub, UAC2/USB-audio-playback, AND retired-v1.0-write-path symbols are confirmed absent, in zephyr.elf"
 
       - name: Effective configuration assertion (fail-closed)
         # Checks the REAL effective .config the build actually used (not
@@ -1211,7 +1241,20 @@ jobs:
               echo "confirmed enabled: $1"
             fi
           }
-          expect_set   CONFIG_USBD_AUDIO2_CLASS
+          # STEM TAPE: UAC2 (USB audio class) playback is REMOVED -- product
+          # decision, see main.c's own top-of-file comment. Confirms the
+          # REAL effective build never silently re-enabled it (e.g. via a
+          # board/SoC default or a dependency rule this file's own request
+          # doesn't control).
+          expect_unset() {
+            if grep -qE "^$1=y\$" "$CFG"; then
+              echo "::error::$1 IS =y in the effective config (forbidden -- UAC2 audio playback must stay removed)"
+              fail=1
+            else
+              echo "confirmed NOT enabled: $1"
+            fi
+          }
+          expect_unset CONFIG_USBD_AUDIO2_CLASS
           expect_set   CONFIG_USBD_MIDI2_CLASS
           expect_set   CONFIG_USBD_CDC_ACM_CLASS
           expect_set   CONFIG_I2S
@@ -1221,7 +1264,7 @@ jobs:
           if [ "$fail" -ne 0 ]; then
             exit 1
           fi
-          echo "effective configuration matches the Gate 1 requirements"
+          echo "effective configuration matches the Gate 1 requirements (UAC2 audio playback confirmed absent)"
 
       - name: USB descriptor assertion (fail-closed)
         # A symbol name alone is not proof: this proves the actual
