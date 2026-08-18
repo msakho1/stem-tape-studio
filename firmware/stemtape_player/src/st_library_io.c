@@ -8,21 +8,42 @@
 
 #define ST_LIBIO_COPY_BYTES (ST_LIBRARY_HEADER_SECTORS_PER_COPY * ST_SECTOR_BYTES)
 
-/* Static (not stack) work buffers: a serialized copy is 16 KiB (2 sectors)
- * and st_library_header_t itself (96 slots) is several KiB -- neither
- * belongs on a bounded thread stack, matching st_transfer.c's own
- * static-work-buffer precedent for exactly the same reason. Library
- * load/save is inherently serial (one transfer/commit at a time, audio
- * paused -- see main.c), so single static instances are safe without
- * additional locking, also matching st_transfer.c. */
+/* Static (not stack) work buffer: a serialized copy occupies
+ * ST_LIBRARY_HEADER_SECTORS_PER_COPY sectors -- this does not belong on a
+ * bounded thread stack, matching st_transfer.c's own static-work-buffer
+ * precedent for exactly the same reason. Library load/save is inherently
+ * serial (one transfer/commit at a time, audio paused -- see main.c), so
+ * a single static instance is safe without additional locking, also
+ * matching st_transfer.c.
+ *
+ * Deliberately only ONE raw buffer and NO second `st_library_header_t`
+ * scratch instance: st_library_header_t is itself several KiB (grows with
+ * ST_MAX_SLOTS), and st_libio_load() below only ever needs ONE candidate
+ * fully deserialized into `*out` at a time -- see its comment for how the
+ * generation compare is done from the raw bytes directly, before
+ * committing to a real (all-or-nothing, per
+ * st_library_header_deserialize()'s own contract) deserialize into `*out`. */
 static uint8_t s_libio_raw[ST_LIBIO_COPY_BYTES];
-static st_library_header_t s_libio_tmp;
 
 /* Wraparound-safe "is a newer than b" compare, matching the header's own
  * documented generation semantics. */
 static bool gen_is_newer(uint32_t a, uint32_t b)
 {
 	return (int32_t)(a - b) > 0;
+}
+
+/* Reads just the `generation` field (bytes 8..11, little-endian -- see
+ * st_storage_layout.c's serialize field order: magic, layout_version,
+ * generation, ...) directly out of a raw, not-yet-validated copy buffer.
+ * This is a PEEK, not a validation -- it exists only to decide which
+ * candidate is worth the real, fully-validated
+ * st_library_header_deserialize() attempt below; a garbage/corrupt buffer
+ * peeking a garbage generation is harmless, because deserialize() itself
+ * still gates whether that candidate is ever actually used. */
+static uint32_t peek_generation(const uint8_t *raw)
+{
+	return (uint32_t)raw[8] | ((uint32_t)raw[9] << 8) |
+	       ((uint32_t)raw[10] << 16) | ((uint32_t)raw[11] << 24);
 }
 
 static bool read_copy(uint32_t copy_index, st_sector_read_fn read_fn, void *ctx)
@@ -68,25 +89,30 @@ st_libio_load_result_t st_libio_load(st_library_header_t *out, uint32_t slot_cou
 {
 	bool read_ok0, read_ok1;
 	bool valid0, valid1;
+	bool attempt1;
 
+	/* Copy 0: deserialize (all-or-nothing) directly into *out. On failure
+	 * *out is left completely untouched, per st_library_header_deserialize()'s
+	 * own contract. */
 	read_ok0 = read_copy(0u, read_fn, ctx);
 	valid0 = read_ok0 && st_library_header_deserialize(s_libio_raw, ST_LIBIO_COPY_BYTES, out);
 
+	/* Copy 1: only worth a real (all-or-nothing) deserialize attempt into
+	 * *out if it could actually win -- either copy 0 wasn't valid, or
+	 * copy 1's peeked generation is newer than the copy 0 generation
+	 * already sitting in *out. A failed attempt here leaves *out exactly
+	 * as it was (still copy 0's data, if valid0), so it's always safe to
+	 * try opportunistically. */
 	read_ok1 = read_copy(1u, read_fn, ctx);
-	valid1 = read_ok1 &&
-		 st_library_header_deserialize(s_libio_raw, ST_LIBIO_COPY_BYTES, &s_libio_tmp);
-
-	if (valid0 && valid1) {
-		if (gen_is_newer(s_libio_tmp.generation, out->generation)) {
-			*out = s_libio_tmp;
-			*trusted_copy = 1;
-		} else {
-			*trusted_copy = 0;
+	valid1 = false;
+	if (read_ok1) {
+		attempt1 = !valid0 || gen_is_newer(peek_generation(s_libio_raw), out->generation);
+		if (attempt1) {
+			valid1 = st_library_header_deserialize(s_libio_raw, ST_LIBIO_COPY_BYTES, out);
 		}
-		return ST_LIBIO_LOADED;
 	}
+
 	if (valid1) {
-		*out = s_libio_tmp;
 		*trusted_copy = 1;
 		return ST_LIBIO_LOADED;
 	}

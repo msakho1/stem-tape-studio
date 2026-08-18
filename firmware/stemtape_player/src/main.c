@@ -2425,15 +2425,26 @@ static void xfer_service(void)
 		st_xfer_wire_encode_begin_rsp(rsp, resume);
 		cdc_tx(rsp, sizeof rsp);
 	} else if (cmd == 'S') {                               /* stage one sector */
-		static uint8_t sreq[4 + ST_SECTOR_BYTES + 4];
+		/* Wire layout is [4-byte sector index][ST_SECTOR_BYTES body][4-byte
+		 * CRC] -- read it as three separate cdc_rx() calls instead of one
+		 * combined buffer so the ST_SECTOR_BYTES body can land directly in
+		 * the shared s_commit_copy_buf (never used concurrently with 'S',
+		 * since a transfer is audio-paused and single-threaded) rather than
+		 * a second, standalone 8-KiB-plus static array. */
+		uint8_t shdr[4];
+		uint8_t strl[4];
 
-		if (!cdc_rx(sreq, sizeof sreq, 4000)) { xfer_resync('e'); return; }
-		uint32_t sector_index = (uint32_t)sreq[0] | ((uint32_t)sreq[1] << 8) |
-					 ((uint32_t)sreq[2] << 16) | ((uint32_t)sreq[3] << 24);
-		const uint8_t *crc_p = sreq + 4 + ST_SECTOR_BYTES;
-		uint32_t sector_crc = (uint32_t)crc_p[0] | ((uint32_t)crc_p[1] << 8) |
-				       ((uint32_t)crc_p[2] << 16) | ((uint32_t)crc_p[3] << 24);
-		st_xfer_result_t rc = st_xfer_stage_sector(&g_xfer_txn, sector_index, sreq + 4,
+		if (!cdc_rx(shdr, sizeof shdr, 4000) ||
+		    !cdc_rx(s_commit_copy_buf, ST_SECTOR_BYTES, 4000) ||
+		    !cdc_rx(strl, sizeof strl, 4000)) {
+			xfer_resync('e');
+			return;
+		}
+		uint32_t sector_index = (uint32_t)shdr[0] | ((uint32_t)shdr[1] << 8) |
+					 ((uint32_t)shdr[2] << 16) | ((uint32_t)shdr[3] << 24);
+		uint32_t sector_crc = (uint32_t)strl[0] | ((uint32_t)strl[1] << 8) |
+				       ((uint32_t)strl[2] << 16) | ((uint32_t)strl[3] << 24);
+		st_xfer_result_t rc = st_xfer_stage_sector(&g_xfer_txn, sector_index, s_commit_copy_buf,
 							    sector_crc, xfer_staging_write, NULL);
 		uint8_t h = (rc == ST_XFER_OK) ? (uint8_t)ST_XFER_RSP_STAGE_OK : (uint8_t)'e';
 		cdc_tx(&h, 1);
