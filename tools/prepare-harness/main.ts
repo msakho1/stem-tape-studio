@@ -33,7 +33,7 @@ async function run() {
   }
 
   const song: CanonicalSong = await prepareCanonicalSong(inputs, {
-    metadata: { title: "audit", bpm: 120, beatZeroSeconds: 0 } as never,
+    metadata: { title: "audit", artist: "audit", bpm: 120, downbeatSeconds: 0 },
   });
   assertCanonicalSong(song);
 
