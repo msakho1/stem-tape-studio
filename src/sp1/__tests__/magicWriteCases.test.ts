@@ -181,7 +181,43 @@ describe("magic-write cases, split", () => {
     expect(table.every((r) => r.observed === r.expected)).toBe(true);
     expect(table.some((r) => r.bothGenerationsInvalid)).toBe(false);
 
+    // All five commit categories are exercised, and each category always
+    // resolves to the same generation — proved by reparsing stored blocks after
+    // reboot, never by mock-internal state.
+    const byCategory: Record<string, { cases: string[]; resolvesTo: string[] }> = {};
+    for (const r of table) {
+      const e = (byCategory[r.category] ??= { cases: [], resolvesTo: [] });
+      e.cases.push(r.id);
+      if (!e.resolvesTo.includes(r.observed)) e.resolvesTo.push(r.observed);
+    }
+    expect(Object.keys(byCategory).sort()).toEqual([
+      "body-corrupted-or-crc-invalid",
+      "complete-block-ack-lost",
+      "no-final-bytes-applied",
+      "non-durable-write",
+      "valid-magic-prefix-intact-body",
+    ]);
+    expect(Object.fromEntries(Object.entries(byCategory).map(([k, v]) => [k, v.resolvesTo]))).toEqual({
+      "no-final-bytes-applied": ["previous"],
+      "valid-magic-prefix-intact-body": ["new"],
+      "body-corrupted-or-crc-invalid": ["previous"],
+      "complete-block-ack-lost": ["new"],
+      "non-durable-write": ["previous"],
+    });
+
     mkdirSync(REPORT_DIR, { recursive: true });
-    writeFileSync(`${REPORT_DIR}/magic-write-cases.json`, JSON.stringify({ cases: table }, null, 2) + "\n");
+    writeFileSync(
+      `${REPORT_DIR}/magic-write-cases.json`,
+      JSON.stringify(
+        {
+          note: "Every result is produced by rebooting the mock from its stored blocks and reparsing them through the production selector. No hidden mock state is consulted.",
+          byCategory,
+          cases: table,
+        },
+        null,
+        2,
+      ) + "\n",
+    );
   }, 120000);
+
 });
