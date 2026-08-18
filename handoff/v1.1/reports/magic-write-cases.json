@@ -1,0 +1,74 @@
+{
+  "cases": [
+    {
+      "id": "A",
+      "description": "no bytes of the final block are applied",
+      "expected": "previous",
+      "observed": "previous",
+      "uploadOutcome": "unknown",
+      "resolvedOutcome": "failed",
+      "activeGeneration": 2,
+      "bothGenerationsInvalid": false
+    },
+    {
+      "id": "B",
+      "description": "only the validity-magic bytes are applied and the record is fully valid",
+      "expected": "new",
+      "observed": "new",
+      "uploadOutcome": "unknown",
+      "resolvedOutcome": "committed",
+      "activeGeneration": 3,
+      "bothGenerationsInvalid": false
+    },
+    {
+      "id": "C",
+      "description": "a partial block is applied that produces an invalid CRC / structure",
+      "expected": "previous",
+      "observed": "previous",
+      "uploadOutcome": "unknown",
+      "resolvedOutcome": "failed",
+      "activeGeneration": 2,
+      "bothGenerationsInvalid": false
+    },
+    {
+      "id": "C2",
+      "description": "a clean prefix tear that lands only the magic bytes stays valid",
+      "expected": "new",
+      "observed": "new",
+      "uploadOutcome": "unknown",
+      "resolvedOutcome": "committed",
+      "activeGeneration": 3,
+      "bothGenerationsInvalid": false
+    },
+    {
+      "id": "D",
+      "description": "the complete final block lands but the acknowledgement is lost",
+      "expected": "new",
+      "observed": "new",
+      "uploadOutcome": "unknown",
+      "resolvedOutcome": "committed",
+      "activeGeneration": 3,
+      "bothGenerationsInvalid": false
+    },
+    {
+      "id": "E",
+      "description": "the final block and flush succeed but the confirmation is lost",
+      "expected": "new",
+      "observed": "new",
+      "uploadOutcome": "unknown",
+      "resolvedOutcome": "committed",
+      "activeGeneration": 3,
+      "bothGenerationsInvalid": false
+    },
+    {
+      "id": "F",
+      "description": "the final block is acknowledged but not durably applied",
+      "expected": "previous",
+      "observed": "previous",
+      "uploadOutcome": "unknown",
+      "resolvedOutcome": "failed",
+      "activeGeneration": 2,
+      "bothGenerationsInvalid": false
+    }
+  ]
+}

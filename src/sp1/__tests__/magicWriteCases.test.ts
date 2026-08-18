@@ -126,8 +126,26 @@ describe("magic-write cases, split", () => {
       (m) => onMagic(m, { apply: "partial", partialBytes: 4, ack: "ok", disconnect: true }),
     );
 
-    await runCase(base, "C", "a partial block produces an invalid CRC / structure", "previous", (m) =>
-      onMagic(m, { apply: "partial", partialBytes: 200, ack: "ok", disconnect: true }),
+    // A clean prefix tear of the magic block is provably harmless: the block is
+    // byte-identical to the already-verified uncommitted record except for the
+    // four magic bytes at offset 0, so a prefix tear is either case A or case B.
+    // Case C therefore models the destructive variant — a torn program cycle
+    // that lands the magic but corrupts the record body.
+    await runCase(base, "C", "a partial block is applied that produces an invalid CRC / structure", "previous", (m) =>
+      onMagic(m, {
+        apply: "partial",
+        partialBytes: 200,
+        ack: "ok",
+        disconnect: true,
+        mangle: (d) => {
+          d[100] = d[100]! ^ 0xff; // body byte inside CRC coverage
+          return d;
+        },
+      }),
+    );
+
+    await runCase(base, "C2", "a clean prefix tear that lands only the magic bytes stays valid", "new", (m) =>
+      onMagic(m, { apply: "partial", partialBytes: 64, ack: "ok", disconnect: true }),
     );
 
     await runCase(base, "D", "the complete final block lands but the acknowledgement is lost", "new", (m) =>
@@ -147,7 +165,7 @@ describe("magic-write cases, split", () => {
       onMagic(m, { apply: "none", ack: "ok", disconnect: true }),
     );
 
-    expect(table.map((r) => r.id)).toEqual(["A", "B", "C", "D", "E", "F"]);
+    expect(table.map((r) => r.id)).toEqual(["A", "B", "C", "C2", "D", "E", "F"]);
     expect(table.every((r) => r.observed === r.expected)).toBe(true);
     expect(table.some((r) => r.bothGenerationsInvalid)).toBe(false);
 

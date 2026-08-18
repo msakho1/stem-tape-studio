@@ -41,6 +41,8 @@ export interface WriteAction {
   ack?: "ok" | "nak" | "none";
   /** Drop the connection after handling this write. */
   disconnect?: boolean;
+  /** Corrupt the bytes that reach storage (models a failed flash program). */
+  mangle?: (data: Uint8Array) => Uint8Array;
 }
 
 export interface FlushAction {
@@ -300,12 +302,13 @@ export class MockSp1 {
         }
         const act = this.opts.onWrite?.({ n: this.writes, blk, op: this.ops, data }) ?? {};
         const apply = act.apply ?? "full";
+        const eff = act.mangle ? act.mangle(data.slice(0)) : data;
         if (apply === "full") {
-          this.blocks.set(blk, data);
+          this.blocks.set(blk, eff);
         } else if (apply === "partial") {
           const cur = this.block(blk).slice(0);
           const n = Math.max(0, Math.min(512, act.partialBytes ?? 256));
-          cur.set(data.slice(0, n), 0);
+          cur.set(eff.slice(0, n), 0);
           this.blocks.set(blk, cur);
         }
         const ack = act.ack ?? "ok";
