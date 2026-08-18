@@ -1236,9 +1236,25 @@ static int xfer_header_write(uint32_t sector, const uint8_t data[ST_SECTOR_BYTES
  * exactly the shape GCC's interprocedural constant propagation specializes
  * into a differently-named clone (e.g. xfer_songdata_write.constprop.0),
  * independent of inlining. noclone disables that cloning so the ORIGINAL
- * symbol name survives. */
-static int __attribute__((noinline, noclone))
-xfer_songdata_write(uint32_t sector, const uint8_t data[ST_SECTOR_BYTES], void *ctx)
+ * symbol name survives.
+ *
+ * The attribute is placed AFTER the parameter list, trailing on the SAME
+ * line (`... name(params) __attribute__((...))`), not before the return
+ * type and not on its own line -- confirmed by a real CI run: a leading
+ * `__attribute__` on its own line before this signature broke the STRICT
+ * persistence safety gate's OWN (regex-based, single-line) function-
+ * signature parser (.github/scripts/stemtape_player_safety_gate.py's
+ * FUNC_SIG_RX), which misread everything up to the attribute as the return
+ * type and captured the wrong name for this function
+ * ("fer_songdata_write", missing its leading "x") as the enclosing
+ * function of the emmc_write_blocks() call inside it -- causing pass D to
+ * reject it as an unrecognized caller, even though the real symbol name in
+ * the ELF was correct (see the prior nm.txt evidence above). Trailing,
+ * same-line attribute placement keeps the whole signature in the exact
+ * single-line shape that parser already handles correctly. */
+static int xfer_songdata_write(uint32_t sector, const uint8_t data[ST_SECTOR_BYTES], void *ctx)
+	__attribute__((noinline, noclone));
+static int xfer_songdata_write(uint32_t sector, const uint8_t data[ST_SECTOR_BYTES], void *ctx)
 {
 	ARG_UNUSED(ctx);
 	uint32_t blk;
@@ -1302,8 +1318,19 @@ static bool xfer_lib_save(void)
  * candidate the way xfer_songdata_write() was (confirmed: plain noinline
  * alone already kept it present in a real CI run) -- noclone is added
  * anyway, defensively, so this doesn't quietly break the same way under a
- * future toolchain/optimization change. */
-static bool __attribute__((noinline, noclone)) xfer_do_commit(void)
+ * future toolchain/optimization change.
+ *
+ * Forward-declared with a trailing attribute (see xfer_songdata_write()'s
+ * identical pattern and comment above) rather than `__attribute__(...)`
+ * before the name on the definition itself: that placement, even on one
+ * line, also confuses the STRICT persistence safety gate's FUNC_SIG_RX
+ * parser (verified directly: it captures "__attribute__" as the function
+ * name, not "xfer_do_commit") -- harmless today only because this
+ * function's own body happens not to call emmc_write_blocks()/
+ * meta_write_blocks() directly, but not something to leave latent. */
+static bool xfer_do_commit(void)
+	__attribute__((noinline, noclone));
+static bool xfer_do_commit(void)
 {
 	st_slot_meta_t slot_meta;
 	uint32_t start_sector;
