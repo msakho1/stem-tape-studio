@@ -26,8 +26,17 @@
 #include "st_checksum32.h"
 #include "st_crc32.h"
 #include "st_sector_v11.h"
+#include "st_stix.h"
 #include "st_transfer_protocol.h" /* ST_CRC32_INIT */
 #include "st_v11_format.h"
+
+/* Real region geometry from handoff/v1.1/decoded/stcp-capability-response.json
+ * (the same synthetic 272-block test device every handoff/v1.1/binaries/
+ * fixture was generated against): songA [16,144), songB [144,272). */
+#define FIXTURE_SONG_A_START 16u
+#define FIXTURE_SONG_A_BLOCKS 128u
+#define FIXTURE_SONG_B_START 144u
+#define FIXTURE_SONG_B_BLOCKS 128u
 
 static int g_checks;
 static int g_failures;
@@ -275,10 +284,212 @@ static void test_index_record_crc_fixture(void)
 	free(rec);
 }
 
+/* ========================================================================
+ * st_stix.c: parse/validate/select vs the real STIX v2 fixtures.
+ *
+ * Ground truth (handoff/v1.1/decoded/index-a-valid.json,
+ * index-b-valid.json, index-uncommitted.json, storage-initialized-empty.json):
+ *   index-a-valid.bin:  slotIdentity=A songSlot=B generation=3 committed
+ *                        songStartBlock=144 songBlockCount=32 frames=680
+ *                        sectorCount=2 bpm=120 title="HANDOFF TWO"
+ *   index-b-valid.bin:  slotIdentity=B songSlot=A generation=2 committed
+ *                        songStartBlock=16  songBlockCount=32 frames=680
+ *                        sectorCount=2 bpm=120 title="HANDOFF ONE"
+ *   index-uncommitted.bin: byte-identical to index-a-valid.bin except
+ *                        magic=0 (the step-13 "written, not yet committed"
+ *                        image -- same CRC, since CRC excludes magic)
+ *   storage-initialized-empty.bin: index region A (generation=1, no song,
+ *                        valid) immediately followed by index region B
+ *                        (all zero, never written)
+ * ======================================================================== */
+
+static void test_stix_parse_index_a_valid(void)
+{
+	size_t len;
+	uint8_t *block = read_fixture("handoff/v1.1/binaries/index-a-valid.bin", &len);
+	st_stix_record_t r;
+
+	st_stix_deserialize(block, &r);
+
+	CHECK(r.magic == ST11_INDEX_MAGIC, "index-a-valid.bin: magic == 'STIX'");
+	CHECK(r.index_version == 2u, "index-a-valid.bin: indexVersion == 2");
+	CHECK(r.format_major == 1u && r.format_minor == 1u, "index-a-valid.bin: format 1.1");
+	CHECK(r.slot_identity == ST11_SLOT_A, "index-a-valid.bin: slotIdentity == A");
+	CHECK(r.song_slot == ST11_SLOT_B, "index-a-valid.bin: songSlot == B");
+	CHECK((r.flags & ST11_IX_FLAG_SONG_PRESENT) != 0u, "index-a-valid.bin: SONG_PRESENT set");
+	CHECK(r.generation_lo == 3u && r.generation_hi == 0u, "index-a-valid.bin: generation == 3");
+	CHECK(r.song_start_block == 144u, "index-a-valid.bin: songStartBlock == 144");
+	CHECK(r.song_block_count == 32u, "index-a-valid.bin: songBlockCount == 32");
+	CHECK(r.frames == 680u, "index-a-valid.bin: frames == 680");
+	CHECK(r.sector_count == 2u, "index-a-valid.bin: sectorCount == 2");
+	CHECK(r.sample_rate == 48000u && r.channels == 2u && r.bit_depth == 24u,
+	      "index-a-valid.bin: 48kHz/stereo/24-bit");
+	CHECK(r.bpm_q8 == 120u * 256u, "index-a-valid.bin: bpmQ8 == 120*256 (bpm=120)");
+	CHECK(r.downbeat_frame == 0u, "index-a-valid.bin: downbeatFrame == 0");
+	CHECK(r.original_frames[0] == 680u && r.original_frames[1] == 680u &&
+		      r.original_frames[2] == 680u && r.original_frames[3] == 680u,
+	      "index-a-valid.bin: all 4 originalFrames == 680");
+	CHECK(r.stem_checksums[0] == 3328139340u && r.stem_checksums[1] == 3389290872u &&
+		      r.stem_checksums[2] == 1581417403u && r.stem_checksums[3] == 981923180u,
+	      "index-a-valid.bin: 4 stemChecksums match the declared fixture values");
+	CHECK(r.song_checksum == 4164182808u, "index-a-valid.bin: songChecksum matches the declared value");
+	CHECK(strncmp(r.title, "HANDOFF TWO", ST11_INDEX_TEXT_BYTES) == 0, "index-a-valid.bin: title == \"HANDOFF TWO\"");
+	CHECK(strncmp(r.artist, "Stem Tape handoff", ST11_INDEX_TEXT_BYTES) == 0,
+	      "index-a-valid.bin: artist == \"Stem Tape handoff\"");
+	CHECK(r.crc32 == 888519033u, "index-a-valid.bin: crc32 field == 888519033");
+
+	/* Round-trip proof: re-serializing the parsed struct reproduces the
+	 * exact original bytes -- nothing lost, mangled, or invented. */
+	uint8_t roundtrip[ST11_PHYSICAL_BLOCK_BYTES];
+
+	st_stix_serialize(&r, roundtrip);
+	CHECK(memcmp(roundtrip, block, ST11_PHYSICAL_BLOCK_BYTES) == 0,
+	      "index-a-valid.bin: deserialize -> serialize reproduces the exact original 512 bytes");
+
+	free(block);
+}
+
+static void test_stix_parse_index_b_valid(void)
+{
+	size_t len;
+	uint8_t *block = read_fixture("handoff/v1.1/binaries/index-b-valid.bin", &len);
+	st_stix_record_t r;
+
+	st_stix_deserialize(block, &r);
+
+	CHECK(r.slot_identity == ST11_SLOT_B, "index-b-valid.bin: slotIdentity == B");
+	CHECK(r.song_slot == ST11_SLOT_A, "index-b-valid.bin: songSlot == A");
+	CHECK(r.generation_lo == 2u && r.generation_hi == 0u, "index-b-valid.bin: generation == 2");
+	CHECK(r.song_start_block == 16u && r.song_block_count == 32u,
+	      "index-b-valid.bin: songStartBlock=16 songBlockCount=32");
+	CHECK(r.stem_checksums[0] == 372356050u && r.stem_checksums[1] == 3369609747u &&
+		      r.stem_checksums[2] == 277600979u && r.stem_checksums[3] == 59441969u,
+	      "index-b-valid.bin: 4 stemChecksums match the declared fixture values");
+	CHECK(r.song_checksum == 1510267332u, "index-b-valid.bin: songChecksum matches the declared value");
+	CHECK(strncmp(r.title, "HANDOFF ONE", ST11_INDEX_TEXT_BYTES) == 0, "index-b-valid.bin: title == \"HANDOFF ONE\"");
+	CHECK(r.crc32 == 720762313u, "index-b-valid.bin: crc32 field == 720762313");
+
+	free(block);
+}
+
+static void test_stix_validate_committed_records(void)
+{
+	size_t len_a, len_b;
+	uint8_t *block_a = read_fixture("handoff/v1.1/binaries/index-a-valid.bin", &len_a);
+	uint8_t *block_b = read_fixture("handoff/v1.1/binaries/index-b-valid.bin", &len_b);
+	st_stix_record_t rec;
+
+	st_stix_validity_t va = st_stix_validate(block_a, ST11_SLOT_A, FIXTURE_SONG_A_START,
+						  FIXTURE_SONG_A_BLOCKS, FIXTURE_SONG_B_START,
+						  FIXTURE_SONG_B_BLOCKS, &rec);
+	CHECK(va == ST_STIX_VALID, "index-a-valid.bin validates as ST_STIX_VALID when read from region A");
+	CHECK(rec.generation_lo == 3u, "index-a-valid.bin: validated record carries generation 3");
+
+	st_stix_validity_t vb = st_stix_validate(block_b, ST11_SLOT_B, FIXTURE_SONG_A_START,
+						  FIXTURE_SONG_A_BLOCKS, FIXTURE_SONG_B_START,
+						  FIXTURE_SONG_B_BLOCKS, &rec);
+	CHECK(vb == ST_STIX_VALID, "index-b-valid.bin validates as ST_STIX_VALID when read from region B");
+	CHECK(rec.generation_lo == 2u, "index-b-valid.bin: validated record carries generation 2");
+
+	/* Misaddressed-write guard: the SAME valid, correctly-CRC'd bytes are
+	 * rejected if read from the WRONG region. */
+	st_stix_validity_t mismatched = st_stix_validate(block_a, ST11_SLOT_B, FIXTURE_SONG_A_START,
+							  FIXTURE_SONG_A_BLOCKS, FIXTURE_SONG_B_START,
+							  FIXTURE_SONG_B_BLOCKS, &rec);
+	CHECK(mismatched == ST_STIX_ERR_SLOT_IDENTITY,
+	      "index-a-valid.bin's bytes, if found in region B, are rejected as ST_STIX_ERR_SLOT_IDENTITY");
+
+	free(block_a);
+	free(block_b);
+}
+
+static void test_stix_validate_uncommitted(void)
+{
+	size_t len;
+	uint8_t *block = read_fixture("handoff/v1.1/binaries/index-uncommitted.bin", &len);
+	st_stix_record_t rec;
+
+	st_stix_validity_t v = st_stix_validate(block, ST11_SLOT_A, FIXTURE_SONG_A_START,
+						 FIXTURE_SONG_A_BLOCKS, FIXTURE_SONG_B_START,
+						 FIXTURE_SONG_B_BLOCKS, &rec);
+	CHECK(v == ST_STIX_ERR_MAGIC,
+	      "index-uncommitted.bin (magic=0, otherwise complete+CRC-valid) is rejected as ST_STIX_ERR_MAGIC");
+	CHECK(rec.generation_lo == 3u,
+	      "index-uncommitted.bin: the rejected record's OTHER fields still parse (generation 3) for diagnostics");
+
+	free(block);
+}
+
+static void test_stix_storage_initialized_empty(void)
+{
+	size_t len;
+	uint8_t *data = read_fixture("handoff/v1.1/binaries/storage-initialized-empty.bin", &len);
+
+	CHECK(len == 1024, "storage-initialized-empty.bin is exactly two 512-byte index blocks (A then B)");
+
+	const uint8_t *block_a = data;
+	const uint8_t *block_b = data + ST11_PHYSICAL_BLOCK_BYTES;
+	st_stix_record_t rec_a, rec_b;
+
+	st_stix_validity_t va = st_stix_validate(block_a, ST11_SLOT_A, FIXTURE_SONG_A_START,
+						  FIXTURE_SONG_A_BLOCKS, FIXTURE_SONG_B_START,
+						  FIXTURE_SONG_B_BLOCKS, &rec_a);
+	CHECK(va == ST_STIX_VALID, "storage-initialized-empty.bin: region A validates (generation 1, no song)");
+	CHECK(rec_a.generation_lo == 1u, "storage-initialized-empty.bin: region A generation == 1");
+	CHECK((rec_a.flags & ST11_IX_FLAG_SONG_PRESENT) == 0u,
+	      "storage-initialized-empty.bin: region A SONG_PRESENT is clear (fresh init, no song)");
+
+	st_stix_validity_t vb = st_stix_validate(block_b, ST11_SLOT_B, FIXTURE_SONG_A_START,
+						  FIXTURE_SONG_A_BLOCKS, FIXTURE_SONG_B_START,
+						  FIXTURE_SONG_B_BLOCKS, &rec_b);
+	CHECK(vb == ST_STIX_ERR_MAGIC, "storage-initialized-empty.bin: region B (all-zero, never written) is invalid");
+
+	st_stix_record_t selected;
+	st_stix_select_t sel = st_stix_select_active(block_a, block_b, FIXTURE_SONG_A_START,
+						      FIXTURE_SONG_A_BLOCKS, FIXTURE_SONG_B_START,
+						      FIXTURE_SONG_B_BLOCKS, &selected);
+
+	CHECK(sel == ST_STIX_SELECT_A,
+	      "storage-initialized-empty.bin: selector picks A (the only valid record) -- 'one invalid slot never requires reinitialization'");
+	CHECK(selected.generation_lo == 1u, "storage-initialized-empty.bin: selected record's generation == 1");
+
+	free(data);
+}
+
+static void test_stix_select_active_two_generations(void)
+{
+	size_t len_a, len_b;
+	uint8_t *block_a = read_fixture("handoff/v1.1/binaries/index-a-valid.bin", &len_a);
+	uint8_t *block_b = read_fixture("handoff/v1.1/binaries/index-b-valid.bin", &len_b);
+	st_stix_record_t selected;
+
+	/* index-a-valid.bin (generation 3) vs index-b-valid.bin (generation
+	 * 2): both are genuinely valid, real, independently-CRC'd companion
+	 * fixtures with the correct slotIdentity for the region they're fed
+	 * as here -- the selector must pick the strictly greater generation. */
+	st_stix_select_t sel = st_stix_select_active(block_a, block_b, FIXTURE_SONG_A_START,
+						      FIXTURE_SONG_A_BLOCKS, FIXTURE_SONG_B_START,
+						      FIXTURE_SONG_B_BLOCKS, &selected);
+
+	CHECK(sel == ST_STIX_SELECT_A, "selector: generation 3 (A) strictly beats generation 2 (B) -> SELECT_A");
+	CHECK(selected.generation_lo == 3u, "selector: the selected record is the generation-3 one");
+	CHECK(strncmp(selected.title, "HANDOFF TWO", ST11_INDEX_TEXT_BYTES) == 0,
+	      "selector: the selected record's title confirms it is index-a-valid.bin's content");
+
+	free(block_a);
+	free(block_b);
+}
+
 int main(void)
 {
 	RUN(test_song_sectors_fixture);
 	RUN(test_index_record_crc_fixture);
+	RUN(test_stix_parse_index_a_valid);
+	RUN(test_stix_parse_index_b_valid);
+	RUN(test_stix_validate_committed_records);
+	RUN(test_stix_validate_uncommitted);
+	RUN(test_stix_storage_initialized_empty);
+	RUN(test_stix_select_active_two_generations);
 
 	printf("\n");
 	printf("%d distinct test cases, %d assertion checks\n", g_test_cases, g_checks);
