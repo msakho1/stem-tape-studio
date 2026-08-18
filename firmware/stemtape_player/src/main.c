@@ -95,12 +95,11 @@
 #include <zephyr/audio/midi.h>
 #include <zephyr/sys/ring_buffer.h>
 #include <sample_usbd.h>
-#include "st_library_io.h"
+#include "st_ab_session.h"
 #include "st_midi_queue.h"
-#include "st_storage_layout.h"
-#include "st_transfer.h"
-#include "st_transfer_protocol.h"
-#include "st_xfer_wire.h"
+#include "st_stcp.h"
+#include "st_stix.h"
+#include "st_v11_format.h"
 
 /* GATE 1: USB audio input is restored (UAC2 receive -> live mix, exactly the
  * classic looper's own path) and USB MIDI receive is new (KO II pad cue
@@ -1107,272 +1106,58 @@ RING_BUF_DECLARE(g_cdc_rx, 1024);              /* CDC serial RX bytes, filled by
 #endif
 
 #if SP1_XFER_ENABLE
-/* ---- GATE 2: the real Stem Tape library header + transactional 4-stem
- * song transfer (docs/stem-tape-transfer-v1.md sections 2 and 6). This is
- * a WHOLLY SEPARATE, current storage format from the classic looper's own
- * meta_blk/trk[]/NUM_SLOTS format above (which remains read-only and
- * completely untouched by anything below -- g_meta, META_BLOCK, etc. are
- * never read or written here, and g_lib/ST_* are never read or written by
- * the classic-format code). ST_STORAGE_BASE_BLOCK is numerically the same
- * as the classic looper's SLOT0_BLOCK, but that is never a real conflict:
- * this target is the Stem Tape Player, a different firmware image from
- * the golden Tape Looper, and never runs both formats' write paths
- * against the same physical card at once. */
-static st_library_header_t g_lib;
-static volatile uint8_t    g_lib_ready;        /* cold-boot library load completed */
-static volatile uint8_t    g_lib_read_failed;  /* diag: a real eMMC I/O error at cold boot (distinct
-                                                 * from "blank/no library yet", which is not an error) */
-static int                 g_lib_trusted_copy = -1;
-static uint32_t            g_lib_slot_capacity = ST_MAX_SLOTS; /* capacity-detected at cold boot;
-                                                       * a safe, conservative default until then
-                                                       * (build_fresh() clamps to ST_MAX_SLOTS
-                                                       * regardless, but starting here avoids
-                                                       * implying a bigger default than the policy
-                                                       * ceiling actually allows) */
-static uint32_t            g_emmc_total_sectors;      /* real, EXT_CSD-detected device size in
-                                                        * ST_SECTOR_BYTES sectors; 0 = not yet known
-                                                        * (fail-closed: xfer_songdata_write() below
-                                                        * refuses every write until this is real) */
-static st_xfer_txn_t       g_xfer_txn;               /* the one open transaction, if any */
-
-/* Non-stack (static) 8192-byte work buffer for the commit path's staged-
- * to-permanent sector copy -- same "no 8192-byte automatic stack buffer"
- * discipline st_transfer.c's own verify path already follows.
+/* ---- Stem Tape v1.1 A/B storage (docs/stem-tape-transfer-v1.1.md is the
+ * current, authoritative contract; docs/stem-tape-transfer-v1.md is the
+ * RETIRED v1.0 doc). Replaces the old single-index Gate 2 transfer
+ * contract (command verbs V/B/S/K/C/A/D/I) ENTIRELY: that contract's own
+ * command handlers, write adapters (xfer_staging_write/xfer_header_write/
+ * xfer_songdata_write), and commit path (xfer_do_commit) are DELETED from
+ * this file, not merely disabled behind a flag -- st_transfer.c/
+ * st_library_io.c/st_xfer_wire.c/st_storage_layout.c stay in the tree and
+ * keep their own host tests (tests/test_stemtape_player.c) for regression
+ * evidence, but nothing in this firmware image calls them, and no path
+ * from this image's command dispatch reaches emmc_write_blocks() through
+ * them anymore -- v1.0 and v1.1 can never both hold a live write path in
+ * the same build, by construction. The classic looper's own
+ * meta_blk/trk[]/NUM_SLOTS format above is untouched, exactly as before.
  *
- * Also THE ONE shared scratch buffer for every other Gate 2 operation that
- * needs a sector-sized work area: the 'S' verb's staged sector body,
- * st_libio_load()/st_libio_save()'s raw serialize/deserialize scratch, and
- * st_xfer_verify()'s per-sector read-back -- see each call site's own
- * comment. Sharing ONE buffer instead of one-per-module is a deliberate RAM
- * trade (each of those modules used to own its own static 8192-byte
- * buffer); it's safe because a transfer session only ever runs ONE of
- * these operations at a time (xfer_service() services one command per
- * call, audio paused throughout -- see its own comment), so their
- * lifetimes never overlap. */
-static uint8_t s_commit_copy_buf[ST_SECTOR_BYTES];
-#if !defined(__cplusplus)
-_Static_assert((uint64_t)ST_LIBRARY_HEADER_SECTORS_PER_COPY * ST_SECTOR_BYTES <= ST_SECTOR_BYTES,
-	       "s_commit_copy_buf is too small to double as st_libio_load/save's scratch buffer "
-	       "-- ST_LIBRARY_HEADER_SECTORS_PER_COPY must stay at 1 for this sharing to be safe");
-#endif
+ * v1.1's region layout is computed ONCE at boot (streamer_thread(), right
+ * after the real EXT_CSD-detected device capacity is known -- see its own
+ * comment) and FROZEN for the life of the image: never relocated, even
+ * once real songs may exist on the card. g_v11_layout_ready stays 0 (fail
+ * closed) if the detected device cannot provide two equal, aligned song
+ * regions plus two index regions; 'Q' then stays silent (docs section 2:
+ * "Silence = stock firmware = read-only") and no v1.1 write path is ever
+ * reachable. The functions that actually use this state
+ * (xfer_v11_refresh_session(), xfer_v11_send_caps()) are defined further
+ * down, after cdc_tx()/cdc_rx(), which they need. */
+/* Same proven-safe first data block the classic looper's own on-flash
+ * format already uses (this file's SLOT0_BLOCK=4096) [looper a8dd127:796]:
+ * 2 MiB in, past every bootloader/stock-firmware-reserved block (0..4095).
+ * v1.1 gets the FULL remaining device capacity from here on -- there is no
+ * v1.0 write path left to share it with (see this block's own comment). */
+#define ST11_STORAGE_BASE_BLOCK 4096u
 
-/* The ONE reader for every Stem Tape sector -- staging, library header,
- * and (once playback streams from it) committed song data alike. Reads
- * are safe by construction (never mutate storage), so one shared function
- * legitimately covers every region -- unlike the write side below, which
- * is deliberately split one function per region. */
-static int xfer_sector_read(uint32_t sector, uint8_t out[ST_SECTOR_BYTES], void *ctx)
-{
-	ARG_UNUSED(ctx);
-	uint32_t blk;
+static st11_region_layout_t g_v11_layout;
+static volatile uint8_t     g_v11_layout_ready;
+static uint32_t             g_v11_device_blocks_total; /* the real, EXT_CSD-detected device size in
+							  * 512-byte blocks -- the exact value the boot-
+							  * time layout computation was run against; kept
+							  * separately because it can be a few blocks larger
+							  * than g_v11_layout's own song B end (the even-split
+							  * remainder is never allocated to either region) */
 
-	if (!st_storage_sector_to_block(sector, &blk)) {
-		return -1;
-	}
-	return emmc_read_blocks(blk, out, ST_BLOCKS_PER_SECTOR) ? 0 : -1;
-}
-
-/* Bounded to the STAGING region by its OWN body -- structurally cannot
- * write outside [ST_STAGING_SECTOR0, +ST_STAGING_SECTOR_COUNT) regardless
- * of caller. This is the ONLY function in this firmware that can ever
- * write a staging sector; its only caller is st_xfer_stage_sector() (the
- * 'S' verb, via xfer_service() below). */
-static int xfer_staging_write(uint32_t sector, const uint8_t data[ST_SECTOR_BYTES], void *ctx)
-{
-	ARG_UNUSED(ctx);
-	uint32_t blk;
-
-	if (sector < ST_STAGING_SECTOR0 || sector >= ST_STAGING_SECTOR0 + ST_STAGING_SECTOR_COUNT) {
-		return -1;
-	}
-	if (!st_storage_sector_to_block(sector, &blk)) {
-		return -1;
-	}
-	return emmc_write_blocks(blk, data, ST_BLOCKS_PER_SECTOR) ? 0 : -1;
-}
-
-/* Bounded to the LIBRARY HEADER region by its own body, same reasoning.
- * Its only caller is xfer_lib_save() below, itself only ever called from
- * the commit ('C'), delete ('D'), and initialize ('I') paths -- 'C' only
- * after st_xfer_commit_precheck() has verified the transaction; 'D'/'I'
- * only after a real destructive-confirmation token check. */
-static int xfer_header_write(uint32_t sector, const uint8_t data[ST_SECTOR_BYTES], void *ctx)
-{
-	ARG_UNUSED(ctx);
-	uint32_t blk;
-
-	if (sector < ST_LIBRARY_HEADER_SECTOR0 || sector >= ST_LIBRARY_HEADER_SECTOR0 + ST_LIBRARY_HEADER_SECTORS) {
-		return -1;
-	}
-	if (!st_storage_sector_to_block(sector, &blk)) {
-		return -1;
-	}
-	return emmc_write_blocks(blk, data, ST_BLOCKS_PER_SECTOR) ? 0 : -1;
-}
-
-/* Bounded to the SONG-DATA region by its own body -- both edges: below
- * ST_SONG_DATA_SECTOR0 is rejected, and at/beyond the real, EXT_CSD-
- * detected device capacity (g_emmc_total_sectors; 0 = not yet known,
- * fail-closed) is rejected too, so this can never walk off the end of
- * the real card. Its only caller is xfer_do_commit() above, itself only
- * ever reached after the transaction is confirmed open and verified
- * (see xfer_do_commit() below). */
-/* __attribute__((noinline, noclone)): this function's single call site
- * (inside xfer_do_commit()'s copy loop) makes it an -Os inlining candidate
- * once enough surrounding code shrinks (confirmed by a real CI run after
- * the RAM fixes above) -- but unlike trk_blk()/xfer_service()/uac2_dev/
- * midi_dev (where inlining was accepted and the symbol-presence check
- * simply dropped), this specific function is looked up BY NAME in the
- * STRICT persistence safety gate's disassembly scan (ALLOWED_WRITE_FUNCS in
- * .github/scripts/stemtape_player_safety_gate.py) to prove its bounds-check
- * pattern. Inlining it would silently remove that evidence rather than
- * just a reachability nicety, so it stays a real, separately-named symbol
- * on purpose.
- *
- * noinline alone was NOT enough (confirmed by a real CI run: xfer_do_commit
- * came back with plain noinline, xfer_songdata_write did not) -- its one
- * call site passes a compile-time-constant `ctx` (always NULL) and an
- * effectively address-constant `data` (always s_commit_copy_buf), which is
- * exactly the shape GCC's interprocedural constant propagation specializes
- * into a differently-named clone (e.g. xfer_songdata_write.constprop.0),
- * independent of inlining. noclone disables that cloning so the ORIGINAL
- * symbol name survives.
- *
- * The attribute is placed AFTER the parameter list, trailing on the SAME
- * line (`... name(params) __attribute__((...))`), not before the return
- * type and not on its own line -- confirmed by a real CI run: a leading
- * `__attribute__` on its own line before this signature broke the STRICT
- * persistence safety gate's OWN (regex-based, single-line) function-
- * signature parser (.github/scripts/stemtape_player_safety_gate.py's
- * FUNC_SIG_RX), which misread everything up to the attribute as the return
- * type and captured the wrong name for this function
- * ("fer_songdata_write", missing its leading "x") as the enclosing
- * function of the emmc_write_blocks() call inside it -- causing pass D to
- * reject it as an unrecognized caller, even though the real symbol name in
- * the ELF was correct (see the prior nm.txt evidence above). Trailing,
- * same-line attribute placement keeps the whole signature in the exact
- * single-line shape that parser already handles correctly. */
-static int xfer_songdata_write(uint32_t sector, const uint8_t data[ST_SECTOR_BYTES], void *ctx)
-	__attribute__((noinline, noclone));
-static int xfer_songdata_write(uint32_t sector, const uint8_t data[ST_SECTOR_BYTES], void *ctx)
-{
-	ARG_UNUSED(ctx);
-	uint32_t blk;
-
-	if (sector < ST_SONG_DATA_SECTOR0) {
-		return -1;
-	}
-	if (g_emmc_total_sectors == 0u || sector >= g_emmc_total_sectors) {
-		return -1;
-	}
-	if (!st_storage_sector_to_block(sector, &blk)) {
-		return -1;
-	}
-	return emmc_write_blocks(blk, data, ST_BLOCKS_PER_SECTOR) ? 0 : -1;
-}
-
-/* Saves g_lib (torn-write-safe, two-copy) via st_libio_save() -- the ONLY
- * caller of xfer_header_write(). Reuses s_commit_copy_buf as st_libio_save()'s
- * scratch buffer (see its doc comment) -- safe because library-save,
- * sector-staging, and commit's copy loop never run concurrently (one
- * command serviced at a time, audio paused during a transfer -- see
- * xfer_service()). */
-static bool xfer_lib_save(void)
-{
-	if (!st_libio_save(&g_lib, g_lib_trusted_copy, s_commit_copy_buf, xfer_header_write, NULL)) {
-		return false;
-	}
-	/* A successful save left BOTH copies identical and valid at the new
-	 * generation -- which one is "trusted" for the next save's write
-	 * order is now arbitrary; 0 is as good as any. */
-	g_lib_trusted_copy = 0;
-	return true;
-}
-
-/*
- * 'C': the actual commit. Requires the open transaction to be verified
- * (matches st_xfer_commit_precheck()'s own gate -- checked again here
- * directly, before it clears the transaction, because
- * st_xfer_build_slot_meta() below needs the SAME open+verified state
- * st_xfer_commit_precheck() would otherwise have already cleared).
- * Sequence (matches docs/stem-tape-transfer-v1.md section 6's numbered
- * guarantee exactly): allocate the song's permanent home past every
- * other committed slot -> copy every staged sector there -> flush the
- * eMMC write cache -> write the slot metadata into the in-RAM library
- * header -> save the library header (this is the one write that makes
- * the song visible) -> only THEN clear the transaction. Any failure at
- * any step returns false without ever touching g_lib -- the previously
- * committed song for this slot (if any) is provably untouched, since
- * nothing above this point in the sequence writes g_lib or the library
- * header sectors at all.
- */
-/* __attribute__((noinline, noclone)): same reasoning as xfer_songdata_write()
- * above -- single call site (the 'C' verb branch in xfer_service()), an -Os
- * inlining candidate once nearby code shrinks, but this function's name is
- * how the STRICT persistence safety gate's pass D (eMMC write call-site
- * provenance) classifies xfer_songdata_write()'s call site as belonging to
- * the validated commit path. Inlining it into xfer_service() would rename
- * that call site out from under the gate's classification, not just remove
- * a reachability nicety. This one's call site takes no arguments (`xfer_do_
- * commit()`), so it isn't an interprocedural-constant-propagation clone
- * candidate the way xfer_songdata_write() was (confirmed: plain noinline
- * alone already kept it present in a real CI run) -- noclone is added
- * anyway, defensively, so this doesn't quietly break the same way under a
- * future toolchain/optimization change.
- *
- * Forward-declared with a trailing attribute (see xfer_songdata_write()'s
- * identical pattern and comment above) rather than `__attribute__(...)`
- * before the name on the definition itself: that placement, even on one
- * line, also confuses the STRICT persistence safety gate's FUNC_SIG_RX
- * parser (verified directly: it captures "__attribute__" as the function
- * name, not "xfer_do_commit") -- harmless today only because this
- * function's own body happens not to call emmc_write_blocks()/
- * meta_write_blocks() directly, but not something to leave latent. */
-static bool xfer_do_commit(void)
-	__attribute__((noinline, noclone));
-static bool xfer_do_commit(void)
-{
-	st_slot_meta_t slot_meta;
-	uint32_t start_sector;
-	uint32_t i;
-
-	if (!g_lib_ready || !g_xfer_txn.open || !g_xfer_txn.verified) {
-		return false;
-	}
-	start_sector = st_storage_next_free_song_sector(&g_lib);
-	if (!st_xfer_build_slot_meta(&g_xfer_txn, start_sector, &slot_meta)) {
-		return false;
-	}
-	for (i = 0; i < g_xfer_txn.total_sectors; i++) {
-		if (xfer_sector_read(ST_STAGING_SECTOR0 + i, s_commit_copy_buf, NULL) != 0) {
-			return false;
-		}
-		if (xfer_songdata_write(start_sector + i, s_commit_copy_buf, NULL) != 0) {
-			return false;
-		}
-	}
-	/* Matches the classic looper's own established, unconditional
-	 * best-effort flush-before-commit pattern (see stop_and_flush's own
-	 * `(void)emmc_cache_flush()`) -- the ordering (before the metadata
-	 * write below) is the real safety property section 6 step 4/5
-	 * requires, not this call's return code, which some cards legitimately
-	 * report in ways unrelated to whether this specific data is durable. */
-	(void)emmc_cache_flush();
-
-	if (g_xfer_txn.slot >= g_lib.slot_count) {
-		return false;
-	}
-	g_lib.slot[g_xfer_txn.slot] = slot_meta;
-	if (g_lib.current_slot >= g_lib.slot_count) {
-		g_lib.current_slot = g_xfer_txn.slot;
-	}
-	if (!xfer_lib_save()) {
-		return false;
-	}
-	(void)st_xfer_commit_precheck(&g_xfer_txn); /* clears the in-RAM transaction */
-	g_slot_switch_req = 1; /* reload playback for the (possibly new) active song */
-	return true;
-}
+/* The one open v1.1 write-safety session, if any -- see st_ab_session.h.
+ * Refreshed on every 'Q' (the natural "about to transfer" signal: docs
+ * section 5 step 1, "re-query Q immediately before writing... or nothing
+ * is written"), which re-reads both real index blocks and re-freezes the
+ * active/inactive pair from that fresh read -- exactly the required
+ * correction: the destination pair is snapshotted once per session, not
+ * re-derived per write. A real 'W' handler that consults this session is
+ * wired in a later commit; until then this session's state has no
+ * observable effect on storage -- every 'W' still fails closed exactly as
+ * Phase 1 left it below. */
+static st_ab_session_t g_v11_session;
 #endif /* SP1_XFER_ENABLE */
 
 static volatile uint32_t g_consume_pos;          /* shared playhead (loop samples, free-running) */
@@ -2380,6 +2165,85 @@ static void xfer_resync(uint8_t err_byte)
 	cdc_tx(&err_byte, 1);
 }
 
+/*
+ * Re-reads both real v1.1 index blocks and (re)opens g_v11_session against
+ * them fresh: REPLACE if the library already has a valid active record,
+ * or INIT if it is genuinely blank/corrupt (the only two cases
+ * st_ab_session_open_*() ever accept -- see st_ab_session.h). INIT's
+ * `confirmed` is passed true unconditionally: the real wire contract has
+ * no separate confirmation verb for v1.1 (docs section 7 performs
+ * initialization via plain guarded writes, not a destructive-token
+ * command like the old 'D'/'I'), so open_init()'s OWN requires_
+ * initialization gate -- both index records already independently proven
+ * blank/invalid -- is the entire, tightly-scoped safety condition here,
+ * matching the contract exactly rather than inventing an extra step it
+ * doesn't have. Leaves g_v11_session closed/unusable (every check_write()
+ * call then returns NO_SESSION) if either index block can't even be read,
+ * or if opening genuinely fails for a reason logged by the open result
+ * (capacity, already-initialized) -- fails closed in every case.
+ */
+static void xfer_v11_refresh_session(void)
+{
+	if (!g_v11_layout_ready) {
+		memset(&g_v11_session, 0, sizeof(g_v11_session));
+		return;
+	}
+
+	uint8_t idx_a[ST11_PHYSICAL_BLOCK_BYTES];
+	uint8_t idx_b[ST11_PHYSICAL_BLOCK_BYTES];
+
+	if (!emmc_read_blocks(g_v11_layout.index_a_start, idx_a, 1) ||
+	    !emmc_read_blocks(g_v11_layout.index_b_start, idx_b, 1)) {
+		memset(&g_v11_session, 0, sizeof(g_v11_session));
+		return;
+	}
+
+	st_ab_open_result_t r = st_ab_session_open_replace(&g_v11_session, idx_a, idx_b, &g_v11_layout,
+							     g_v11_layout.song_a_blocks);
+
+	if (r == ST_AB_OPEN_ERR_NOT_INITIALIZED) {
+		(void)st_ab_session_open_init(&g_v11_session, idx_a, idx_b, &g_v11_layout, true);
+	}
+}
+
+/*
+ * Builds and sends the real 'Q' -> STCP capability reply (docs section 2).
+ * Re-reads both index blocks and runs the SAME selector st_ab_session
+ * itself uses (st_stix_read_library()) so the advisory active-slot/
+ * generation fields reflect the current on-disk truth -- advisory only
+ * (docs section 4: "the device's advisory activeIndexSlot is never
+ * trusted"), the companion always re-derives its own answer from the raw
+ * index bytes it reads independently via 'R'. Sends nothing at all if
+ * g_v11_layout_ready is false (docs section 2: "Silence = stock firmware
+ * = read-only") or either index block can't be read -- fails closed
+ * exactly like every other v1.1 path here.
+ */
+static void xfer_v11_send_caps(void)
+{
+	if (!g_v11_layout_ready) {
+		return;
+	}
+
+	uint8_t idx_a[ST11_PHYSICAL_BLOCK_BYTES];
+	uint8_t idx_b[ST11_PHYSICAL_BLOCK_BYTES];
+
+	if (!emmc_read_blocks(g_v11_layout.index_a_start, idx_a, 1) ||
+	    !emmc_read_blocks(g_v11_layout.index_b_start, idx_b, 1)) {
+		return;
+	}
+
+	st_stix_library_state_t lib;
+
+	st_stix_read_library(idx_a, idx_b, g_v11_layout.song_a_start, g_v11_layout.song_a_blocks,
+			      g_v11_layout.song_b_start, g_v11_layout.song_b_blocks, &lib);
+
+	uint8_t reply[4 + ST11_CAPS_BYTES];
+
+	st11_stcp_build(&g_v11_layout, g_v11_device_blocks_total, lib.active_index_slot, lib.active_song_slot,
+			lib.generation, reply);
+	cdc_tx(reply, sizeof reply);
+}
+
 /* STEM TAPE PHASE 1: g_xfer_dirty (which track regions the host wrote this
  * transfer session, used by the classic committer to merge host writes into
  * the durable index) and xfer_commit() (the classic looper's write-cache-to-
@@ -2479,118 +2343,19 @@ static void xfer_service(void)
 		uint8_t h = 'x';
 		cdc_tx(&h, 1);
 
-	/* ---- GATE 2: the real Stem Tape transfer verbs (docs/
-	 * stem-tape-transfer-v1.md section 6). Entirely separate wire
-	 * commands from 'P'/'R'/'W'/'F'/'X' above -- those stay exactly as
-	 * Phase 1 left them (read-only-safe against the classic looper's own
-	 * block address space). Everything below operates on the NEW library
-	 * header + staging region instead, and is the only place in this
-	 * firmware image that can ever reach emmc_write_blocks() -- see
-	 * xfer_staging_write()/xfer_header_write()/xfer_songdata_write()
-	 * above, each independently bounded to its own disjoint region. */
-	} else if (cmd == 'V') {                               /* capability/version query */
-		uint8_t r[16];
-
-		st_xfer_wire_encode_version(r, ST_XFER_CAP_TRANSACTIONAL_SLOTS | ST_XFER_CAP_CRC32);
-		cdc_tx(r, sizeof r);
-	} else if (cmd == 'B') {                               /* begin/resume upload */
-		/* Small (117-byte) request, read once and consumed within this same
-		 * call -- unlike the 8192-byte sector buffers, this is fine as a
-		 * plain stack local (matches `meta` right below and 'V''s `r[16]`
-		 * above), so it costs no static RAM at all. */
-		uint8_t breq[ST_XFER_WIRE_BEGIN_REQ_LEN];
-		uint16_t slot;
-		st_xfer_song_meta_t meta;
-		uint32_t resume = 0;
-
-		if (!cdc_rx(breq, sizeof breq, 4000) ||
-		    !st_xfer_wire_decode_begin_req(breq, sizeof breq, &slot, &meta) ||
-		    !g_lib_ready ||
-		    st_xfer_begin(&g_xfer_txn, slot, &meta, g_lib.slot_count, &resume) != ST_XFER_OK) {
-			xfer_resync('e');
-			return;
-		}
-		uint8_t rsp[ST_XFER_WIRE_BEGIN_RSP_LEN];
-		st_xfer_wire_encode_begin_rsp(rsp, resume);
-		cdc_tx(rsp, sizeof rsp);
-	} else if (cmd == 'S') {                               /* stage one sector */
-		/* Wire layout is [4-byte sector index][ST_SECTOR_BYTES body][4-byte
-		 * CRC] -- read it as three separate cdc_rx() calls instead of one
-		 * combined buffer so the ST_SECTOR_BYTES body can land directly in
-		 * the shared s_commit_copy_buf (never used concurrently with 'S',
-		 * since a transfer is audio-paused and single-threaded) rather than
-		 * a second, standalone 8-KiB-plus static array. */
-		uint8_t shdr[4];
-		uint8_t strl[4];
-
-		if (!cdc_rx(shdr, sizeof shdr, 4000) ||
-		    !cdc_rx(s_commit_copy_buf, ST_SECTOR_BYTES, 4000) ||
-		    !cdc_rx(strl, sizeof strl, 4000)) {
-			xfer_resync('e');
-			return;
-		}
-		uint32_t sector_index = (uint32_t)shdr[0] | ((uint32_t)shdr[1] << 8) |
-					 ((uint32_t)shdr[2] << 16) | ((uint32_t)shdr[3] << 24);
-		uint32_t sector_crc = (uint32_t)strl[0] | ((uint32_t)strl[1] << 8) |
-				       ((uint32_t)strl[2] << 16) | ((uint32_t)strl[3] << 24);
-		st_xfer_result_t rc = st_xfer_stage_sector(&g_xfer_txn, sector_index, s_commit_copy_buf,
-							    sector_crc, xfer_staging_write, NULL);
-		uint8_t h = (rc == ST_XFER_OK) ? (uint8_t)ST_XFER_RSP_STAGE_OK : (uint8_t)'e';
-		cdc_tx(&h, 1);
-	} else if (cmd == 'K') {                               /* verify */
-		/* Reuses s_commit_copy_buf as the per-sector read-back scratch (see
-		 * its own comment) -- safe for the same "one command at a time"
-		 * reason. */
-		uint8_t h = (st_xfer_verify(&g_xfer_txn, s_commit_copy_buf, xfer_sector_read, NULL) ==
-			     ST_XFER_OK)
-				    ? (uint8_t)ST_XFER_RSP_OK_GENERIC : (uint8_t)'e';
-		cdc_tx(&h, 1);
-	} else if (cmd == 'C') {                               /* commit */
-		uint8_t h = xfer_do_commit() ? (uint8_t)ST_XFER_RSP_COMMIT_OK : (uint8_t)'e';
-		cdc_tx(&h, 1);
-	} else if (cmd == 'A') {                               /* abort: previously committed song untouched */
-		st_xfer_abort(&g_xfer_txn);
-		uint8_t h = ST_XFER_RSP_ABORT_OK;
-		cdc_tx(&h, 1);
-	} else if (cmd == 'D') {                               /* delete (destructive-token-gated) */
-		/* Small (10-byte), single-use request -- plain stack local, see 'B'
-		 * above's comment. */
-		uint8_t dreq[ST_XFER_WIRE_DELETE_REQ_LEN];
-		uint16_t slot;
-		const uint8_t *token;
-		uint8_t h = 'e';
-
-		if (cdc_rx(dreq, sizeof dreq, 4000) &&
-		    st_xfer_wire_decode_delete_req(dreq, sizeof dreq, &slot, &token) &&
-		    st_xfer_check_token(token, ST_DESTRUCTIVE_CONFIRM_LEN) &&
-		    g_lib_ready && slot < g_lib.slot_count) {
-			memset(&g_lib.slot[slot], 0, sizeof(g_lib.slot[slot]));
-			if (g_lib.current_slot == slot) {
-				g_lib.current_slot = 0;
-			}
-			if (xfer_lib_save()) {
-				h = ST_XFER_RSP_DELETE_OK;
-				g_slot_switch_req = 1;
-			}
-		}
-		cdc_tx(&h, 1);
-	} else if (cmd == 'I') {                               /* initialize/format (destructive-token-gated) */
-		/* Small (8-byte), single-use request -- plain stack local, see 'B'
-		 * above's comment. */
-		uint8_t ireq[ST_DESTRUCTIVE_CONFIRM_LEN];
-		uint8_t h = 'e';
-
-		if (cdc_rx(ireq, sizeof ireq, 4000) && st_xfer_check_token(ireq, sizeof ireq)) {
-			memset(&g_lib, 0, sizeof(g_lib));
-			g_lib.magic = ST_LIBRARY_HEADER_MAGIC;
-			g_lib.layout_version = ST_STORAGE_LAYOUT_VERSION;
-			g_lib.slot_count = g_lib_slot_capacity;
-			if (xfer_lib_save()) {
-				h = ST_XFER_RSP_INIT_OK;
-				g_slot_switch_req = 1;
-			}
-		}
-		cdc_tx(&h, 1);
+	/* ---- Stem Tape v1.1 (docs/stem-tape-transfer-v1.1.md section 1-2):
+	 * 'Q' is the ONLY new wire command this contract adds -- v1.1 reuses
+	 * 'P'/'R'/'W'/'F'/'X' above verbatim, unlike the old, now-deleted
+	 * Gate 2 contract's own extra verbs (V/B/S/K/C/A/D/I). Answering 'Q'
+	 * also (re)opens g_v11_session, since a real companion always
+	 * re-queries Q immediately before writing (docs section 5 step 1) --
+	 * see xfer_v11_send_caps()/xfer_v11_refresh_session() above for the
+	 * fail-closed details. Silence (no reply at all) when
+	 * g_v11_layout_ready is false is the documented "unsupported
+	 * firmware, stay read-only" signal (docs section 2) -- not a bug. */
+	} else if (cmd == 'Q') {                               /* v1.1 capability query -> STCP */
+		xfer_v11_refresh_session();
+		xfer_v11_send_caps();
 	}
 }
 #endif /* SP1_XFER_ENABLE */
@@ -2871,25 +2636,34 @@ static void streamer_thread(void *a, void *b, void *c)
 				emmc_set_abort_cb(emmc_busy_abort_chk);
 		}
 #if SP1_XFER_ENABLE
-		/* GATE 2: EXT_CSD SEC_COUNT (offset 212, 4 bytes LE) -- the real,
-		 * standard eMMC "device size in 512-byte sectors" field -- gives
-		 * a REAL, capacity-detected Stem Tape slot count instead of a
-		 * UI-hardcoded number (docs/stem-tape-transfer-v1.md section 3).
-		 * A zero/implausible reading leaves the safe conservative default
-		 * (g_lib_slot_capacity's static initializer) untouched. */
+		/* Stem Tape v1.1: EXT_CSD SEC_COUNT (offset 212, 4 bytes LE) --
+		 * the real, standard eMMC "device size in 512-byte blocks" field
+		 * -- is the real, capacity-detected device size the v1.1 region
+		 * layout is computed against (docs section 10 item 2: "aligned,
+		 * non-overlapping and inside deviceBlocks"), FROZEN here for the
+		 * life of the image (the wiring directive's own requirement: "do
+		 * not relocate it later after real songs may exist"). A zero/
+		 * implausible reading, or a device too small to hold two equal
+		 * song regions plus two index regions, leaves g_v11_layout_ready
+		 * at its safe default (0, fail closed) -- 'Q' then stays silent
+		 * (docs section 2) rather than advertising a layout the device
+		 * cannot actually honor. */
 		{
 			uint32_t sec_count = (uint32_t)blk[212] | ((uint32_t)blk[213] << 8) |
 					      ((uint32_t)blk[214] << 16) | ((uint32_t)blk[215] << 24);
-			if (sec_count > 0u) {
-				uint64_t total_sectors = (uint64_t)sec_count / ST_BLOCKS_PER_SECTOR;
-				uint32_t cap = st_storage_compute_slot_capacity(total_sectors, 0u);
 
-				if (cap > 0u) {
-					g_lib_slot_capacity = cap;
-				}
-				if (total_sectors <= 0xFFFFFFFFu) {
-					g_emmc_total_sectors = (uint32_t)total_sectors;
-				}
+			/* st11_storage_layout_compute()'s `device_blocks_total` is
+			 * blocks AVAILABLE STARTING AT base_block, not the raw
+			 * device size from block 0 -- so the reserved base has to
+			 * be subtracted before calling it, even though the STCP
+			 * reply's own "total device blocks" field (below) is the
+			 * raw, ABSOLUTE size every region start is compared
+			 * against, and stays sec_count unchanged. */
+			if (sec_count > ST11_STORAGE_BASE_BLOCK &&
+			    st11_storage_layout_compute(ST11_STORAGE_BASE_BLOCK,
+							 sec_count - ST11_STORAGE_BASE_BLOCK, &g_v11_layout)) {
+				g_v11_device_blocks_total = sec_count;
+				g_v11_layout_ready = 1u;
 			}
 		}
 #endif
@@ -2931,34 +2705,45 @@ static void streamer_thread(void *a, void *b, void *c)
 	g_meta_loaded = 1;
 
 #if SP1_XFER_ENABLE
-	/* GATE 2: cold-boot load of the REAL Stem Tape library header -- a
-	 * wholly separate, disjoint format/address-range from the classic
-	 * g_meta load just above (see the GATE 2 globals' own comment).
-	 * "The firmware never erases or formats storage automatically at
-	 * boot" (docs/stem-tape-transfer-v1.md section 6): an unrecognized
-	 * or corrupt header loads as ST_LIBIO_FRESH (an in-RAM-only empty
-	 * library, zero songs, but legitimately writable once a real 'I'
-	 * arrives) or, for a genuine I/O error, ST_LIBIO_READ_FAILED (same
-	 * safe empty state, plus a diagnostic flag) -- never an implicit
-	 * reformat, never a write. */
-	memset(&g_lib, 0, sizeof(g_lib));
-	if (g_emmc_ready) {
-		st_libio_load_result_t r = st_libio_load(&g_lib, g_lib_slot_capacity,
-							   &g_lib_trusted_copy, s_commit_copy_buf,
-							   xfer_sector_read, NULL);
-		if (r == ST_LIBIO_READ_FAILED) {
-			g_lib_read_failed = 1;
-			g_lib.magic = ST_LIBRARY_HEADER_MAGIC;
-			g_lib.layout_version = ST_STORAGE_LAYOUT_VERSION;
-			g_lib.slot_count = g_lib_slot_capacity;
-			g_lib_trusted_copy = -1;
+	/* Stem Tape v1.1 boot-time A/B selection (docs section 10 item 4:
+	 * "Boot from the greater valid generation, falling back to the other
+	 * record"). Runs the SAME selector 'Q' and every session-open use
+	 * (st_stix_read_library(), never the device's own advisory hint) once
+	 * at cold boot and logs the result -- structural proof this firmware
+	 * satisfies the checklist item, not a live behavior yet: real
+	 * playback from the selected song is Task 51, explicitly out of
+	 * scope for this migration, so nothing downstream of this boot log
+	 * consumes the result. Never writes; a blank/corrupt library logs as
+	 * such and is left exactly as read -- 'Q' and the next real upload's
+	 * session-open are what actually act on it. */
+	if (g_v11_layout_ready && g_emmc_ready) {
+		uint8_t idx_a[ST11_PHYSICAL_BLOCK_BYTES];
+		uint8_t idx_b[ST11_PHYSICAL_BLOCK_BYTES];
+
+		if (emmc_read_blocks(g_v11_layout.index_a_start, idx_a, 1) &&
+		    emmc_read_blocks(g_v11_layout.index_b_start, idx_b, 1)) {
+			st_stix_library_state_t lib;
+
+			st_stix_read_library(idx_a, idx_b, g_v11_layout.song_a_start, g_v11_layout.song_a_blocks,
+					      g_v11_layout.song_b_start, g_v11_layout.song_b_blocks, &lib);
+			if (lib.status == ST_STIX_LIB_OK) {
+				/* Split the 64-bit generation into two 32-bit halves for
+				 * printk -- Zephyr's default minimal printk build does
+				 * not reliably support %llu, and this is a boot-time
+				 * diagnostic only (see this block's own comment), not a
+				 * value anything downstream parses. */
+				printk("V11 lib: gen_hi=%u gen_lo=%u active_index=%u active_song=%u\n",
+				       (unsigned)(uint32_t)(lib.generation >> 32),
+				       (unsigned)(uint32_t)lib.generation, (unsigned)lib.active_index_slot,
+				       (unsigned)lib.active_song_slot);
+			} else {
+				printk("V11 lib: %s, requires initialization\n",
+				       lib.status == ST_STIX_LIB_BLANK ? "blank" : "corrupt");
+			}
+		} else {
+			printk("V11 lib: index read failed at boot\n");
 		}
-	} else {
-		g_lib.magic = ST_LIBRARY_HEADER_MAGIC;
-		g_lib.layout_version = ST_STORAGE_LAYOUT_VERSION;
-		g_lib.slot_count = g_lib_slot_capacity;
 	}
-	g_lib_ready = 1;
 #endif
 
 	while (1) {

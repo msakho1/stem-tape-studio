@@ -15,44 +15,52 @@ include(${ZEPHYR_BASE}/samples/subsys/usb/common/common.cmake)
 # exercises on the host -- so this is genuinely linked, not a parallel
 # unwired module.
 #
-# GATE 2: src/st_crc32.c, src/st_storage_layout.c, src/st_sector_codec.c,
-# src/st_transfer.c, src/st_library_io.c, src/st_xfer_wire.c -- the real,
-# current Stem Tape library-header + transactional song-transfer engine
-# (see st_transfer.h/st_storage_layout.h/st_library_io.h's own docs) --
-# are now linked: main.c's real xfer_service() 'V'/'B'/'S'/'K'/'C'/'A'/
-# 'D'/'I' verb handlers call these SAME pure functions the host tests
-# exercise, through the region-bounded eMMC adapters
-# (xfer_staging_write()/xfer_header_write()/xfer_songdata_write() in
-# main.c). This is the ONLY route to emmc_write_blocks() this target
-# links -- see the strict persistence safety gate.
+# STEM TAPE v1.1 (docs/stem-tape-transfer-v1.1.md is the current,
+# authoritative contract): src/st_crc32.c, src/st_checksum32.c,
+# src/st_sector_v11.c, src/st_stix.c, src/st_stcp.c, src/st_ab_session.c --
+# the real STIX v2 index parse/validate/select, STSC sector codec, A/B
+# region layout + STCP capability reply, and the stateful write-safety
+# session gate (see each header's own doc) -- are linked: main.c's real
+# 'Q' handler and boot-time A/B selection call these SAME pure functions
+# tests/test_stem_v11.c exercises against the frozen Lovable handoff
+# fixtures. st_crc32.c is linked for st_stix.c's own record-integrity CRC
+# (st_stix_block_crc()), not for any v1.0 purpose.
 #
-# st_stem_validate.c -- an EARLIER, superseded validated-commit design
-# (its own header docstring describes a 'Z' verb and TRACK_BLOCKS-based
-# present[] mask that were never implemented; st_transfer.c's real
-# st_xfer_verify()/st_xfer_commit_precheck() supersede it with an
-# independently-designed, already-tested equivalent) -- is NOT linked.
-# Preserved and still host-tested for reference, matching how this file
-# already treats every other superseded/reference-only module below.
+# The OLD, now-retired v1.0 Gate 2 contract's own engine -- src/
+# st_storage_layout.c, src/st_sector_codec.c, src/st_transfer.c, src/
+# st_library_io.c, src/st_xfer_wire.c, and src/st_stem_validate.c (an
+# even earlier, already-superseded design within that same v1.0 line) --
+# is DELIBERATELY NOT linked here: main.c no longer calls any command
+# handler or adapter that reaches these files' functions at all (the
+# v1.1 migration deleted that dispatch code, not merely disabled it), so
+# there is no path from this target's command dispatch to their own
+# emmc_write_blocks() call sites, and no v1.0 write path is ever present
+# in this ELF -- v1.0 and v1.1 can never both hold a live write path in
+# the same build, by construction. These files stay in the tree and keep
+# their own host tests (tests/test_stemtape_player.c) for regression
+# evidence only; a follow-up commit extends the strict persistence safety
+# gate to check their symbols are absent from the built ELF directly, as
+# positive proof rather than relying on this list alone.
 #
 # NOT included here (compiled only into tests/test_stemtape_player.c's host
 # test binary, not into this firmware target): led_duty.c/led_render.c/
-# led_render_policy.c, st_gesture.c, st_scrub.c, st_led_pattern.c,
-# st_stem_validate.c -- st_gesture.c/st_scrub.c/st_led_pattern.c implemented
-# an earlier, superseded standalone protocol/runtime design (see git log);
-# main.c still drives LEDs directly (its own GPIO+soft-PWM driver,
-# inherited from the Tape Looper). Preserved and still host-tested for
-# reference; deliberately NOT linked into this ELF so as not to present
-# unwired modules as part of the real runtime.
+# led_render_policy.c, st_gesture.c, st_scrub.c, st_led_pattern.c --
+# st_gesture.c/st_scrub.c/st_led_pattern.c implemented an earlier,
+# superseded standalone protocol/runtime design (see git log); main.c
+# still drives LEDs directly (its own GPIO+soft-PWM driver, inherited
+# from the Tape Looper). Preserved and still host-tested for reference;
+# deliberately NOT linked into this ELF so as not to present unwired
+# modules as part of the real runtime.
 target_sources(app PRIVATE
 	src/main.c
 	src/sp1_emmc.c
 	src/st_midi_queue.c
 	src/st_crc32.c
-	src/st_storage_layout.c
-	src/st_sector_codec.c
-	src/st_transfer.c
-	src/st_library_io.c
-	src/st_xfer_wire.c
+	src/st_checksum32.c
+	src/st_sector_v11.c
+	src/st_stix.c
+	src/st_stcp.c
+	src/st_ab_session.c
 )
 
 # See firmware/CMakeLists.txt's identical note: the batchbuf/meta-block code

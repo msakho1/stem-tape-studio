@@ -231,30 +231,30 @@ if os.path.exists(DERIVED_MAIN_C):
                   if sym == "meta_write_blocks" for ln in lns]
     check(meta_sites == [], "real main.c: meta_write_blocks() has zero call sites")
 
+    # Stem Tape v1.1 migration, transitional commit: the old v1.0 Gate 2
+    # write adapters (xfer_staging_write/xfer_header_write/
+    # xfer_songdata_write, ALLOWED_WRITE_FUNCS's three keys) are DELETED
+    # from real main.c, not merely disabled -- see this commit's own log.
+    # The new v1.1 guarded write path is wired in a FOLLOWING commit, which
+    # updates this section again to assert exactly one real
+    # emmc_write_blocks() call site inside its own new adapter. Until then,
+    # real main.c has ZERO emmc_write_blocks() call sites at all -- no
+    # write path, from either contract, is reachable in this image.
     real_write_sites = {fn: lns for (fn, sym), lns in real_sites.items()
                          if sym == "emmc_write_blocks"}
-    check(set(real_write_sites) == set(ALLOWED_WRITE_FUNCS),
-          f"real main.c: emmc_write_blocks() call sites are enclosed by exactly "
-          f"the three allowed adapters -- {sorted(real_write_sites)}")
-    total_sites = sum(len(v) for v in real_write_sites.values())
-    check(total_sites == 3,
-          f"real main.c: exactly 3 emmc_write_blocks() call sites total "
-          f"(got {total_sites})")
+    check(set(real_write_sites) == set(),
+          f"real main.c: zero emmc_write_blocks() call sites (v1.0 adapters deleted, "
+          f"v1.1 guarded write not yet wired) -- found {sorted(real_write_sites)}")
 
-    for fn, (lower_const, upper_const) in ALLOWED_WRITE_FUNCS.items():
-        lns = real_write_sites.get(fn)
-        if not lns:
-            check(False, f"real main.c: {fn}() has a real emmc_write_blocks() call site")
-            continue
-        start, end = function_body_bounds(real_lines, lns[0])
-        body = "\n".join(real_lines[start:end])
-        has_lower = lower_const in body
-        has_upper = upper_const in body
-        has_return = re.search(r"return\s+-1\s*;", body) is not None
-        check(has_lower and has_upper and has_return,
-              f"real main.c: {fn}()'s own body contains its lower bound "
-              f"({lower_const}: {has_lower}), upper bound ({upper_const}: "
-              f"{has_upper}), and an early `return -1;` guard ({has_return})")
+    # index_functions()'s own values() (not a raw text search, which would
+    # also match this very doc comment) are the actual top-level functions
+    # DEFINED in real main.c -- confirms the three old v1.0 adapters no
+    # longer exist as functions at all, not merely that nothing calls them.
+    real_defined_funcs = {fn for fn in real_func_of_line.values() if fn is not None}
+    stale_names = sorted(set(ALLOWED_WRITE_FUNCS) & real_defined_funcs)
+    check(stale_names == [],
+          "real main.c: none of the old v1.0 adapter functions "
+          f"({sorted(ALLOWED_WRITE_FUNCS)}) are defined any more -- found {stale_names}")
 else:
     print(f"[SKIP] real main.c not found at {DERIVED_MAIN_C} -- run from the repo root "
           f"to exercise part 4 (parts 1-3 already ran against synthetic fixtures)")
