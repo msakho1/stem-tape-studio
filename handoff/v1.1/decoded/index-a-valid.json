@@ -1,0 +1,42 @@
+{
+  "record": {
+    "committed": true,
+    "indexVersion": 2,
+    "formatMajor": 1,
+    "formatMinor": 1,
+    "slotIdentity": 0,
+    "songSlot": 0,
+    "songPresent": false,
+    "generation": 1,
+    "songStartBlock": 0,
+    "songBlockCount": 0,
+    "frames": 0,
+    "sectorCount": 0,
+    "sampleRate": 0,
+    "channels": 0,
+    "bitDepth": 0,
+    "bpm": 0,
+    "downbeatFrame": 0,
+    "originalFrames": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "stemChecksums": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "songChecksum": 0,
+    "title": "",
+    "artist": "",
+    "crc": 1324120305,
+    "crcComputed": 1324120305
+  },
+  "validation": {
+    "valid": true,
+    "reason": "valid, no song"
+  }
+}
