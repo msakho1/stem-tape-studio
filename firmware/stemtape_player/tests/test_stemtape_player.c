@@ -165,15 +165,19 @@ static void test_storage_layout(void)
 	CHECK(strcmp(h2.slot[0].title, "Test Song") == 0 && strcmp(h2.slot[0].artist, "Test Artist") == 0,
 	      "deserialized title/artist strings match");
 
-	/* Corruption is rejected, not silently accepted. */
-	uint8_t corrupt[64];
+	/* Corruption is rejected, not silently accepted. `corrupt` is sized the
+	 * same as `buf` (not a smaller fixed size) -- deserialize is called
+	 * with `written` as the length, and `written` bytes must actually be
+	 * valid, addressable storage, or the read past a too-small buffer is
+	 * undefined behavior regardless of what deserialize does with it. */
+	static uint8_t corrupt[ST_LIBRARY_HEADER_SECTORS_PER_COPY * ST_SECTOR_BYTES];
 
 	memcpy(corrupt, buf, sizeof(corrupt));
 	corrupt[0] ^= 0xFFu; /* wreck the magic */
 	CHECK(!st_library_header_deserialize(corrupt, written, &h2),
 	      "a corrupted magic is rejected");
 
-	memcpy(corrupt, buf, written < sizeof(corrupt) ? written : sizeof(corrupt));
+	memcpy(corrupt, buf, sizeof(corrupt));
 	if (written >= 40u) {
 		corrupt[39] ^= 0xFFu; /* flip a byte inside the first slot record */
 	}
@@ -665,7 +669,7 @@ static void libio_build_sample_header(st_library_header_t *h, uint32_t song_id, 
 	memset(h, 0, sizeof(*h));
 	h->magic = ST_LIBRARY_HEADER_MAGIC;
 	h->layout_version = ST_STORAGE_LAYOUT_VERSION;
-	h->slot_count = 4u;
+	h->slot_count = ST_MAX_SLOTS; /* the full (small, 2-slot) fixture library */
 	h->current_slot = 1u;
 	h->slot[1].song_id_hash = song_id;
 	h->slot[1].frame_count = 48000u;
@@ -681,10 +685,10 @@ static void test_libio_fresh_on_blank_media(void)
 	int trusted = -99;
 
 	memset(&m, 0, sizeof(m));
-	CHECK(st_libio_load(&h, 6u, &trusted, s_test_libio_scratch, libio_mock_read, &m) == ST_LIBIO_FRESH,
+	CHECK(st_libio_load(&h, 2u, &trusted, s_test_libio_scratch, libio_mock_read, &m) == ST_LIBIO_FRESH,
 	      "blank (never-written) media loads as FRESH, not an error");
 	CHECK(trusted == -1, "FRESH reports no trusted copy");
-	CHECK(h.magic == ST_LIBRARY_HEADER_MAGIC && h.slot_count == 6u && h.generation == 0u,
+	CHECK(h.magic == ST_LIBRARY_HEADER_MAGIC && h.slot_count == 2u && h.generation == 0u,
 	      "a fresh header is seeded with the real capacity-detected slot_count, not a placeholder");
 	CHECK(h.slot[0].frame_count == 0u, "every slot in a fresh header is empty");
 }
@@ -706,7 +710,7 @@ static void test_libio_save_then_load_round_trip(void)
 	      "a just-saved header loads back as LOADED");
 	CHECK(trusted == 0 || trusted == 1, "a real trusted copy index is reported");
 	CHECK(loaded.generation == 1u, "the loaded generation matches what was saved");
-	CHECK(loaded.slot_count == 4u && loaded.current_slot == 1u,
+	CHECK(loaded.slot_count == ST_MAX_SLOTS && loaded.current_slot == 1u,
 	      "loaded fixed fields match exactly");
 	CHECK(loaded.slot[1].song_id_hash == 0xABCD1234u && loaded.slot[1].start_sector == 123u,
 	      "loaded slot record fields match exactly");
@@ -835,7 +839,7 @@ static void test_storage_next_free_song_sector(void)
 	st_library_header_t h;
 
 	memset(&h, 0, sizeof(h));
-	h.slot_count = 4u;
+	h.slot_count = ST_MAX_SLOTS;
 	CHECK(st_storage_next_free_song_sector(&h) == ST_SONG_DATA_SECTOR0,
 	      "an all-empty library allocates from the very start of the song-data region");
 
@@ -844,14 +848,15 @@ static void test_storage_next_free_song_sector(void)
 	CHECK(st_storage_next_free_song_sector(&h) == ST_SONG_DATA_SECTOR0 + 2u,
 	      "the next allocation starts immediately after the one committed slot's real span");
 
-	/* A second, non-contiguous slot (as if slot 2 was uploaded before slot
-	 * 1) -- the allocator must take the MAX end, not just the last slot
-	 * examined, and must ignore still-empty slots entirely. */
-	h.slot[2].frame_count = ST_SECTOR_FRAME_CAPACITY * 5u; /* 5 sectors */
-	h.slot[2].start_sector = ST_SONG_DATA_SECTOR0 + 100u;
+	/* A second, non-contiguous slot at a much later sector, with a bigger
+	 * span than slot 0's -- proves the allocator actually scans every
+	 * committed slot and returns the true MAX end across all of them
+	 * (105), not just slot 0's own end (2) computed above. */
+	h.slot[1].frame_count = ST_SECTOR_FRAME_CAPACITY * 5u; /* 5 sectors */
+	h.slot[1].start_sector = ST_SONG_DATA_SECTOR0 + 100u;
 	CHECK(st_storage_next_free_song_sector(&h) == ST_SONG_DATA_SECTOR0 + 105u,
 	      "the allocator returns the true maximum end across every committed slot, "
-	      "not just the highest-indexed one");
+	      "not just the first one");
 }
 
 /* ========================================================================

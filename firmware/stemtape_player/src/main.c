@@ -1123,8 +1123,12 @@ static volatile uint8_t    g_lib_ready;        /* cold-boot library load complet
 static volatile uint8_t    g_lib_read_failed;  /* diag: a real eMMC I/O error at cold boot (distinct
                                                  * from "blank/no library yet", which is not an error) */
 static int                 g_lib_trusted_copy = -1;
-static uint32_t            g_lib_slot_capacity = 8u; /* capacity-detected at cold boot; a safe,
-                                                       * conservative default until then */
+static uint32_t            g_lib_slot_capacity = ST_MAX_SLOTS; /* capacity-detected at cold boot;
+                                                       * a safe, conservative default until then
+                                                       * (build_fresh() clamps to ST_MAX_SLOTS
+                                                       * regardless, but starting here avoids
+                                                       * implying a bigger default than the policy
+                                                       * ceiling actually allows) */
 static uint32_t            g_emmc_total_sectors;      /* real, EXT_CSD-detected device size in
                                                         * ST_SECTOR_BYTES sectors; 0 = not yet known
                                                         * (fail-closed: xfer_songdata_write() below
@@ -2429,7 +2433,11 @@ static void xfer_service(void)
 		st_xfer_wire_encode_version(r, ST_XFER_CAP_TRANSACTIONAL_SLOTS | ST_XFER_CAP_CRC32);
 		cdc_tx(r, sizeof r);
 	} else if (cmd == 'B') {                               /* begin/resume upload */
-		static uint8_t breq[ST_XFER_WIRE_BEGIN_REQ_LEN];
+		/* Small (117-byte) request, read once and consumed within this same
+		 * call -- unlike the 8192-byte sector buffers, this is fine as a
+		 * plain stack local (matches `meta` right below and 'V''s `r[16]`
+		 * above), so it costs no static RAM at all. */
+		uint8_t breq[ST_XFER_WIRE_BEGIN_REQ_LEN];
 		uint16_t slot;
 		st_xfer_song_meta_t meta;
 		uint32_t resume = 0;
@@ -2484,7 +2492,9 @@ static void xfer_service(void)
 		uint8_t h = ST_XFER_RSP_ABORT_OK;
 		cdc_tx(&h, 1);
 	} else if (cmd == 'D') {                               /* delete (destructive-token-gated) */
-		static uint8_t dreq[ST_XFER_WIRE_DELETE_REQ_LEN];
+		/* Small (10-byte), single-use request -- plain stack local, see 'B'
+		 * above's comment. */
+		uint8_t dreq[ST_XFER_WIRE_DELETE_REQ_LEN];
 		uint16_t slot;
 		const uint8_t *token;
 		uint8_t h = 'e';
@@ -2504,7 +2514,9 @@ static void xfer_service(void)
 		}
 		cdc_tx(&h, 1);
 	} else if (cmd == 'I') {                               /* initialize/format (destructive-token-gated) */
-		static uint8_t ireq[ST_DESTRUCTIVE_CONFIRM_LEN];
+		/* Small (8-byte), single-use request -- plain stack local, see 'B'
+		 * above's comment. */
+		uint8_t ireq[ST_DESTRUCTIVE_CONFIRM_LEN];
 		uint8_t h = 'e';
 
 		if (cdc_rx(ireq, sizeof ireq, 4000) && st_xfer_check_token(ireq, sizeof ireq)) {

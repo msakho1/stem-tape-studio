@@ -107,25 +107,33 @@ static inline bool st_storage_sector_to_block(uint32_t logical_sector, uint32_t 
 					    * slot_count(4)+current_slot(4)+header_crc32(4) */
 #define ST_SLOT_RECORD_BYTES        144u  /* actual fields sum to 133; see st_storage_layout.c */
 
-#define ST_MAX_SLOTS 8u /* a deliberate FIRMWARE POLICY ceiling (not a hardware limit) --
+#define ST_MAX_SLOTS 2u /* a deliberate FIRMWARE POLICY ceiling (not a hardware limit) --
 			   * see the overflow this replaces: 256 slots at the old ad-hoc
 			   * struct size overflowed a single sector by 3096 bytes.
 			   * st_storage_compute_slot_capacity() still clamps DOWN from
 			   * here based on real reported device capacity.
 			   *
-			   * Sized at 8 for this vertical slice, not the original 96:
-			   * st_library_header_t is carried as a whole-struct static/
-			   * global (g_lib in main.c), not streamed, so its in-memory
-			   * size is a direct RAM cost against the device's fixed
-			   * budget, and every other Gate 2 sector-sized work buffer
-			   * has already been merged down to one shared 8192-byte
-			   * buffer (see main.c's s_commit_copy_buf) and per-frame
-			   * verify decode (see st_sector_decode_frame()) -- an 8-song
-			   * onboard library is this pass's real, measured fit within
-			   * that budget; raising it is real future work (most likely
-			   * a directory/full-metadata split so only the CURRENT
-			   * song's full st_slot_meta_t needs to be RAM-resident),
-			   * not a number to bump casually. */
+			   * Sized at the practical FLOOR for this vertical slice, not
+			   * the original 96 (or even a comfortable 8): st_library_
+			   * header_t is carried as a whole-struct static/global
+			   * (g_lib in main.c), not streamed, so its in-memory size is
+			   * a direct RAM cost against the device's fixed, CI-enforced
+			   * budget (>= 32 KiB free of 256 KiB total). Every other
+			   * Gate 2 sector-sized work buffer has already been merged
+			   * into one shared 8192-byte buffer (main.c's
+			   * s_commit_copy_buf), verify decodes one frame at a time
+			   * (st_sector_decode_frame()) instead of a whole-sector
+			   * array, and the small per-command wire request buffers
+			   * are plain stack locals, not static -- 2 is what real,
+			   * measured RAM (a real CI build, not an estimate) leaves
+			   * room for after all of that. It's enough to prove real
+			   * multi-song library behavior (upload two songs, switch,
+			   * delete) but is NOT meant to be the shipping capacity --
+			   * raising it is real follow-up work, most likely a
+			   * directory/full-metadata split so only the CURRENT song's
+			   * full st_slot_meta_t needs to stay RAM-resident while a
+			   * much smaller per-slot summary record serves the rest,
+			   * not a number to bump casually without re-measuring. */
 
 #define ST_LIBRARY_HEADER_SERIALIZED_MAX_BYTES \
 	(ST_LIBRARY_HEADER_FIXED_BYTES + (uint64_t)ST_MAX_SLOTS * ST_SLOT_RECORD_BYTES)
