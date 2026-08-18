@@ -96,11 +96,55 @@ describe("transcript audit artifacts", () => {
       }
     }
 
+    // Byte-level difference over the transmitted frames.
+    const byteDifferenceCount = differences.length;
+    // Command-order difference: positional mismatch of the operation notes.
+    const orderLen = Math.max(recA.opNotes.length, recB.opNotes.length);
+    let commandOrderDifferenceCount = 0;
+    for (let i = 0; i < orderLen; i++) if (recA.opNotes[i] !== recB.opNotes[i]) commandOrderDifferenceCount++;
+    // Device-state difference: blocks whose stored contents differ after the run.
+    const touchedBlocks = new Set<number>([...mockA.blocks.keys(), ...mockB.blocks.keys()]);
+    const deviceStateDifferenceCount = [...touchedBlocks].filter(
+      (blk) => hex(mockA.block(blk)) !== hex(mockB.block(blk)),
+    ).length;
+
+    mkdirSync(AUDIT_DIR, { recursive: true });
+    const originalPath = resolve(AUDIT_DIR, "tape-looper-original-transcript.json");
+    const inheritedPath = resolve(AUDIT_DIR, "stem-tape-inherited-transcript.json");
+    writeFileSync(originalPath, JSON.stringify(original, null, 2));
+    writeFileSync(inheritedPath, JSON.stringify(inherited, null, 2));
+
+    const fileSha = (p: string) => createHash("sha256").update(readFileSync(p)).digest("hex");
+    const originalKeys = Object.keys(original);
+    const inheritedKeys = Object.keys(inherited);
+    const wrapperOnlyKeys = originalKeys.filter((k) => !inheritedKeys.includes(k));
+    /**
+     * The two transcript FILES are different documents about different sources,
+     * so their file hashes differ by construction. What must be identical is the
+     * transmitted bytes, the command order and the resulting device state.
+     */
+    const payloadIdentical =
+      JSON.stringify({ operations: original.operations, transmitted: original.transmitted, entries: original.entries }) ===
+      JSON.stringify({
+        operations: inherited.operations,
+        transmitted: inherited.transmitted,
+        entries: inherited.entries,
+      });
+
     const comparison = {
-      schema: "stem-tape-transcript-comparison/1",
+      schema: "stem-tape-transcript-comparison/2",
       generatedAt: new Date().toISOString(),
       goldenFileSha256: original.sourceFileSha256,
       operations: OPS,
+      transcriptFileSha256: { original: fileSha(originalPath), inherited: fileSha(inheritedPath) },
+      transcriptFileHashesDiffer: fileSha(originalPath) !== fileSha(inheritedPath),
+      fileHashDifferenceExplanation:
+        "The two audit documents describe different sources and therefore carry different wrapper metadata keys " +
+        `(${wrapperOnlyKeys.join(", ")}) and a different 'source' value. Their comparable payload — operations, ` +
+        "transmitted frames and entries — is byte-identical, which is what the conformance claim rests on. Differently " +
+        "structured audit documents are not expected to share a file hash.",
+      wrapperOnlyKeys,
+      payloadIdentical,
       transmittedFrameCount: { original: recA.txHex.length, inherited: recB.txHex.length },
       transmittedSha256: {
         original: sha(recA.txHex),
@@ -112,14 +156,14 @@ describe("transcript audit artifacts", () => {
         identical: JSON.stringify(recA.opNotes) === JSON.stringify(recB.opNotes),
       },
       deviceStateIdentical: hex(mockA.block(4)) === hex(mockB.block(4)),
+      byteDifferenceCount,
+      commandOrderDifferenceCount,
+      deviceStateDifferenceCount,
       differenceCount: differences.length,
       differences,
       verdict: differences.length === 0 ? "identical" : "DIVERGENT",
     };
 
-    mkdirSync(AUDIT_DIR, { recursive: true });
-    writeFileSync(resolve(AUDIT_DIR, "tape-looper-original-transcript.json"), JSON.stringify(original, null, 2));
-    writeFileSync(resolve(AUDIT_DIR, "stem-tape-inherited-transcript.json"), JSON.stringify(inherited, null, 2));
     writeFileSync(resolve(AUDIT_DIR, "transcript-comparison.json"), JSON.stringify(comparison, null, 2));
 
     expect(comparison.differences).toEqual([]);
@@ -127,5 +171,10 @@ describe("transcript audit artifacts", () => {
     expect(comparison.operationOrder.identical).toBe(true);
     expect(comparison.deviceStateIdentical).toBe(true);
     expect(comparison.transmittedFrameCount.original).toBeGreaterThan(4);
+    expect(comparison.byteDifferenceCount).toBe(0);
+    expect(comparison.commandOrderDifferenceCount).toBe(0);
+    expect(comparison.deviceStateDifferenceCount).toBe(0);
+    expect(comparison.payloadIdentical).toBe(true);
   });
+
 });
