@@ -129,15 +129,20 @@ static bool candidate_matches_session(const st_ab_session_t *s, const st_stix_re
 	if (s->kind == ST_AB_SESSION_INIT) {
 		return !present; /* an init record must never claim a song */
 	}
-	/* REPLACE: must claim a song, at exactly this session's frozen
-	 * start block and exactly the block count THIS song needs (not
-	 * merely "fits somewhere in the region"). */
+	/* REPLACE: must claim a song, starting at exactly this session's
+	 * frozen region start, using no more than needed_song_blocks (a
+	 * CEILING -- the real wire protocol (docs section 1) has no verb to
+	 * declare a song's size before writes begin, so a caller can only
+	 * ever pass the frozen region's own capacity here, not the specific
+	 * song's exact size; st_stix_validate_fields_only()'s own bounds
+	 * check already rejects anything that doesn't fit or isn't sector-
+	 * aligned, so this is not the only guard against an oversized claim). */
 	if (!present) {
 		return false;
 	}
 	uint32_t region_start = region_start_of_slot(&s->layout, s->inactive_song_slot);
 
-	return cand->song_start_block == region_start && cand->song_block_count == s->needed_song_blocks;
+	return cand->song_start_block == region_start && cand->song_block_count <= s->needed_song_blocks;
 }
 
 st_ab_write_check_t st_ab_session_check_write(st_ab_session_t *s, uint32_t block,

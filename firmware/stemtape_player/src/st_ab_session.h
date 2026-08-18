@@ -67,8 +67,14 @@ typedef struct {
 	uint32_t inactive_index_slot; /* the ONLY index slot this session may ever write */
 	uint64_t active_generation;   /* generation at open time; a commit record must declare
 					* exactly active_generation+1 (or exactly 1 for INIT) */
-	uint32_t needed_song_blocks;  /* REPLACE only: the exact block count THIS song needs --
-					* tighter than the whole frozen region's capacity */
+	uint32_t needed_song_blocks;  /* REPLACE only: the CEILING this session may write/commit
+					* up to (the frozen region's own capacity, or a tighter
+					* bound a caller who somehow knows the exact song size
+					* may choose to pass) -- NOT necessarily the exact size
+					* of the song actually being uploaded; the real wire
+					* protocol has no verb to declare that before writes
+					* begin (docs section 1), so a real caller can only
+					* ever know the region's own capacity in advance */
 } st_ab_session_t;
 
 typedef enum {
@@ -90,9 +96,13 @@ typedef enum {
  * Opens a REPLACE session: reads both index blocks fresh (st_stix_read_library()),
  * freezes the resulting inactive_song_slot, inactive_index_slot, active
  * slots, and generation,
- * and checks `needed_song_blocks` fits the frozen song region's real capacity.
- * Refuses (session left closed/unusable) if the library requires
- * initialization or the song does not fit.
+ * and checks `needed_song_blocks` fits the frozen song region's real capacity
+ * -- `needed_song_blocks` is a CEILING a commit record's own song_block_count
+ * must not exceed (typically the region's own full capacity, since the real
+ * wire protocol gives no way to know the exact song size in advance; see
+ * st_ab_session_t's own field comment). Refuses (session left closed/
+ * unusable) if the library requires initialization or `needed_song_blocks`
+ * itself does not fit the region.
  */
 st_ab_open_result_t st_ab_session_open_replace(st_ab_session_t *s,
 						const uint8_t block_a[ST11_PHYSICAL_BLOCK_BYTES],

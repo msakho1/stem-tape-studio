@@ -967,6 +967,89 @@ static void test_ab_session_open_and_negative_writes(void)
 }
 
 /*
+ * needed_song_blocks is a CEILING, not an exact-match target: the real wire
+ * protocol has no verb for the companion to declare a song's size before
+ * writes begin (docs section 1), so a real caller (main.c, wired in a later
+ * commit) can only ever pass the frozen region's own full capacity here, not
+ * the specific song's exact block count. Opens with a ceiling of a full
+ * region (128 blocks) and proves a commit record claiming far fewer blocks
+ * (16, one sector) is still accepted -- the OLD exact-match rule would have
+ * wrongly rejected every real-world song shorter than the whole region.
+ */
+static void test_ab_session_ceiling_allows_smaller_song(void)
+{
+	memset(g_mock_device, 0, sizeof(g_mock_device));
+
+	st11_region_layout_t layout;
+
+	CHECK(st11_storage_layout_compute(0u, 272u, &layout), "ceiling test: layout computation succeeds");
+
+	uint32_t stem_checksums[ST11_STEM_COUNT] = { 0u, 0u, 0u, 0u };
+	uint8_t blank_b[ST11_PHYSICAL_BLOCK_BYTES];
+	uint8_t valid_a[ST11_PHYSICAL_BLOCK_BYTES];
+
+	memset(blank_b, 0, sizeof(blank_b));
+	/* A blank-but-initialized library (generation 1, no song, index A active,
+	 * index B blank) -- the same shape st_ab_session_open_init() itself
+	 * would have produced, so the very first real upload's destination is
+	 * song A / index B, per docs section 5's worked example. */
+	build_stix_block(valid_a, ST11_INDEX_MAGIC, ST11_SLOT_A, ST11_SLOT_A, false, 1u, 0u, 0u, 0u, 0u,
+			  stem_checksums, 0u, NULL);
+
+	st_ab_session_t s;
+	st_ab_open_result_t open_res = st_ab_session_open_replace(&s, valid_a, blank_b, &layout,
+								    layout.song_a_blocks);
+
+	CHECK(open_res == ST_AB_OPEN_OK, "ceiling test: opens with needed_song_blocks == the FULL region "
+					 "capacity (128), not any specific song's size");
+
+	uint32_t new_stem_checksums[ST11_STEM_COUNT];
+	uint32_t new_song_checksum;
+	uint8_t new_song_sector[ST11_SECTOR_BYTES];
+
+	build_one_sector_song(new_song_sector, 100u, new_stem_checksums, &new_song_checksum);
+
+	uint32_t k;
+	bool all_ok = true;
+
+	for (k = 0; k < ST11_BLOCKS_PER_SECTOR; k++) {
+		uint32_t blk = FIXTURE_SONG_A_START + k;
+
+		if (st_ab_session_check_write(&s, blk, new_song_sector + (size_t)k * ST11_PHYSICAL_BLOCK_BYTES) !=
+		    ST_AB_WRITE_OK) {
+			all_ok = false;
+		}
+		memcpy(g_mock_device + (size_t)blk * ST11_PHYSICAL_BLOCK_BYTES,
+		       new_song_sector + (size_t)k * ST11_PHYSICAL_BLOCK_BYTES, ST11_PHYSICAL_BLOCK_BYTES);
+	}
+	CHECK(all_ok, "ceiling test: a real 16-block (one-sector) song writes fine inside a 128-block ceiling");
+
+	uint8_t commit_block[ST11_PHYSICAL_BLOCK_BYTES];
+	st_stix_record_t candidate;
+
+	/* song_block_count == 16, FAR below the session's 128-block ceiling --
+	 * this is exactly what the old `== needed_song_blocks` rule would have
+	 * rejected as BAD_COMMIT_RECORD. */
+	build_stix_block(commit_block, 0u, ST11_SLOT_B, ST11_SLOT_A, true, 2u, FIXTURE_SONG_A_START,
+			  ST11_BLOCKS_PER_SECTOR, 100u, 1u, new_stem_checksums, new_song_checksum, &candidate);
+	CHECK(st_ab_session_check_write(&s, 1u, commit_block) == ST_AB_WRITE_OK,
+	      "ceiling test: ACCEPT a draft record whose song_block_count (16) is LESS than the session's "
+	      "ceiling (128) -- the ceiling bounds a maximum, not an exact size");
+
+	uint8_t scratch_sector[ST11_SECTOR_BYTES];
+	bool verified = st_ab_session_verify_song_before_commit(&s, &candidate, mock_read_block, NULL,
+								 scratch_sector);
+
+	CHECK(verified, "ceiling test: verify_song_before_commit succeeds for the shorter-than-ceiling song");
+
+	st_ab_session_mark_song_verified(&s);
+	build_stix_block(commit_block, ST11_INDEX_MAGIC, ST11_SLOT_B, ST11_SLOT_A, true, 2u, FIXTURE_SONG_A_START,
+			  ST11_BLOCKS_PER_SECTOR, 100u, 1u, new_stem_checksums, new_song_checksum, NULL);
+	CHECK(st_ab_session_check_write(&s, 1u, commit_block) == ST_AB_WRITE_OK,
+	      "ceiling test: the magic-committing write for the same shorter-than-ceiling song succeeds");
+}
+
+/*
  * The open-time gates: NOT_INITIALIZED / ALREADY_INITIALIZED /
  * NOT_CONFIRMED / CAPACITY -- each refuses BEFORE any write is ever
  * attempted, and each is a distinct wrong-precondition a real caller can
@@ -1042,6 +1125,7 @@ int main(void)
 	RUN(test_stcp_build_matches_fixture_byte_for_byte);
 	RUN(test_region_of_block_matches_fixture_layout);
 	RUN(test_ab_session_open_and_negative_writes);
+	RUN(test_ab_session_ceiling_allows_smaller_song);
 	RUN(test_ab_session_open_errors);
 
 	printf("\n");
