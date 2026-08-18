@@ -852,6 +852,53 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Stem Tape v1.1 wire-transcript replay (real recorded tx/rx bytes)
+        # Directive step 8's transcript fixtures: handoff/v1.1/transcripts/
+        # *.json are REAL, byte-for-byte recorded P/Q/R/W/F wire sessions
+        # (SHA-256-verified against handoff/v1.1/SHA256SUMS.txt by
+        # gen_transcript_bin.py BEFORE this ever compiles -- a corrupted or
+        # substituted transcript fails closed right here, never reaching
+        # replay). test_stem_v11_transcripts.c replays every recorded byte
+        # against the SAME real st_ab_session.c/st_stix.c/st_stcp.c
+        # functions main.c's 'Q'/'R'/'W'/'F' handlers call -- see that
+        # file's own doc comment for exactly what is and isn't
+        # reimplemented here (nothing that makes a decision; only wire
+        # framing and the same short call-order any real caller needs).
+        # This step covers the two successful-upload transcripts
+        # (upload-1-successful.json, upload-2-successful.json, replayed
+        # back-to-back on one continuous mock device, matching upload-2's
+        # own "over the same storage after a reconnect"); the four
+        # interruption/corruption transcripts are a separate, later step.
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          mkdir -p build-transcripts
+          python3 firmware/stemtape_player/tests/gen_transcript_bin.py . \
+            upload-1-successful build-transcripts/upload-1-successful.bin
+          python3 firmware/stemtape_player/tests/gen_transcript_bin.py . \
+            upload-2-successful build-transcripts/upload-2-successful.bin
+          cc -std=c11 -Wall -Wextra -Ifirmware/stemtape_player/src \
+            firmware/stemtape_player/src/st_crc32.c \
+            firmware/stemtape_player/src/st_checksum32.c \
+            firmware/stemtape_player/src/st_sector_v11.c \
+            firmware/stemtape_player/src/st_stix.c \
+            firmware/stemtape_player/src/st_stcp.c \
+            firmware/stemtape_player/src/st_ab_session.c \
+            firmware/stemtape_player/tests/test_stem_v11_transcripts.c \
+            -o audit/test_stem_v11_transcripts
+          ./audit/test_stem_v11_transcripts audit/transcript-replay-results.json \
+            | tee audit/stem-v11-transcript-replay.txt
+          {
+            echo '### Stem Tape v1.1 wire-transcript replay'
+            echo '```text'
+            cat audit/stem-v11-transcript-replay.txt
+            echo '```'
+            echo '#### Machine-readable result'
+            echo '```json'
+            cat audit/transcript-replay-results.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Image assertions (origin, bounds, storage, UICR, entry, vectors, size, BIN identity)
         working-directory: ${{ github.workspace }}/project
         run: |
