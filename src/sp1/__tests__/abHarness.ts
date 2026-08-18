@@ -142,6 +142,21 @@ export async function withFirstSong(frames = 680, sectorsPerSong = 8): Promise<B
   };
 }
 
+/**
+ * A fresh device holding exactly the baseline's stored blocks. Used by the
+ * exhaustive sweep so each of the hundreds of points starts from identical
+ * storage without re-running initialization and the first upload.
+ */
+export async function forkBaseline(b: Baseline): Promise<{ mock: MockSp1; t: StemTapeTransport }> {
+  const clean = { ...b.mock.opts };
+  delete clean.onWrite;
+  delete clean.onRead;
+  delete clean.onFlush;
+  const mock = new MockSp1(clean);
+  for (const [k, v] of b.mock.blocks) mock.blocks.set(k, v.slice(0));
+  return { mock, t: await attach(mock) };
+}
+
 export type When = "before" | "after";
 
 /** Interrupt the connection exactly at protocol operation `op`. */

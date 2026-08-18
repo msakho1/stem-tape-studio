@@ -30,6 +30,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   clearInjection,
+  forkBaseline,
   interruptAt,
   reconnect,
   regionHash,
@@ -121,13 +122,15 @@ describe("exhaustive interruption sweep (v1.1 A/B)", () => {
       priorBytesUnchanged: boolean;
     }[] = [];
 
+    const baseline = await withFirstSong(FRAMES);
+    const two = await song("TWO", FRAMES, 11);
+    const twoImage = songImage(two);
+    expect(regionsDisjoint(baseline.caps)).toBe(true);
+
     for (const o of ops) {
       for (const when of ["before", "after"] as When[]) {
-        const b = await withFirstSong(FRAMES);
-        expect(regionsDisjoint(b.caps)).toBe(true);
+        const b = { ...baseline, ...(await forkBaseline(baseline)) };
 
-        const two = await song("TWO", FRAMES, 11);
-        const twoImage = songImage(two);
         interruptAt(b.mock, b.mock.ops + o.op, when);
         const res = await b.t.uploadSong({ song: two });
         clearInjection(b.mock);
