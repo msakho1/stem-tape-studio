@@ -976,29 +976,34 @@ jobs:
           check st_midi_decode_ump32
           check st_midi_queue_push
           # Stem Tape v1.1: the real Q -> STCP capability handler + session
-          # refresh (main.c's own two new functions), and the v1.1 A/B
-          # storage engine's top-level entry points main.c directly calls --
-          # boot-time region-layout computation, STIX v2 active-index
-          # selection (used identically by 'Q', the boot-time A/B-selection
-          # log, and session-open), the STCP capability-reply builder, and
-          # the write-safety session's two open paths. Deeper internals
-          # these call (st_ab_session_check_write(), st_stix_validate(),
-          # the STSC sector codec, the FNV-1a checksum, CRC-32) are
-          # deliberately NOT checked yet -- guarded 'W' (a later commit) is
-          # what actually reaches st_ab_session_check_write(), and until
-          # then this gate can't yet confirm which of those deeper pure
-          # functions -Os keeps as standalone symbols vs. inlines, the same
-          # "confirmed by a real CI run, not anticipated" discipline this
-          # gate's own comments already apply to trk_blk()/xfer_service()/
-          # uac2_dev/midi_dev above. That later commit extends this list
-          # once its own CI run confirms what's actually present.
+          # refresh + guarded write (main.c's own four new functions), and
+          # the v1.1 A/B storage engine's top-level entry points main.c
+          # directly calls -- boot-time region-layout computation, STIX v2
+          # active-index selection (used identically by 'Q', the boot-time
+          # A/B-selection log, and session-open), the STCP capability-reply
+          # builder, the write-safety session's two open paths, the guarded-
+          # write path's own real gate call, the pre-commit song-checksum
+          # verification, and the STIX record deserializer the guarded-write
+          # path uses to inspect a candidate commit block. Deeper internals
+          # these in turn call (st_stix_validate(), the STSC sector codec,
+          # the FNV-1a checksum, CRC-32) are still NOT checked -- this gate
+          # can't yet confirm which of those deeper pure functions -Os keeps
+          # as standalone symbols vs. inlines without a real CI run to show
+          # it, the same "confirmed by a real CI run, not anticipated"
+          # discipline this gate's own comments already apply to
+          # trk_blk()/xfer_service()/uac2_dev/midi_dev above.
           check xfer_v11_refresh_session
           check xfer_v11_send_caps
+          check xfer_v11_write
+          check xfer_v11_block_read
           check st_stix_read_library
           check st11_storage_layout_compute
           check st11_stcp_build
           check st_ab_session_open_replace
           check st_ab_session_open_init
+          check st_ab_session_check_write
+          check st_ab_session_verify_song_before_commit
+          check st_stix_deserialize
 
           # REQUIRED-ABSENT: any of these appearing in the final ELF (any nm
           # symbol type -- function OR data/bss) means recording, overdub,
@@ -1020,11 +1025,11 @@ jobs:
           }
           # eMMC/index write primitives -- meta_write_blocks() is removed
           # from src/main.c entirely (no definition left to link); this
-          # gate does not forbid emmc_write_blocks() itself (guarded 'W',
-          # a later commit, will legitimately need it for the v1.1 write-
-          # safety session's validated path) -- see the STRICT persistence
-          # safety gate step below, which proves every eMMC write call
-          # site instead of forbidding the symbol.
+          # gate does not forbid emmc_write_blocks() itself (the v1.1
+          # write-safety session's guarded 'W' legitimately needs it) --
+          # see the STRICT persistence safety gate step below, which
+          # proves every eMMC write call site instead of forbidding the
+          # symbol.
           absent meta_write_blocks
           # the live-input record ring (32 KB) and any recording/overdub
           # state -- must never come back, with or without USB audio.
@@ -1126,20 +1131,20 @@ jobs:
         # to durably persist validated 4-stem songs to eMMC, so m0_safety_
         # gate.py's blanket "no eMMC write capability may be linked" property
         # is the wrong gate here -- eMMC writes are the exact capability the
-        # Stem Tape v1.1 write path (once wired) legitimately needs.
+        # Stem Tape v1.1 write path legitimately needs.
         # stemtape_player_safety_gate.py is a DIFFERENT, still strictly
         # fail-closed gate, scoped to this target: every other forbidden
         # category (internal-flash, NVMC, UICR/APPROTECT, any OTHER disk/
         # filesystem/NVS subsystem, MCUboot) stays exactly as forbidden as it
-        # is for stemtape-m0, and any real emmc_write_blocks call site is
+        # is for stemtape-m0, and the one real emmc_write_blocks call site is
         # allowed ONLY when proven -- by real source inspection, evidence
-        # printed below -- to be inside an independently region-bounded
-        # write adapter with its own real bounds-check pattern confirmed
-        # present in its own source body (currently: none exist in this
-        # image at all, since the old v1.0 adapters were deleted and
-        # guarded v1.1 'W' is a later commit -- pass D's own report reflects
-        # that transitional truth). m0_safety_gate.py itself is untouched
-        # and still strictly applied, unchanged, to the
+        # printed below -- to be inside xfer_v11_write(), the sole write
+        # adapter for the v1.1 A/B storage engine, with its real safety-
+        # mechanism pattern (g_v11_layout_ready, st_ab_session_check_write())
+        # confirmed present in its own source body. The retired v1.0
+        # adapters must have zero call sites -- they have no definition left
+        # to link in this derivative at all. m0_safety_gate.py itself is
+        # untouched and still strictly applied, unchanged, to the
         # stemtape-m0 job below.
         working-directory: ${{ github.workspace }}/project
         run: |

@@ -58,58 +58,60 @@ def check(ok: bool, label: str):
 
 SHAPES = [
     ("plain single-line",
-     "static int xfer_songdata_write(uint32_t sector, const uint8_t data[8192], void *ctx)",
-     "xfer_songdata_write"),
+     "static int xfer_v11_write(uint32_t block, const uint8_t data[512])",
+     "xfer_v11_write"),
     ("attribute BEFORE the return type, same line",
-     "static __attribute__((noinline, noclone)) int xfer_songdata_write(uint32_t sector, const uint8_t data[8192], void *ctx)",
-     "xfer_songdata_write"),
+     "static __attribute__((noinline, noclone)) int xfer_v11_write(uint32_t block, const uint8_t data[512])",
+     "xfer_v11_write"),
     ("attribute BETWEEN the return type and the name, same line",
-     "static int __attribute__((noinline, noclone)) xfer_songdata_write(uint32_t sector, const uint8_t data[8192], void *ctx)",
-     "xfer_songdata_write"),
+     "static int __attribute__((noinline, noclone)) xfer_v11_write(uint32_t block, const uint8_t data[512])",
+     "xfer_v11_write"),
     ("attribute AFTER the parameter list, same line",
-     "static int xfer_songdata_write(uint32_t sector, const uint8_t data[8192], void *ctx) __attribute__((noinline, noclone))",
-     "xfer_songdata_write"),
+     "static int xfer_v11_write(uint32_t block, const uint8_t data[512]) __attribute__((noinline, noclone))",
+     "xfer_v11_write"),
     ("attribute BETWEEN return type and name, split onto its OWN line "
      "(the exact shape a real CI run caught misparsing)",
-     "static int __attribute__((noinline, noclone))\nxfer_songdata_write(uint32_t sector, const uint8_t data[8192], void *ctx)",
-     "xfer_songdata_write"),
+     "static int __attribute__((noinline, noclone))\nxfer_v11_write(uint32_t block, const uint8_t data[512])",
+     "xfer_v11_write"),
     ("attribute AFTER the parameter list, on its own continuation line "
      "(this codebase's actual current main.c shape)",
-     "static int xfer_songdata_write(uint32_t sector, const uint8_t data[8192], void *ctx)\n\t__attribute__((noinline, noclone))",
-     "xfer_songdata_write"),
+     "static int xfer_v11_write(uint32_t block, const uint8_t data[512])\n\t__attribute__((noinline, noclone))",
+     "xfer_v11_write"),
     ("multi-line parameter list, no attribute",
-     "static int xfer_songdata_write(uint32_t sector,\n\tconst uint8_t data[8192],\n\tvoid *ctx)",
-     "xfer_songdata_write"),
+     "static int xfer_v11_write(uint32_t block,\n\tconst uint8_t data[512])",
+     "xfer_v11_write"),
     ("multi-line parameter list WITH a trailing attribute on its own line",
-     "static int xfer_songdata_write(uint32_t sector,\n\tconst uint8_t data[8192],\n\tvoid *ctx)\n\t__attribute__((noinline, noclone))",
-     "xfer_songdata_write"),
+     "static int xfer_v11_write(uint32_t block,\n\tconst uint8_t data[512])\n\t__attribute__((noinline, noclone))",
+     "xfer_v11_write"),
     ("pointer return type",
-     "static uint8_t *xfer_songdata_write(uint32_t sector, void *ctx)",
-     "xfer_songdata_write"),
+     "static uint8_t *xfer_v11_write(uint32_t block, void *ctx)",
+     "xfer_v11_write"),
     ("pointer-to-const return type",
-     "static const uint8_t *xfer_songdata_write(uint32_t sector, void *ctx)",
-     "xfer_songdata_write"),
+     "static const uint8_t *xfer_v11_write(uint32_t block, void *ctx)",
+     "xfer_v11_write"),
     ("void-argument, no-parameter function",
-     "static bool xfer_do_commit(void)",
-     "xfer_do_commit"),
+     "static void xfer_v11_refresh_session(void)",
+     "xfer_v11_refresh_session"),
     ("void-argument function, attribute between return type and name",
-     "static bool __attribute__((noinline, noclone)) xfer_do_commit(void)",
-     "xfer_do_commit"),
+     "static void __attribute__((noinline, noclone)) xfer_v11_refresh_session(void)",
+     "xfer_v11_refresh_session"),
     ("void-argument function, attribute trailing on its own line",
-     "static bool xfer_do_commit(void)\n\t__attribute__((noinline, noclone))",
-     "xfer_do_commit"),
+     "static void xfer_v11_refresh_session(void)\n\t__attribute__((noinline, noclone))",
+     "xfer_v11_refresh_session"),
     ("a project macro standing in for a return-type-adjacent attribute "
      "(an object-like macro token, no parens of its own in source -- "
      "exactly how e.g. `#define ST_AUDIT_NOINLINE __attribute__((...))` "
      "would appear UNEXPANDED in the raw source this parser reads)",
-     "static ST_AUDIT_NOINLINE int xfer_songdata_write(uint32_t sector, const uint8_t data[8192], void *ctx)",
-     "xfer_songdata_write"),
-    ("xfer_staging_write, the second real adapter",
-     "static int xfer_staging_write(uint32_t sector, const uint8_t data[8192], void *ctx)",
-     "xfer_staging_write"),
-    ("xfer_header_write, the third real adapter",
-     "static int xfer_header_write(uint32_t sector, const uint8_t data[8192], void *ctx)",
-     "xfer_header_write"),
+     "static ST_AUDIT_NOINLINE int xfer_v11_write(uint32_t block, const uint8_t data[512])",
+     "xfer_v11_write"),
+    ("xfer_v11_send_caps, a second real v1.1 function using this exact "
+     "attribute pattern",
+     "static void xfer_v11_send_caps(void)",
+     "xfer_v11_send_caps"),
+    ("xfer_v11_block_read, a real v1.1 function with a genuinely different "
+     "signature shape (three parameters, address-taken, no attribute)",
+     "static int xfer_v11_block_read(uint32_t block, uint8_t out[512], void *ctx)",
+     "xfer_v11_block_read"),
     ("a non-function initializer must NOT be read as a function at all",
      "static const uint8_t ST_SUBBLOCK_PHYSICAL_ORDER[4] = { 0u, 2u, 1u, 3u }",
      None),
@@ -145,13 +147,13 @@ def build_fixture_lines(sig_line1: str, sig_line2: str | None, body_call: str):
 
 
 fixture = build_fixture_lines(
-    "static int xfer_songdata_write(uint32_t sector, const uint8_t data[8192], void *ctx)",
+    "static int xfer_v11_write(uint32_t block, const uint8_t data[512])",
     "\t__attribute__((noinline, noclone));",
-    "emmc_write_blocks(blk, data, 16)",
+    "emmc_write_blocks(block, data, 1)",
 ) + [""] + build_fixture_lines(
-    "static int xfer_songdata_write(uint32_t sector, const uint8_t data[8192], void *ctx)",
+    "static int xfer_v11_write(uint32_t block, const uint8_t data[512])",
     None,
-    "emmc_write_blocks(blk, data, 16)",
+    "emmc_write_blocks(block, data, 1)",
 )
 # The first block above is a bare forward declaration (never opens a body,
 # so it contributes nothing to index_functions()'s output); the second is
@@ -160,15 +162,15 @@ fixture = build_fixture_lines(
 func_of_line = index_functions(fixture)
 sites = find_call_sites(fixture, func_of_line)
 write_sites = {fn: lns for (fn, sym), lns in sites.items() if sym == "emmc_write_blocks"}
-check(write_sites == {"xfer_songdata_write": [12]},
+check(write_sites == {"xfer_v11_write": [12]},
       f"index_functions()+find_call_sites(): the real main.c forward-declaration "
       f"shape attributes the emmc_write_blocks() call to the complete, correct "
       f"name (got {write_sites!r})")
-check("xfer_songdata_write" in ALLOWED_WRITE_FUNCS,
-      "sanity: 'xfer_songdata_write' (the real name) is the exact "
+check("xfer_v11_write" in ALLOWED_WRITE_FUNCS,
+      "sanity: 'xfer_v11_write' (the real name) is the exact "
       "ALLOWED_WRITE_FUNCS key")
-check("fer_songdata_write" not in ALLOWED_WRITE_FUNCS,
-      "sanity: the historically mangled name is NOT an allowed key "
+check("fer_v11_write" not in ALLOWED_WRITE_FUNCS,
+      "sanity: a historically-mangled-shaped name is NOT an allowed key "
       "(no substring/suffix exception was added to fix this)")
 
 print()
@@ -180,12 +182,12 @@ print()
 # ============================================================================
 
 NEGATIVES = [
-    ("a truncated name identical to the historical bug's own mangled output",
-     "static int fer_songdata_write(uint32_t sector, const uint8_t data[8192], void *ctx)"),
+    ("a truncated name in the shape of the historical bug's own mangled output",
+     "static int fer_v11_write(uint32_t block, const uint8_t data[512])"),
     ("a lookalike name with an extra prefix",
-     "static int evil_xfer_songdata_write(uint32_t sector, const uint8_t data[8192], void *ctx)"),
+     "static int evil_xfer_v11_write(uint32_t block, const uint8_t data[512])"),
     ("a lookalike name with an extra suffix",
-     "static int xfer_songdata_write_unbounded(uint32_t sector, const uint8_t data[8192], void *ctx)"),
+     "static int xfer_v11_write_unbounded(uint32_t block, const uint8_t data[512])"),
     ("a direct call from `main`",
      "int main(void)"),
     ("a direct call from a USB-audio callback",
@@ -214,11 +216,13 @@ print()
 
 # ============================================================================
 # Part 4: end-to-end against the REAL, current firmware/stemtape_player/
-# src/main.c -- exactly three emmc_write_blocks() call sites, enclosed by
-# exactly the three allowed adapters, each with its real bounds-check
-# pattern (lower bound constant, upper bound constant, `return -1;` guard)
-# genuinely present in its own body. Run from the repo root, matching every
-# other script/test in this repo's own convention.
+# src/main.c -- exactly ONE emmc_write_blocks() call site, enclosed by the
+# one allowed v1.1 write adapter (xfer_v11_write()), with its real safety-
+# mechanism pattern (g_v11_layout_ready, st_ab_session_check_write(), an
+# early `return -1;` guard) genuinely present in its own body -- and proves
+# the retired v1.0 adapters no longer exist as functions at all. Run from
+# the repo root, matching every other script/test in this repo's own
+# convention.
 # ============================================================================
 
 DERIVED_MAIN_C = gate.DERIVED_MAIN_C
@@ -231,30 +235,40 @@ if os.path.exists(DERIVED_MAIN_C):
                   if sym == "meta_write_blocks" for ln in lns]
     check(meta_sites == [], "real main.c: meta_write_blocks() has zero call sites")
 
-    # Stem Tape v1.1 migration, transitional commit: the old v1.0 Gate 2
-    # write adapters (xfer_staging_write/xfer_header_write/
-    # xfer_songdata_write, ALLOWED_WRITE_FUNCS's three keys) are DELETED
-    # from real main.c, not merely disabled -- see this commit's own log.
-    # The new v1.1 guarded write path is wired in a FOLLOWING commit, which
-    # updates this section again to assert exactly one real
-    # emmc_write_blocks() call site inside its own new adapter. Until then,
-    # real main.c has ZERO emmc_write_blocks() call sites at all -- no
-    # write path, from either contract, is reachable in this image.
     real_write_sites = {fn: lns for (fn, sym), lns in real_sites.items()
                          if sym == "emmc_write_blocks"}
-    check(set(real_write_sites) == set(),
-          f"real main.c: zero emmc_write_blocks() call sites (v1.0 adapters deleted, "
-          f"v1.1 guarded write not yet wired) -- found {sorted(real_write_sites)}")
+    check(set(real_write_sites) == {"xfer_v11_write"},
+          f"real main.c: emmc_write_blocks() call site(s) enclosed by exactly "
+          f"the one allowed adapter -- {sorted(real_write_sites)}")
+    total_sites = sum(len(v) for v in real_write_sites.values())
+    check(total_sites == 1,
+          f"real main.c: exactly 1 emmc_write_blocks() call site total (got {total_sites})")
+
+    lower_const, upper_const = ALLOWED_WRITE_FUNCS.get("xfer_v11_write", (None, None))
+    lns = real_write_sites.get("xfer_v11_write")
+    if lns:
+        start, end = function_body_bounds(real_lines, lns[0])
+        body = "\n".join(real_lines[start:end])
+        has_lower = lower_const in body
+        has_upper = upper_const in body
+        has_return = re.search(r"return\s+-1\s*;", body) is not None
+        check(has_lower and has_upper and has_return,
+              f"real main.c: xfer_v11_write()'s own body contains its lower bound "
+              f"({lower_const}: {has_lower}), upper bound ({upper_const}: {has_upper}), "
+              f"and an early `return -1;` guard ({has_return})")
+    else:
+        check(False, "real main.c: xfer_v11_write() has a real emmc_write_blocks() call site")
 
     # index_functions()'s own values() (not a raw text search, which would
     # also match this very doc comment) are the actual top-level functions
-    # DEFINED in real main.c -- confirms the three old v1.0 adapters no
+    # DEFINED in real main.c -- confirms the retired v1.0 adapters no
     # longer exist as functions at all, not merely that nothing calls them.
+    OLD_V10_ADAPTERS = ["xfer_staging_write", "xfer_header_write", "xfer_songdata_write"]
     real_defined_funcs = {fn for fn in real_func_of_line.values() if fn is not None}
-    stale_names = sorted(set(ALLOWED_WRITE_FUNCS) & real_defined_funcs)
+    stale_names = sorted(set(OLD_V10_ADAPTERS) & real_defined_funcs)
     check(stale_names == [],
-          "real main.c: none of the old v1.0 adapter functions "
-          f"({sorted(ALLOWED_WRITE_FUNCS)}) are defined any more -- found {stale_names}")
+          f"real main.c: none of the old v1.0 adapter functions ({OLD_V10_ADAPTERS}) "
+          f"are defined any more -- found {stale_names}")
 else:
     print(f"[SKIP] real main.c not found at {DERIVED_MAIN_C} -- run from the repo root "
           f"to exercise part 4 (parts 1-3 already ran against synthetic fixtures)")

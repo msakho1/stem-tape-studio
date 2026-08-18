@@ -1153,11 +1153,19 @@ static uint32_t             g_v11_device_blocks_total; /* the real, EXT_CSD-dete
  * is written"), which re-reads both real index blocks and re-freezes the
  * active/inactive pair from that fresh read -- exactly the required
  * correction: the destination pair is snapshotted once per session, not
- * re-derived per write. A real 'W' handler that consults this session is
- * wired in a later commit; until then this session's state has no
- * observable effect on storage -- every 'W' still fails closed exactly as
- * Phase 1 left it below. */
+ * re-derived per write. The real 'W' handler (xfer_v11_write(), defined
+ * near xfer_service() below) routes every v1.1-region write through
+ * st_ab_session_check_write() against this session. */
 static st_ab_session_t g_v11_session;
+
+/* Non-stack (static) ST11_SECTOR_BYTES (8192-byte) scratch buffer for
+ * st_ab_session_verify_song_before_commit()'s real read-back -- same "no
+ * 8192-byte automatic stack buffer" discipline the retired v1.0 code's own
+ * s_commit_copy_buf followed. Used ONLY inside xfer_v11_write(), itself only
+ * ever reached one command at a time (xfer_service() services one command
+ * per call, audio paused throughout a transfer), so there is no concurrent
+ * use to guard against. */
+static uint8_t s_v11_verify_scratch[ST11_SECTOR_BYTES];
 #endif /* SP1_XFER_ENABLE */
 
 static volatile uint32_t g_consume_pos;          /* shared playhead (loop samples, free-running) */
@@ -2262,6 +2270,78 @@ static void xfer_v11_send_caps(void)
 	cdc_tx(reply, sizeof reply);
 }
 
+/* Read-adapter for st_ab_session_verify_song_before_commit()'s injected I/O
+ * (st11_block_read_fn) -- a thin wrapper over the real emmc_read_blocks(),
+ * matching st_transfer.h's own injected-function convention the retired
+ * v1.0 code used identically (xfer_sector_read()). Its address is taken
+ * (passed as a function pointer below), never called directly, so it is
+ * not an -Os single-call-site inlining candidate the way
+ * xfer_v11_refresh_session()/xfer_v11_send_caps() are -- xfer_sector_read()
+ * never needed a noinline attribute either, for the same reason. */
+static int xfer_v11_block_read(uint32_t block, uint8_t out[ST11_PHYSICAL_BLOCK_BYTES], void *ctx)
+{
+	ARG_UNUSED(ctx);
+	return emmc_read_blocks(block, out, 1) ? 0 : -1;
+}
+
+/*
+ * THE only function in this firmware image that can ever call
+ * emmc_write_blocks() for the v1.1 A/B storage engine. Every block this
+ * accepts has already been proven safe by st_ab_session_check_write()
+ * against g_v11_session's CURRENT frozen destination pair (see
+ * st_ab_session.h's own doc: active song/index rejected outright, anything
+ * outside the frozen pair rejected, a commit record validated field-by-
+ * field and generation-checked before being allowed to land) -- bounded by
+ * this function's OWN body, independent of caller, the same discipline the
+ * retired v1.0 adapters (xfer_staging_write() et al.) established. See the
+ * STRICT persistence safety gate's own ALLOWED_WRITE_FUNCS entry for this
+ * function, which checks that exact property by source inspection.
+ *
+ * Before the ONE magic-committing write of a REPLACE session is allowed
+ * through, this firmware verifies the actual song bytes already on the
+ * frozen region against the candidate record's own declared checksums --
+ * real injected I/O via xfer_v11_block_read() above -- rather than ever
+ * trusting the companion's own claim that its upload succeeded (the user's
+ * explicit requirement: "do not rely solely on the companion behaving
+ * correctly"). A candidate that fails this real verification is never
+ * marked verified, so st_ab_session_check_write() itself refuses the
+ * commit -- this function does not duplicate that refusal, only runs the
+ * verify attempt once, before the decision that matters.
+ */
+static int xfer_v11_write(uint32_t block, const uint8_t data[ST11_PHYSICAL_BLOCK_BYTES])
+	__attribute__((noinline, noclone));
+static int xfer_v11_write(uint32_t block, const uint8_t data[ST11_PHYSICAL_BLOCK_BYTES])
+{
+	if (!g_v11_layout_ready) {
+		return -1;
+	}
+
+	st11_region_id_t region = st11_region_of_block(&g_v11_layout, block);
+	bool is_frozen_index = (g_v11_session.inactive_index_slot == ST11_SLOT_A && region == ST11_REGION_INDEX_A) ||
+				(g_v11_session.inactive_index_slot == ST11_SLOT_B && region == ST11_REGION_INDEX_B);
+
+	if (g_v11_session.open && !g_v11_session.closed && g_v11_session.kind == ST_AB_SESSION_REPLACE &&
+	    !g_v11_session.song_verified && is_frozen_index) {
+		uint32_t magic = (uint32_t)data[0] | ((uint32_t)data[1] << 8) | ((uint32_t)data[2] << 16) |
+				  ((uint32_t)data[3] << 24);
+
+		if (magic == ST11_INDEX_MAGIC) {
+			st_stix_record_t candidate;
+
+			st_stix_deserialize(data, &candidate);
+			if (st_ab_session_verify_song_before_commit(&g_v11_session, &candidate, xfer_v11_block_read,
+								     NULL, s_v11_verify_scratch)) {
+				st_ab_session_mark_song_verified(&g_v11_session);
+			}
+		}
+	}
+
+	if (st_ab_session_check_write(&g_v11_session, block, data) != ST_AB_WRITE_OK) {
+		return -1;
+	}
+	return emmc_write_blocks(block, data, 1) ? 0 : -1;
+}
+
 /* STEM TAPE PHASE 1: g_xfer_dirty (which track regions the host wrote this
  * transfer session, used by the classic committer to merge host writes into
  * the durable index) and xfer_commit() (the classic looper's write-cache-to-
@@ -2328,7 +2408,7 @@ static void xfer_service(void)
 				     SLOT0_BLOCK, TRACK_BLOCKS, META_MAGIC };
 		memcpy(r + 4, info, sizeof info);
 		cdc_tx(r, sizeof r);
-	} else if (cmd == 'R' || cmd == 'W') {                 /* read one block / (Phase 1: 'W' is read-only-safe) */
+	} else if (cmd == 'R' || cmd == 'W') {                 /* read one block / write one block (v1.1-region only) */
 		uint8_t a[4];
 		if (!cdc_rx(a, 4, 1000)) { xfer_resync(cmd == 'R' ? 'e' : 'E'); return; }
 		uint32_t blk = (uint32_t)a[0] | ((uint32_t)a[1] << 8) |
@@ -2336,20 +2416,30 @@ static void xfer_service(void)
 		uint32_t total = SLOT0_BLOCK + (uint32_t)NUM_SLOTS * NTRK * TRACK_BLOCKS;
 		static uint8_t sec[EMMC_BLOCK_SIZE];
 		if (cmd == 'R') {
-			bool ok = (blk < total) && emmc_read_blocks(blk, sec, 1);
+			/* Reads are always safe: the classic looper's own block
+			 * address space (unchanged, read-only-safe) UNION the v1.1
+			 * region (docs section 5 steps 9-10/15-16 explicitly read
+			 * back what was just written, to verify it byte-for-byte
+			 * before ever trusting it -- 'R' has to reach those blocks
+			 * for that to be possible at all). */
+			bool in_v11_region =
+				g_v11_layout_ready && st11_region_of_block(&g_v11_layout, blk) != ST11_REGION_NONE;
+			bool ok = (blk < total || in_v11_region) && emmc_read_blocks(blk, sec, 1);
 			uint8_t h = ok ? 'r' : 'e';
 			cdc_tx(&h, 1);
 			if (ok) cdc_tx(sec, EMMC_BLOCK_SIZE);
 		} else {
-			/* STEM TAPE PHASE 1: storage fails closed -- read (and discard)
-			 * the payload so the host's framing stays in sync, but NEVER
-			 * write it. Deterministic error response every time; no
-			 * emmc_write_blocks() call, no g_xfer_dirty bookkeeping (that
-			 * bookkeeping only ever fed the Phase-2 validated commit path,
-			 * which does not exist in this image -- see the removed 'Z'
-			 * verb). Phase 2 reintroduces a real, validated write path. */
-			(void)cdc_rx(sec, EMMC_BLOCK_SIZE, 4000);
-			uint8_t h = 'E';
+			/* Stem Tape v1.1: the classic looper's own block address
+			 * space stays exactly as read-only-safe as Phase 1 left it
+			 * -- xfer_v11_write() is bounded by its own body to the
+			 * v1.1 region, and only accepts a block there when
+			 * st_ab_session_check_write() proves it safe against the
+			 * CURRENT session's frozen destination pair. */
+			if (!cdc_rx(sec, EMMC_BLOCK_SIZE, 4000)) {
+				xfer_resync('E');
+				return;
+			}
+			uint8_t h = (xfer_v11_write(blk, sec) == 0) ? (uint8_t)ST11_WRITE_ACK : (uint8_t)'E';
 			cdc_tx(&h, 1);
 		}
 	} else if (cmd == 'F') {                               /* Phase 1: ack only -- never persists */
