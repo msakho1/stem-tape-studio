@@ -3,6 +3,16 @@
   "frames": 680,
   "protocolOperations": 73,
   "injectedInterruptionPoints": 146,
+  "totals": {
+    "totalPoints": 146,
+    "previousSurvived": 139,
+    "newCommitted": 7,
+    "byOutcome": {
+      "failed": 137,
+      "unknown": 8,
+      "committed": 1
+    }
+  },
   "byPhase": {
     "preflight-index-read": {
       "points": 4,
@@ -59,6 +69,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -69,6 +80,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -79,6 +91,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -89,6 +102,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -99,6 +113,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -109,6 +124,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -119,6 +135,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -129,6 +146,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -139,6 +157,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -149,6 +168,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -159,6 +179,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -169,6 +190,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -179,6 +201,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -189,6 +212,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -199,6 +223,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -209,6 +234,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -219,6 +245,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -229,6 +256,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -239,6 +267,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -249,6 +278,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -259,6 +289,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -269,6 +300,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -279,6 +311,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -289,6 +322,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -299,6 +333,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -309,6 +344,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -319,6 +355,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -329,6 +366,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -339,6 +377,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -349,6 +388,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -359,6 +399,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -369,6 +410,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -379,6 +421,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -389,6 +432,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -399,6 +443,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -409,6 +454,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -419,6 +465,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -429,6 +476,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -439,6 +487,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -449,6 +498,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -459,6 +509,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -469,6 +520,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -479,6 +531,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -489,6 +542,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -499,6 +553,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -509,6 +564,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -519,6 +575,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -529,6 +586,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -539,6 +597,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -549,6 +608,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -559,6 +619,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -569,6 +630,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -579,6 +641,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -589,6 +652,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -599,6 +663,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -609,6 +674,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -619,6 +685,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -629,6 +696,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -639,6 +707,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -649,6 +718,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -659,6 +729,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -669,6 +740,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -679,6 +751,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -689,6 +762,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -699,6 +773,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -709,6 +784,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -719,6 +795,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -729,6 +806,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -739,6 +817,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -749,6 +828,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -759,6 +839,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -769,6 +850,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -779,6 +861,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -789,6 +872,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -799,6 +883,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -809,6 +894,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -819,6 +905,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -829,6 +916,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -839,6 +927,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -849,6 +938,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -859,6 +949,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -869,6 +960,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -879,6 +971,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -889,6 +982,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -899,6 +993,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -909,6 +1004,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -919,6 +1015,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -929,6 +1026,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -939,6 +1037,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -949,6 +1048,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -959,6 +1059,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -969,6 +1070,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -979,6 +1081,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -989,6 +1092,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -999,6 +1103,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1009,6 +1114,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1019,6 +1125,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1029,6 +1136,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1039,6 +1147,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1049,6 +1158,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1059,6 +1169,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1069,6 +1180,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1079,6 +1191,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1089,6 +1202,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1099,6 +1213,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1109,6 +1224,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1119,6 +1235,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1129,6 +1246,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1139,6 +1257,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1149,6 +1268,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1159,6 +1279,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1169,6 +1290,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1179,6 +1301,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1189,6 +1312,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1199,6 +1323,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1209,6 +1334,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1219,6 +1345,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1229,6 +1356,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1239,6 +1367,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1249,6 +1378,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1259,6 +1389,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1269,6 +1400,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1279,6 +1411,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1289,6 +1422,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1299,6 +1433,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1309,6 +1444,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1319,6 +1455,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1329,6 +1466,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1339,6 +1477,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1349,6 +1488,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1359,6 +1499,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1369,6 +1510,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1379,6 +1521,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1389,6 +1532,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1399,6 +1543,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1409,6 +1554,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1419,6 +1565,7 @@
       "outcome": "failed",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1429,6 +1576,7 @@
       "outcome": "unknown",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1439,6 +1587,7 @@
       "outcome": "unknown",
       "active": "previous",
       "activeGeneration": 2,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1449,6 +1598,7 @@
       "outcome": "unknown",
       "active": "new",
       "activeGeneration": 3,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1459,6 +1609,7 @@
       "outcome": "unknown",
       "active": "new",
       "activeGeneration": 3,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1469,6 +1620,7 @@
       "outcome": "unknown",
       "active": "new",
       "activeGeneration": 3,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1479,6 +1631,7 @@
       "outcome": "unknown",
       "active": "new",
       "activeGeneration": 3,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1489,6 +1642,7 @@
       "outcome": "unknown",
       "active": "new",
       "activeGeneration": 3,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1499,6 +1653,7 @@
       "outcome": "unknown",
       "active": "new",
       "activeGeneration": 3,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     },
     {
@@ -1509,6 +1664,7 @@
       "outcome": "committed",
       "active": "new",
       "activeGeneration": 3,
+      "selectedValidGenerations": 1,
       "priorBytesUnchanged": true
     }
   ]
