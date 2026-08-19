@@ -1249,7 +1249,7 @@
 }
 .up-row {
   display: grid;
-  grid-template-columns: 42px minmax(72px, auto) minmax(0, 1fr) auto auto;
+  grid-template-columns: 42px 120px minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 12px;
   border: 1px solid var(--bench-line);
