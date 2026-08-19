@@ -142,6 +142,9 @@ export interface UploadResult {
   failure?: { operation: string; block: number } | undefined;
 }
 
+/** A bulk refusal that resending the identical request can never fix. */
+class FatalBulkError extends Error {}
+
 export class ReadOnlyDeviceError extends Error {
   constructor(op: string) {
     super(`${op} is refused: this device is not a compatible Stem Tape v1.1 device and stays read-only.`);
