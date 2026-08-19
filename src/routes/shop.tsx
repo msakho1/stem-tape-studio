@@ -1,12 +1,10 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useState } from "react";
-import productAsset from "@/assets/sp1-product-3.jpg.asset.json";
 import shop1 from "@/assets/sp1-shop-1.png.asset.json";
 import shop2 from "@/assets/sp1-shop-2.png.asset.json";
 import shop3 from "@/assets/sp1-shop-3.png.asset.json";
 
 const GALLERY = [
-  { url: productAsset.url, alt: "Stem Tape for SP-1 — four-fader stem player, three-quarter view" },
   { url: shop1.url, alt: "SP-1 front face — four faders, four track buttons and status LEDs" },
   { url: shop2.url, alt: "SP-1 rear panel — brushed aluminium back with markings and ports" },
   { url: shop3.url, alt: "SP-1 top edge — track buttons, faders, speaker grille and side controls" },
