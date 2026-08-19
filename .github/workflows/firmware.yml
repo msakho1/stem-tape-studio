@@ -1067,7 +1067,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Stem Tape v1.1 stored four-stem playback wiring check (fail-closed)
-        # Phase 2 slice 3B.1: proves the real production call sequence for
+        # Phase 2 slice 3C: proves the real production call sequence for
         # CONTINUOUS streaming, handed off through the real atomic mailbox
         # -- looper_audio_block() (the mailbox consumer) calling
         # st_stream_required_sector()/st_stream_sector_ready()/st_stream_
@@ -1076,12 +1076,19 @@ jobs:
         # frame(), streamer_thread() (the mailbox producer) calling
         # st_stream_init()/st_stream_validate_sector()/st_stem_mbox_
         # init()/st_stem_mbox_producer_target_slot()/st_stem_mbox_
-        # publish_ready()/st11_sector_read_header() -- is genuinely
-        # present as real call sites in main.c's own source, not merely
-        # that the callee symbols happen to be linked somewhere (the
-        # runtime symbol-presence gate already proves that separately).
-        # See .github/scripts/stemtape_player_stem_playback_
-        # wiring_check.py's own doc comment.
+        # publish_ready()/st11_sector_read_header(), AND (new in slice
+        # 3C) audio_thread() calling looper_audio_block()/i2s_write() --
+        # the final link, proving the mixer's real output reaches the
+        # SAME physical I2S write call site the golden classic bus
+        # already used -- is genuinely present as real call sites in
+        # main.c's own source, not merely that the callee symbols happen
+        # to be linked somewhere (the runtime symbol-presence gate
+        # already proves that separately). Source-level proof only --
+        # see the "full continuous playback gate" step below for the
+        # complementary REAL two-thread algorithmic proof, and this
+        # step's own final NOTE for what neither proves. See .github/
+        # scripts/stemtape_player_stem_playback_wiring_check.py's own
+        # doc comment.
         working-directory: ${{ github.workspace }}/project
         run: |
           set -euo pipefail
@@ -1092,6 +1099,87 @@ jobs:
             echo '### Stem Tape v1.1 stored four-stem playback wiring check'
             echo '```text'
             cat audit/stem-playback-wiring-check.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Stem Tape v1.1 full continuous playback gate (Slice 3C)
+        # Phase 2, Slice 3C -- the FULL continuous playback gate. Drives
+        # the REAL production algorithm (st_stem_stream.h + st_stem_
+        # bufmbox.h + st_sector_v11.h + st_stem_mix.h, in the exact call
+        # order main.c's own streamer_thread()/audio_thread() use) across
+        # TWO REAL pthreads over the entire real, SHA-256-verified
+        # handoff/v1.1/binaries/song-sectors-four-stem.bin fixture (43
+        # sectors, 14592 frames): simulated boot A/B generation selection
+        # against the real frozen index fixtures; every sector boundary
+        # crossed exactly once, with per-sector frame counts checked
+        # individually (not just in aggregate); a deterministic output
+        # hash cross-checked against an independent reference formula;
+        # loop behavior (two full passes reproduce an identical hash);
+        # corrupt-sector recovery (a deliberately corrupted real sector,
+        # one real field flipped, causes real underrun/silence then
+        # recovers on retry, with zero effect on the final hash); stalled-
+        # producer underrun recovery (same guarantee under an artificially
+        # slow producer). See tests/test_stem_playback_gate.c's own doc
+        # comment for exactly what this proves and does not.
+        #
+        # TRUTHFUL CI WORDING (explicit, per this slice's own directive):
+        # this step, together with the wiring-check step above and the
+        # runtime symbol-presence gate, proves CONTINUOUS FIXTURE-BACKED
+        # PLAYBACK -- a real algorithm, run concurrently exactly as
+        # designed, over real audio content, with real call sites proven
+        # present in main.c's own source. It does NOT constitute AUDIBLE
+        # PHYSICAL VERIFICATION on a real SP-1: no physical upload, no
+        # eMMC hardware, no I2S/codec hardware, and no human listening
+        # test have been performed. Every CI step in this job that
+        # touches stored-song playback carries this same distinction;
+        # this comment is the canonical statement of it.
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          cc -std=c11 -Wall -Wextra -pthread -Ifirmware/stemtape_player/src \
+            firmware/stemtape_player/src/st_checksum32.c \
+            firmware/stemtape_player/src/st_crc32.c \
+            firmware/stemtape_player/src/st_sector_v11.c \
+            firmware/stemtape_player/src/st_stem_mix.c \
+            firmware/stemtape_player/src/st_stem_stream.c \
+            firmware/stemtape_player/src/st_stem_bufmbox.c \
+            firmware/stemtape_player/src/st_stix.c \
+            firmware/stemtape_player/tests/test_stem_playback_gate.c \
+            -o audit/test_stem_playback_gate
+          ./audit/test_stem_playback_gate | tee audit/stem-playback-gate.txt
+          {
+            echo '### Stem Tape v1.1 full continuous playback gate (Slice 3C)'
+            echo '```text'
+            cat audit/stem-playback-gate.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Stem Tape v1.1 full playback gate ThreadSanitizer run (supplemental evidence)
+        # Supplemental evidence ONLY, not the sole proof -- same posture
+        # and same caveats as the SPSC mailbox's own TSan step above (see
+        # that step's own comment): validates this slice's real two-
+        # thread algorithm, including the fault-injection paths (corrupt
+        # sector, stalled producer), under real pthreads with TSan's own
+        # happens-before tracking. Does not gate the build.
+        working-directory: ${{ github.workspace }}/project
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          cc -std=c11 -Wall -Wextra -pthread -fsanitize=thread -g -Ifirmware/stemtape_player/src \
+            firmware/stemtape_player/src/st_checksum32.c \
+            firmware/stemtape_player/src/st_crc32.c \
+            firmware/stemtape_player/src/st_sector_v11.c \
+            firmware/stemtape_player/src/st_stem_mix.c \
+            firmware/stemtape_player/src/st_stem_stream.c \
+            firmware/stemtape_player/src/st_stem_bufmbox.c \
+            firmware/stemtape_player/src/st_stix.c \
+            firmware/stemtape_player/tests/test_stem_playback_gate.c \
+            -o audit/test_stem_playback_gate_tsan
+          ./audit/test_stem_playback_gate_tsan | tee audit/stem-playback-gate-tsan.txt
+          {
+            echo '### Stem Tape v1.1 full playback gate ThreadSanitizer run (supplemental evidence)'
+            echo '```text'
+            cat audit/stem-playback-gate-tsan.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 

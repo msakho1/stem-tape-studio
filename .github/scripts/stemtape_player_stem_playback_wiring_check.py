@@ -44,6 +44,17 @@ find_call_sites() in stemtape_player_safety_gate.py already does):
      of the song go through the real state machine and the real atomic
      handoff, never a shared struct touched directly by both threads.
 
+  3. audio_thread() (the real I2S TX loop) calls looper_audio_block()
+     (the decoder+mixer, check 1 above) and i2s_write() -- proving the
+     final link Phase 2's own "full playback gate" slice requires: the
+     mixer's real stereo output feeds the SAME I2S write call site the
+     golden classic bus already used, unconditionally, every block --
+     not a separate/parallel output path. This is the "prove the real
+     streamer, decoder, mixer AND I2S caller chain is linked" proof, at
+     the source level (main.c is not itself host-testable -- see tests/
+     test_stem_playback_gate.c's own doc comment for the complementary,
+     REAL two-thread algorithmic proof over the real fixture).
+
 Fails closed: main.c missing, either function's body not found, or any
 required call site absent.
 
@@ -78,6 +89,10 @@ REQUIRED_CALLS = {
         "st_stem_mbox_init",
         "st_stem_mbox_producer_target_slot",
         "st_stem_mbox_publish_ready",
+    ],
+    "audio_thread": [
+        "looper_audio_block",
+        "i2s_write",
     ],
 }
 
