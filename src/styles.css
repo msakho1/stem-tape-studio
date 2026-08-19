@@ -417,35 +417,36 @@
   opacity: 1;
 }
 
+/* Hardware behaviour: all four LEDs flash on/off together, ~600ms period. */
 .st-connect-led--pulse .st-connect-led__halo {
-  animation: st-connect-pulse-halo 1.4s ease-in-out infinite;
+  animation: st-connect-blink-halo 600ms steps(1, end) infinite;
 }
 
 .st-connect-led--pulse .st-connect-led__core {
-  animation: st-connect-pulse 1.4s ease-in-out infinite;
+  animation: st-connect-blink 600ms steps(1, end) infinite;
 }
 
-@keyframes st-connect-pulse {
-  0%,
-  100% {
-    opacity: 0.45;
-    transform: scale(0.92);
-  }
-  50% {
+@keyframes st-connect-blink {
+  0% {
     opacity: 1;
-    transform: scale(1);
+  }
+  66% {
+    opacity: 0;
+  }
+  100% {
+    opacity: 0;
   }
 }
 
-@keyframes st-connect-pulse-halo {
-  0%,
-  100% {
-    opacity: 0.2;
-    transform: scale(0.9);
+@keyframes st-connect-blink-halo {
+  0% {
+    opacity: 0.85;
   }
-  50% {
-    opacity: 0.8;
-    transform: scale(1);
+  66% {
+    opacity: 0;
+  }
+  100% {
+    opacity: 0;
   }
 }
 
