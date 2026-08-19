@@ -1,13 +1,13 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useState } from "react";
-import shop1 from "@/assets/sp1-shop-1.png.asset.json";
-import shop2 from "@/assets/sp1-shop-2.png.asset.json";
-import shop3 from "@/assets/sp1-shop-3.png.asset.json";
+import shop1 from "@/assets/sp1-white-front.png.asset.json";
+import shop2 from "@/assets/sp1-white-back.png.asset.json";
+import shop3 from "@/assets/sp1-white-side.png.asset.json";
 
 const GALLERY = [
   { url: shop1.url, alt: "SP-1 front face — four faders, four track buttons and status LEDs" },
-  { url: shop2.url, alt: "SP-1 rear panel — brushed aluminium back with markings and ports" },
-  { url: shop3.url, alt: "SP-1 top edge — track buttons, faders, speaker grille and side controls" },
+  { url: shop2.url, alt: "SP-1 rear panel — aluminium back plate with markings and side switch" },
+  { url: shop3.url, alt: "SP-1 side profile — edge buttons, LED indicators and rear plate" },
 ];
 import { SupportButton } from "@/components/SupportButton";
 
@@ -33,32 +33,47 @@ export const Route = createFileRoute("/shop")({
   }),
 });
 
-const SECTIONS: { id: string; label: string; body: string }[] = [
+const SECTIONS: { id: string; label: string; body: string[] }[] = [
   {
     id: "details",
-    label: "product details",
-    body: "Stem Tape is an unofficial browser digital twin of the SP-1 surface: four stems, four independent tape loops, one shared transport. Every control on the rendered device is playable with pointer, touch, keyboard or MIDI.",
+    label: "product description",
+    body: [
+      "Teenage Engineering SP-1, fully loaded with Stem Tape.",
+      "A ready-to-play SP-1 with the latest Stem Tape firmware installed, configured, and individually tested for full functionality before shipping.",
+      "No setup. Take it out of the box, load your music, and start playing.",
+      "Stem Tape transforms the SP-1 into a four-track performance instrument built around stems — giving you independent, tactile control over the parts of a song and a growing set of tools for manipulating music in real time.",
+      "Every unit is a genuine Teenage Engineering SP-1 and is tested with Stem Tape before it leaves us.",
+      "All proceeds from these units go directly toward the continued development of Stem Tape and keeping the platform available to everyone.",
+    ],
   },
   {
     id: "features",
     label: "features",
-    body: "Four-track tape engine with varispeed, reverse and inertia · global and per-stem loops with audible-frame release · four tape heads with audible scrubbing · twelve effects in four banks · automatic tempo, beat-phase and bar detection · Stem Instrument Mode cue markers over MIDI.",
+    body: [
+      "4-TRACK STEM PLAYBACK — Load a song as four synchronized stems and control each part independently from the SP-1's four physical channels.",
+      "PHYSICAL STEM CONTROL — Four faders give you immediate hands-on control over the mix. Bring vocals, drums, bass, instruments, or any other stem in and out while the song plays.",
+      "INDEPENDENT TRACK CONTROL — Interact with individual stems without breaking synchronization between the four tracks.",
+      "LOOPING — Create and manipulate loops directly from the hardware for live performance, practice, remixing, and experimentation.",
+      "VARISPEED PLAYBACK — Manipulate playback speed from the SP-1 for tape-inspired pitch and speed changes.",
+      "STEM TAPE PERFORMANCE CONTROLS — Stem Tape combines the SP-1's physical interface with an expanded performance-oriented control system designed specifically around manipulating separated music.",
+      "SONG STORAGE — Store songs on the SP-1 and recall them without needing a computer during playback.",
+      "STEM TAPE COMPANION APP — Prepare and transfer your four-stem songs to the SP-1 through the Stem Tape companion experience.",
+      "READY OUT OF THE BOX — Stem Tape comes installed and configured. Each device is tested before shipping so you can start using it immediately.",
+    ],
   },
   {
-    id: "compatibility",
-    label: "compatibility",
-    body: "Desktop Chrome, Edge and Safari; iOS and iPadOS Safari for playback. Web MIDI is available in desktop Chrome and Edge. Wired class-compliant USB MIDI on iPhone and iPad runs through the native Stem Tape wrapper.",
-  },
-  {
-    id: "requirements",
-    label: "system requirements",
-    body: "A current browser with Web Audio and AudioWorklet support, roughly 300 MiB of free memory for four decoded stems, and local audio files. No account, no upload — no audio ever leaves your device.",
+    id: "support",
+    label: "built to support the project",
+    body: [
+      "Stem Tape is an independent project exploring what the SP-1 can become when its hardware is opened up to a different way of interacting with music.",
+      "The Stem Tape platform and firmware are being developed for the community. Purchasing a preloaded SP-1 is a way to get a ready-to-use physical Stem Tape instrument while directly funding continued development.",
+      "Buy the hardware if you want the ready-to-play experience. The project itself remains for everyone.",
+    ],
   },
 ];
 
 function ShopPage() {
   const [open, setOpen] = useState<string | null>(null);
-  const [license, setLicense] = useState("web application");
   const [shot, setShot] = useState(0);
 
   return (
@@ -157,41 +172,22 @@ function ShopPage() {
         <h1 className="mt-10 font-mono text-[26px] uppercase tracking-[0.06em] text-[var(--ink)] md:text-[32px]">
           Stem Tape for SP-1
         </h1>
-        <p className="mt-2 font-mono text-[15px] text-[var(--ink)] underline underline-offset-4">$0.00</p>
+        <p className="mt-2 font-mono text-[15px] text-[var(--ink)] underline underline-offset-4">$175</p>
 
         <p className="mt-5 max-w-md font-mono text-[12px] leading-[1.9] text-[var(--ink-dim)]">
-          A four-track tape looper for the browser.
+          Teenage Engineering SP-1, fully loaded with Stem Tape.
           <br />
-          Built for performance. Designed like hardware.
+          Installed, configured and individually tested.
           <br />
-          Runs in real time.
+          No setup — take it out of the box and play.
         </p>
-
-        {/* license */}
-        <label className="mt-7 flex items-center justify-between gap-3 border border-[var(--bench-line)] bg-[var(--bench-raised)] px-4 py-4">
-          <span className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--ink)]">
-            license:
-          </span>
-          <select
-            value={license}
-            onChange={(e) => setLicense(e.target.value)}
-            className="flex-1 cursor-pointer appearance-none bg-transparent font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--ink)] outline-none"
-          >
-            <option value="web application">web application</option>
-            <option value="ios wrapper">ios wrapper</option>
-            <option value="firmware source">firmware source</option>
-          </select>
-          <span aria-hidden className="font-mono text-[11px] text-[var(--ink-dim)]">
-            ⌄
-          </span>
-        </label>
 
         {/* actions */}
         <button
           type="button"
-          className="mt-3 w-full bg-[var(--ink)] px-4 py-4 font-mono text-[11px] uppercase tracking-[0.22em] text-[var(--bench)] transition-opacity hover:opacity-90"
+          className="mt-7 w-full bg-[var(--ink)] px-4 py-4 font-mono text-[11px] uppercase tracking-[0.22em] text-[var(--bench)] transition-opacity hover:opacity-90"
         >
-          add to cart
+          support this project
         </button>
         <Link
           to="/"
@@ -218,9 +214,16 @@ function ShopPage() {
                   </span>
                 </button>
                 {on && (
-                  <p className="-mt-1 pb-4 font-mono text-[11px] leading-relaxed text-[var(--ink-dim)]">
-                    {s.body}
-                  </p>
+                  <div className="-mt-1 grid gap-3 pb-4">
+                    {s.body.map((para) => (
+                      <p
+                        key={para}
+                        className="font-mono text-[11px] leading-relaxed text-[var(--ink-dim)]"
+                      >
+                        {para}
+                      </p>
+                    ))}
+                  </div>
                 )}
               </div>
             );
