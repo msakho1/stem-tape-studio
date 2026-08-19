@@ -97,10 +97,33 @@ export class Sp1SurfaceAdapter {
   private held = new Map<string, Set<Control>>();
   private lastBattery: number | null = null;
   private connectedName: string | null = null;
+  /** Device IDs currently recognized as a physical SP-1 on the wire. */
+  private connected = new Set<string>();
+  private connectionListeners = new Set<(c: { deviceId: string; deviceName: string; at: number } | null) => void>();
 
   subscribe(fn: Sp1Listener): () => void {
     this.listeners.add(fn);
     return () => this.listeners.delete(fn);
+  }
+
+  /**
+   * Presence only — fires when a physical SP-1 appears on (or leaves) the wire.
+   * Carries no control data, so it can never reach the cue or audio paths.
+   */
+  onConnectionChange(
+    fn: (c: { deviceId: string; deviceName: string; at: number } | null) => void,
+  ): () => void {
+    this.connectionListeners.add(fn);
+    return () => this.connectionListeners.delete(fn);
+  }
+
+  /** Idempotent: repeated rescans of the same port are not new connections. */
+  deviceConnected(deviceId: string, deviceName: string): void {
+    this.connectedName = deviceName;
+    if (this.connected.has(deviceId)) return;
+    this.connected.add(deviceId);
+    const at = nowMs();
+    for (const fn of this.connectionListeners) fn({ deviceId, deviceName, at });
   }
 
   snapshot(): { deviceName: string | null; held: Control[]; battery: number | null } {
@@ -173,6 +196,8 @@ export class Sp1SurfaceAdapter {
   deviceDisconnected(deviceId: string): void {
     this.releaseAll(deviceId);
     this.held.delete(deviceId);
+    if (this.connected.delete(deviceId) && this.connected.size === 0)
+      for (const fn of this.connectionListeners) fn(null);
     if (this.held.size === 0) this.connectedName = null;
   }
 

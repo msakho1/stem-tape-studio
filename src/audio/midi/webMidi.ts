@@ -100,6 +100,8 @@ export class WebMidiAdapter {
       const name = port.name ?? "MIDI input";
       seen.add(port.id);
       devices.push({ id: port.id, name });
+      // Presence signal for the surface greeting; idempotent per port id.
+      if (isSp1DeviceName(name)) sp1Surface.deviceConnected(port.id, name);
       if (!this.bound.has(port.id)) {
         this.bound.add(port.id);
         port.onmidimessage = (e) => this.handle(port, e);
