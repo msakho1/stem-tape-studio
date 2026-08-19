@@ -966,7 +966,7 @@ function DevicePage() {
           </div>
           <div className="grid gap-2">
             <button className="up-act" data-testid="copy-activity" onClick={copyActivity}>
-              <Clipboard size={15} strokeWidth={1.4} />
+              <ClipboardCopy size={15} strokeWidth={1.4} />
               copy activity
             </button>
             <button className="up-act" data-testid="download-report" onClick={downloadReport}>
