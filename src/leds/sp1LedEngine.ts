@@ -17,7 +17,7 @@
  * physical index 4.
  */
 
-import type { SurfaceState } from "@/machine/surface";
+import { SP1_CONNECT_GREETING_LAP_MS, SP1_CONNECT_GREETING_MS, type SurfaceState } from "@/machine/surface";
 import { algorithmDef, bankOfButton } from "@/machine/fx12";
 import { fxStateOf, fxTargetOf } from "@/machine/stemPerformance";
 import { GLOBAL_SCRUB_SPEEDS, type ScrubSpeedIndex } from "@/audio/inertia";
@@ -93,6 +93,7 @@ export function loopPeriodFor(division: 1 | 2 | 4 | 8): number {
 export const PRECEDENCE = {
   power: 100,
   error: 96,
+  connectGreeting: 95,
   loading: 94,
   rejectionFlash: 90,
   confirmationFlash: 88,
@@ -120,7 +121,7 @@ export type LedProvenance =
   | "unverified";
 
 /** Owners above this are temporary and must name a restoration target. */
-const TEMPORARY: PrecedenceKey[] = ["rejectionFlash", "confirmationFlash"];
+const TEMPORARY: PrecedenceKey[] = ["rejectionFlash", "confirmationFlash", "connectGreeting"];
 
 // ------------------------------------------------------------- state -------
 
@@ -159,6 +160,8 @@ export interface AuthoritativeSp1LedState {
   heads: { active: boolean };
   song: number;
   bankJumpArmed: boolean;
+  /** Physical SP-1 recognized on the wire — finite greeting chase, or null. */
+  connectGreeting: { startedAt: number } | null;
   /** Finite one-shots, expressed as absolute app-clock start times. */
   flash: { kind: "fx-latch" | "fx-unlatch" | "heads-reject"; startedAt: number } | null;
 }
@@ -218,6 +221,12 @@ export function sp1LedStateFrom(state: SurfaceState, now: number): Authoritative
     heads: { active: state.headsMode },
     song: state.song,
     bankJumpArmed: state.bankJumpArmed,
+    connectGreeting:
+      state.sp1ConnectedAt != null &&
+      now - state.sp1ConnectedAt >= 0 &&
+      now - state.sp1ConnectedAt < SP1_CONNECT_GREETING_MS
+        ? { startedAt: state.sp1ConnectedAt }
+        : null,
     flash,
   };
 }
@@ -351,6 +360,17 @@ function trackCandidates(s: AuthoritativeSp1LedState, i: number): Candidate[] {
 
   if (s.error)
     out.push({ mode: "blink", owner: `error — ${s.error}`, key: "error", provenance: "tape-looper-source", periodMs: PERIOD.blink });
+  if (s.connectGreeting)
+    out.push({
+      mode: "chase",
+      owner: "Stem Tape SP-1 connected — Track LED greeting",
+      key: "connectGreeting",
+      provenance: "implementation-observation",
+      periodMs: SP1_CONNECT_GREETING_LAP_MS,
+      direction: "forward",
+      chaseSlot: i,
+      phaseAnchor: "app-clock",
+    });
   if (s.loading)
     out.push({ mode: "breathe", owner: "song loading", key: "loading", provenance: "tape-looper-source", periodMs: PERIOD.breathe });
 

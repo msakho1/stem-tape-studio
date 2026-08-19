@@ -92,6 +92,7 @@ type Action =
   | { type: "globalScrub"; dir: 1 | -1 | null }
   | { type: "headsFeedback"; patch: { active?: boolean; source?: number | null; rejectedAt?: number } }
   | { type: "faderCommit"; index: number; value: number; claimed?: ContinuousChannel }
+  | { type: "sp1Connected"; at: number | null }
   | { type: "midi"; event: StemMidiEvent };
 
 
@@ -116,6 +117,9 @@ function reducer(state: SurfaceState, action: Action): SurfaceState {
       return applyHeadsFeedback(state, action.patch);
     case "faderCommit":
       return applyFader(state, action.index, action.value, action.claimed);
+    case "sp1Connected":
+      // Presence only: drives the Track-LED greeting, nothing else.
+      return { ...state, sp1ConnectedAt: action.at };
     case "midi":
       // Stem Instrument Mode: one ordered command per normalized MIDI event.
       return applyMidiEvent(state, action.event);
@@ -602,6 +606,14 @@ export function useDeviceSurface() {
    * and contextual Volume stay owned by the surface reducer / arbitrator.
    * Nothing here talks to the cue system or the audio engine directly.
    */
+  useEffect(
+    () =>
+      sp1Surface.onConnectionChange((c) => {
+        dispatch({ type: "sp1Connected", at: c ? c.at : null });
+      }),
+    [],
+  );
+
   useEffect(() => {
     const off = sp1Surface.subscribe((ev: Sp1SurfaceEvent) => {
       if (!readyRef.current) return;
