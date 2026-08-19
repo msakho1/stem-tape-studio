@@ -864,13 +864,39 @@ function DevicePage() {
             </div>
           )}
 
-          {prepState !== "idle" && (
-            <p
-              className="mt-3 font-mono text-[12px] text-[var(--ink-dim)]"
-              data-testid="prep-status"
-            >
-              {prepDetail}
-            </p>
+          {(busyPhase || prepState !== "idle") && (
+            <div className="mt-4" data-testid="prep-status">
+              <div className="flex items-center gap-3 font-mono text-[12px] text-[var(--ink-dim)]">
+                {(busyPhase || prepState === "working") && (
+                  <Loader2
+                    size={14}
+                    strokeWidth={1.6}
+                    className="shrink-0 animate-spin text-[var(--ink)]"
+                    data-testid="prep-spinner"
+                  />
+                )}
+                <span className="min-w-0 flex-1 truncate">
+                  {busyPhase ?? prepDetail}
+                </span>
+                {prepState === "working" && prepFraction !== null && (
+                  <span className="shrink-0 tabular-nums text-[var(--ink)]">
+                    {Math.round(prepFraction * 100)}%
+                  </span>
+                )}
+              </div>
+              {(busyPhase || prepState === "working") && (
+                <div className="mt-2 h-[3px] w-full overflow-hidden bg-[var(--bench-line)]">
+                  <div
+                    className={`h-full bg-[var(--ink)] transition-[width] duration-200 ${
+                      busyPhase || prepFraction === null ? "animate-pulse" : ""
+                    }`}
+                    style={{
+                      width: busyPhase ? "100%" : `${Math.max(4, (prepFraction ?? 0) * 100)}%`,
+                    }}
+                  />
+                </div>
+              )}
+            </div>
           )}
         </section>
 
