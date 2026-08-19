@@ -347,14 +347,13 @@ export class StemTapeTransport {
             ? "the sector did not read back correctly on the SP-1"
             : describeBulkStatus(resp.status);
         const retryable = resp.status === BULK_STATUS.OK ? true : resp.retryable && bulkStatusIsRetryable(resp.status);
-        if (!retryable) throw new Error(last);
+        if (!retryable) throw new FatalBulkError(last);
         counter.retries++;
       } catch (e) {
+        if (e instanceof FatalBulkError) throw new Error(e.message);
         // A timeout means the acknowledgement (or the request) was lost. The
-        // identical request is safe to resend.
-        const msg = e instanceof Error ? e.message : String(e);
-        if (msg === last && last !== "") throw e;
-        last = msg;
+        // identical request is safe to resend: same seq, same block, same bytes.
+        last = e instanceof Error ? e.message : String(e);
         counter.retries++;
       }
     }
