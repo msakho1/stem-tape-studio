@@ -1,11 +1,13 @@
 /*
  * st_stem_stream.h — pure stored-song CONTINUOUS streaming state machine
- * (STEM TAPE Phase 2 continuous streaming, Slice 3A).
+ * (STEM TAPE Phase 2 continuous streaming: pure module added, host-test-
+ * only, in Slice 3A; genuinely wired into main.c's streamer_thread()/
+ * looper_audio_block() in Slice 3B -- see CMakeLists.txt's own note).
  *
  * Slice 2 played back exactly one resident STSC sector (<= 340 frames,
  * ~7 ms), looped indefinitely. This module is the pure logic core for
  * playing the WHOLE song, every sector in order, that Slice 3B's real
- * double-buffered streamer_thread prefetch wiring will drive. It owns NO
+ * double-buffered streamer_thread prefetch wiring drives. It owns NO
  * storage, NO buffers, and does NO I/O of its own: it only ever operates
  * on the immutable song geometry taken from the selected st_stix_record_t
  * (song_start_block, song_block_count, frames, sector_count) and on
@@ -14,6 +16,12 @@
  * which is exactly what makes this module host-testable without any real
  * flash, and exactly what Slice 3B's audio thread needs: no eMMC access,
  * no allocation, no blocking, ever, from this code.
+ *
+ * THREAD SAFETY: Slice 3B calls into ONE shared st_stream_t instance from
+ * TWO real threads (streamer_thread publishes sector readiness;
+ * audio_thread advances song position). See st_stream_t's own doc
+ * comment below for exactly which fields are `volatile` and why that is
+ * sufficient here without a lock.
  *
  * THE ONE SEQUENCE a real caller (streamer_thread, in Slice 3B) follows:
  *   1. st_stream_init()            -- once, from the selected song's own
@@ -101,20 +109,58 @@ typedef enum {
 
 typedef struct {
 	/* Immutable song geometry, set once by st_stream_init() from the
-	 * selected st_stix_record_t. Never reassigned by any other
-	 * function in this file. */
+	 * selected st_stix_record_t, from a single-threaded boot context
+	 * before any concurrent caller exists. Never reassigned by any
+	 * other function in this file -- plain (non-volatile) is correct
+	 * for these. */
 	uint32_t song_start_block;
 	uint32_t song_block_count;
 	uint32_t frames;
 	uint32_t sector_count;
 	bool loop_enabled;
 
-	/* Mutable playback state. */
-	st_stream_state_t state;
-	uint32_t song_frame;     /* the ONE authoritative absolute song frame */
-	uint32_t ready_sector;   /* sector index currently marked resident/playable, or ST_STREAM_NO_SECTOR */
-	uint32_t underrun_count; /* diagnostic: episodes (not ticks) of UNDERRUN entered; never reset here */
-	uint32_t corrupt_count;  /* diagnostic: st_stream_report_corrupt() calls; never reset here */
+	/*
+	 * Mutable playback state -- `volatile`: Slice 3B's real production
+	 * wiring has TWO threads calling into the SAME st_stream_t
+	 * instance concurrently (streamer_thread validates/publishes
+	 * sectors; audio_thread advances song position every output
+	 * frame), so the compiler must never cache or reorder these
+	 * across a call into this module from either side, exactly like
+	 * every other cross-thread flag in this codebase (e.g. main.c's
+	 * own g_playing, trk[].p_w).
+	 *
+	 * `volatile` alone (no lock) is sufficient here, not merely
+	 * convenient, because of two invariants this module itself
+	 * enforces:
+	 *   1. song_frame (and therefore st_stream_required_sector()'s own
+	 *      result) NEVER changes while ready_sector != required_sector
+	 *      -- st_stream_advance_frame() refuses to advance in that
+	 *      case (returns UNDERRUN instead). So streamer_thread's
+	 *      target sector cannot move out from under it mid-prefetch:
+	 *      by the time its (possibly slow) validated read completes,
+	 *      the sector it fetched is still guaranteed to be the one
+	 *      audio_thread needs.
+	 *   2. st_stream_advance_frame() re-derives `state` from
+	 *      ready_sector itself on every call (state = PLAYING the
+	 *      moment ready_sector matches, unconditionally) rather than
+	 *      trusting a state transition published by the other thread
+	 *      -- so a state write from streamer_thread's own
+	 *      st_stream_sector_ready()/st_stream_report_corrupt() being
+	 *      interleaved with an audio_thread call is self-correcting,
+	 *      not a hazard: the worst possible outcome of any interleaving
+	 *      is one extra tick of UNDERRUN (silence), never stale/wrong
+	 *      sector data played as current audio.
+	 * Every individual field here is a single aligned load/store
+	 * (uint32_t or a small enum), atomic on this Cortex-M4 target, so
+	 * there is no torn-write hazard to additionally guard against.
+	 */
+	volatile st_stream_state_t state;
+	volatile uint32_t song_frame;     /* the ONE authoritative absolute song frame; audio_thread-owned */
+	volatile uint32_t ready_sector;   /* resident/playable sector, or ST_STREAM_NO_SECTOR; streamer_thread-
+					    * published, audio_thread-invalidated on loop wrap (see invariant 1
+					    * above for why that's still safe) */
+	volatile uint32_t underrun_count; /* diagnostic: UNDERRUN episodes (not ticks); audio_thread-owned */
+	volatile uint32_t corrupt_count;  /* diagnostic: report_corrupt() calls; streamer_thread-owned */
 } st_stream_t;
 
 /*

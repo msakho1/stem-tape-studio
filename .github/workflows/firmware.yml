@@ -973,18 +973,22 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Stem Tape v1.1 continuous streaming state machine host tests (Slice 3A)
-        # Phase 2 continuous streaming, Slice 3A: src/st_stem_stream.c's own
-        # pure stored-song streaming state machine (see that file's own doc
-        # comment) -- NOT YET linked into the real firmware target or wired
-        # into main.c (that is Slice 3B's own, later, separate commit; see
-        # CMakeLists.txt's established "link in the same commit as the real
-        # caller" policy). Walks the ENTIRE real 43-sector, 14592-frame
-        # handoff/v1.1/binaries/song-sectors-four-stem.bin fixture end to
-        # end, proving sector-transition/final-partial-sector/loop/stop/
-        # underrun/corrupt-sector behavior and a deterministic full-song
-        # mixed-audio hash cross-checked against an independent reference
-        # formula -- pure host-side arithmetic, no Zephyr/nRF toolchain
-        # needed for this part.
+        # Phase 2 continuous streaming: src/st_stem_stream.c's own pure
+        # stored-song streaming state machine (see that file's own doc
+        # comment). Added unlinked, host-test-only, in Slice 3A; as of
+        # Slice 3B it IS linked into the real firmware target and
+        # genuinely called from main.c's streamer_thread()/looper_audio_
+        # block() (see CMakeLists.txt's own established "link in the same
+        # commit as the real caller" policy, and the "stored four-stem
+        # playback wiring check" step below, which proves the real call
+        # sites) -- this step re-proves the pure state-machine arithmetic
+        # itself in isolation, unaffected by that wiring. Walks the ENTIRE
+        # real 43-sector, 14592-frame handoff/v1.1/binaries/song-sectors-
+        # four-stem.bin fixture end to end, proving sector-transition/
+        # final-partial-sector/loop/stop/underrun/corrupt-sector behavior
+        # and a deterministic full-song mixed-audio hash cross-checked
+        # against an independent reference formula -- pure host-side
+        # arithmetic, no Zephyr/nRF toolchain needed for this part.
         working-directory: ${{ github.workspace }}/project
         run: |
           set -euo pipefail
@@ -1004,15 +1008,17 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Stem Tape v1.1 stored four-stem playback wiring check (fail-closed)
-        # Phase 2 slice 2: proves the real production call sequence this
-        # slice establishes -- looper_audio_block() calling
+        # Phase 2 slice 3B: proves the real production call sequence for
+        # CONTINUOUS streaming -- looper_audio_block() calling
+        # st_stream_required_sector()/st_stream_advance_frame()/
         # st11_sector_decode_frame()/st_stem_mix_frame(), streamer_thread()
-        # calling st11_sector_read_header() -- is genuinely present as real
-        # call sites in main.c's own source, not merely that the callee
-        # symbols happen to be linked somewhere (the runtime symbol-
-        # presence gate already proves that separately). See
-        # .github/scripts/stemtape_player_stem_playback_wiring_check.py's
-        # own doc comment.
+        # calling st_stream_init()/st_stream_validate_sector()/
+        # st_stream_sector_ready()/st11_sector_read_header() -- is
+        # genuinely present as real call sites in main.c's own source, not
+        # merely that the callee symbols happen to be linked somewhere
+        # (the runtime symbol-presence gate already proves that
+        # separately). See .github/scripts/stemtape_player_stem_playback_
+        # wiring_check.py's own doc comment.
         working-directory: ${{ github.workspace }}/project
         run: |
           set -euo pipefail
@@ -1202,17 +1208,23 @@ jobs:
           check st_ab_session_check_write
           check st_ab_session_verify_song_before_commit
           check st_stix_deserialize
-          # Phase 2 slice 2: the stored four-stem playback data path --
-          # looper_audio_block() (real-time, RAM-only) calls both of
-          # these on every I2S block while a stored song plays;
-          # streamer_thread() calls st11_sector_read_header() once at
-          # boot to validate the one sector it reads from flash. Proven
-          # to be REAL call sites (not just linked symbols) by the
-          # separate "stored four-stem playback wiring check" CI step
-          # below, which parses main.c's own source.
+          # Phase 2 slice 2/3B: the stored four-stem playback data path --
+          # looper_audio_block() (real-time, RAM-only) calls the first
+          # three on every I2S block while a stored song plays;
+          # streamer_thread() calls the rest, both at boot and on every
+          # per-pass prefetch, to validate every sector it reads from
+          # flash (not just the first). Proven to be REAL call sites (not
+          # just linked symbols) by the separate "stored four-stem
+          # playback wiring check" CI step below, which parses main.c's
+          # own source.
           check st11_sector_decode_frame
           check st11_sector_read_header
           check st_stem_mix_frame
+          check st_stream_init
+          check st_stream_required_sector
+          check st_stream_validate_sector
+          check st_stream_sector_ready
+          check st_stream_advance_frame
 
           # REQUIRED-ABSENT: any of these appearing in the final ELF (any nm
           # symbol type -- function OR data/bss) means recording, overdub,

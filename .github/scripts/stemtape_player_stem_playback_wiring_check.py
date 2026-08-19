@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Stem Tape Player -- stored four-stem playback wiring check (fail-closed).
 
-Phase 2 slice 2: proves the real production audio-data-path call sequence
-this slice claims to establish is genuinely present in main.c's own
-source, not merely that the callee symbols exist somewhere in the link
-(the runtime symbol-presence gate's own CI step already proves THAT
-separately). Source-level call-site proof, not link-level: reuses
-index_functions() from stemtape_player_safety_gate.py (the SAME brace-
-depth enclosing-function parser this repo's own write-safety gate already
-depends on and self-tests -- see
+Phase 2 slice 3B: proves the real production audio-data-path call
+sequence -- now continuous, multi-sector streaming via st_stem_stream.h's
+pure state machine, not slice 2's single resident sector -- is genuinely
+present in main.c's own source, not merely that the callee symbols exist
+somewhere in the link (the runtime symbol-presence gate's own CI step
+already proves THAT separately). Source-level call-site proof, not
+link-level: reuses index_functions() from stemtape_player_safety_gate.py
+(the SAME brace-depth enclosing-function parser this repo's own write-
+safety gate already depends on and self-tests -- see
 stemtape_player_safety_gate_parser_selftest.py) rather than reimplementing
 a second C-source scanner.
 
@@ -18,17 +19,23 @@ enclosing function's own body, skipping comment lines the same way
 find_call_sites() in stemtape_player_safety_gate.py already does):
 
   1. looper_audio_block() (the real-time audio mixer, called every I2S
-     block from audio_thread()) calls st11_sector_decode_frame() -- the
-     real STSC per-frame decoder, RAM-only, no I/O -- and st_stem_mix_
-     frame() -- the real 4-stem-to-stereo mixdown. This is the "stored
-     four-stem playback path actually references/uses st_stem_mix"
-     requirement: not incidental symbol presence, a real call site inside
+     block from audio_thread()) calls st_stream_required_sector() and
+     st_stream_advance_frame() -- the pure streaming state machine's own
+     per-frame bookkeeping -- plus st11_sector_decode_frame() -- the real
+     STSC per-frame decoder, RAM-only, no I/O -- and st_stem_mix_frame()
+     -- the real 4-stem-to-stereo mixdown. This is the "stored four-stem
+     playback path actually references/uses st_stem_stream/st_stem_mix"
+     requirement: not incidental symbol presence, real call sites inside
      the real real-time audio function.
 
   2. streamer_thread() (the one thread that ever touches flash) calls
-     st11_sector_read_header() -- proving the one-time boot-time sector
-     read this slice performs is validated through the real header parser
-     before any frame is ever decoded from it, not trusted blindly.
+     st_stream_init() (seeding the state machine from the real selected
+     song's own STIX geometry), st_stream_validate_sector() (validating
+     EVERY sector read, not just the first), and st_stream_sector_ready()
+     (publishing a freshly-validated sector to the audio path) -- proving
+     both the boot-time first sector AND the continuous per-pass prefetch
+     that streams the rest of the song are validated through the real
+     state machine, never trusted blindly.
 
 Fails closed: main.c missing, either function's body not found, or any
 required call site absent.
@@ -48,8 +55,18 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from stemtape_player_safety_gate import function_body_bounds, index_functions  # noqa: E402
 
 REQUIRED_CALLS = {
-    "looper_audio_block": ["st11_sector_decode_frame", "st_stem_mix_frame"],
-    "streamer_thread": ["st11_sector_read_header"],
+    "looper_audio_block": [
+        "st11_sector_decode_frame",
+        "st_stem_mix_frame",
+        "st_stream_required_sector",
+        "st_stream_advance_frame",
+    ],
+    "streamer_thread": [
+        "st11_sector_read_header",
+        "st_stream_init",
+        "st_stream_validate_sector",
+        "st_stream_sector_ready",
+    ],
 }
 
 

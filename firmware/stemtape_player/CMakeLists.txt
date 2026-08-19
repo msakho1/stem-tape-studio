@@ -30,11 +30,20 @@ include(${ZEPHYR_BASE}/samples/subsys/usb/common/common.cmake)
 # to-stereo mixdown (see st_stem_mix.h's own doc) -- is now linked and
 # genuinely called: main.c's looper_audio_block() (PASS C) calls
 # st_stem_mix_frame() on frames st11_sector_decode_frame() decodes from a
-# real stored song's own first sector (read once at boot by
-# streamer_thread()), feeding the SP-1's existing physical I2S output.
-# Was added unlinked, host-test-only, in an earlier commit (see git log);
-# this is the commit that gives it its real caller, per this file's own
-# established policy below.
+# real stored song's own sector data, feeding the SP-1's existing physical
+# I2S output. Was added unlinked, host-test-only, in an earlier commit
+# (see git log); the slice-2 commit gave it its real caller, per this
+# file's own established policy below.
+#
+# Phase 2 slice 3B: src/st_stem_stream.c -- the pure stored-song
+# CONTINUOUS streaming state machine (see st_stem_stream.h's own doc) --
+# is now linked and genuinely called: streamer_thread() seeds it from the
+# selected song's own real STIX geometry and validates every sector (not
+# just the first) through it before publishing that sector to the audio
+# path; looper_audio_block() (PASS C) drives its per-frame song-position
+# bookkeeping and reads its sector-readiness/underrun state. Was added
+# unlinked, host-test-only, in slice 3A (see git log); this is the commit
+# that gives it its real caller, per this file's own established policy.
 #
 # The OLD, now-retired v1.0 Gate 2 contract's own engine -- src/
 # st_storage_layout.c, src/st_sector_codec.c, src/st_transfer.c, src/
@@ -72,6 +81,7 @@ target_sources(app PRIVATE
 	src/st_stcp.c
 	src/st_ab_session.c
 	src/st_stem_mix.c
+	src/st_stem_stream.c
 )
 
 # See firmware/CMakeLists.txt's identical note: the batchbuf/meta-block code
