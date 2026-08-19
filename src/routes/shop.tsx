@@ -129,15 +129,44 @@ function ShopPage() {
       </div>
 
       <main className="mx-auto w-full max-w-[820px] px-4 pb-20 md:px-8">
-        {/* hero product photo */}
+        {/* product photo slideshow */}
         <figure className="relative flex flex-col items-center">
           <img
-            src={hero.url}
-            alt="Teenage Engineering SP-1 with Stem Tape — front view on grey"
+            src={GALLERY[shot].url}
+            alt={GALLERY[shot].alt}
             className="relative z-10 w-full max-w-[560px] select-none"
             draggable={false}
           />
+          <div className="z-10 mt-4 flex items-center gap-2">
+            {GALLERY.map((g, i) => (
+              <button
+                key={g.url}
+                type="button"
+                aria-label={`View photo ${i + 1}`}
+                aria-current={i === shot}
+                onClick={() => setShot(i)}
+                className={`h-1.5 w-1.5 rounded-full transition-opacity ${
+                  i === shot ? "bg-[var(--ink)]" : "bg-[var(--ink-faint)] opacity-60"
+                }`}
+              />
+            ))}
+          </div>
+          <div className="z-10 mt-4 flex flex-wrap items-center justify-center gap-2">
+            {GALLERY.map((g, i) => (
+              <button
+                key={g.url}
+                type="button"
+                onClick={() => setShot(i)}
+                className={`h-16 w-16 border p-1 transition-colors ${
+                  i === shot ? "border-[var(--ink)]" : "border-[var(--bench-line)]"
+                }`}
+              >
+                <img src={g.url} alt="" className="h-full w-full object-contain" draggable={false} />
+              </button>
+            ))}
+          </div>
         </figure>
+
 
 
         {/* title block */}
