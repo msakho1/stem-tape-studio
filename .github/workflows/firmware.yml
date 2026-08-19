@@ -846,6 +846,35 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Stem Tape bulk upload wire contract + sequence state (host tests)
+        # Upload-reliability phase, Slice C1: st_bulk_xfer.c is the pure
+        # wire-contract parser/builder and per-session sequence state
+        # machine behind the new 'U' bulk verified-sector command (see
+        # st_bulk_xfer.h's own doc and docs/stem-tape-bulk-upload-v1.md).
+        # Not yet linked into the real firmware target (main.c does not
+        # call it yet -- that is Slice C2) -- host-test-only for now,
+        # matching this repo's own established policy for a pure module
+        # added ahead of its real wiring (see CMakeLists.txt's own note on
+        # st_stem_stream.c's identical slice-3A/3B split). Exercises a
+        # REAL frozen sector from handoff/v1.1/binaries/song-sectors-four-
+        # stem.bin through the real request parser and CRC-32 path, never
+        # a fabricated fixture.
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          cc -std=c11 -Wall -Wextra -Ifirmware/stemtape_player/src \
+            firmware/stemtape_player/src/st_crc32.c \
+            firmware/stemtape_player/src/st_bulk_xfer.c \
+            firmware/stemtape_player/tests/test_bulk_xfer.c \
+            -o audit/test_bulk_xfer
+          ./audit/test_bulk_xfer | tee audit/bulk-xfer-selftest.txt
+          {
+            echo '### Stem Tape bulk upload wire contract + sequence state'
+            echo '```text'
+            cat audit/bulk-xfer-selftest.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Stem Tape v1.1 wire-transcript replay (real recorded tx/rx bytes)
         # Directive step 8's transcript fixtures: handoff/v1.1/transcripts/
         # *.json are REAL, byte-for-byte recorded P/Q/R/W/F wire sessions
