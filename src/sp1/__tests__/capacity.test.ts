@@ -6,11 +6,19 @@ const gate = (over: Partial<Parameters<typeof uploadEnabled>[0]>) =>
   uploadEnabled({
     deviceConnected: true,
     capabilitiesNegotiated: true,
+    bulkCapable: true,
     capacity: "fits",
     songPrepared: true,
     transferActive: false,
     ...over,
   });
+
+describe("bulk capability gate", () => {
+  it("refuses upload when the firmware has no bulk verified-sector command", () => {
+    expect(gate({})).toBe(true);
+    expect(gate({ bulkCapable: false })).toBe(false);
+  });
+});
 
 describe("tri-state staging capacity", () => {
   it("disconnected with a prepared song is unknown, never 'does not fit'", () => {

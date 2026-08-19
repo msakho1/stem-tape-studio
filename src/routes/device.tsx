@@ -94,6 +94,7 @@ function DevicePage() {
   const [queryState, setQueryState] = useState<CapabilityQueryState>("none");
   const [sectorsPerSong, setSectorsPerSong] = useState<number | null>(null);
   const [mockMode, setMockMode] = useState(false);
+  const [bulkCapable, setBulkCapable] = useState(false);
 
   const [files, setFiles] = useState<Files>({});
   const [decoded, setDecoded] = useState<Decoded>({});
@@ -112,8 +113,11 @@ function DevicePage() {
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState<{
     fraction: number;
-    bytes: number;
+    /** Bytes CONFIRMED from device storage, never bytes merely sent. */
+    verifiedBytes: number;
     total: number;
+    sectors: number;
+    sectorsTotal: number;
     rate: number;
     eta: number;
     retries: number;
@@ -178,9 +182,21 @@ function DevicePage() {
       setSectorsPerSong(d.sectorsPerSong);
       setConnected(true);
       say(`Connected · ${l.sampleRate / 1000} kHz · transport ${d.transport}.`, "success");
-      say(t.verdict.summary, t.verdict.writable ? "success" : "warning");
-      for (const r of t.verdict.requirements) {
-        if (!r.satisfied) say(`capability: ${r.label} — ${r.detail}`, "warning");
+      const bulk = t.bulkSupported;
+      setBulkCapable(bulk);
+      say(
+        bulk
+          ? `Firmware capability: fast verified-sector upload available (STBC, ${session.bulkCaps!.maxSectorBytes} bytes per sector).`
+          : "Firmware capability: this SP-1 does not offer the fast verified-sector upload command.",
+        bulk ? "success" : "warning",
+      );
+      const lib = t.library;
+      if (lib?.active) {
+        say(
+          `Active song: generation ${lib.active.generation} · “${lib.active.title || "untitled"}” · song slot ${lib.active.songSlot === 0 ? "A" : "B"} / index slot ${lib.activeIndexSlot === 0 ? "A" : "B"}.`,
+        );
+      } else {
+        say("No song has been written to this SP-1 yet.");
       }
       session.startKeepalive();
     } catch (e) {
@@ -189,6 +205,7 @@ function DevicePage() {
       transportRef.current = null;
       setConnected(false);
       setSectorsPerSong(null);
+      setBulkCapable(false);
       setQueryState("none");
     } finally {
       setConnecting(false);
@@ -202,6 +219,7 @@ function DevicePage() {
     transportRef.current = null;
     setConnected(false);
     setSectorsPerSong(null);
+    setBulkCapable(false);
     setQueryState("none");
     setVerdict(readOnlyVerdict());
     say("Disconnected. The SP-1 has resumed normal operation.");
@@ -401,6 +419,7 @@ function DevicePage() {
   const canUpload = uploadEnabled({
     deviceConnected: connected,
     capabilitiesNegotiated: verdict.writable,
+    bulkCapable,
     capacity: capacity.status,
     songPrepared: prepState === "ready" && !!song,
     transferActive: uploading || connecting,
@@ -413,41 +432,81 @@ function DevicePage() {
     setUploading(true);
     setResult(null);
     const total = manifest.totalBytes;
+    const sectorsTotal = sectorsForFrames(song.frames);
     const started = performance.now();
     setProgress({
       fraction: 0,
-      bytes: 0,
+      verifiedBytes: 0,
       total,
+      sectors: 0,
+      sectorsTotal,
       rate: 0,
       eta: NaN,
       retries: 0,
-      checkpoint: "none yet",
+      checkpoint: "starting",
     });
-    say(`Upload started · ${fmtMiB(total)}.`);
+    say(
+      `Upload started · “${title || "untitled"}” · ${fmtMiB(total)} · ${sectorsTotal} sectors · fast verified-sector transfer.`,
+    );
+    let lastStage = "";
+    let lastCheckpoint = 0;
+    let lastRetries = 0;
     try {
       const out = await t.uploadSong({
         song,
         signal: abortRef.current,
         onProgress: (p) => {
-          const bytes = Math.round(p.fraction * total);
+          // Progress only ever advances on sectors the device itself confirmed.
+          const verifiedBytes = p.bytesDone ?? Math.round(p.fraction * total);
           const elapsed = (performance.now() - started) / 1000;
-          const rate = elapsed > 0 ? bytes / elapsed : 0;
+          const rate = elapsed > 0 ? verifiedBytes / elapsed : 0;
+          const sectors = p.sectorsDone ?? 0;
           setProgress({
             fraction: p.fraction,
-            bytes,
+            verifiedBytes,
             total,
+            sectors,
+            sectorsTotal: p.sectorsTotal ?? sectorsTotal,
             rate,
-            eta: rate > 0 ? (total - bytes) / rate : NaN,
-            retries: 0,
-            checkpoint: p.stage,
+            eta: rate > 0 ? (total - verifiedBytes) / rate : NaN,
+            retries: p.retries ?? 0,
+            checkpoint: p.detail,
           });
+          if (p.stage !== lastStage) {
+            lastStage = p.stage;
+            if (p.stage === "capacity" || p.stage === "metadata" || p.stage === "committing" || p.stage === "confirming") {
+              say(p.detail);
+            }
+          }
+          if (sectors && (sectors - lastCheckpoint >= 64 || sectors === (p.sectorsTotal ?? sectorsTotal))) {
+            lastCheckpoint = sectors;
+            say(
+              `Verified ${sectors}/${p.sectorsTotal ?? sectorsTotal} sectors · ${fmtMiB(verifiedBytes)} confirmed from SP-1 storage.`,
+            );
+          }
+          if ((p.retries ?? 0) > lastRetries) {
+            lastRetries = p.retries ?? 0;
+            say(`Retry ${lastRetries} — the identical transaction was resent.`, "warning");
+          }
         },
       });
       setResult(out);
+      for (const tx of t.bulkTransactions.filter((x) => x.status !== 0)) {
+        say(
+          `Device response · sector ${tx.seq} · block ${tx.destBlock} · ${tx.statusText}${
+            tx.status >= 0 ? ` (code ${tx.status}, retryable ${tx.retryable ? "yes" : "no"})` : ""
+          }`,
+          "error",
+        );
+      }
       if (out.ok) {
         const secs = out.elapsedMs / 1000;
         say(
-          `Upload complete in ${secs.toFixed(1)}s · effective ${(total / 1048576 / Math.max(secs, 0.001)).toFixed(2)} MiB/s.`,
+          `Song slot ${out.targetSongSlot === 0 ? "A" : "B"} / index slot ${out.targetIndexSlot === 0 ? "A" : "B"} · generation ${out.previousGeneration} → ${out.generation} · validity magic written and flushed.`,
+          "success",
+        );
+        say(
+          `Uploaded and verified in ${secs.toFixed(1)}s · ${(total / 1048576 / Math.max(secs, 0.001)).toFixed(2)} MiB/s verified payload · ${out.retries} retries.`,
           "success",
         );
       } else if (out.outcome === "unknown") {
@@ -460,7 +519,7 @@ function DevicePage() {
     } finally {
       setUploading(false);
     }
-  }, [manifest, say, song]);
+  }, [manifest, say, song, title]);
 
   const replaceSong = useCallback(() => {
     setResult(null);
@@ -495,7 +554,8 @@ function DevicePage() {
         requirements: verdict.requirements,
         queryState,
       },
-      device: { sectorsPerSong },
+      device: { sectorsPerSong, bulkVerifiedSectorUpload: bulkCapable },
+      bulkTransactions: transportRef.current?.bulkTransactions ?? [],
       song: manifest,
       timing,
       capacity,
@@ -510,7 +570,7 @@ function DevicePage() {
     a.download = `stem-tape-diagnostic-${Date.now()}.json`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [capacity, log, manifest, mockMode, queryState, result, sectorsPerSong, timing, verdict]);
+  }, [bulkCapable, capacity, log, manifest, mockMode, queryState, result, sectorsPerSong, timing, verdict]);
 
   const stemRows = useMemo(
     () => STEM_ORDER.map((name) => ({ name, file: files[name], buf: decoded[name] })),
@@ -643,13 +703,12 @@ function DevicePage() {
                   </button>
                 </div>
               )}
-              {incompatible && (
+              {connected && (incompatible || !bulkCapable) && (
                 <p
                   className="mt-3 font-mono text-[12px] leading-relaxed text-[var(--ink-dim)]"
                   data-testid="incompatible"
                 >
-                  This SP-1 needs a compatible Stem Tape firmware update before songs can be
-                  uploaded.
+                  Update the Stem Tape firmware to use fast song upload.
                 </p>
               )}
             </div>
@@ -915,11 +974,22 @@ function DevicePage() {
             <span className="up-card__title">upload</span>
           </div>
 
+          {!result && !uploading && (
+            <p className="font-mono text-[12px] text-[var(--ink-dim)]" data-testid="no-song">
+              No song has been written.
+            </p>
+          )}
+
           {result?.ok ? (
             <div data-testid="success">
               <p className="font-mono text-[16px] text-[var(--ink)]">{title || "Untitled song"}</p>
               <p className="mt-1 font-mono text-[14px] text-[var(--ink)]" data-testid="ready-line">
-                Song ready. Press Play on your SP-1.
+                Uploaded and verified. Press Play on your SP-1.
+              </p>
+              <p className="mt-1 font-mono text-[12px] text-[var(--ink-dim)]">
+                Generation {result.generation} · song slot {result.targetSongSlot === 0 ? "A" : "B"}{" "}
+                · index slot {result.targetIndexSlot === 0 ? "A" : "B"} · {result.sectorCount}{" "}
+                sectors verified from SP-1 storage.
               </p>
               <button className="st-btn mt-3" data-testid="replace-song" onClick={replaceSong}>
                 Replace song
@@ -936,8 +1006,8 @@ function DevicePage() {
                     >
                       {!connected
                         ? "Connect your SP-1 to upload."
-                        : incompatible
-                          ? "This SP-1 needs a compatible Stem Tape firmware update before songs can be uploaded."
+                        : incompatible || !bulkCapable
+                          ? "Update the Stem Tape firmware to use fast song upload."
                           : !allFour
                             ? "Load all four stems."
                             : prepState !== "ready"
@@ -978,11 +1048,21 @@ function DevicePage() {
                       style={{ width: `${Math.round(progress.fraction * 100)}%` }}
                     />
                   </div>
-                  <p className="mt-2 font-mono text-[12px] text-[var(--ink-dim)]">
-                    {Math.round(progress.fraction * 100)}% · {fmtMiB(progress.bytes)} /{" "}
-                    {fmtMiB(progress.total)} · {(progress.rate / 1048576).toFixed(2)} MiB/s ·{" "}
-                    {fmtClock(progress.eta)} left · {progress.retries} retries · checkpoint{" "}
+                  <p className="mt-2 font-mono text-[13px] text-[var(--ink)]" data-testid="progress-title">
+                    {title || "Untitled song"}
+                  </p>
+                  <p className="mt-1 font-mono text-[12px] leading-relaxed text-[var(--ink-dim)]">
+                    {Math.round(progress.fraction * 100)}% · {fmtMiB(progress.verifiedBytes)} /{" "}
+                    {fmtMiB(progress.total)} verified · {progress.sectors}/{progress.sectorsTotal}{" "}
+                    sectors verified
+                    <br />
+                    {(progress.rate / 1048576).toFixed(2)} MiB/s · {fmtClock(progress.eta)} left ·{" "}
+                    {progress.retries} {progress.retries === 1 ? "retry" : "retries"}
+                    <br />
                     {progress.checkpoint}
+                  </p>
+                  <p className="mt-2 font-mono text-[12px] text-[var(--ink)]" data-testid="uploading-copy">
+                    Uploading and verifying on SP-1. Keep it connected.
                   </p>
                 </div>
               )}
@@ -990,7 +1070,12 @@ function DevicePage() {
               {result && !result.ok && (
                 <div className="mt-3" data-testid="upload-error">
                   <p className="font-mono text-[14px] text-[var(--ink)]">
-                    Upload stopped. Your previous song is still active.
+                    {result.outcome === "unknown"
+                      ? "Reconnect the SP-1 to confirm whether the new song committed."
+                      : "Upload stopped. Your previous song is still active."}
+                  </p>
+                  <p className="mt-1 font-mono text-[12px] leading-relaxed text-[var(--ink-dim)]">
+                    {result.detail}
                   </p>
                   <button className="st-btn mt-3" onClick={downloadReport}>
                     Download diagnostic report

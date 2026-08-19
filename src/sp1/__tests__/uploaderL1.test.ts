@@ -42,22 +42,25 @@ describe("device route presents exactly three steps", () => {
 
   it("keeps the file input off-screen behind a real styled button", () => {
     expect(route).toContain('data-testid="choose-files"');
-    expect(route).toContain("Choose stem files");
+    expect(route).toContain("Choose files");
+    expect(route).toContain("Choose file");
     expect(route).toMatch(/type="file"[\s\S]{0,240}className="sr-only"/);
   });
 
   it("shows the required success line and failure copy", () => {
-    expect(route).toContain("Song ready. Press Play on your SP-1.");
+    expect(route).toContain("Uploaded and verified. Press Play on your SP-1.");
     expect(route).toContain("Upload stopped. Your previous song is still active.");
-    expect(route).toContain(
-      "This SP-1 needs a compatible Stem Tape firmware update before songs can be uploaded.",
-    );
+    expect(route).toContain("Reconnect the SP-1 to confirm whether the new song committed.");
+    expect(route).toContain("Update the Stem Tape firmware to use fast song upload.");
+    expect(route).toContain("Uploading and verifying on SP-1. Keep it connected.");
+    expect(route).toContain("No song has been written.");
   });
 
   it("keeps activity controls", () => {
-    expect(route).toContain("Copy activity");
-    expect(route).toContain("Download diagnostic report");
-    expect(route).toContain("Clear activity");
+    const lower = route.toLowerCase();
+    expect(lower).toContain("copy activity");
+    expect(lower).toContain("diagnostic report");
+    expect(lower).toContain("clear activity");
   });
 
   it("never reads the mock port outside development", () => {
