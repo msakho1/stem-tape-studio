@@ -96,7 +96,9 @@
 #include <sample_usbd.h>
 #include "st_ab_session.h"
 #include "st_midi_queue.h"
+#include "st_sector_v11.h"
 #include "st_stcp.h"
+#include "st_stem_mix.h"
 #include "st_stix.h"
 #include "st_v11_format.h"
 
@@ -1124,6 +1126,56 @@ static st_ab_session_t g_v11_session;
  * per call, audio paused throughout a transfer), so there is no concurrent
  * use to guard against. */
 static uint8_t s_v11_verify_scratch[ST11_SECTOR_BYTES];
+
+/* ============================================================
+ * STEM TAPE Phase 2 slice 2: the smallest possible stored-song
+ * audio-data path -- validated stored song -> real STSC decode ->
+ * st_stem_mix -> the existing physical I2S output. See
+ * streamer_thread()'s own boot-time A/B-selection block (where this
+ * buffer is filled, once, from real flash) and looper_audio_block()'s
+ * own PASS C (where it is consumed, RAM-only, every I2S block) for the
+ * two ends of this path, and this comment for the buffer itself.
+ *
+ * A GENUINELY NEW buffer, not a reuse of s_v11_verify_scratch just
+ * above: that scratch buffer is transient, overwritten on every
+ * REPLACE-upload song-verification pass inside xfer_v11_write(), and
+ * this one has to stay resident across many audio_thread() calls
+ * while a song plays -- sharing it would silently corrupt whatever
+ * g_stem_sector_buf currently holds the instant a companion started a
+ * new upload, with no mechanism in THIS slice to detect that and
+ * re-read before resuming playback (that belongs to the continuous-
+ * streaming follow-up slice, not this one). Exactly
+ * ST11_SECTOR_BYTES (8192 bytes) -- one physical STSC sector, the
+ * smallest unit the real codec can decode from, and the ONLY new RAM
+ * this slice spends (see this file's own commit message for the
+ * measured total).
+ */
+static uint8_t g_stem_sector_buf[ST11_SECTOR_BYTES];
+
+/* Set exactly once, by streamer_thread(), only after g_stem_sector_buf
+ * above is FULLY populated with a real, header-validated sector --
+ * the same "volatile flag as a one-shot release fence" idiom this file
+ * already uses for g_v11_layout_ready/g_meta_loaded. audio_thread()
+ * only ever reads this flag and, if set, the buffer -- never writes
+ * either. */
+static volatile uint8_t g_stem_song_ready;
+
+/* The real sector 0's own frameCount, from its own real header (never
+ * assumed to be a full ST11_FRAMES_PER_SECTOR) -- the loop bound for
+ * this slice's one-sector playback. audio_thread-only after boot. */
+static uint32_t g_stem_song_frame_count;
+
+/* Current frame index within g_stem_sector_buf's decoded sector.
+ * audio_thread()-owned exclusively; frozen (does not advance) whenever
+ * g_playing is false, exactly like the classic tracks' own p_w/starve
+ * semantics already pause on stop -- reusing g_playing itself rather
+ * than inventing a second transport flag. KNOWN LIMITATION: wraps back
+ * to 0 at g_stem_song_frame_count, looping this ONE resident sector
+ * (<=340 frames, ~7 ms) indefinitely while playing, rather than
+ * advancing into the song's later sectors -- see this file's own
+ * commit message for why continuous multi-sector streaming is a
+ * separate, later slice. */
+static uint32_t g_stem_play_pos;
 #endif /* SP1_XFER_ENABLE */
 
 static volatile uint32_t g_consume_pos;          /* shared playhead (loop samples, free-running) */
@@ -1933,7 +1985,8 @@ static void looper_audio_block(int16_t *s)
 		}
 	}
 
-	/* ==== PASS C: master volume + soft limiter -> stereo out ==== */
+	/* ==== PASS C: master volume + soft limiter -> stereo out, plus the
+	 * real stored-song stereo stem mix (STEM TAPE Phase 2 slice 2) ==== */
 	{
 		/* the VOL buttons step ~3 dB at a time — ramp each step across the
 		 * block instead of applying it as a hard gain jump (a click). */
@@ -1942,10 +1995,57 @@ static void looper_audio_block(int16_t *s)
 		const int32_t md = mv - mv_prev;
 		const int32_t m0 = mv_prev;
 		mv_prev = mv;
+#if SP1_XFER_ENABLE
+		/* Unity gain, unmuted, no solo on all 4 stems -- per-stem fader/
+		 * mute/solo control is a later Phase 3 control-matrix slice's
+		 * job, not this one's (this slice's own scope is establishing
+		 * the audio DATA path, not the control surface). */
+		static const st_stem_mix_channel_t stem_channels[ST11_STEM_COUNT] = {
+			{ ST_STEM_MIX_GAIN_UNITY_Q8, false, false },
+			{ ST_STEM_MIX_GAIN_UNITY_Q8, false, false },
+			{ ST_STEM_MIX_GAIN_UNITY_Q8, false, false },
+			{ ST_STEM_MIX_GAIN_UNITY_Q8, false, false },
+		};
+		/* Reuses the existing PLAY/STOP transport flag as-is (the
+		 * "minimum existing transport state necessary to exercise
+		 * playback" -- no new transport/control-surface wiring in this
+		 * slice): stem playback simply freezes, rather than resetting,
+		 * while stopped, exactly like the classic tracks' own p_w
+		 * position already does. */
+		bool stem_active = g_stem_song_ready && g_playing;
+#endif
 		for (uint32_t f = 0; f < BLK_FRAMES; f++) {
 			int32_t m = md ? (m0 + ((md * (int32_t)(f + 1)) >> 8)) : mv;
-			int16_t out = soft_limit((mix32[f] * m) >> 8);
-			s[2 * f] = out; s[2 * f + 1] = out;
+			int16_t classic = soft_limit((mix32[f] * m) >> 8);
+			int16_t stem_l = 0, stem_r = 0;
+
+#if SP1_XFER_ENABLE
+			if (stem_active) {
+				/* RAM-only: decodes ONE frame out of the already-
+				 * resident g_stem_sector_buf (see streamer_thread()'s
+				 * own boot-time comment for how it got there) --
+				 * never touches flash from this real-time thread. */
+				st11_audio_frame_t frame;
+
+				st11_sector_decode_frame(g_stem_sector_buf, g_stem_play_pos, &frame);
+				st_stem_mix_frame(&frame, stem_channels, &stem_l, &stem_r);
+				if (++g_stem_play_pos >= g_stem_song_frame_count) {
+					g_stem_play_pos = 0u; /* loop this one resident sector -- see the
+							       * known limitation at g_stem_play_pos's own
+							       * declaration */
+				}
+			}
+#endif
+			/* The classic mono bus (currently always silent -- recording
+			 * is unreachable, see this file's own PHASE 1 notes) and the
+			 * real stem stereo mix are summed per channel, THEN limited
+			 * once more -- st_stem_mix_frame() already saturates its own
+			 * output to the int16 range, but classic+stem summed together
+			 * can still exceed it, so this is the one place that clamps
+			 * the FINAL combined output, reusing the same proven
+			 * soft_limit() the classic bus alone already used here. */
+			s[2 * f]     = soft_limit((int32_t)classic + stem_l);
+			s[2 * f + 1] = soft_limit((int32_t)classic + stem_r);
 		}
 	}
 	g_sample_clock += BLK_FRAMES;
@@ -2758,13 +2858,13 @@ static void streamer_thread(void *a, void *b, void *c)
 	 * "Boot from the greater valid generation, falling back to the other
 	 * record"). Runs the SAME selector 'Q' and every session-open use
 	 * (st_stix_read_library(), never the device's own advisory hint) once
-	 * at cold boot and logs the result -- structural proof this firmware
-	 * satisfies the checklist item, not a live behavior yet: real
-	 * playback from the selected song is Task 51, explicitly out of
-	 * scope for this migration, so nothing downstream of this boot log
-	 * consumes the result. Never writes; a blank/corrupt library logs as
-	 * such and is left exactly as read -- 'Q' and the next real upload's
-	 * session-open are what actually act on it. */
+	 * at cold boot and logs the result. As of Phase 2 slice 2, this IS
+	 * consumed downstream: if a song is present, its own first sector is
+	 * also read here (see the block below) into g_stem_sector_buf, which
+	 * looper_audio_block()'s own PASS C plays back. Never writes; a
+	 * blank/corrupt library logs as such and is left exactly as read --
+	 * 'Q' and the next real upload's session-open are what actually act
+	 * on it. */
 	if (g_v11_layout_ready && g_emmc_ready) {
 		uint8_t idx_a[ST11_PHYSICAL_BLOCK_BYTES];
 		uint8_t idx_b[ST11_PHYSICAL_BLOCK_BYTES];
@@ -2785,6 +2885,41 @@ static void streamer_thread(void *a, void *b, void *c)
 				       (unsigned)(uint32_t)(lib.generation >> 32),
 				       (unsigned)(uint32_t)lib.generation, (unsigned)lib.active_index_slot,
 				       (unsigned)lib.active_song_slot);
+
+				/* STEM TAPE Phase 2 slice 2: the smallest possible
+				 * stored-song audio path. Reuses THIS SAME real
+				 * st_stix_read_library() result -- never a second
+				 * parser -- to read the active song's own first STSC
+				 * sector: one bounded, one-time flash read, here in
+				 * streamer_thread (the only thread that ever touches
+				 * flash; audio_thread only ever reads the resulting
+				 * g_stem_sector_buf from RAM, see looper_audio_block()'s
+				 * own PASS C). Real header validation
+				 * (st11_sector_read_header()) before publishing
+				 * g_stem_song_ready -- a corrupt/garbage sector is left
+				 * unready (silent stem playback) rather than trusted.
+				 *
+				 * KNOWN LIMITATION of this slice: only sector 0 (up to
+				 * ST11_FRAMES_PER_SECTOR = 340 frames, ~7 ms at 48 kHz)
+				 * is ever read, and audio_thread loops it indefinitely
+				 * while playing -- continuous, gapless multi-sector
+				 * streaming across the whole song, fed by this same
+				 * thread the same way trk[].pring already is for the
+				 * classic tracks, is deliberately deferred to the next
+				 * Phase 2 slice (see this commit's own message). */
+				if (lib.active.flags & ST11_IX_FLAG_SONG_PRESENT) {
+					if (emmc_read_blocks(lib.active.song_start_block, g_stem_sector_buf,
+							      ST11_BLOCKS_PER_SECTOR)) {
+						st11_sector_header_t hdr;
+
+						if (st11_sector_read_header(g_stem_sector_buf, &hdr) &&
+						    hdr.frame_count > 0u) {
+							g_stem_song_frame_count = hdr.frame_count;
+							g_stem_song_ready = 1u; /* release fence: buffer is
+										 * fully populated above */
+						}
+					}
+				}
 			} else {
 				printk("V11 lib: %s, requires initialization\n",
 				       lib.status == ST_STIX_LIB_BLANK ? "blank" : "corrupt");

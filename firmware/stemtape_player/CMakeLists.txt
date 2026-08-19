@@ -26,6 +26,16 @@ include(${ZEPHYR_BASE}/samples/subsys/usb/common/common.cmake)
 # fixtures. st_crc32.c is linked for st_stix.c's own record-integrity CRC
 # (st_stix_block_crc()), not for any v1.0 purpose.
 #
+# Phase 2 slice 2: src/st_stem_mix.c -- the pure, real-time-safe 4-stem-
+# to-stereo mixdown (see st_stem_mix.h's own doc) -- is now linked and
+# genuinely called: main.c's looper_audio_block() (PASS C) calls
+# st_stem_mix_frame() on frames st11_sector_decode_frame() decodes from a
+# real stored song's own first sector (read once at boot by
+# streamer_thread()), feeding the SP-1's existing physical I2S output.
+# Was added unlinked, host-test-only, in an earlier commit (see git log);
+# this is the commit that gives it its real caller, per this file's own
+# established policy below.
+#
 # The OLD, now-retired v1.0 Gate 2 contract's own engine -- src/
 # st_storage_layout.c, src/st_sector_codec.c, src/st_transfer.c, src/
 # st_library_io.c, src/st_xfer_wire.c, and src/st_stem_validate.c (an
@@ -61,6 +71,7 @@ target_sources(app PRIVATE
 	src/st_stix.c
 	src/st_stcp.c
 	src/st_ab_session.c
+	src/st_stem_mix.c
 )
 
 # See firmware/CMakeLists.txt's identical note: the batchbuf/meta-block code

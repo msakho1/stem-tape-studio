@@ -946,16 +946,16 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Stem Tape v1.1 stem mixdown host tests (not yet linked into the firmware target)
-        # Phase 2 (real four-stem playback engine), first slice:
-        # src/st_stem_mix.c's own pure fixed-point 4-stem-to-stereo
-        # mixdown -- see that file's own doc comment. Host-tested only,
-        # same as st_gesture.c/st_scrub.c/st_led_pattern.c (see
-        # CMakeLists.txt's own comment): deliberately NOT added to
-        # target_sources yet, so as not to present an unwired module as
-        # part of the real runtime. It is real, tested code the ACTUAL
-        # audio_thread()/looper_audio_block() wiring will call in a later,
-        # separate commit -- not a stub.
+      - name: Stem Tape v1.1 stem mixdown host tests
+        # Phase 2 (real four-stem playback engine): src/st_stem_mix.c's
+        # own pure fixed-point 4-stem-to-stereo mixdown -- see that
+        # file's own doc comment. As of Phase 2 slice 2 this module IS
+        # linked into the real firmware target (CMakeLists.txt) and
+        # genuinely called from main.c's looper_audio_block() -- proven
+        # by the runtime symbol-presence gate and the "stored four-stem
+        # playback wiring check" step below, not merely by this host-test
+        # step, which only re-proves the pure mixdown arithmetic itself
+        # in isolation (no Zephyr/nRF toolchain needed for that part).
         working-directory: ${{ github.workspace }}/project
         run: |
           set -euo pipefail
@@ -969,6 +969,29 @@ jobs:
             echo '### Stem Tape v1.1 stem mixdown host tests'
             echo '```text'
             cat audit/stem-mix-selftest.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Stem Tape v1.1 stored four-stem playback wiring check (fail-closed)
+        # Phase 2 slice 2: proves the real production call sequence this
+        # slice establishes -- looper_audio_block() calling
+        # st11_sector_decode_frame()/st_stem_mix_frame(), streamer_thread()
+        # calling st11_sector_read_header() -- is genuinely present as real
+        # call sites in main.c's own source, not merely that the callee
+        # symbols happen to be linked somewhere (the runtime symbol-
+        # presence gate already proves that separately). See
+        # .github/scripts/stemtape_player_stem_playback_wiring_check.py's
+        # own doc comment.
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/stemtape_player_stem_playback_wiring_check.py \
+            firmware/stemtape_player/src/main.c \
+            audit/stem-playback-wiring-check.md | tee audit/stem-playback-wiring-check.txt
+          {
+            echo '### Stem Tape v1.1 stored four-stem playback wiring check'
+            echo '```text'
+            cat audit/stem-playback-wiring-check.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -1121,6 +1144,17 @@ jobs:
           check st_ab_session_check_write
           check st_ab_session_verify_song_before_commit
           check st_stix_deserialize
+          # Phase 2 slice 2: the stored four-stem playback data path --
+          # looper_audio_block() (real-time, RAM-only) calls both of
+          # these on every I2S block while a stored song plays;
+          # streamer_thread() calls st11_sector_read_header() once at
+          # boot to validate the one sector it reads from flash. Proven
+          # to be REAL call sites (not just linked symbols) by the
+          # separate "stored four-stem playback wiring check" CI step
+          # below, which parses main.c's own source.
+          check st11_sector_decode_frame
+          check st11_sector_read_header
+          check st_stem_mix_frame
 
           # REQUIRED-ABSENT: any of these appearing in the final ELF (any nm
           # symbol type -- function OR data/bss) means recording, overdub,
@@ -1221,7 +1255,7 @@ jobs:
             echo "one or more required runtime symbols are missing, or one or more forbidden symbols are present, in the final ELF" >&2
             exit 1
           fi
-          echo "all required Stem Tape runtime symbols are linked (USB MIDI receive and the v1.1 Q/A-B-storage capability), and all forbidden recording/overdub, UAC2/USB-audio-playback, AND retired-v1.0-write-path symbols are confirmed absent, in zephyr.elf"
+          echo "all required Stem Tape runtime symbols are linked (USB MIDI receive, the v1.1 Q/A-B-storage capability, and the stored four-stem playback data path), and all forbidden recording/overdub, UAC2/USB-audio-playback, AND retired-v1.0-write-path symbols are confirmed absent, in zephyr.elf"
 
       - name: Effective configuration assertion (fail-closed)
         # Checks the REAL effective .config the build actually used (not
