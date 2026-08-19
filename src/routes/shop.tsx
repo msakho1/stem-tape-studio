@@ -74,7 +74,6 @@ const SECTIONS: { id: string; label: string; body: string[] }[] = [
 
 function ShopPage() {
   const [open, setOpen] = useState<string | null>(null);
-  const [license, setLicense] = useState("web application");
   const [shot, setShot] = useState(0);
 
   return (
