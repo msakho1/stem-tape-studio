@@ -69,6 +69,13 @@ find_call_sites() in stemtape_player_safety_gate.py already does):
      own comment in main.c), so solo is a real, sourced toggle, not a
      field that exists but nothing ever sets.
 
+  5. Phase 3 control-matrix, LED slice: led_service() (the single real
+     owner of the physical LEDs -- see its own doc comment) reads the
+     SAME trk[].muted/trk[].solo state as check 4, gated on the SAME
+     g_stem_song_selected flag PASS C itself gates on, and drives the
+     real track_led_on()/track_led_ghost() primitives -- proving stem
+     mute/solo status reaches the physical LEDs, not just the mixer.
+
 Fails closed: main.c missing, either function's body not found, or any
 required call site/substring absent.
 
@@ -125,6 +132,13 @@ REQUIRED_SUBSTRINGS = {
     ],
     "main": [
         "trk[ti].solo = !trk[ti].solo",
+    ],
+    "led_service": [
+        "atomic_get(&g_stem_song_selected)",
+        "trk[i].solo",
+        "trk[i].muted",
+        "track_led_on(i)",
+        "track_led_ghost(i)",
     ],
 }
 

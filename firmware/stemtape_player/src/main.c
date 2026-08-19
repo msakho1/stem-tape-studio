@@ -4415,6 +4415,46 @@ static void led_service(void)
 {
 	show_song_leds();                              /* status row = current song */
 
+#if SP1_XFER_ENABLE
+	/* STEM TAPE Phase 3 control-matrix (LED slice): while a stem song is
+	 * selected, the track row shows real per-stem mute/solo status
+	 * instead of falling through to the classic active/standby logic
+	 * below (whose trk[i].state readings can never reach TS_PLAY for a
+	 * stem song -- see the classic-source-absence gate -- so that logic
+	 * would otherwise just show the standby chase throughout real stem
+	 * playback, uninformative about the mixer this slice just wired).
+	 * Reuses the SAME track_led_on()/track_led_ghost() primitives and
+	 * the SAME "ghost = loaded but not currently audible" vocabulary
+	 * the classic engine's own TS_PLAY-and-muted case already
+	 * established a few lines below -- not a new LED language. `audible`
+	 * mirrors st_stem_mix.h's own documented solo/mute rule exactly
+	 * (mute always wins for that stem; otherwise any soloed stem
+	 * silences every non-soloed one) so what lights up is exactly what
+	 * plays, not an approximation. This deliberately does not
+	 * distinguish "muted" from "silenced by another stem's solo" --
+	 * both read as ghost, matching the classic engine's own one-ghost-
+	 * state precedent; a future slice could add a distinct pattern per
+	 * cause, not required for this one. Beat-synced pulsing (like the
+	 * classic engine's on-beat blink for TS_PLAY) is deliberately not
+	 * reused here: it is driven by the classic engine's own detected-
+	 * tempo machinery (g_beat_phase), not a stem song's own bpm_q8 --
+	 * reusing it would risk a visibly wrong pulse rate, so this slice
+	 * stays with steady on/ghost until a stem-tempo-aware pulse is
+	 * built as its own, separately verified piece. */
+	if (atomic_get(&g_stem_song_selected)) {
+		bool any_solo = false;
+
+		for (int i = 0; i < NUM_TRACK_LEDS && i < NTRK; i++)
+			if (trk[i].solo) any_solo = true;
+		for (int i = 0; i < NUM_TRACK_LEDS && i < NTRK; i++) {
+			bool audible = !trk[i].muted && (!any_solo || trk[i].solo);
+
+			audible ? track_led_on(i) : track_led_ghost(i);
+		}
+		return;
+	}
+#endif
+
 	int active = g_loop_active;
 	for (int i = 0; i < NTRK; i++)
 		if (trk[i].state != TS_EMPTY) active = 1;
