@@ -173,41 +173,22 @@ function ShopPage() {
         <h1 className="mt-10 font-mono text-[26px] uppercase tracking-[0.06em] text-[var(--ink)] md:text-[32px]">
           Stem Tape for SP-1
         </h1>
-        <p className="mt-2 font-mono text-[15px] text-[var(--ink)] underline underline-offset-4">$0.00</p>
+        <p className="mt-2 font-mono text-[15px] text-[var(--ink)] underline underline-offset-4">$175</p>
 
         <p className="mt-5 max-w-md font-mono text-[12px] leading-[1.9] text-[var(--ink-dim)]">
-          A four-track tape looper for the browser.
+          Teenage Engineering SP-1, fully loaded with Stem Tape.
           <br />
-          Built for performance. Designed like hardware.
+          Installed, configured and individually tested.
           <br />
-          Runs in real time.
+          No setup — take it out of the box and play.
         </p>
-
-        {/* license */}
-        <label className="mt-7 flex items-center justify-between gap-3 border border-[var(--bench-line)] bg-[var(--bench-raised)] px-4 py-4">
-          <span className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--ink)]">
-            license:
-          </span>
-          <select
-            value={license}
-            onChange={(e) => setLicense(e.target.value)}
-            className="flex-1 cursor-pointer appearance-none bg-transparent font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--ink)] outline-none"
-          >
-            <option value="web application">web application</option>
-            <option value="ios wrapper">ios wrapper</option>
-            <option value="firmware source">firmware source</option>
-          </select>
-          <span aria-hidden className="font-mono text-[11px] text-[var(--ink-dim)]">
-            ⌄
-          </span>
-        </label>
 
         {/* actions */}
         <button
           type="button"
-          className="mt-3 w-full bg-[var(--ink)] px-4 py-4 font-mono text-[11px] uppercase tracking-[0.22em] text-[var(--bench)] transition-opacity hover:opacity-90"
+          className="mt-7 w-full bg-[var(--ink)] px-4 py-4 font-mono text-[11px] uppercase tracking-[0.22em] text-[var(--bench)] transition-opacity hover:opacity-90"
         >
-          add to cart
+          support this project
         </button>
         <Link
           to="/"
