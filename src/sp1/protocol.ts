@@ -341,13 +341,43 @@ export class Sp1Session {
    * 17-byte request header and exactly 8,192 bytes of payload, then reads the
    * 14-byte response. Retries are the caller's business: the wire contract
    * makes resending the identical request idempotent.
+   *
+   * `timeoutMs` default: the firmware's own device-side payload-receive
+   * window is ST_BULK_PAYLOAD_TIMEOUT_MS = 64,000ms (the classic Tape
+   * Looper 'W' handler's own proven 4,000ms/512-byte receive timeout,
+   * scaled by the exact 16x size ratio a bulk sector represents -- see
+   * docs/stem-tape-bulk-upload-handoff.md §6 in the firmware repo for the
+   * full derivation). This default must stay comfortably above that: it
+   * also has to cover the real eMMC write + read-back + CRC-verify work
+   * that happens on the device AFTER the payload is fully received, before
+   * any response byte is sent. 80,000ms = 64,000ms (device receive
+   * ceiling) + 15,000ms (matching the classic protocol's own `flush()`
+   * timeout, its largest proven real-I/O precedent, as headroom for that
+   * write+read-back+CRC stage -- classic 'W' never had to do a read-back
+   * at all). Every number here traces to an already-proven value; none
+   * are newly invented. A healthy transfer returns long before this
+   * ceiling -- it only matters for the rare genuinely slow case.
    */
-  async writeSectorBulk(seq: number, destBlock: number, payload: Uint8Array, timeoutMs = 5000): Promise<BulkResponse> {
+  async writeSectorBulk(
+    seq: number,
+    destBlock: number,
+    payload: Uint8Array,
+    timeoutMs = 80_000,
+  ): Promise<BulkResponse & { writeMs: number; ackMs: number }> {
     if (payload.length !== BULK_PAYLOAD_BYTES) {
       throw new Error(`bulk sector must be exactly ${BULK_PAYLOAD_BYTES} bytes`);
     }
+    const t0 = performance.now();
     await this.io.write(buildBulkRequest({ seq, destBlock, payload }));
-    return parseBulkResponse(await this.io.read(BULK_RESP_BYTES, timeoutMs));
+    const tWritten = performance.now();
+    const resp = parseBulkResponse(await this.io.read(BULK_RESP_BYTES, timeoutMs));
+    const tAcked = performance.now();
+    // writeMs: host -> stream handoff (near-zero unless real backpressure
+    // exists). ackMs: device-side receive + eMMC write + read-back + CRC —
+    // the real cost this timeout has to cover. Kept separate so a slow
+    // round trip can be attributed to one side or the other instead of
+    // guessed at.
+    return { ...resp, writeMs: tWritten - t0, ackMs: tAcked - tWritten };
   }
 }
 

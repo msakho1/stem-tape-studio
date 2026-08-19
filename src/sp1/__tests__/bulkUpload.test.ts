@@ -109,7 +109,13 @@ describe("bulk session behaviour on the mock device", () => {
     const payload = new Uint8Array(BULK_PAYLOAD_BYTES).fill(3);
     const a = await session.writeSectorBulk(0, 16, payload);
     const b = await session.writeSectorBulk(0, 16, payload);
-    expect(b).toEqual(a);
+    // The WIRE response must be byte-identical on a duplicate transaction
+    // (the whole point of idempotent retry) -- writeMs/ackMs are host-side
+    // timing metadata added alongside the response, not part of it, and
+    // are expected to differ between two real calls.
+    const { writeMs: _aWriteMs, ackMs: _aAckMs, ...aWire } = a;
+    const { writeMs: _bWriteMs, ackMs: _bAckMs, ...bWire } = b;
+    expect(bWire).toEqual(aWire);
     // The next genuinely new sector is still seq 1.
     const c = await session.writeSectorBulk(1, 32, payload);
     expect(c.status).toBe(BULK_STATUS.OK);

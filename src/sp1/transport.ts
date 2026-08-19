@@ -160,6 +160,14 @@ export interface BulkTransactionRecord {
   /** Present instead of a status when no response arrived at all. */
   transportError?: string;
   atMs: number;
+  /** Host -> stream write() handoff time (ms). Near-zero unless real
+   * backpressure exists; absent on the no-response (transportError) path,
+   * since there is no completed round trip to time. */
+  writeMs?: number;
+  /** Time from write-resolved to the 14-byte response actually arriving
+   * (ms) — the real device-side receive + eMMC write + read-back + CRC
+   * cost. Absent on the no-response path for the same reason as writeMs. */
+  ackMs?: number;
 }
 
 /** A bulk refusal that resending the identical request can never fix. */
@@ -389,6 +397,8 @@ export class StemTapeTransport {
             verifiedCrc32: resp.verifiedCrc32,
             retryable: resp.retryable,
             atMs: Date.now(),
+            writeMs: resp.writeMs,
+            ackMs: resp.ackMs,
           });
         }
         if (resp.status === BULK_STATUS.OK && resp.verifiedCrc32 === expectCrc) return resp;
