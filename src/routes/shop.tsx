@@ -1,7 +1,18 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useState } from "react";
 import hero from "@/assets/sp1-hero-grey.png.asset.json";
+import whiteFront from "@/assets/sp1-white-front.png.asset.json";
+import whiteBack from "@/assets/sp1-white-back.png.asset.json";
+import whiteSide from "@/assets/sp1-white-side.png.asset.json";
 import { SupportButton } from "@/components/SupportButton";
+
+const GALLERY = [
+  { url: hero.url, alt: "Teenage Engineering SP-1 with Stem Tape — front view on grey" },
+  { url: whiteFront.url, alt: "SP-1 front view" },
+  { url: whiteBack.url, alt: "SP-1 rear view" },
+  { url: whiteSide.url, alt: "SP-1 side view" },
+];
+
 
 export const Route = createFileRoute("/shop")({
   component: ShopPage,
