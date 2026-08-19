@@ -972,6 +972,37 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Stem Tape v1.1 continuous streaming state machine host tests (Slice 3A)
+        # Phase 2 continuous streaming, Slice 3A: src/st_stem_stream.c's own
+        # pure stored-song streaming state machine (see that file's own doc
+        # comment) -- NOT YET linked into the real firmware target or wired
+        # into main.c (that is Slice 3B's own, later, separate commit; see
+        # CMakeLists.txt's established "link in the same commit as the real
+        # caller" policy). Walks the ENTIRE real 43-sector, 14592-frame
+        # handoff/v1.1/binaries/song-sectors-four-stem.bin fixture end to
+        # end, proving sector-transition/final-partial-sector/loop/stop/
+        # underrun/corrupt-sector behavior and a deterministic full-song
+        # mixed-audio hash cross-checked against an independent reference
+        # formula -- pure host-side arithmetic, no Zephyr/nRF toolchain
+        # needed for this part.
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          cc -std=c11 -Wall -Wextra -Ifirmware/stemtape_player/src \
+            firmware/stemtape_player/src/st_checksum32.c \
+            firmware/stemtape_player/src/st_sector_v11.c \
+            firmware/stemtape_player/src/st_stem_mix.c \
+            firmware/stemtape_player/src/st_stem_stream.c \
+            firmware/stemtape_player/tests/test_stem_stream.c \
+            -o audit/test_stem_stream
+          ./audit/test_stem_stream | tee audit/stem-stream-selftest.txt
+          {
+            echo '### Stem Tape v1.1 continuous streaming state machine host tests (Slice 3A)'
+            echo '```text'
+            cat audit/stem-stream-selftest.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Stem Tape v1.1 stored four-stem playback wiring check (fail-closed)
         # Phase 2 slice 2: proves the real production call sequence this
         # slice establishes -- looper_audio_block() calling
