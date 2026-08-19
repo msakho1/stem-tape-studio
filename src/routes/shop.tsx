@@ -33,26 +33,42 @@ export const Route = createFileRoute("/shop")({
   }),
 });
 
-const SECTIONS: { id: string; label: string; body: string }[] = [
+const SECTIONS: { id: string; label: string; body: string[] }[] = [
   {
     id: "details",
-    label: "product details",
-    body: "Stem Tape is an unofficial browser digital twin of the SP-1 surface: four stems, four independent tape loops, one shared transport. Every control on the rendered device is playable with pointer, touch, keyboard or MIDI.",
+    label: "product description",
+    body: [
+      "Teenage Engineering SP-1, fully loaded with Stem Tape.",
+      "A ready-to-play SP-1 with the latest Stem Tape firmware installed, configured, and individually tested for full functionality before shipping.",
+      "No setup. Take it out of the box, load your music, and start playing.",
+      "Stem Tape transforms the SP-1 into a four-track performance instrument built around stems — giving you independent, tactile control over the parts of a song and a growing set of tools for manipulating music in real time.",
+      "Every unit is a genuine Teenage Engineering SP-1 and is tested with Stem Tape before it leaves us.",
+      "All proceeds from these units go directly toward the continued development of Stem Tape and keeping the platform available to everyone.",
+    ],
   },
   {
     id: "features",
     label: "features",
-    body: "Four-track tape engine with varispeed, reverse and inertia · global and per-stem loops with audible-frame release · four tape heads with audible scrubbing · twelve effects in four banks · automatic tempo, beat-phase and bar detection · Stem Instrument Mode cue markers over MIDI.",
+    body: [
+      "4-TRACK STEM PLAYBACK — Load a song as four synchronized stems and control each part independently from the SP-1's four physical channels.",
+      "PHYSICAL STEM CONTROL — Four faders give you immediate hands-on control over the mix. Bring vocals, drums, bass, instruments, or any other stem in and out while the song plays.",
+      "INDEPENDENT TRACK CONTROL — Interact with individual stems without breaking synchronization between the four tracks.",
+      "LOOPING — Create and manipulate loops directly from the hardware for live performance, practice, remixing, and experimentation.",
+      "VARISPEED PLAYBACK — Manipulate playback speed from the SP-1 for tape-inspired pitch and speed changes.",
+      "STEM TAPE PERFORMANCE CONTROLS — Stem Tape combines the SP-1's physical interface with an expanded performance-oriented control system designed specifically around manipulating separated music.",
+      "SONG STORAGE — Store songs on the SP-1 and recall them without needing a computer during playback.",
+      "STEM TAPE COMPANION APP — Prepare and transfer your four-stem songs to the SP-1 through the Stem Tape companion experience.",
+      "READY OUT OF THE BOX — Stem Tape comes installed and configured. Each device is tested before shipping so you can start using it immediately.",
+    ],
   },
   {
-    id: "compatibility",
-    label: "compatibility",
-    body: "Desktop Chrome, Edge and Safari; iOS and iPadOS Safari for playback. Web MIDI is available in desktop Chrome and Edge. Wired class-compliant USB MIDI on iPhone and iPad runs through the native Stem Tape wrapper.",
-  },
-  {
-    id: "requirements",
-    label: "system requirements",
-    body: "A current browser with Web Audio and AudioWorklet support, roughly 300 MiB of free memory for four decoded stems, and local audio files. No account, no upload — no audio ever leaves your device.",
+    id: "support",
+    label: "built to support the project",
+    body: [
+      "Stem Tape is an independent project exploring what the SP-1 can become when its hardware is opened up to a different way of interacting with music.",
+      "The Stem Tape platform and firmware are being developed for the community. Purchasing a preloaded SP-1 is a way to get a ready-to-use physical Stem Tape instrument while directly funding continued development.",
+      "Buy the hardware if you want the ready-to-play experience. The project itself remains for everyone.",
+    ],
   },
 ];
 
