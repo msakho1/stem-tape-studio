@@ -402,8 +402,12 @@ export class StemTapeTransport {
   }): Promise<UploadResult> {
     if (!this.writable) throw new ReadOnlyDeviceError("upload");
     const { song } = args;
-    const report = (stage: UploadStage, fraction: number, detail: string) =>
-      args.onProgress?.({ stage, fraction, detail });
+    const report = (
+      stage: UploadStage,
+      fraction: number,
+      detail: string,
+      extra?: Partial<UploadProgress>,
+    ) => args.onProgress?.({ stage, fraction, detail, ...extra });
     const counter = { retries: 0 };
     const started = Date.now();
     this.magicAttempted = false;
