@@ -55,19 +55,19 @@ find_call_sites() in stemtape_player_safety_gate.py already does):
      test_stem_playback_gate.c's own doc comment for the complementary,
      REAL two-thread algorithmic proof over the real fixture).
 
-  4. Phase 3 control-matrix slice 1 (fader + mute): looper_audio_block()
+  4. Phase 3 control-matrix (fader + mute + solo): looper_audio_block()
      builds its st_stem_mix_channel_t array from the SAME control
      surface the classic engine's own PASS A/B already read
-     (trk[s].vol_q8, trk[s].muted -- see main.c's own PASS C comment for
-     why that cross-thread read is safe), not from a hardcoded
-     placeholder. This is a substring check, not a call-site check (an
-     array-field read is not a call expression), so it is REQUIRED_
-     SUBSTRINGS below, checked the same fail-closed way. Also proves
-     `.solo = false` is still an explicit, visible statement (not a
-     silently-dropped field) -- solo is a documented, deliberate scope
-     cut pending a hardware-compatible gesture (PLAY+Track chording is
-     not physically readable through the shared TRK/PLAY ladder -- see
-     main.c's own comment at the same call site), not an oversight.
+     (trk[s].vol_q8, trk[s].muted, trk[s].solo -- see main.c's own PASS C
+     comment for why that cross-thread read is safe), not from a
+     hardcoded placeholder. This is a substring check, not a call-site
+     check (an array-field read is not a call expression), so it is
+     REQUIRED_SUBSTRINGS below, checked the same fail-closed way. Also
+     proves main()'s own release handler actually WRITES trk[ti].solo
+     (the hold-to-solo gesture substituting for the documented-but-
+     hardware-unreadable PLAY+Track chord -- see TRACK_HOLD_SOLO_MS's
+     own comment in main.c), so solo is a real, sourced toggle, not a
+     field that exists but nothing ever sets.
 
 Fails closed: main.c missing, either function's body not found, or any
 required call site/substring absent.
@@ -121,7 +121,10 @@ REQUIRED_SUBSTRINGS = {
     "looper_audio_block": [
         "trk[s].vol_q8",
         "trk[s].muted",
-        ".solo = false",
+        "trk[s].solo",
+    ],
+    "main": [
+        "trk[ti].solo = !trk[ti].solo",
     ],
 }
 

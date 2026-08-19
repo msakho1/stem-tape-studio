@@ -990,6 +990,10 @@ struct looptrk {
 	volatile uint32_t rec_target;        /* stop after this many samples (0 = open, first loop) */
 	volatile uint8_t  rec_silence;       /* live phrase ended; pad silence to rec_target */
 	volatile uint8_t  muted;             /* tap-to-mute: track silenced but kept */
+	volatile uint8_t  solo;              /* STEM TAPE Phase 3: hold-to-solo (see
+	                                      * TRACK_HOLD_SOLO_MS) -- silences every
+	                                      * OTHER stem while any stem is soloed;
+	                                      * classic engine never sets or reads this. */
 	volatile uint8_t  starved;           /* ring underran; silent until half-refilled */
 	uint16_t          fade;              /* starve-recovery fade-in position (256 = full; mixer-only) */
 	uint16_t          vol_now;           /* gain actually applied last block (mixer-only; ramps toward fader/mute target) */
@@ -1307,6 +1311,20 @@ static volatile int g_play_bpm = 80;
 /* track-button gesture timing */
 #define HOLD_RECORD_MS   180   /* physical button-down this long (ms) => RECORD; shorter => TAP */
 #define DTAP_GAP_MS      420   /* 2nd tap within this of the 1st tap's release => DOUBLE-TAP delete */
+/* STEM TAPE Phase 3 control-matrix, slice 2 (solo): docs/FIRMWARE_CONTRACT_
+ * V1.md specifies PLAY+Track (<stemSoloLinkThresholdMs=700ms overlap) as the
+ * solo gesture, but PLAY and TRACK1-4 share one resistor ladder (see
+ * decode_tracks() -- only one of them is ever readable as pressed at a
+ * time), so that chord cannot be read on this hardware as wired -- see the
+ * fader/mute wiring commit's own note. Product decision: a track held
+ * physically down at least this long toggles SOLO instead of MUTE (release
+ * sooner = the existing tap-to-mute gesture, unchanged); this constant
+ * reuses the contract's own stemSoloLinkThresholdMs value verbatim rather
+ * than inventing a new one, even though the gesture SHAPE (hold vs. a
+ * second control) deviates from the documented chord. HOLD_RECORD_MS above
+ * (180 ms) is a different, much shorter threshold for a capability Stem
+ * Tape does not have (recording) and does not apply here. */
+#define TRACK_HOLD_SOLO_MS 700
 
 /* BEAT GRID for the LED pulse + MIDI clock — defaults to the nominal beat, but
  * the first-track TEMPO ESTIMATOR replaces it with the detected beat period so
@@ -2075,43 +2093,45 @@ static void looper_audio_block(int16_t *s)
 		const int32_t m0 = mv_prev;
 		mv_prev = mv;
 #if SP1_XFER_ENABLE
-		/* Phase 3 control-matrix, slice 1 of 2 (fader + mute; solo is a
-		 * separate follow-up -- see below). Per-stem gain and mute are
-		 * read from the SAME control surface the classic engine's own
-		 * PASS A/B already read: trk[s].vol_q8 (fader ladder -> Q8,
-		 * main-thread-written every ~32 ms round-robin) and trk[s].muted
-		 * (bare-track-tap toggle -- the real, already-proven "tap ->
-		 * mute" gesture a few hundred lines up, unchanged) -- both
-		 * already `volatile`, single-writer(main thread)/single-
-		 * reader(audio thread), the SAME cross-thread convention PASS
-		 * A/B's own `vol_s[i] = trk[i].vol_q8` snapshot already relies
-		 * on (see this file's PASS A/B above) -- no new synchronization
-		 * primitive introduced. Lane order is identical on both sides:
-		 * docs/FIRMWARE_CONTRACT_V1.md section 2 fixes "1 Vocals - 2
-		 * Drums - 3 Bass - 4 Instruments", the SAME order st_sector_v11.h's
-		 * own frame layout documents (vocal, drums, bass, inst) and the
+		/* Phase 3 control-matrix (fader + mute + solo). Per-stem gain,
+		 * mute AND solo are read from the SAME control surface the
+		 * classic engine's own PASS A/B already read: trk[s].vol_q8
+		 * (fader ladder -> Q8, main-thread-written every ~32 ms round-
+		 * robin), trk[s].muted (bare-track-tap toggle -- the real,
+		 * already-proven "tap -> mute" gesture a few hundred lines up),
+		 * and trk[s].solo (hold-to-solo, TRACK_HOLD_SOLO_MS, same
+		 * release handler) -- all three already `volatile`, single-
+		 * writer(main thread)/single-reader(audio thread), the SAME
+		 * cross-thread convention PASS A/B's own `vol_s[i] =
+		 * trk[i].vol_q8` snapshot already relies on (see this file's
+		 * PASS A/B above) -- no new synchronization primitive
+		 * introduced. Lane order is identical on both sides: docs/
+		 * FIRMWARE_CONTRACT_V1.md section 2 fixes "1 Vocals - 2 Drums -
+		 * 3 Bass - 4 Instruments", the SAME order st_sector_v11.h's own
+		 * frame layout documents (vocal, drums, bass, inst) and the
 		 * SAME order TRACK1-4/trk[0..3] already use for the classic
 		 * engine, so trk[s] maps directly to stem index s with no
 		 * reordering.
 		 *
-		 * SOLO NOT WIRED YET: docs/FIRMWARE_CONTRACT_V1.md specifies
-		 * PLAY+Track (<700ms overlap) as the solo gesture, but PLAY and
-		 * TRACK1-4 are decoded from ONE shared resistor ladder
-		 * (decode_tracks() above -- enum trk_btn's TRK_PLAY is one value
-		 * in the SAME single-button decode as TRK_1..TRK_4), so this
-		 * hardware cannot report PLAY and a Track as simultaneously
-		 * pressed -- true chording is not physically readable through
-		 * this ladder as wired, unlike the FUNCTION+Track bank-jump
-		 * chord elsewhere in this file (FUNCTION is a separate line).
-		 * Every channel's .solo stays false (never silences a stem)
-		 * until a hardware-compatible solo gesture is chosen. */
+		 * SOLO GESTURE DEVIATES FROM THE DOCUMENTED CHORD, DELIBERATELY:
+		 * docs/FIRMWARE_CONTRACT_V1.md specifies PLAY+Track (<700ms
+		 * overlap) as solo, but PLAY and TRACK1-4 are decoded from ONE
+		 * shared resistor ladder (decode_tracks() above -- enum
+		 * trk_btn's TRK_PLAY is one value in the SAME single-button
+		 * decode as TRK_1..TRK_4), so this hardware cannot report PLAY
+		 * and a Track as simultaneously pressed -- true chording is not
+		 * physically readable through this ladder as wired, unlike the
+		 * FUNCTION+Track bank-jump chord elsewhere in this file
+		 * (FUNCTION is a separate line). TRACK_HOLD_SOLO_MS's own
+		 * comment has the full reasoning and the product decision that
+		 * approved this substitute gesture. */
 		_Static_assert(NTRK == ST11_STEM_COUNT, "trk[]/stem lane count must match 1:1");
 		st_stem_mix_channel_t stem_channels[ST11_STEM_COUNT];
 
 		for (uint32_t s = 0; s < ST11_STEM_COUNT; s++) {
 			stem_channels[s].gain_q8 = (int32_t)trk[s].vol_q8;
 			stem_channels[s].mute = trk[s].muted != 0;
-			stem_channels[s].solo = false;
+			stem_channels[s].solo = trk[s].solo != 0;
 		}
 		/* Both audio-thread-EXCLUSIVE (Slice 3B.1): which physical
 		 * buffer (0/1) the last successful mailbox acquire named --
@@ -5573,6 +5593,18 @@ int main(void)
 						 * handler) is never reached. */
 						tap_deadline[ti] = 0;   /* 2nd tap: recognized, no-op */
 						trk[ti].muted = 0;
+					} else if (tnow - press_t[ti] >= TRACK_HOLD_SOLO_MS) {
+						/* STEM TAPE Phase 3: HOLD >= TRACK_HOLD_SOLO_MS
+						 * -> SOLO toggle, in place of the documented-but-
+						 * hardware-unreadable PLAY+Track chord (see that
+						 * constant's own comment). Mute is untouched by
+						 * this gesture -- solo and mute are independent
+						 * per-stem flags (st_stem_mix.h's own solo/mute
+						 * interaction rule: mute always wins for that
+						 * stem; otherwise any soloed stem silences every
+						 * non-soloed one). No double-tap window is armed
+						 * here -- a held gesture was never a tap. */
+						trk[ti].solo = !trk[ti].solo;
 					} else {
 						/* tap -> mute, INSTANT on gridded and
 						 * ungridded songs alike (v2.0.0: the M8c
