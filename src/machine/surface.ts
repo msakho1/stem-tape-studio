@@ -15,6 +15,10 @@ export const FX_LATCH_FLASH_MS = 220;
  * distinct from the single simultaneous FX-latch flash above.
  */
 export const HEADS_REJECT_FLASH_MS = 420;
+/** Track-LED greeting length when a physical SP-1 is recognized (one full lap ×2). */
+export const SP1_CONNECT_GREETING_MS = 2400;
+/** One lap of the four Track LEDs during the connect greeting. */
+export const SP1_CONNECT_GREETING_LAP_MS = 600;
 /** Soft-takeover window: a fader picks the stored value up within this margin. */
 export const PICKUP_WINDOW = 0.04;
 import { V26_ROW_BY_ID } from "@/machine/v26map";
