@@ -2911,8 +2911,8 @@ static void stem_song_post_commit_reload(void)
 
 /* STEM TAPE Slice T0's throughput benchmark ('Y' command,
  * xfer_bench_run()/bench_inactive_song_region()/bench_fill_pattern()/
- * bench_send_result()/bench_send_error(), plus the BENCH_MODE_*/
- * BENCH_MAX_* constants and s_bench_last_base/s_bench_last_count) is
+ * bench_send_result()/bench_send_error(), plus the BENCH_MODE_ and
+ * BENCH_MAX_ constants and s_bench_last_base/s_bench_last_count) is
  * REMOVED as of this change -- product decision (Slice C4): its whole
  * job was measuring real physical CDC/eMMC throughput numbers to design
  * the real bulk-upload path against, and that path now exists and is
