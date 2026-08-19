@@ -1140,6 +1140,15 @@ static st_ab_session_t g_v11_session;
  * start -- never carries stale sequence state across sessions. */
 static st_bulk_seq_t g_v11_bulk_seq;
 
+/* Slice C3: post-commit runtime reload without reboot. Set by streamer_
+ * thread the instant xfer_v11_write() detects a magic-committing write
+ * genuinely landed (see that function's own comment) -- consumed by the
+ * NEXT real 'F' (docs section 5 step 18: the flush always immediately
+ * follows step 17's magic write), which performs the actual re-select +
+ * reload handoff (see xfer_service()'s own 'F' handler and g_stem_
+ * reload_req below, near g_stem_song_selected). */
+static bool g_v11_commit_pending;
+
 /* Non-stack (static) ST11_SECTOR_BYTES (8192-byte) scratch buffer for
  * st_ab_session_verify_song_before_commit()'s real read-back -- same "no
  * 8192-byte automatic stack buffer" discipline the retired v1.0 code's own
@@ -1205,17 +1214,41 @@ static st_stem_mbox_t g_stem_mbox;
  * comment. */
 static st_stream_t g_stem_stream;
 
-/* Set exactly once, by streamer_thread(), only after g_stem_stream above
- * is validly initialized AND g_stem_bufs[0]/g_stem_mbox both hold a
- * real, header-validated sector 0 -- the same "one-shot release fence"
- * idiom this file already uses for g_v11_layout_ready/g_meta_loaded,
- * now a real atomic (Slice 3B.1) rather than a `volatile` flag, since
- * it is exactly the kind of "shared ready flag" st_stem_bufmbox.h's own
+/* Set at boot, by streamer_thread(), only after g_stem_stream above is
+ * validly initialized AND g_stem_bufs[0]/g_stem_mbox both hold a real,
+ * header-validated sector 0 -- the same "one-shot release fence" idiom
+ * this file already uses for g_v11_layout_ready/g_meta_loaded, now a
+ * real atomic (Slice 3B.1) rather than a `volatile` flag, since it is
+ * exactly the kind of "shared ready flag" st_stem_bufmbox.h's own
  * protocol note requires be atomic. Distinct from g_stem_stream.state
  * (STOPPED/PLAYING/..., which toggles with transport): this flag means
- * "a valid song was selected and geometry-validated at boot", never
- * cleared again. */
+ * "a valid song is currently selected and geometry-validated". Slice C3:
+ * no longer "never cleared again" -- audio_thread's own post-commit
+ * reload (g_stem_reload_req below) briefly clears it to 0 for the
+ * duration of a runtime song-swap (during which g_playing is already 0
+ * for the whole transfer session, so nothing depends on a song being
+ * selected at that exact moment) before setting it back to 1 once the
+ * NEW song's geometry has been validated the same way boot validates it. */
 static atomic_t g_stem_song_selected;
+
+/* Slice C3: the post-commit reload handoff, mirroring g_stem_beat_timing's
+ * own already-proven "write plain fields, then an atomic release fence"
+ * pattern. streamer_thread (the only thread that touches flash) fills
+ * g_stem_reload_pending with the freshly re-selected STIX record AND (if
+ * it names a song) reads+resides that song's real sector 0 into g_stem_
+ * bufs[0] BEFORE publishing g_stem_reload_req -- audio_thread (g_stem_
+ * stream/g_stem_mbox/g_stem_beat_timing's sole legitimate owner after
+ * boot) performs the actual st_stream_init()/st_stem_mbox_init()/
+ * st_beat_timing_init() reconstruction the next time it observes this
+ * flag set (its own PASS C, once per audio block), then clears it back to
+ * 0 -- see looper_audio_block()'s own comment at its check site. This is
+ * safe specifically because g_playing is already 0 for the WHOLE duration
+ * of any transfer session (set the instant the SP1XFER! magic is
+ * detected), so stem_active is already false and audio_thread is already
+ * not touching g_stem_bufs[]/the mailbox for the entire window a reload
+ * can ever be pending in -- confirmed by inspection, not merely assumed. */
+static st_stix_record_t g_stem_reload_pending;
+static atomic_t g_stem_reload_req;
 
 /* ---- Slice 3B.1: internal runtime diagnostics (no LEDs, no user-
  * facing indication -- see this codebase's own controls_diag() USB-
@@ -1235,6 +1268,18 @@ static atomic_t g_stem_underrun_count;     /* mirrors g_stem_stream.underrun_cou
 static atomic_t g_stem_corrupt_count;      /* validated-but-wrong sectors (st_stream_validate_sector() == false);
 					     * distinct from a failed physical read, which is not itself proof the
 					     * sector's DATA is bad (see the prefetch step's own comment) */
+static atomic_t g_stem_reload_fail_count;  /* Slice C3: post-commit runtime reloads audio_thread's own second
+					     * validation pass rejected (looper_audio_block()'s own reload-
+					     * consumption block) -- should be ~impossible in practice (streamer_
+					     * thread already validated the identical sector0 moments earlier,
+					     * nothing else writes flash in between), but counted rather than
+					     * assumed never to happen: "if runtime reload fails, report
+					     * explicitly, do not claim ready" -- see controls_diag()'s own print
+					     * line, the SAME internal-diagnostic channel g_stem_underrun_count/
+					     * g_stem_corrupt_count already use (no LEDs, no user-facing signal,
+					     * observable only via the USB-serial diagnostic monitor). On this
+					     * path g_stem_song_selected is left/set to 0, so the device
+					     * correctly shows "no song selected" rather than a partial one. */
 
 /* STEM TAPE Phase 3 control-matrix (beat-sync LED slice). g_stem_beat_
  * timing: written EXACTLY ONCE, by streamer_thread()'s own boot block,
@@ -2198,6 +2243,53 @@ static void looper_audio_block(int16_t *s)
 		 * module already represents as UNDERRUN (silence); see st_stem_
 		 * stream.h's own note on why that is an intentional
 		 * simplification, not a capability loss. */
+		/* Slice C3: post-commit runtime reload consumption -- audio_
+		 * thread's own half of the handoff (see g_stem_reload_req's
+		 * own doc comment, near g_stem_song_selected, for the full
+		 * protocol and why this is safe: g_playing is already 0 for
+		 * the whole duration of any transfer session, so stem_active
+		 * below is already false and this thread is provably not
+		 * touching g_stem_bufs[]/the mailbox anywhere in the window a
+		 * reload can ever be pending in). Checked once per audio
+		 * block, before stem_active is computed, so a reload that
+		 * completes here takes effect the SAME block, never one late.
+		 * This is the ONLY place g_stem_stream/g_stem_mbox/g_stem_
+		 * beat_timing are ever reconstructed after boot -- streamer_
+		 * thread's own stem_song_post_commit_reload() never touches
+		 * them directly, only this published copy of the new STIX
+		 * record (g_stem_reload_pending) and the already-resident,
+		 * already-validated g_stem_bufs[0] it prepared before
+		 * publishing. Deliberately no printk() here (unlike the
+		 * equivalent boot-time diagnostic in streamer_thread): this
+		 * runs on the real-time audio thread, which never blocks on
+		 * the console elsewhere in this file either -- a sector-0/
+		 * STIX timing disagreement, if any, is silently resolved the
+		 * same way it always is (the STIX record wins), not logged
+		 * from here. */
+		if (atomic_get(&g_stem_reload_req)) {
+			bool reload_ok = false;
+
+			if (st_stream_init(&g_stem_stream, g_stem_reload_pending.song_start_block,
+					    g_stem_reload_pending.song_block_count, g_stem_reload_pending.frames,
+					    g_stem_reload_pending.sector_count, /*loop_enabled=*/true)) {
+				st11_sector_header_t hdr;
+
+				if (st11_sector_read_header(g_stem_bufs[0], &hdr) &&
+				    st_stream_validate_sector(&g_stem_stream, 0u, &hdr)) {
+					(void)st_beat_timing_init(&g_stem_beat_timing, g_stem_reload_pending.bpm_q8,
+								   g_stem_reload_pending.downbeat_frame,
+								   g_stem_reload_pending.sample_rate);
+					st_stem_mbox_init(&g_stem_mbox, 0u, 0u);
+					reload_ok = true;
+				}
+			}
+			if (!reload_ok) {
+				(void)atomic_add(&g_stem_reload_fail_count, 1);
+			}
+			atomic_set(&g_stem_song_selected, reload_ok ? 1 : 0);
+			atomic_set(&g_stem_reload_req, 0);
+		}
+
 		bool stem_active = atomic_get(&g_stem_song_selected) != 0 && g_playing;
 
 		if (stem_active) {
@@ -2683,10 +2775,138 @@ static int xfer_v11_write(uint32_t block, const uint8_t data[ST11_PHYSICAL_BLOCK
 		}
 	}
 
+	/* Slice C3: whether THIS write, if accepted, IS the sole magic-
+	 * committing write of the open session (REPLACE or INIT alike --
+	 * docs 12.7: "the magic ... is written LAST and is the sole commit
+	 * point" applies to both). Recomputed independently of the
+	 * verify-before-commit block above (which only ever runs before
+	 * song_verified is set) so a magic write that lands on a LATER call,
+	 * after verification already happened earlier, is still recognized. */
+	bool is_magic_commit_write = false;
+
+	if (is_frozen_index) {
+		uint32_t magic = (uint32_t)data[0] | ((uint32_t)data[1] << 8) | ((uint32_t)data[2] << 16) |
+				  ((uint32_t)data[3] << 24);
+
+		is_magic_commit_write = (magic == ST11_INDEX_MAGIC);
+	}
+
 	if (st_ab_session_check_write(&g_v11_session, block, data) != ST_AB_WRITE_OK) {
 		return -1;
 	}
-	return emmc_write_blocks(block, data, 1) ? 0 : -1;
+	if (!emmc_write_blocks(block, data, 1)) {
+		return -1;
+	}
+	if (is_magic_commit_write) {
+		/* A real new generation was just durably WRITTEN (not yet
+		 * flushed) -- st_ab_session_check_write() itself already
+		 * closed the session (single-use latch) exactly when it
+		 * accepted this specific write, so reaching here means the
+		 * commit genuinely landed, never merely attempted. Consumed
+		 * by the NEXT real 'F' (durability barrier) -- docs step 18,
+		 * "Flush", is always the immediately-following operation
+		 * after step 17's magic write -- which performs the actual
+		 * post-commit reload; see xfer_service()'s own 'F' handler
+		 * and stem_song_post_commit_reload()'s own doc comment. */
+		g_v11_commit_pending = true;
+	}
+	return 0;
+}
+
+/*
+ * Slice C3 -- post-commit runtime reload, streamer-thread half. Called
+ * from the real 'F' handler (xfer_service()) the instant a durability
+ * flush succeeds AFTER a magic-committing write genuinely landed
+ * (g_v11_commit_pending, set by xfer_v11_write() above). Re-reads both
+ * index blocks fresh and re-runs the SAME real selector
+ * (st_stix_read_library()) every other v1.1 path already uses -- never
+ * assumes the just-committed record is the one now active; docs section 5
+ * steps 19-21 require literally re-reading and re-selecting, not merely
+ * trusting the write that was just performed.
+ *
+ * If the newly selected record names a song, reads its real sector 0 into
+ * g_stem_bufs[0] (this thread's own job -- the only thread that ever
+ * touches flash) and validates it through a LOCAL, throwaway st_stream_t
+ * instance -- never g_stem_stream itself, which stays audio-thread-
+ * exclusive at every moment (see that struct's own doc comment) -- before
+ * publishing the reload request. This is exactly the same "prove it's
+ * real before ever selecting it" discipline boot itself uses in
+ * streamer_thread's own boot block, just performed against a scratch
+ * instance instead of the shared one, since only audio_thread may ever
+ * construct the real g_stem_stream (see g_stem_reload_req's own doc
+ * comment for the full handoff and why it is safe: g_playing is already 0
+ * for the whole duration of any transfer session, so audio_thread is
+ * provably not touching g_stem_bufs[]/the mailbox anywhere in the window
+ * this function can ever run).
+ *
+ * Only on successful validation does this fill g_stem_reload_pending and
+ * publish g_stem_reload_req -- ANY failure (layout not ready, index
+ * unreadable, no valid record, no song present, geometry/sector-0
+ * validation failure) leaves the CURRENTLY selected song, if any,
+ * completely undisturbed: this function never clears g_stem_song_selected
+ * on failure, and audio_thread's own reload consumption performs an
+ * independent second validation pass before it ever would either (see
+ * looper_audio_block()'s own comment at its check site) -- an interrupted
+ * or corrupt post-commit reload can degrade to "keep playing the OLD
+ * song" but never to a torn/partial new one.
+ */
+static void stem_song_post_commit_reload(void)
+{
+	if (!g_v11_layout_ready) {
+		return;
+	}
+
+	uint8_t idx_a[ST11_PHYSICAL_BLOCK_BYTES];
+	uint8_t idx_b[ST11_PHYSICAL_BLOCK_BYTES];
+
+	if (!emmc_read_blocks(g_v11_layout.index_a_start, idx_a, 1) ||
+	    !emmc_read_blocks(g_v11_layout.index_b_start, idx_b, 1)) {
+		return;
+	}
+
+	st_stix_library_state_t lib;
+
+	st_stix_read_library(idx_a, idx_b, g_v11_layout.song_a_start, g_v11_layout.song_a_blocks,
+			      g_v11_layout.song_b_start, g_v11_layout.song_b_blocks, &lib);
+
+	if (lib.status != ST_STIX_LIB_OK || !(lib.active.flags & ST11_IX_FLAG_SONG_PRESENT)) {
+		/* Nothing to reload for stem playback -- either genuinely no
+		 * valid record yet (should never happen immediately after a
+		 * real, just-verified commit, but this function fails closed
+		 * rather than assuming) or a genuine index-only commit (INIT)
+		 * with no song at all, which correctly has nothing to select. */
+		return;
+	}
+
+	st_stream_t local_check;
+
+	if (!st_stream_init(&local_check, lib.active.song_start_block, lib.active.song_block_count,
+			     lib.active.frames, lib.active.sector_count, /*loop_enabled=*/true)) {
+		return;
+	}
+	if (!emmc_read_blocks(lib.active.song_start_block, g_stem_bufs[0], ST11_BLOCKS_PER_SECTOR)) {
+		return;
+	}
+
+	st11_sector_header_t hdr;
+
+	if (!st11_sector_read_header(g_stem_bufs[0], &hdr) || !st_stream_validate_sector(&local_check, 0u, &hdr)) {
+		return;
+	}
+
+	/* All real validation passed -- hand off to audio_thread. Plain-field
+	 * write BEFORE the atomic release fences, matching g_stem_beat_
+	 * timing's own already-proven idiom (see g_stem_reload_req's own doc
+	 * comment). Clearing g_stem_song_selected here (not left to audio_
+	 * thread) means no audio block in between can observe a stale
+	 * "selected" flag alongside an already-in-flight reload -- the two
+	 * atomic_set() calls are two separate operations, but stem_active
+	 * (looper_audio_block()'s own gate) is already false throughout via
+	 * g_playing==0, so no block ever computes stem_active=true from the
+	 * old selection during this brief window regardless. */
+	g_stem_reload_pending = lib.active;
+	atomic_set(&g_stem_song_selected, 0);
+	atomic_set(&g_stem_reload_req, 1);
 }
 
 /*
@@ -3175,6 +3395,14 @@ static int xfer_bench_run(void)
  * plain local (hdr.payload_crc32), so nothing of the payload is still
  * needed from the buffer itself.
  */
+/* feed_wdt() itself is defined much further down (near fnp_mode_toggle());
+ * forward-declared here, matching this file's own established convention
+ * for an early caller of a function defined later (see streamer_thread()'s
+ * own single-line forward declaration above), so a real CI build doesn't
+ * see an implicit, non-static declaration created at THIS call site
+ * conflict with the real `static void feed_wdt(void);` declared later. */
+static void feed_wdt(void);
+
 /* Returns -1 on every rejected/failed path (never reaching the real eMMC
  * write or a magic-committing anything past it), 0 on the one accepted
  * path -- the SAME `return -1;` early-guard idiom xfer_v11_write() itself
@@ -3475,6 +3703,22 @@ static void xfer_service(void)
 		 * own scope (docs section 1: 'F' takes no payload). */
 		uint8_t h = emmc_cache_flush() ? (uint8_t)ST11_FLUSH_ACK : (uint8_t)'E';
 		cdc_tx(&h, 1);
+
+		/* Slice C3: this flush ack is sent first, unconditionally,
+		 * exactly as before -- the reload below never delays or
+		 * changes it. docs section 5 step 18 ("Flush") always
+		 * immediately follows step 17's magic write, so a real 'F'
+		 * that lands right after a genuine commit (g_v11_commit_
+		 * pending, set by xfer_v11_write()) is the natural, wire-
+		 * contract-compatible trigger point for the post-commit
+		 * reload -- no new command verb needed. One-shot: cleared
+		 * here regardless of the reload's own outcome, so a LATER,
+		 * unrelated 'F' (e.g. one more flush during ordinary song-
+		 * region writes) never re-triggers it. */
+		if (h == (uint8_t)ST11_FLUSH_ACK && g_v11_commit_pending) {
+			g_v11_commit_pending = false;
+			stem_song_post_commit_reload();
+		}
 	} else if (cmd == 'X') {                               /* Phase 1: exit transfer mode -- never commits */
 		g_slot_switch_req = 1;                         /* reload tracks for the active song (read-only) */
 		g_xfer_mode = 0;
@@ -5006,12 +5250,15 @@ static void controls_diag(void)
 	 * worst read duration this session (us), rate=calculated sustained
 	 * read rate (bytes/s, successful-read time only -- see stem_diag_
 	 * sustained_read_bytes_per_sec()'s own doc comment), und=buffer
-	 * underrun episode count, corr=corrupt-sector count. */
-	printk("STEMIO rdby=%u rdc=%u rdus=%u rdusmx=%u rate=%uBps und=%u corr=%u\n",
+	 * underrun episode count, corr=corrupt-sector count, reloadfail=Slice
+	 * C3 post-commit runtime reloads audio_thread's own validation
+	 * rejected (should be ~impossible in practice -- see g_stem_reload_
+	 * fail_count's own doc comment). */
+	printk("STEMIO rdby=%u rdc=%u rdus=%u rdusmx=%u rate=%uBps und=%u corr=%u reloadfail=%u\n",
 	       (unsigned)atomic_get(&g_stem_diag_bytes_total), (unsigned)atomic_get(&g_stem_diag_read_calls),
 	       (unsigned)atomic_get(&g_stem_diag_read_us_last), (unsigned)atomic_get(&g_stem_diag_read_us_max),
 	       (unsigned)stem_diag_sustained_read_bytes_per_sec(), (unsigned)atomic_get(&g_stem_underrun_count),
-	       (unsigned)atomic_get(&g_stem_corrupt_count));
+	       (unsigned)atomic_get(&g_stem_corrupt_count), (unsigned)atomic_get(&g_stem_reload_fail_count));
 #endif
 	emmc_dbg_wr_busy_max = 0u;   /* per-window worst, reset each print */
 	emmc_dbg_wr_busy_us_max = 0u;

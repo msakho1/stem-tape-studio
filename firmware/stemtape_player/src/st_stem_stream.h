@@ -168,9 +168,22 @@ typedef struct {
  *     -- the sectors this song claims would not fit inside its own
  *     reserved capacity ("never read beyond the selected song region",
  *     enforced structurally here rather than merely by convention)
- * Called ONCE, from a single-threaded boot context, strictly before the
- * producer thread's steady-state prefetch loop or the audio thread's
- * steady-state mixing loop begin touching this instance.
+ * Called once at boot, from a single-threaded boot context, strictly
+ * before the producer thread's steady-state prefetch loop or the audio
+ * thread's steady-state mixing loop begin touching this instance.
+ *
+ * Slice C3 adds exactly one other legal caller: audio_thread's own
+ * post-commit runtime reload (main.c's looper_audio_block(), PASS C),
+ * which re-runs this on the SAME `st_stream_t` instance mid-session, from
+ * inside audio_thread itself, to pick up a newly uploaded song without a
+ * reboot. This remains safe under the single-writer rule above: it is not
+ * a second thread touching the instance, it is the instance's own sole
+ * legitimate writer (audio_thread) reinitializing it synchronously on its
+ * own thread, and only while stem_active is provably false for the whole
+ * reload window (see g_stem_reload_req's own doc comment in main.c for
+ * why) -- so no read of `st` by the same thread's mixing logic can ever
+ * observe a mid-reinit state. Every OTHER caller must still treat this as
+ * boot-only, single-shot initialization.
  */
 bool st_stream_init(st_stream_t *st, uint32_t song_start_block, uint32_t song_block_count, uint32_t frames,
 		     uint32_t sector_count, bool loop_enabled);

@@ -847,18 +847,15 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Stem Tape bulk upload wire contract + sequence state (host tests)
-        # Upload-reliability phase, Slice C1: st_bulk_xfer.c is the pure
-        # wire-contract parser/builder and per-session sequence state
-        # machine behind the new 'U' bulk verified-sector command (see
-        # st_bulk_xfer.h's own doc and docs/stem-tape-bulk-upload-v1.md).
-        # Not yet linked into the real firmware target (main.c does not
-        # call it yet -- that is Slice C2) -- host-test-only for now,
-        # matching this repo's own established policy for a pure module
-        # added ahead of its real wiring (see CMakeLists.txt's own note on
-        # st_stem_stream.c's identical slice-3A/3B split). Exercises a
-        # REAL frozen sector from handoff/v1.1/binaries/song-sectors-four-
-        # stem.bin through the real request parser and CRC-32 path, never
-        # a fabricated fixture.
+        # Upload-reliability phase: st_bulk_xfer.c is the pure wire-contract
+        # parser/builder and per-session sequence state machine behind the
+        # 'U' bulk verified-sector command (see st_bulk_xfer.h's own doc and
+        # docs/stem-tape-bulk-upload-v1.md). Linked into the real firmware
+        # target since Slice C2 (main.c's xfer_bulk_write_sector() calls
+        # these same functions) -- this step host-tests the pure module
+        # directly, exercising a REAL frozen sector from handoff/v1.1/
+        # binaries/song-sectors-four-stem.bin through the real request
+        # parser and CRC-32 path, never a fabricated fixture.
         working-directory: ${{ github.workspace }}/project
         run: |
           set -euo pipefail
@@ -872,6 +869,38 @@ jobs:
             echo '### Stem Tape bulk upload wire contract + sequence state'
             echo '```text'
             cat audit/bulk-xfer-selftest.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Stem Tape bulk upload long-run walk (31,814-sector real scale)
+        # Slice C3 verification: mirrors xfer_bulk_write_sector()'s own real
+        # call sequence (header parse -> CRC -> st_bulk_seq_check() ->
+        # st_ab_session_check_write() per block -> write -> read-back -> CRC
+        # verify -> st_bulk_seq_advance()) at the real benchmark song's exact
+        # scale -- 31,814 sectors = 509,024 physical blocks, the same numbers
+        # the phase directive's own physical failure report uses -- via a
+        # mock eMMC that remembers only the single most-recently-written
+        # 8192-byte sector (O(1) memory, no 248.5 MiB fixture). Every pure
+        # function called is the exact same one main.c's real
+        # xfer_bulk_write_sector() calls, never a reimplementation.
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          cc -std=c11 -Wall -Wextra -Ifirmware/stemtape_player/src \
+            firmware/stemtape_player/src/st_crc32.c \
+            firmware/stemtape_player/src/st_checksum32.c \
+            firmware/stemtape_player/src/st_sector_v11.c \
+            firmware/stemtape_player/src/st_stix.c \
+            firmware/stemtape_player/src/st_stcp.c \
+            firmware/stemtape_player/src/st_ab_session.c \
+            firmware/stemtape_player/src/st_bulk_xfer.c \
+            firmware/stemtape_player/tests/test_bulk_xfer_walk.c \
+            -o audit/test_bulk_xfer_walk
+          ./audit/test_bulk_xfer_walk | tee audit/bulk-xfer-walk-selftest.txt
+          {
+            echo '### Stem Tape bulk upload long-run walk (31,814 real-scale sectors)'
+            echo '```text'
+            cat audit/bulk-xfer-walk-selftest.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 

@@ -1,11 +1,12 @@
 # Stem Tape bulk verified-sector upload — wire contract v1
 
-Status: **Slice C2 — wire contract frozen, host-tested, AND wired into the
-real production firmware dispatcher** (`xfer_service()`'s `'U'` handler,
-`firmware/stemtape_player/src/main.c`). Commit/reload integration (the
-post-commit runtime reload without reboot, and coordination with stored-
-song playback) is Slice C3. This document is extended, not replaced, by
-later slices — see the end-of-document changelog.
+Status: **Slice C3 — wire contract frozen, host-tested, wired into the
+real production firmware dispatcher, AND the post-commit runtime reload
+(new song selectable and playable without reflashing/rebooting) is
+implemented and host-verified.** Removing the now-superseded `'Y'`
+benchmark command and the final CI/handoff proof bundle is Slice C4. This
+document is extended, not replaced, by later slices — see the
+end-of-document changelog.
 
 ## 0. Why this exists
 
@@ -198,3 +199,37 @@ if `g_v11_layout_ready` is false, neither part is transmitted.
   `xfer_bulk_write_sector()`'s own body genuinely bounds every write
   through the real session gate before it can ever reach
   `emmc_write_blocks()`.
+- **Slice C3** (this revision): post-commit runtime reload, so a newly
+  uploaded song becomes selectable and playable without reflashing or
+  rebooting. `xfer_v11_write()` now recognizes its own magic-committing
+  write (REPLACE or INIT alike) the instant it genuinely lands on eMMC
+  and sets a one-shot `g_v11_commit_pending` flag — no new wire command;
+  the very next real `'F'` (durability flush), which docs §5 step 18
+  always places immediately after the magic write, consumes that flag
+  (after sending the flush ack, never delaying it) and calls
+  `stem_song_post_commit_reload()`. That function re-reads both index
+  blocks fresh, re-runs the real `st_stix_read_library()` selector (never
+  trusting the write just performed), and — if the newly selected record
+  names a song — reads its real sector 0 and validates it through a
+  local, throwaway `st_stream_t` before ever publishing a reload request.
+  The actual reconstruction of the shared, audio-thread-owned
+  `g_stem_stream`/`g_stem_mbox`/`g_stem_beat_timing` is performed by
+  `looper_audio_block()`'s own PASS C, once per audio block, the same
+  thread that already exclusively owns those structures after boot —
+  this handoff is safe specifically because `g_playing` is forced to 0
+  for the entire duration of any transfer session (set the instant the
+  `SP1XFER!` magic is detected), so stored-song playback is provably not
+  contending with upload writes or with this reload at any point (item
+  12's requirement). Any failure along the reload path leaves the
+  previously selected song, if any, completely undisturbed — never a
+  partial or torn selection — and increments a diagnostic-only
+  `g_stem_reload_fail_count` (`controls_diag()`'s existing `STEMIO`
+  line), never a user-facing signal. Verified via a new long-run host
+  test (`test_bulk_xfer_walk.c`) that drives the real
+  `st_bulk_seq_check()`/`st_ab_session_check_write()`/
+  `st_bulk_seq_advance()` functions through a full 31,814-sector
+  (509,024-block) walk against a mock eMMC that remembers only the
+  single most-recently-written sector (O(1) memory, no 248.5 MiB
+  fixture) — including the exact offsets (499/609/633 blocks into the
+  inactive region) the phase directive's own physical failure report
+  named.
