@@ -290,6 +290,15 @@ export class Sp1Session {
     if (this.keepalive) clearInterval(this.keepalive);
     this.keepalive = null;
   }
+  /**
+   * Whether the periodic keepalive is currently armed. Lets a long
+   * multi-command operation (a bulk upload) suspend it for its duration and
+   * then restore exactly the previous state, instead of guessing whether the
+   * caller had ever started one.
+   */
+  get keepaliveActive(): boolean {
+    return this.keepalive !== null;
+  }
 
   /**
    * Stem Tape capability query ('Q'). This command does NOT exist in the Tape
@@ -367,17 +376,36 @@ export class Sp1Session {
     if (payload.length !== BULK_PAYLOAD_BYTES) {
       throw new Error(`bulk sector must be exactly ${BULK_PAYLOAD_BYTES} bytes`);
     }
-    const t0 = performance.now();
-    await this.io.write(buildBulkRequest({ seq, destBlock, payload }));
-    const tWritten = performance.now();
-    const resp = parseBulkResponse(await this.io.read(BULK_RESP_BYTES, timeoutMs));
-    const tAcked = performance.now();
-    // writeMs: host -> stream handoff (near-zero unless real backpressure
-    // exists). ackMs: device-side receive + eMMC write + read-back + CRC —
-    // the real cost this timeout has to cover. Kept separate so a slow
-    // round trip can be attributed to one side or the other instead of
-    // guessed at.
-    return { ...resp, writeMs: tWritten - t0, ackMs: tAcked - tWritten };
+    // Runs under the shared CommandLock, for the exact reason that lock
+    // exists: "keepalive pings can never interleave with a block read or
+    // write". This round trip is NOT atomic on the wire -- it is a write
+    // followed by a separate read -- so without the lock the keepalive
+    // timer can fire in between, inject its PING byte mid-transfer and
+    // then call io.drain(), which discards the ENTIRE receive buffer.
+    // A real physical upload failed exactly this way: it reached sector
+    // 18, the 7-second keepalive fired mid-transfer, the device answered
+    // the stray PING with its "SP1!" reply, and this read consumed that
+    // reply as if it were the 14-byte bulk response -- surfacing as the
+    // nonexistent status 83, which is simply ASCII 'S', the first byte of
+    // that tag. queryCapabilities() above already takes the lock for the
+    // same reason, and StemTapeTransport wraps its own multi-step index
+    // and commit sequences in session.lock.run() as well; the bulk path
+    // was the one multi-step exchange that never got the same protection.
+    // Deadlock-safe: every caller (bulkWithRetry, and the tests) invokes
+    // this from outside the lock, never from within it.
+    return this.lock.run(async () => {
+      const t0 = performance.now();
+      await this.io.write(buildBulkRequest({ seq, destBlock, payload }));
+      const tWritten = performance.now();
+      const resp = parseBulkResponse(await this.io.read(BULK_RESP_BYTES, timeoutMs));
+      const tAcked = performance.now();
+      // writeMs: host -> stream handoff (near-zero unless real backpressure
+      // exists). ackMs: device-side receive + eMMC write + read-back + CRC —
+      // the real cost this timeout has to cover. Kept separate so a slow
+      // round trip can be attributed to one side or the other instead of
+      // guessed at.
+      return { ...resp, writeMs: tWritten - t0, ackMs: tAcked - tWritten };
+    });
   }
 }
 

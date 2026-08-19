@@ -145,6 +145,40 @@ describe("bulk session behaviour on the mock device", () => {
     expect(r.retryable).toBe(true);
     expect(r.verifiedCrc32).not.toBe(crc32(payload));
   });
+
+  /**
+   * Regression: a real physical upload reached sector 18 and then failed with
+   * "unknown transfer status (83)". 83 is ASCII 'S' — the first byte of the
+   * "SP1!" reply tag. The 7-second keepalive had fired in the middle of a
+   * bulk round trip (a write followed by a separate read, not atomic on the
+   * wire), so the device answered the stray PING and this read consumed that
+   * reply as if it were the 14-byte bulk response. writeSectorBulk() now runs
+   * under the shared CommandLock, which the keepalive already takes, so the
+   * two can no longer interleave. Pinging far faster than any real keepalive
+   * so many pings contend with every sector.
+   */
+  it("keeps bulk round trips intact while the keepalive is firing", async () => {
+    const dev = new MockSp1({ stemTape: true, bulk: true });
+    const { session } = await openSession(dev);
+    await session.queryCapabilities();
+    const payload = new Uint8Array(BULK_PAYLOAD_BYTES).fill(5);
+
+    session.startKeepalive(1);
+    try {
+      for (let seq = 0; seq < 8; seq++) {
+        const r = await session.writeSectorBulk(seq, 16 + seq * 16, payload);
+        // Each field is checked: a desync corrupts the status byte first,
+        // but a shifted-by-N read can still leave a plausible-looking status
+        // while seq/destBlock/CRC no longer line up.
+        expect(r.status).toBe(BULK_STATUS.OK);
+        expect(r.seq).toBe(seq);
+        expect(r.destBlock).toBe(16 + seq * 16);
+        expect(r.verifiedCrc32).toBe(crc32(payload));
+      }
+    } finally {
+      session.stopKeepalive();
+    }
+  });
 });
 
 describe("full upload over the bulk path", () => {
@@ -197,6 +231,32 @@ describe("full upload over the bulk path", () => {
     expect(res.retries).toBeGreaterThan(0);
     expect(mock.songBytes(mock.activeLibrary().activeSongSlot!, res.sectorCount)).toEqual(songImage(s));
   }, 30000);
+
+  it("uploads cleanly with the keepalive armed, and restores it afterwards", async () => {
+    const { mock, t } = await bulkDevice(8);
+    const s = await song("KEEPALIVE", 1400, 5);
+
+    t.session.startKeepalive(1);
+    expect(t.session.keepaliveActive).toBe(true);
+    try {
+      const res = await t.uploadSong({ song: s });
+      expect(res.ok).toBe(true);
+      // The bytes that landed must be the real song, not a stream that
+      // merely survived without an error status.
+      expect(mock.songBytes(mock.activeLibrary().activeSongSlot!, res.sectorCount)).toEqual(songImage(s));
+      // Suspended for the transfer, then put back exactly as it was.
+      expect(t.session.keepaliveActive).toBe(true);
+    } finally {
+      t.session.stopKeepalive();
+    }
+  });
+
+  it("leaves the keepalive off after an upload that never had one", async () => {
+    const { t } = await bulkDevice(8);
+    expect(t.session.keepaliveActive).toBe(false);
+    await t.uploadSong({ song: await song("NOKEEP", 700, 3) });
+    expect(t.session.keepaliveActive).toBe(false);
+  });
 
   it("recovers from a transient incoming-CRC rejection", async () => {
     let once = false;

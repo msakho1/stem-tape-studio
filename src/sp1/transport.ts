@@ -562,6 +562,22 @@ export class StemTapeTransport {
       if (args.signal?.aborted) throw new Error("cancelled before commit — the previous song is still authoritative");
     };
 
+    // Suspend the periodic keepalive for the whole upload. It exists only to
+    // stop the device's 15-second idle auto-exit during a quiet connection,
+    // and an upload is the opposite of quiet — it keeps the link busy far
+    // more often than every 7 seconds, so the ping is pure downside here.
+    // Its real cost: the ping writes a byte and then calls io.drain(), which
+    // discards the whole receive buffer. writeSectorBulk() now takes the
+    // shared CommandLock so a ping can no longer land in the MIDDLE of a
+    // sector round trip, but suspending it outright also removes the
+    // narrower remaining window between sectors, where a PING reply arriving
+    // later than the keepalive's own 80ms drain wait would be left sitting in
+    // the buffer for the next sector's read to consume as its response.
+    // Restored in the finally below to exactly its previous state.
+    const keepaliveWasActive = this.session.keepaliveActive;
+
+    if (keepaliveWasActive) this.session.stopKeepalive();
+
     try {
       // 1. Query and validate capabilities immediately before anything else.
       report("preparing", 0.02, "re-checking device capabilities before writing");
@@ -846,6 +862,10 @@ export class StemTapeTransport {
         },
         failure,
       };
+    } finally {
+      // Restore the keepalive exactly as it was, on every exit path --
+      // success, a handled failure response, or a thrown transport error.
+      if (keepaliveWasActive) this.session.startKeepalive();
     }
   }
 
