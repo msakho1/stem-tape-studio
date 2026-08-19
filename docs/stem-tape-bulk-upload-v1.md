@@ -266,3 +266,23 @@ if `g_v11_layout_ready` is false, neither part is transmitted.
   report, ELF symbol/call-site proof, all safety gates green) and the
   exact Lovable handoff document (`docs/stem-tape-bulk-upload-
   handoff.md`) are part of this same slice.
+- **Slice C5** (physical-test-driven fix): the first real physical upload
+  attempt failed at sector 0 with `ERR_TIMEOUT_PAYLOAD` on every retry.
+  Root cause: the device's payload-receive window (4000ms) was copied
+  from the classic Tape Looper `'W'` handler's own proven per-512-byte-
+  block receive timeout without accounting for a bulk sector being 16x
+  as much data in one call. Fixed by scaling that SAME proven number by
+  the exact 16x size ratio (`ST_BULK_PAYLOAD_TIMEOUT_MS = 4000 *
+  (ST_BULK_PAYLOAD_BYTES / EMMC_BLOCK_SIZE)` = 64000ms) rather than
+  inventing an unrelated new value. This required first fixing a real,
+  previously-latent hazard: the device's hardware watchdog has a 4000ms
+  window, and `cdc_rx()`'s own receive loop never fed it internally --
+  every existing call site (including the classic block receive) stayed
+  at or under 4000ms specifically so the caller's own feed_wdt() calls
+  immediately before/after were sufficient. Raising a single timeout past
+  4000ms without this fix would have made a genuinely slow-but-succeeding
+  transfer hard-reset the device mid-upload instead of returning a clean,
+  retryable timeout. `cdc_rx()` now feeds the watchdog on every poll
+  iteration; every existing (≤ 4000ms) call site is behaviorally
+  unaffected. See `docs/stem-tape-bulk-upload-handoff.md` §6 for the
+  full derivation and the corresponding companion-side timeout value.

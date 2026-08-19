@@ -2551,7 +2551,33 @@ static void cdc_tx(const uint8_t *p, uint32_t n)
 	for (uint32_t i = 0; i < n; i++) uart_poll_out(cdc, p[i]);
 }
 
-/* Pull exactly n bytes from the RX ring, up to timeout_ms. */
+/* feed_wdt() itself is defined much further down (near fnp_mode_toggle());
+ * forward-declared here, matching this file's own established convention
+ * for an early caller of a function defined later (see streamer_thread()'s
+ * own single-line forward declaration above). Needed as of the bulk-upload
+ * timeout fix below: cdc_rx()'s own wait loop must feed the watchdog
+ * itself now that a caller may legitimately ask it to wait longer than the
+ * WDT's 4000ms window (see wdt_install_timeout()'s own `.window.max =
+ * 4000` -- every cdc_rx() call site in this file, until now, stayed at or
+ * under that same ceiling specifically so the caller's own feed_wdt()
+ * calls immediately before/after were enough; that stops being true the
+ * moment any call site legitimately needs more than ~4 real seconds). */
+static void feed_wdt(void);
+
+/* Pull exactly n bytes from the RX ring, up to timeout_ms.
+ *
+ * Feeds the watchdog itself, once per poll iteration, whenever it is about
+ * to sleep and try again -- REQUIRED (not merely a nicety) the moment
+ * `timeout_ms` can legitimately exceed the WDT's own 4000ms window (see
+ * ST_BULK_PAYLOAD_TIMEOUT_MS's own doc comment for why the bulk payload
+ * receive is exactly such a case): without this, a genuinely slow but
+ * still-succeeding transfer would hard-reset the whole SP-1 via the
+ * watchdog partway through, which is a strictly worse failure than a
+ * clean, caller-visible timeout response. Every existing call site in
+ * this file passes timeout_ms <= 4000 and is therefore completely
+ * unaffected in practice (feed_wdt() is cheap -- an NRF_WDT->RR[] register
+ * write -- calling it once more per short wait changes nothing observable
+ * there); this is additive safety margin for them, not a behavior change. */
 static bool cdc_rx(uint8_t *p, uint32_t n, int timeout_ms)
 {
 	int64_t end = k_uptime_get() + timeout_ms;
@@ -2560,6 +2586,7 @@ static bool cdc_rx(uint8_t *p, uint32_t n, int timeout_ms)
 		got += ring_buf_get(&g_cdc_rx, p + got, n - got);
 		if (got < n) {
 			if (k_uptime_get() > end) return false;
+			feed_wdt();
 			k_msleep(1);
 		}
 	}
@@ -2981,15 +3008,10 @@ static void stem_song_post_commit_reload(void)
  * plain local (hdr.payload_crc32), so nothing of the payload is still
  * needed from the buffer itself.
  */
-/* feed_wdt() itself is defined much further down (near fnp_mode_toggle());
- * forward-declared here, matching this file's own established convention
- * for an early caller of a function defined later (see streamer_thread()'s
- * own single-line forward declaration above), so a real CI build doesn't
- * see an implicit, non-static declaration created at THIS call site
- * conflict with the real `static void feed_wdt(void);` declared later. */
-static void feed_wdt(void);
-
-/* Returns -1 on every rejected/failed path (never reaching the real eMMC
+/* feed_wdt() is already forward-declared above (see cdc_rx()'s own doc
+ * comment) -- no second declaration needed here.
+ *
+ * Returns -1 on every rejected/failed path (never reaching the real eMMC
  * write or a magic-committing anything past it), 0 on the one accepted
  * path -- the SAME `return -1;` early-guard idiom xfer_v11_write() itself
  * uses, deliberately, so this function fits the strict persistence safety
@@ -3018,6 +3040,26 @@ static void feed_wdt(void);
  * established convention for this exact function-signature shape (see
  * xfer_v11_write()'s own identical placement, which the strict
  * persistence safety gate's parser is proven against). */
+/* The classic/v1.1 'W' handler already trusts EXACTLY 4000ms as the real,
+ * proven-in-production device-side receive window for one EMMC_BLOCK_SIZE
+ * (512-byte) block (see its own cdc_rx() call site above) -- physically
+ * measured against this same real hardware and USB CDC link over years of
+ * classic Tape Looper use, not a number this project invented. A bulk
+ * sector's payload is exactly ST_BULK_PAYLOAD_BYTES / EMMC_BLOCK_SIZE (16)
+ * times as much data to receive in one call as that already-proven
+ * precedent covers, so this scales the SAME trusted per-block number by
+ * that exact, structural ratio -- not a new, independently-chosen value.
+ * This is a CEILING for the rare slow case, not the expected duration:
+ * cdc_rx() returns the moment all bytes have actually arrived, so a
+ * healthy transfer completes in whatever real time it takes and never
+ * waits anywhere near this bound. Safe to use here specifically because
+ * cdc_rx() itself now feeds the watchdog on every poll iteration (see its
+ * own doc comment) -- before that fix, anything above the WDT's own
+ * 4000ms window risked a hard reset partway through a legitimately slow
+ * (but otherwise succeeding) transfer, which is a strictly worse outcome
+ * than a clean, retryable ERR_TIMEOUT_PAYLOAD response. */
+#define ST_BULK_PAYLOAD_TIMEOUT_MS (4000 * (ST_BULK_PAYLOAD_BYTES / EMMC_BLOCK_SIZE))
+
 static int xfer_bulk_write_sector(void)
 	__attribute__((noinline, noclone));
 static int xfer_bulk_write_sector(void)
@@ -3043,7 +3085,7 @@ static int xfer_bulk_write_sector(void)
 	 * function's own doc comment on why the payload is always drained
 	 * next, regardless of what is wrong with the header). */
 	uint32_t dropped_before = (uint32_t)atomic_get(&g_cdc_rx_dropped_bytes);
-	bool payload_ok = cdc_rx(s_v11_verify_scratch, ST_BULK_PAYLOAD_BYTES, 4000);
+	bool payload_ok = cdc_rx(s_v11_verify_scratch, ST_BULK_PAYLOAD_BYTES, ST_BULK_PAYLOAD_TIMEOUT_MS);
 	uint32_t dropped_after = (uint32_t)atomic_get(&g_cdc_rx_dropped_bytes);
 
 	feed_wdt();

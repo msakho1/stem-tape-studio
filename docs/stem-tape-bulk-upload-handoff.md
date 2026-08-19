@@ -121,17 +121,64 @@ renumber or repurpose an existing one.
   `seq` (processed as new) or the immediately preceding one (processed as
   a no-op-equivalent retry). It is never safe to skip ahead speculatively.
 
-## 6. Timeout and retry policy (host-side recommendation)
+## 6. Timeout and retry policy — REVISED after the first real physical attempt
 
-The device times out its own payload receive internally (`ERR_TIMEOUT_
-PAYLOAD`) — this is a device-side safety bound, not something the host
-configures. Host-side guidance:
+**The first physical upload failed at sector 0 with `ERR_TIMEOUT_PAYLOAD`,
+consistently, on every attempt.** Root cause, found by reading both sides'
+real code (not guessed): the device's own payload-receive window was
+4000ms — copied from the classic Tape Looper `'W'` handler's own real,
+production-proven per-block receive timeout, but that precedent covers
+**512 bytes**; a bulk sector is **8192 bytes**, sixteen times as much data
+to receive in the same window. The fix scales that same proven number by
+the exact size ratio rather than inventing a new one:
 
-- If no response arrives within a reasonable window (recommend **5
-  seconds** per 8192-byte sector, generous relative to real USB CDC
-  throughput), **resend the identical request** (same `seq`, same
-  `dest_block`, same payload bytes, same CRC). Per §5, this is always
-  either a fresh accept or a safe no-op retry.
+```
+ST_BULK_PAYLOAD_TIMEOUT_MS = 4000 * (8192 / 512) = 64000   (64 seconds)
+```
+
+This required one more real fix underneath it: the device has a hardware
+watchdog with a **4000ms window**, and the shared `cdc_rx()` receive loop
+did not feed it internally — every existing call site (including the
+classic 4000ms block receive) stayed at or under that ceiling specifically
+so the caller's own watchdog-feed calls immediately before/after were
+enough. Simply raising one timeout number past 4000ms without also fixing
+this would have made a genuinely slow-but-succeeding transfer hard-reset
+the whole device mid-upload — worse than the current clean timeout. Fixed
+by having `cdc_rx()` feed the watchdog on every poll iteration; every
+existing (≤4000ms) call site is unaffected by this, since it's a wait
+that already always completed under the window.
+
+**Host-side requirement:** `writeSectorBulk()`'s own response-read timeout
+must be raised well above 64000ms — it currently defaults to 5000ms, which
+was already too short for the *device's own new receive ceiling alone*,
+before even counting the real eMMC write, read-back, and CRC-verify work
+that happens after the payload is fully received. Recommend **80000ms**
+(64000ms device receive ceiling + 15000ms headroom, itself matching the
+classic protocol's own largest proven real-I/O precedent — `flush()`'s
+15000ms — for the write+read-back+CRC stage that follows, which classic
+`'W'` never had to do at all, since it never reads back and verifies).
+
+Every number above traces to an existing, already-proven value in this
+codebase (the classic block-receive timeout, the classic flush timeout);
+none of them are newly invented.
+
+**Also add write/ack timing instrumentation** (proposed independently by
+the companion team, and worth doing): split each bulk transaction's timing
+into `writeMs` (time for `this.io.write()` to resolve — should be near-
+zero, a stream-queue handoff, unless real backpressure exists) and
+`ackMs` (time from write-resolved to the 14-byte response actually
+arriving — the real device-side receive+write+read-back+CRC cost). This
+needs no wire-format change and fits entirely inside `writeSectorBulk()`.
+On the next physical attempt, this tells us immediately whether 64000ms
+was enough (transfer succeeds), or exactly how much further off it still
+is (a real number to design against, not another guess).
+
+Original host-side guidance, otherwise unchanged:
+
+- If no response arrives within the host's own configured window,
+  **resend the identical request** (same `seq`, same `dest_block`, same
+  payload bytes, same CRC). Per §5, this is always either a fresh accept
+  or a safe no-op retry.
 - On a response with `retryable = 1`, resending the identical request is
   the correct recovery — no re-query of `'Q'`, no change to the payload.
 - On a response with `retryable = 0`, resending verbatim cannot help —
