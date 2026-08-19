@@ -35,13 +35,31 @@ export function Sp1ConnectLeds({ connected }: { connected: boolean }) {
     return () => window.clearInterval(id);
   }, [connected]);
 
+  const [blinkOn, setBlinkOn] = useState(true);
   const greeting = chaseIndex !== null;
+
+  useEffect(() => {
+    if (!connected || greeting) {
+      setBlinkOn(true);
+      return;
+    }
+    let on = true;
+    let timer = 0;
+    const step = () => {
+      on = !on;
+      setBlinkOn(on);
+      timer = window.setTimeout(step, on ? 400 : 200);
+    };
+    timer = window.setTimeout(step, 400);
+    return () => window.clearTimeout(timer);
+  }, [connected, greeting]);
 
   return (
     <div className="pointer-events-none absolute inset-0" aria-hidden data-testid="sp1-connect-leds">
       {LED_POSITIONS.map((pos, i) => {
-        const on = connected && (!greeting || chaseIndex === i);
         const pulsing = connected && !greeting;
+        const on = connected && (!greeting || chaseIndex === i);
+        const lit = greeting ? chaseIndex === i : blinkOn;
         return (
           <span
             key={i}
@@ -50,7 +68,7 @@ export function Sp1ConnectLeds({ connected }: { connected: boolean }) {
             data-pulsing={pulsing}
             className={`st-connect-led absolute block -translate-x-1/2 -translate-y-1/2 ${
               greeting && chaseIndex === i ? "st-connect-led--chase" : ""
-            } ${pulsing ? "st-connect-led--pulse" : ""}`}
+            } ${pulsing && lit ? "st-connect-led--lit" : ""}`}
             style={{
               left: pos.left,
               top: pos.top,
