@@ -21,6 +21,16 @@
  */
 
 import { CAPS_BYTES, CAPS_TAG, CMD_CAPS } from "./stemTapeFormat";
+import {
+  BULK_CAPS_BYTES,
+  BULK_PAYLOAD_BYTES,
+  BULK_RESP_BYTES,
+  buildBulkRequest,
+  parseBulkCaps,
+  parseBulkResponse,
+  type BulkCapabilities,
+  type BulkResponse,
+} from "./bulkTransfer";
 
 export const BAUD_RATE = 115200;
 export const SAMPLES_PER_BLOCK = 256;
