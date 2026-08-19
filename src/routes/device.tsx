@@ -321,6 +321,7 @@ function DevicePage() {
     void (async () => {
       setPrepState("working");
       setPrepDetail("Preparing audio…");
+      setPrepFraction(0);
       try {
         const cached = await loadPrepared(storage, fingerprint);
         const prepared = await prepareCanonicalSong(
@@ -349,13 +350,16 @@ function DevicePage() {
             fingerprint,
             storage,
             onProgress: (f) => {
-              if (prepTokenRef.current === token)
+              if (prepTokenRef.current === token) {
+                setPrepFraction(f);
                 setPrepDetail(`Preparing audio… ${Math.round(f * 100)}%`);
+              }
             },
           }));
         if (prepTokenRef.current !== token) return;
         setManifest(m);
         setPrepState("ready");
+        setPrepFraction(1);
         setPrepDetail("Ready to upload");
         say(
           cached
@@ -368,6 +372,7 @@ function DevicePage() {
         setPrepState("error");
         setSong(null);
         setManifest(null);
+        setPrepFraction(null);
         const msg = e instanceof Error ? e.message : String(e);
         setPrepDetail(`Preparation failed: ${msg}`);
         say(`Preparation failed: ${msg}`, "error");
