@@ -1071,7 +1071,37 @@ static volatile int      g_cache_flush_req;    /* power-off: streamer, flush the
 #define SP1_XFER_ENABLE 1                      /* 1 = USB loop-transfer (website upload/download) enabled */
 #if SP1_XFER_ENABLE
 static volatile uint8_t  g_xfer_mode;          /* 1 = in block-transfer mode (audio paused) */
-RING_BUF_DECLARE(g_cdc_rx, 1024);              /* CDC serial RX bytes, filled by the ISR */
+/* Sized to hold ONE COMPLETE largest-possible host request, so the ISR can
+ * never be forced to drop a byte no matter how the consumer is scheduled.
+ *
+ * This was 1024 bytes -- a size inherited from the classic Tape Looper 'W'
+ * path, where the largest thing the host ever sent in one burst was a
+ * 512-byte block and 1024 was therefore comfortable. A bulk 'U' request is
+ * 1 command byte + a 17-byte header + an 8192-byte payload = 8210 bytes,
+ * EIGHT TIMES the entire old ring, and the host writes all of it in one
+ * un-chunked stream write. Real physical measurement (companion-side
+ * writeMs/ackMs instrumentation, three separate failed uploads): the host
+ * hands all 8210 bytes to the OS in ~30ms, i.e. bursts of up to roughly a
+ * full-speed USB frame's worth (~1216 B/ms), while cdc_rx()'s consumer loop
+ * polls at k_msleep(1) granularity. A 1024-byte ring therefore overflowed
+ * DETERMINISTICALLY -- within a single poll interval, before the consumer
+ * could possibly drain it -- and cdc_rx_isr() dropped the excess on the
+ * floor. cdc_rx() then waited the full payload timeout for bytes that had
+ * already been discarded and could never arrive, so every real upload
+ * failed at sector 0 with ERR_TIMEOUT_PAYLOAD after a full 64s stall.
+ *
+ * The host cannot have more than one request in flight (it waits for the
+ * 14-byte response before sending the next sector -- see the wire contract's
+ * own sequencing rules), so a ring that holds one whole request plus a
+ * single 64-byte USB packet of slack is not a "bigger, hopefully enough"
+ * buffer: it is a hard upper bound on everything that can be outstanding at
+ * once. No scheduling, priority or drain-rate assumption is left in the
+ * design -- overflow becomes structurally impossible rather than unlikely.
+ *
+ * Costs (ST_CDC_RX_RING_BYTES - 1024) bytes of additional static RAM,
+ * verified against the fail-closed RAM budget gate in CI. */
+#define ST_CDC_RX_RING_BYTES (1u + ST_BULK_REQ_HEADER_BYTES + ST_BULK_PAYLOAD_BYTES + 64u)
+RING_BUF_DECLARE(g_cdc_rx, ST_CDC_RX_RING_BYTES); /* CDC serial RX bytes, filled by the ISR */
 static atomic_t g_cdc_rx_dropped_bytes;        /* bytes the ISR could not queue because the ring was
 						 * already full -- see cdc_rx_isr()'s own comment */
 #else
@@ -2522,20 +2552,26 @@ static void cdc_rx_isr(const struct device *dev, void *u)
 		uint8_t b[64];
 		int n = uart_fifo_read(dev, b, sizeof b);
 		if (n > 0) {
-			/* STEM TAPE throughput benchmark (T0): ring_buf_put()'s
-			 * return value used to be discarded outright -- if the
-			 * 1024-byte g_cdc_rx ring is ever full when the ISR tries
-			 * to add bytes (e.g. the consumer stalled inside a slow
-			 * eMMC write), the EXCESS bytes were silently dropped with
-			 * no counter anywhere ever recording it happened. This was
-			 * a real, previously-invisible failure mode -- exactly the
-			 * "CDC receive loss or ring overflow" category flagged as
-			 * a candidate cause for the physical block 4611/4745
-			 * failures. Now counted, not fixed: this commit does not
-			 * change the ring size or the drain rate, only makes a
-			 * loss visible via g_cdc_rx_dropped_bytes (read by the new
-			 * benchmark's result record, and by anything else that
-			 * cares later). */
+			/* If g_cdc_rx has no room, the excess is dropped here and
+			 * counted in g_cdc_rx_dropped_bytes. That counter was
+			 * added by Slice T0, which deliberately only made the loss
+			 * VISIBLE without changing the ring size or drain rate --
+			 * and it was right to flag "CDC receive loss or ring
+			 * overflow" as a candidate cause of the physical failures,
+			 * because that is exactly what it turned out to be: the
+			 * then-1024-byte ring could not hold an 8210-byte bulk
+			 * request and dropped most of every one. g_cdc_rx is now
+			 * sized to hold one entire largest-possible request (see
+			 * ST_CDC_RX_RING_BYTES's own comment), which is a hard
+			 * bound on everything the host can have in flight at once,
+			 * so this drop path should now be unreachable in normal
+			 * operation. It is kept -- counted, never silent -- as a
+			 * genuine last-resort detector: if it ever fires again it
+			 * means a real invariant broke (a host sending more than
+			 * one request without waiting for its response), and
+			 * xfer_bulk_write_sector() reports it as its own distinct,
+			 * accurate ERR_CDC_OVERFLOW rather than letting it
+			 * masquerade as a mysterious receive timeout. */
 			uint32_t put = ring_buf_put(&g_cdc_rx, b, (uint32_t)n);
 
 			if (put < (uint32_t)n) {
@@ -3116,7 +3152,7 @@ static int xfer_bulk_write_sector(void)
 	 * return promptly now; a host still transmitting long after that point
 	 * is a transport-level problem no single bounded drain here can fully
 	 * cover. */
-	if (!payload_ok) {
+	if (!payload_ok || dropped_after != dropped_before) {
 		uint8_t dump;
 
 		while (ring_buf_get(&g_cdc_rx, &dump, 1) == 1) {
@@ -3137,17 +3173,29 @@ static int xfer_bulk_write_sector(void)
 		cdc_tx(resp, sizeof resp);
 		return -1;
 	}
-	if (!payload_ok) {
-		uint8_t resp[ST_BULK_RESP_BYTES];
-
-		st_bulk_build_response(ST_BULK_ERR_TIMEOUT_PAYLOAD, hdr.seq, hdr.dest_block, 0u, resp);
-		cdc_tx(resp, sizeof resp);
-		return -1;
-	}
+	/* CDC_OVERFLOW is deliberately checked BEFORE TIMEOUT_PAYLOAD, and the
+	 * order matters for real-world diagnosis, not just tidiness: when the
+	 * ISR has dropped bytes, cdc_rx() is left waiting for data that no
+	 * longer exists and ALWAYS eventually reports a timeout too. With the
+	 * timeout tested first, a genuine overflow could only ever surface as
+	 * ERR_TIMEOUT_PAYLOAD -- which is exactly what happened across three
+	 * real physical upload attempts, each one pointing the investigation at
+	 * "the transfer is too slow" when the truth was "the buffer was far too
+	 * small and most of the sector was thrown away". Overflow is the more
+	 * specific and strictly more informative diagnosis, so it wins; a
+	 * timeout is only reported when no bytes were dropped at all, which now
+	 * genuinely does mean the data never arrived. */
 	if (dropped_after != dropped_before) {
 		uint8_t resp[ST_BULK_RESP_BYTES];
 
 		st_bulk_build_response(ST_BULK_ERR_CDC_OVERFLOW, hdr.seq, hdr.dest_block, 0u, resp);
+		cdc_tx(resp, sizeof resp);
+		return -1;
+	}
+	if (!payload_ok) {
+		uint8_t resp[ST_BULK_RESP_BYTES];
+
+		st_bulk_build_response(ST_BULK_ERR_TIMEOUT_PAYLOAD, hdr.seq, hdr.dest_block, 0u, resp);
 		cdc_tx(resp, sizeof resp);
 		return -1;
 	}
