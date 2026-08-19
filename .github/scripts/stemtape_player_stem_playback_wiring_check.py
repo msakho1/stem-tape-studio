@@ -55,8 +55,22 @@ find_call_sites() in stemtape_player_safety_gate.py already does):
      test_stem_playback_gate.c's own doc comment for the complementary,
      REAL two-thread algorithmic proof over the real fixture).
 
+  4. Phase 3 control-matrix slice 1 (fader + mute): looper_audio_block()
+     builds its st_stem_mix_channel_t array from the SAME control
+     surface the classic engine's own PASS A/B already read
+     (trk[s].vol_q8, trk[s].muted -- see main.c's own PASS C comment for
+     why that cross-thread read is safe), not from a hardcoded
+     placeholder. This is a substring check, not a call-site check (an
+     array-field read is not a call expression), so it is REQUIRED_
+     SUBSTRINGS below, checked the same fail-closed way. Also proves
+     `.solo = false` is still an explicit, visible statement (not a
+     silently-dropped field) -- solo is a documented, deliberate scope
+     cut pending a hardware-compatible gesture (PLAY+Track chording is
+     not physically readable through the shared TRK/PLAY ladder -- see
+     main.c's own comment at the same call site), not an oversight.
+
 Fails closed: main.c missing, either function's body not found, or any
-required call site absent.
+required call site/substring absent.
 
 Usage: stemtape_player_stem_playback_wiring_check.py <main.c> <out-report.md>
 """
@@ -96,6 +110,21 @@ REQUIRED_CALLS = {
     ],
 }
 
+# Substring checks (see REQUIRED_CALLS's doc comment, check 4): these are
+# array-field reads/assignments, not call expressions, so they cannot be
+# found by calls_in_function()'s `name(` regex -- a plain per-line substring
+# search within the function's own body (skipping comment-only lines, same
+# as calls_in_function()) is enough, since each string here is specific
+# enough not to appear incidentally in unrelated code or in a real (non-
+# comment) statement other than the one it is meant to prove.
+REQUIRED_SUBSTRINGS = {
+    "looper_audio_block": [
+        "trk[s].vol_q8",
+        "trk[s].muted",
+        ".solo = false",
+    ],
+}
+
 
 def calls_in_function(lines: list[str], func_of_line: dict[int, str | None], func_name: str) -> set[str]:
     """Every bare-call symbol (`name(`, skipping comment-only lines) found
@@ -111,6 +140,22 @@ def calls_in_function(lines: list[str], func_of_line: dict[int, str | None], fun
         for m in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", line):
             found.add(m.group(1))
     return found
+
+
+def substrings_in_function(lines: list[str], func_of_line: dict[int, str | None], func_name: str) -> str:
+    """Every non-comment line of `func_name`'s own body, joined -- cheap
+    enough at main.c's size, and simpler than tracking per-substring
+    line hits when REQUIRED_SUBSTRINGS' own strings are already specific
+    enough not to false-positive against unrelated code."""
+    kept: list[str] = []
+    for i, line in enumerate(lines, 1):
+        if func_of_line.get(i) != func_name:
+            continue
+        stripped = line.strip()
+        if stripped.startswith(("*", "//")):
+            continue
+        kept.append(line)
+    return "\n".join(kept)
 
 
 def main() -> int:
@@ -144,6 +189,21 @@ def main() -> int:
                 report.append(f"- present: real call site to `{sym}(` inside `{func_name}()`'s own body")
             else:
                 report.append(f"- **MISSING**: no call site to `{sym}(` found inside `{func_name}()`'s own body")
+                fail = True
+        report.append("")
+
+    for func_name, required_strings in REQUIRED_SUBSTRINGS.items():
+        if func_name not in defined_functions:
+            report.append(f"**MISSING** `{func_name}` is not defined in {main_c_path} at all")
+            fail = True
+            continue
+        body_text = substrings_in_function(lines, func_of_line, func_name)
+        report.append(f"### `{func_name}()` (substring checks)")
+        for s in required_strings:
+            if s in body_text:
+                report.append(f"- present: `{s}` found inside `{func_name}()`'s own body")
+            else:
+                report.append(f"- **MISSING**: `{s}` not found inside `{func_name}()`'s own body")
                 fail = True
         report.append("")
 

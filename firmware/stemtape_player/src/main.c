@@ -2075,16 +2075,44 @@ static void looper_audio_block(int16_t *s)
 		const int32_t m0 = mv_prev;
 		mv_prev = mv;
 #if SP1_XFER_ENABLE
-		/* Unity gain, unmuted, no solo on all 4 stems -- per-stem fader/
-		 * mute/solo control is a later Phase 3 control-matrix slice's
-		 * job, not this one's (this slice's own scope is establishing
-		 * the audio DATA path, not the control surface). */
-		static const st_stem_mix_channel_t stem_channels[ST11_STEM_COUNT] = {
-			{ ST_STEM_MIX_GAIN_UNITY_Q8, false, false },
-			{ ST_STEM_MIX_GAIN_UNITY_Q8, false, false },
-			{ ST_STEM_MIX_GAIN_UNITY_Q8, false, false },
-			{ ST_STEM_MIX_GAIN_UNITY_Q8, false, false },
-		};
+		/* Phase 3 control-matrix, slice 1 of 2 (fader + mute; solo is a
+		 * separate follow-up -- see below). Per-stem gain and mute are
+		 * read from the SAME control surface the classic engine's own
+		 * PASS A/B already read: trk[s].vol_q8 (fader ladder -> Q8,
+		 * main-thread-written every ~32 ms round-robin) and trk[s].muted
+		 * (bare-track-tap toggle -- the real, already-proven "tap ->
+		 * mute" gesture a few hundred lines up, unchanged) -- both
+		 * already `volatile`, single-writer(main thread)/single-
+		 * reader(audio thread), the SAME cross-thread convention PASS
+		 * A/B's own `vol_s[i] = trk[i].vol_q8` snapshot already relies
+		 * on (see this file's PASS A/B above) -- no new synchronization
+		 * primitive introduced. Lane order is identical on both sides:
+		 * docs/FIRMWARE_CONTRACT_V1.md section 2 fixes "1 Vocals - 2
+		 * Drums - 3 Bass - 4 Instruments", the SAME order st_sector_v11.h's
+		 * own frame layout documents (vocal, drums, bass, inst) and the
+		 * SAME order TRACK1-4/trk[0..3] already use for the classic
+		 * engine, so trk[s] maps directly to stem index s with no
+		 * reordering.
+		 *
+		 * SOLO NOT WIRED YET: docs/FIRMWARE_CONTRACT_V1.md specifies
+		 * PLAY+Track (<700ms overlap) as the solo gesture, but PLAY and
+		 * TRACK1-4 are decoded from ONE shared resistor ladder
+		 * (decode_tracks() above -- enum trk_btn's TRK_PLAY is one value
+		 * in the SAME single-button decode as TRK_1..TRK_4), so this
+		 * hardware cannot report PLAY and a Track as simultaneously
+		 * pressed -- true chording is not physically readable through
+		 * this ladder as wired, unlike the FUNCTION+Track bank-jump
+		 * chord elsewhere in this file (FUNCTION is a separate line).
+		 * Every channel's .solo stays false (never silences a stem)
+		 * until a hardware-compatible solo gesture is chosen. */
+		_Static_assert(NTRK == ST11_STEM_COUNT, "trk[]/stem lane count must match 1:1");
+		st_stem_mix_channel_t stem_channels[ST11_STEM_COUNT];
+
+		for (uint32_t s = 0; s < ST11_STEM_COUNT; s++) {
+			stem_channels[s].gain_q8 = (int32_t)trk[s].vol_q8;
+			stem_channels[s].mute = trk[s].muted != 0;
+			stem_channels[s].solo = false;
+		}
 		/* Both audio-thread-EXCLUSIVE (Slice 3B.1): which physical
 		 * buffer (0/1) the last successful mailbox acquire named --
 		 * plain, not shared, not atomic, since only this thread ever
