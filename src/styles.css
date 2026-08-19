@@ -373,6 +373,113 @@
   }
 }
 
+/* ---------- connect-card SP-1 LEDs ---------- */
+
+.st-connect-led {
+  width: 6%;
+  aspect-ratio: 1 / 1;
+  border-radius: 9999px;
+  transition: opacity 160ms ease-out;
+}
+
+/* Physical LED slot / bezel — dark cutout with a crisp black rim. */
+.st-connect-led__bezel {
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  background: radial-gradient(circle at 35% 30%, #7a7a78 0%, #4a4a48 45%, #111111 100%);
+  border: 3.5px solid #000000;
+  box-shadow:
+    inset 0 1px 2px rgba(255, 255, 255, 0.28),
+    inset 0 -2px 4px rgba(0, 0, 0, 0.8),
+    0 1px 3px rgba(0, 0, 0, 0.5);
+}
+
+/* Soft white glow that spills outside the bezel. */
+.st-connect-led__halo {
+  position: absolute;
+  inset: -70%;
+  border-radius: 9999px;
+  background: radial-gradient(circle, rgba(255, 255, 255, 0.95) 0%, rgba(255, 255, 255, 0.45) 35%, transparent 68%);
+  opacity: 0;
+  transition: opacity 120ms linear;
+}
+
+/* Bright white LED core. */
+.st-connect-led__core {
+  position: absolute;
+  inset: 12%;
+  border-radius: 9999px;
+  background: radial-gradient(circle at 35% 30%, #ffffff 0%, #ffffff 28%, #f0f0f0 100%);
+  box-shadow:
+    0 0 8px 4px rgba(255, 255, 255, 0.75),
+    inset 0 -1px 2px rgba(0, 0, 0, 0.18);
+  opacity: 0;
+  transition: opacity 120ms linear;
+}
+
+.st-connect-led--chase .st-connect-led__halo,
+.st-connect-led--chase .st-connect-led__core {
+  opacity: 1;
+}
+
+.st-connect-led--pulse .st-connect-led__halo {
+  animation: st-connect-pulse-halo 1.4s ease-in-out infinite;
+}
+
+.st-connect-led--pulse .st-connect-led__core {
+  animation: st-connect-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes st-connect-pulse {
+  0%,
+  100% {
+    opacity: 0.45;
+    transform: scale(0.92);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes st-connect-pulse-halo {
+  0%,
+  100% {
+    opacity: 0.2;
+    transform: scale(0.9);
+  }
+  50% {
+    opacity: 0.8;
+    transform: scale(1);
+  }
+}
+
+@keyframes st-connect-chase {
+  0% {
+    opacity: 0.2;
+  }
+  40% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0.2;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .st-connect-led--pulse .st-connect-led__core,
+  .st-connect-led--chase .st-connect-led__core {
+    animation: none;
+    opacity: 0.85;
+  }
+  .st-connect-led--pulse .st-connect-led__halo,
+  .st-connect-led--chase .st-connect-led__halo {
+    animation: none;
+    opacity: 0.25;
+  }
+}
+
 /* ---------- lab chrome ---------- */
 
 .st-panel {

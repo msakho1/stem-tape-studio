@@ -48,19 +48,21 @@ export function Sp1ConnectLeds({ connected }: { connected: boolean }) {
             data-led={`track-${i + 1}`}
             data-on={on}
             data-pulsing={pulsing}
-            className={`absolute block h-[2%] w-[2%] -translate-x-1/2 -translate-y-1/2 rounded-full transition-[background-color,box-shadow] duration-100 ${
-              pulsing ? "pulse" : ""
-            }`}
+            className={`st-connect-led absolute block -translate-x-1/2 -translate-y-1/2 ${
+              greeting && chaseIndex === i ? "st-connect-led--chase" : ""
+            } ${pulsing ? "st-connect-led--pulse" : ""}`}
             style={{
               left: pos.left,
               top: pos.top,
-              backgroundColor: on ? "#ffffff" : "transparent",
-              boxShadow: on ? "0 0 6px 2px rgba(255, 255, 255, 0.55)" : "none",
+              opacity: on ? 1 : 0,
             }}
-          />
+          >
+            <span className="st-connect-led__bezel" aria-hidden />
+            <span className="st-connect-led__halo" aria-hidden />
+            <span className="st-connect-led__core" aria-hidden />
+          </span>
         );
       })}
     </div>
   );
 }
-

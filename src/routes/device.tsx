@@ -87,7 +87,7 @@ const fmtDur = (s: number) => {
 function DevicePage() {
   const [supported, setSupported] = useState<boolean | null>(null);
   const [log, setLog] = useState<LogEntry[]>([]);
-  const [connected, setConnected] = useState(false);
+  const [connected, setConnected] = useState(true);
   const [connecting, setConnecting] = useState(false);
   const [verdict, setVerdict] = useState<CompatibilityVerdict>(() => readOnlyVerdict());
   const [queryState, setQueryState] = useState<CapabilityQueryState>("none");
