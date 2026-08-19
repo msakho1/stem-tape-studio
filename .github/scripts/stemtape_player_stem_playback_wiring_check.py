@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """Stem Tape Player -- stored four-stem playback wiring check (fail-closed).
 
-Phase 2 slice 3B: proves the real production audio-data-path call
-sequence -- now continuous, multi-sector streaming via st_stem_stream.h's
-pure state machine, not slice 2's single resident sector -- is genuinely
-present in main.c's own source, not merely that the callee symbols exist
-somewhere in the link (the runtime symbol-presence gate's own CI step
-already proves THAT separately). Source-level call-site proof, not
-link-level: reuses index_functions() from stemtape_player_safety_gate.py
-(the SAME brace-depth enclosing-function parser this repo's own write-
-safety gate already depends on and self-tests -- see
-stemtape_player_safety_gate_parser_selftest.py) rather than reimplementing
-a second C-source scanner.
+Phase 2 slice 3B.1: proves the real production audio-data-path call
+sequence -- continuous, multi-sector streaming via st_stem_stream.h's pure
+state machine, handed off between threads through st_stem_bufmbox.h's
+atomic mailbox -- is genuinely present in main.c's own source, not merely
+that the callee symbols exist somewhere in the link (the runtime symbol-
+presence gate's own CI step already proves THAT separately). Source-level
+call-site proof, not link-level: reuses index_functions() from
+stemtape_player_safety_gate.py (the SAME brace-depth enclosing-function
+parser this repo's own write-safety gate already depends on and self-
+tests -- see stemtape_player_safety_gate_parser_selftest.py) rather than
+reimplementing a second C-source scanner.
 
 Checks (every one a REAL call expression -- `symbol(`-- found, via
 index_functions()'s own brace-depth tracking, textually inside the named
@@ -19,23 +19,30 @@ enclosing function's own body, skipping comment lines the same way
 find_call_sites() in stemtape_player_safety_gate.py already does):
 
   1. looper_audio_block() (the real-time audio mixer, called every I2S
-     block from audio_thread()) calls st_stream_required_sector() and
-     st_stream_advance_frame() -- the pure streaming state machine's own
-     per-frame bookkeeping -- plus st11_sector_decode_frame() -- the real
-     STSC per-frame decoder, RAM-only, no I/O -- and st_stem_mix_frame()
-     -- the real 4-stem-to-stereo mixdown. This is the "stored four-stem
-     playback path actually references/uses st_stem_stream/st_stem_mix"
-     requirement: not incidental symbol presence, real call sites inside
-     the real real-time audio function.
+     block from audio_thread()) -- the mailbox CONSUMER -- calls
+     st_stream_required_sector()/st_stream_sector_ready()/st_stream_
+     advance_frame() (the pure streaming state machine's own per-frame
+     bookkeeping, exclusively audio-thread-owned as of this slice) plus
+     st_stem_mbox_try_acquire()/st_stem_mbox_set_requested_sector() (the
+     atomic mailbox's consumer-side API) plus st11_sector_decode_frame()
+     -- the real STSC per-frame decoder, RAM-only, no I/O -- and
+     st_stem_mix_frame() -- the real 4-stem-to-stereo mixdown. This is
+     the "stored four-stem playback path actually references/uses
+     st_stem_stream/st_stem_bufmbox/st_stem_mix" requirement: not
+     incidental symbol presence, real call sites inside the real real-
+     time audio function.
 
-  2. streamer_thread() (the one thread that ever touches flash) calls
-     st_stream_init() (seeding the state machine from the real selected
-     song's own STIX geometry), st_stream_validate_sector() (validating
-     EVERY sector read, not just the first), and st_stream_sector_ready()
-     (publishing a freshly-validated sector to the audio path) -- proving
-     both the boot-time first sector AND the continuous per-pass prefetch
-     that streams the rest of the song are validated through the real
-     state machine, never trusted blindly.
+  2. streamer_thread() (the one thread that ever touches flash) -- the
+     mailbox PRODUCER -- calls st_stream_init() (seeding the state
+     machine from the real selected song's own STIX geometry, once, at
+     boot) and st_stream_validate_sector() (validating EVERY sector
+     read, not just the first -- read-only geometry access, safe from
+     the producer thread) plus st_stem_mbox_init()/st_stem_mbox_
+     producer_target_slot()/st_stem_mbox_publish_ready() (the atomic
+     mailbox's producer-side API) -- proving both the boot-time first
+     sector AND the continuous per-pass prefetch that streams the rest
+     of the song go through the real state machine and the real atomic
+     handoff, never a shared struct touched directly by both threads.
 
 Fails closed: main.c missing, either function's body not found, or any
 required call site absent.
@@ -59,13 +66,18 @@ REQUIRED_CALLS = {
         "st11_sector_decode_frame",
         "st_stem_mix_frame",
         "st_stream_required_sector",
+        "st_stream_sector_ready",
         "st_stream_advance_frame",
+        "st_stem_mbox_try_acquire",
+        "st_stem_mbox_set_requested_sector",
     ],
     "streamer_thread": [
         "st11_sector_read_header",
         "st_stream_init",
         "st_stream_validate_sector",
-        "st_stream_sector_ready",
+        "st_stem_mbox_init",
+        "st_stem_mbox_producer_target_slot",
+        "st_stem_mbox_publish_ready",
     ],
 }
 
@@ -126,9 +138,9 @@ def main() -> int:
         report.append("GATE FAILED -- see missing item(s) above.")
     else:
         report.append("GATE PASSED -- the stored four-stem playback path genuinely calls the real "
-                      "st11_sector_decode_frame()/st_stem_mix_frame()/st11_sector_read_header() "
-                      "functions from the real audio_thread()/streamer_thread() call sites, not "
-                      "merely linking them incidentally.")
+                      "st_stem_stream/st_stem_bufmbox/st_stem_mix functions from the real "
+                      "audio_thread()/streamer_thread() call sites, not merely linking them "
+                      "incidentally.")
     report.append("")
 
     open(out_path, "w").write("\n".join(report) + "\n")

@@ -1007,17 +1007,80 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Stem Tape v1.1 SPSC mailbox concurrency host tests (Slice 3B.1)
+        # Phase 2 continuous streaming, Slice 3B.1 concurrency correction:
+        # src/st_stem_bufmbox.c's own formally specified, lock-free SPSC
+        # double-buffer publication mailbox (see that file's own doc
+        # comment and full correctness argument). Built here against the
+        # C11 <stdatomic.h> backend (ST_STEM_BUFMBOX_ZEPHYR undefined),
+        # the SAME source the real firmware builds against Zephyr's own
+        # atomic_t instead (see CMakeLists.txt). Includes real concurrent
+        # pthread producer/consumer coverage (not just single-threaded
+        # simulation) writing a deterministic per-sector byte pattern and
+        # verifying the consumer never observes anything but an exact
+        # match -- the empirical proof that buffer bytes are genuinely
+        # visible before the ready flag is observed under real thread
+        # interleaving.
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          cc -std=c11 -Wall -Wextra -pthread -Ifirmware/stemtape_player/src \
+            firmware/stemtape_player/src/st_stem_bufmbox.c \
+            firmware/stemtape_player/tests/test_stem_bufmbox.c \
+            -o audit/test_stem_bufmbox
+          ./audit/test_stem_bufmbox | tee audit/stem-bufmbox-selftest.txt
+          {
+            echo '### Stem Tape v1.1 SPSC mailbox concurrency host tests (Slice 3B.1)'
+            echo '```text'
+            cat audit/stem-bufmbox-selftest.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Stem Tape v1.1 SPSC mailbox ThreadSanitizer run (supplemental evidence)
+        # Supplemental evidence ONLY, not the sole proof (per the user's
+        # own directive) -- see test_stem_bufmbox.c's own doc comment for
+        # exactly what this does and does not validate: TSan instruments
+        # the SAME source's C11 <stdatomic.h> backend under real pthreads
+        # and would flag any happens-before violation in this module's
+        # own acquire/release usage, but it does not itself exercise
+        # Zephyr's atomic_t (the real firmware's backend), which is
+        # unconditionally sequentially consistent -- strictly stronger
+        # than what this protocol requires. A failure here is still a
+        # real, actionable finding about the protocol's own algorithm;
+        # this step does not gate the build (informational), matching
+        # "include it as supplemental evidence, do not use it as the sole
+        # proof".
+        working-directory: ${{ github.workspace }}/project
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          cc -std=c11 -Wall -Wextra -pthread -fsanitize=thread -g -Ifirmware/stemtape_player/src \
+            firmware/stemtape_player/src/st_stem_bufmbox.c \
+            firmware/stemtape_player/tests/test_stem_bufmbox.c \
+            -o audit/test_stem_bufmbox_tsan
+          ./audit/test_stem_bufmbox_tsan | tee audit/stem-bufmbox-tsan.txt
+          {
+            echo '### Stem Tape v1.1 SPSC mailbox ThreadSanitizer run (supplemental evidence)'
+            echo '```text'
+            cat audit/stem-bufmbox-tsan.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Stem Tape v1.1 stored four-stem playback wiring check (fail-closed)
-        # Phase 2 slice 3B: proves the real production call sequence for
-        # CONTINUOUS streaming -- looper_audio_block() calling
-        # st_stream_required_sector()/st_stream_advance_frame()/
-        # st11_sector_decode_frame()/st_stem_mix_frame(), streamer_thread()
-        # calling st_stream_init()/st_stream_validate_sector()/
-        # st_stream_sector_ready()/st11_sector_read_header() -- is
-        # genuinely present as real call sites in main.c's own source, not
-        # merely that the callee symbols happen to be linked somewhere
-        # (the runtime symbol-presence gate already proves that
-        # separately). See .github/scripts/stemtape_player_stem_playback_
+        # Phase 2 slice 3B.1: proves the real production call sequence for
+        # CONTINUOUS streaming, handed off through the real atomic mailbox
+        # -- looper_audio_block() (the mailbox consumer) calling
+        # st_stream_required_sector()/st_stream_sector_ready()/st_stream_
+        # advance_frame()/st_stem_mbox_try_acquire()/st_stem_mbox_set_
+        # requested_sector()/st11_sector_decode_frame()/st_stem_mix_
+        # frame(), streamer_thread() (the mailbox producer) calling
+        # st_stream_init()/st_stream_validate_sector()/st_stem_mbox_
+        # init()/st_stem_mbox_producer_target_slot()/st_stem_mbox_
+        # publish_ready()/st11_sector_read_header() -- is genuinely
+        # present as real call sites in main.c's own source, not merely
+        # that the callee symbols happen to be linked somewhere (the
+        # runtime symbol-presence gate already proves that separately).
+        # See .github/scripts/stemtape_player_stem_playback_
         # wiring_check.py's own doc comment.
         working-directory: ${{ github.workspace }}/project
         run: |
@@ -1208,15 +1271,18 @@ jobs:
           check st_ab_session_check_write
           check st_ab_session_verify_song_before_commit
           check st_stix_deserialize
-          # Phase 2 slice 2/3B: the stored four-stem playback data path --
-          # looper_audio_block() (real-time, RAM-only) calls the first
-          # three on every I2S block while a stored song plays;
-          # streamer_thread() calls the rest, both at boot and on every
-          # per-pass prefetch, to validate every sector it reads from
-          # flash (not just the first). Proven to be REAL call sites (not
-          # just linked symbols) by the separate "stored four-stem
-          # playback wiring check" CI step below, which parses main.c's
-          # own source.
+          # Phase 2 slice 2/3B/3B.1: the stored four-stem playback data
+          # path -- looper_audio_block() (real-time, RAM-only, the
+          # mailbox CONSUMER) calls the st_stream_*/st_stem_mix_frame
+          # ones and the two st_stem_mbox_* consumer-side entries;
+          # streamer_thread() (the mailbox PRODUCER) calls the rest,
+          # both at boot and on every per-pass prefetch, to validate
+          # every sector it reads from flash (not just the first) and
+          # publish it through the real atomic mailbox (st_stem_
+          # bufmbox.h), never a shared struct touched by both threads.
+          # Proven to be REAL call sites (not just linked symbols) by
+          # the separate "stored four-stem playback wiring check" CI
+          # step below, which parses main.c's own source.
           check st11_sector_decode_frame
           check st11_sector_read_header
           check st_stem_mix_frame
@@ -1225,6 +1291,12 @@ jobs:
           check st_stream_validate_sector
           check st_stream_sector_ready
           check st_stream_advance_frame
+          check st_stem_mbox_init
+          check st_stem_mbox_try_acquire
+          check st_stem_mbox_set_requested_sector
+          check st_stem_mbox_producer_target_slot
+          check st_stem_mbox_producer_requested_sector
+          check st_stem_mbox_publish_ready
 
           # REQUIRED-ABSENT: any of these appearing in the final ELF (any nm
           # symbol type -- function OR data/bss) means recording, overdub,

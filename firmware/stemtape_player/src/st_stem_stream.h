@@ -1,63 +1,72 @@
 /*
  * st_stem_stream.h — pure stored-song CONTINUOUS streaming state machine
  * (STEM TAPE Phase 2 continuous streaming: pure module added, host-test-
- * only, in Slice 3A; genuinely wired into main.c's streamer_thread()/
- * looper_audio_block() in Slice 3B -- see CMakeLists.txt's own note).
+ * only, in Slice 3A; wired into main.c's streamer_thread()/looper_audio_
+ * block() in Slice 3B; Slice 3B.1 corrected the cross-thread handoff --
+ * see below).
  *
  * Slice 2 played back exactly one resident STSC sector (<= 340 frames,
  * ~7 ms), looped indefinitely. This module is the pure logic core for
- * playing the WHOLE song, every sector in order, that Slice 3B's real
- * double-buffered streamer_thread prefetch wiring drives. It owns NO
- * storage, NO buffers, and does NO I/O of its own: it only ever operates
- * on the immutable song geometry taken from the selected st_stix_record_t
+ * playing the WHOLE song, every sector in order. It owns NO storage, NO
+ * buffers, and does NO I/O of its own: it only ever operates on the
+ * immutable song geometry taken from the selected st_stix_record_t
  * (song_start_block, song_block_count, frames, sector_count) and on
  * caller-supplied sector header data -- the same "injected geometry,
  * caller supplies I/O" convention st_stix.h/st_ab_session.h already use,
  * which is exactly what makes this module host-testable without any real
- * flash, and exactly what Slice 3B's audio thread needs: no eMMC access,
+ * flash, and exactly what the real audio thread needs: no eMMC access,
  * no allocation, no blocking, ever, from this code.
  *
- * THREAD SAFETY: Slice 3B calls into ONE shared st_stream_t instance from
- * TWO real threads (streamer_thread publishes sector readiness;
- * audio_thread advances song position). See st_stream_t's own doc
- * comment below for exactly which fields are `volatile` and why that is
- * sufficient here without a lock.
+ * OWNERSHIP / THREAD SAFETY (Slice 3B.1 correction): Slice 3B originally
+ * had TWO threads mutate this SAME struct directly (streamer_thread
+ * calling st_stream_sector_ready()/a since-removed st_stream_report_
+ * corrupt(); audio_thread calling st_stream_advance_frame()), guarded
+ * only by `volatile` fields and a documented write-order argument. That
+ * was replaced: this struct is now exclusively owned and mutated by ONE
+ * thread -- the real audio thread -- end to end. The producer thread
+ * (streamer_thread) NEVER calls a mutating function on a shared
+ * st_stream_t instance; it only calls st_stream_validate_sector(), which
+ * reads ONLY the immutable geometry fields (song_start_block/song_block_
+ * count/frames/sector_count/loop_enabled -- written once by st_stream_
+ * init() before any concurrent thread exists, never reassigned after),
+ * so a plain (non-atomic, non-volatile) struct is correct: every mutable
+ * field genuinely has exactly one writer thread for its entire lifetime,
+ * which is why none of them need be `volatile` any more. The actual
+ * cross-thread handoff -- which sector is ready, which physical buffer
+ * holds it, which buffer the producer may safely refill -- now lives in
+ * st_stem_bufmbox.h's own formally-specified atomic mailbox; see that
+ * header for the full protocol. The real caller sequence below reflects
+ * this: step 6 (recover a validated sector) and the old "report a
+ * corrupt sector into this struct" step are gone from THIS module --
+ * that response now belongs entirely to the mailbox + the caller's own
+ * per-pass logic (see main.c's own comments at its call sites).
  *
- * THE ONE SEQUENCE a real caller (streamer_thread, in Slice 3B) follows:
- *   1. st_stream_init()            -- once, from the selected song's own
- *                                      STIX geometry. Fails closed on any
- *                                      geometry that could not possibly
- *                                      be a valid STSC sector sequence.
+ * THE ONE SEQUENCE the real audio thread (the sole caller of every
+ * mutating function below) follows, once per output frame:
+ *   1. st_stream_init()            -- once, at boot, before either
+ *                                      thread's steady-state loop starts.
+ *                                      Fails closed on any geometry that
+ *                                      could not possibly be a valid STSC
+ *                                      sector sequence.
  *   2. st_stream_required_sector() -- which sector index the CURRENT
  *                                      song_frame needs.
- *   3. read that physical sector off eMMC into a caller-owned buffer,
- *      st11_sector_read_header() it, and pass the result to...
- *   4. st_stream_validate_sector() -- checks sector_index, first_frame,
- *      frame_count and bounds against the song's own declared geometry,
- *      for EVERY sector, not just the first -- st11_sector_read_header()
- *      already checked the magic; this checks everything else Slice 3A's
- *      own directive requires.
- *   5. on success, st_stream_sector_ready() marks that sector index
- *      resident/playable (recovering from UNDERRUN if that was the
- *      sector the stream was waiting for). The audio path then calls
- *      st_stream_advance_frame() once per output frame: it reports
- *      whether the frame just consumed stayed inside the same sector,
- *      crossed into a new one (Slice 3B re-does 2-5 for the new sector,
- *      ideally well ahead of the playhead reaching it), reached end-of-
- *      song (loops back to frame 0, per st_stream_init()'s own
- *      loop_enabled choice, or stops), or could not advance at all
- *      because the sector it needs was never marked ready in time.
- *   6. if a read/validate genuinely FAILS (corrupt header, wrong
- *      sector_index/first_frame/frame_count, out-of-range, or a short
- *      read that never produced ST11_SECTOR_BYTES worth of real data),
- *      the caller calls st_stream_report_corrupt() instead of
- *      st_stream_sector_ready() -- this stops playback safely (a corrupt
- *      sector will not become valid on retry without external
- *      intervention, so unlike underrun this state does not auto-
- *      recover) rather than ever decoding/mixing garbage bytes as if
- *      they were real audio.
+ *   3. if that sector isn't already known-ready (st->ready_sector !=
+ *      needed), ask the mailbox (st_stem_mbox_try_acquire()) whether the
+ *      producer has published it; if so, call st_stream_sector_ready()
+ *      on THIS SAME (audio-thread-owned) struct to record it locally.
+ *   4. st_stream_advance_frame() -- advances by one frame if the needed
+ *      sector is (now) ready; otherwise records an UNDERRUN tick
+ *      (song_frame frozen, never guessed) without touching the mailbox
+ *      at all -- the mailbox is polled again next frame.
  *
- * STATES (deterministic, exactly these five, no others):
+ * The producer side (streamer_thread) has its own, separate sequence,
+ * documented in st_stem_bufmbox.h and at its main.c call sites: read the
+ * mailbox's own target buffer slot, fill + st_stream_validate_sector()
+ * it (read-only geometry access -- safe from any thread), then publish
+ * it ready via the mailbox -- never touching st_stream_t's mutable
+ * fields.
+ *
+ * STATES (deterministic, exactly these four, no others):
  *   STOPPED      -- song_frame frozen; advance_frame() is a no-op.
  *   PLAYING      -- the sector st->ready_sector matches what song_frame
  *                    currently needs; advance_frame() moves forward.
@@ -67,17 +76,24 @@
  *                    a diagnostic counter increments once per episode,
  *                    and the state recovers to PLAYING automatically the
  *                    moment st_stream_sector_ready() supplies the exact
- *                    sector this state was waiting for.
+ *                    sector this state was waiting for (called by the
+ *                    SAME audio thread, after the mailbox confirms it).
  *   END_OF_SONG  -- the last frame was consumed and loop_enabled was
  *                    false; song_frame frozen at `frames` (one past the
  *                    last valid index); advance_frame() is a no-op,
  *                    matching STOPPED's own "stop at end" behavior
  *                    exactly, until st_stream_play() or a fresh
  *                    st_stream_init() is called.
- *   (STOPPED is also the state st_stream_report_corrupt() lands in --
- *    there is no separate sixth "halted" state; a corrupt stop and a
- *    user stop are the same STOPPED state, distinguished only by which
- *    diagnostic counter incremented on the way in.)
+ * (A persistently corrupt sector -- the producer's own validation keeps
+ * failing -- is no longer a distinct state this module tracks: the
+ * mailbox simply never publishes it ready, which this module already
+ * represents as UNDERRUN. This is a deliberate simplification, not a
+ * capability loss: Slice 3B's own production wiring already made a
+ * corrupt-stop behaviorally indistinguishable from underrun, because
+ * st_stream_play() was called unconditionally every block whenever the
+ * transport stayed in PLAY -- see that commit's own note. The producer
+ * still counts corrupt-validation failures on its own diagnostic
+ * counter, in main.c, for observability.)
  *
  * PURE: no I/O, no Zephyr, no dynamic allocation, no floating point,
  * bounded/O(1) execution per call -- safe to drive from a hard-real-time
@@ -94,10 +110,10 @@
 #include "st_v11_format.h"
 
 /* st->ready_sector's value when no sector has ever been marked ready
- * (initial state, and immediately after a loop wrap or a corrupt-stop,
- * both of which invalidate whatever sector index used to be resident --
- * Slice 3B must never assume its own physical buffer is still valid for
- * the new position just because the index looks unchanged). */
+ * (initial state, and immediately after a loop wrap, which invalidates
+ * whatever sector index used to be resident -- the caller must never
+ * assume its own physical buffer is still valid for the new position
+ * just because the index looks unchanged). */
 #define ST_STREAM_NO_SECTOR 0xFFFFFFFFu
 
 typedef enum {
@@ -111,8 +127,12 @@ typedef struct {
 	/* Immutable song geometry, set once by st_stream_init() from the
 	 * selected st_stix_record_t, from a single-threaded boot context
 	 * before any concurrent caller exists. Never reassigned by any
-	 * other function in this file -- plain (non-volatile) is correct
-	 * for these. */
+	 * other function in this file. Read-only after init by BOTH the
+	 * audio thread (its own logic) and the producer thread
+	 * (st_stream_validate_sector()'s geometry checks) -- concurrent
+	 * READS of a value no one ever writes again are never a data race,
+	 * so plain (non-volatile) is correct here regardless of the
+	 * two-thread access pattern. */
 	uint32_t song_start_block;
 	uint32_t song_block_count;
 	uint32_t frames;
@@ -120,47 +140,18 @@ typedef struct {
 	bool loop_enabled;
 
 	/*
-	 * Mutable playback state -- `volatile`: Slice 3B's real production
-	 * wiring has TWO threads calling into the SAME st_stream_t
-	 * instance concurrently (streamer_thread validates/publishes
-	 * sectors; audio_thread advances song position every output
-	 * frame), so the compiler must never cache or reorder these
-	 * across a call into this module from either side, exactly like
-	 * every other cross-thread flag in this codebase (e.g. main.c's
-	 * own g_playing, trk[].p_w).
-	 *
-	 * `volatile` alone (no lock) is sufficient here, not merely
-	 * convenient, because of two invariants this module itself
-	 * enforces:
-	 *   1. song_frame (and therefore st_stream_required_sector()'s own
-	 *      result) NEVER changes while ready_sector != required_sector
-	 *      -- st_stream_advance_frame() refuses to advance in that
-	 *      case (returns UNDERRUN instead). So streamer_thread's
-	 *      target sector cannot move out from under it mid-prefetch:
-	 *      by the time its (possibly slow) validated read completes,
-	 *      the sector it fetched is still guaranteed to be the one
-	 *      audio_thread needs.
-	 *   2. st_stream_advance_frame() re-derives `state` from
-	 *      ready_sector itself on every call (state = PLAYING the
-	 *      moment ready_sector matches, unconditionally) rather than
-	 *      trusting a state transition published by the other thread
-	 *      -- so a state write from streamer_thread's own
-	 *      st_stream_sector_ready()/st_stream_report_corrupt() being
-	 *      interleaved with an audio_thread call is self-correcting,
-	 *      not a hazard: the worst possible outcome of any interleaving
-	 *      is one extra tick of UNDERRUN (silence), never stale/wrong
-	 *      sector data played as current audio.
-	 * Every individual field here is a single aligned load/store
-	 * (uint32_t or a small enum), atomic on this Cortex-M4 target, so
-	 * there is no torn-write hazard to additionally guard against.
+	 * Mutable playback state -- plain (non-volatile, non-atomic), by
+	 * design: every field below has exactly ONE writer thread (the
+	 * real audio thread) for the entire lifetime of a selected song,
+	 * per the ownership rule documented at the top of this file. The
+	 * producer thread never reads OR writes any of these -- the
+	 * cross-thread handoff lives entirely in st_stem_bufmbox.h's own
+	 * atomic mailbox, not here.
 	 */
-	volatile st_stream_state_t state;
-	volatile uint32_t song_frame;     /* the ONE authoritative absolute song frame; audio_thread-owned */
-	volatile uint32_t ready_sector;   /* resident/playable sector, or ST_STREAM_NO_SECTOR; streamer_thread-
-					    * published, audio_thread-invalidated on loop wrap (see invariant 1
-					    * above for why that's still safe) */
-	volatile uint32_t underrun_count; /* diagnostic: UNDERRUN episodes (not ticks); audio_thread-owned */
-	volatile uint32_t corrupt_count;  /* diagnostic: report_corrupt() calls; streamer_thread-owned */
+	st_stream_state_t state;
+	uint32_t song_frame;     /* the ONE authoritative absolute song frame */
+	uint32_t ready_sector;   /* sector index this thread has locally confirmed ready, or ST_STREAM_NO_SECTOR */
+	uint32_t underrun_count; /* diagnostic: UNDERRUN episodes (not ticks); never reset here */
 } st_stream_t;
 
 /*
@@ -177,6 +168,9 @@ typedef struct {
  *     -- the sectors this song claims would not fit inside its own
  *     reserved capacity ("never read beyond the selected song region",
  *     enforced structurally here rather than merely by convention)
+ * Called ONCE, from a single-threaded boot context, strictly before the
+ * producer thread's steady-state prefetch loop or the audio thread's
+ * steady-state mixing loop begin touching this instance.
  */
 bool st_stream_init(st_stream_t *st, uint32_t song_start_block, uint32_t song_block_count, uint32_t frames,
 		     uint32_t sector_count, bool loop_enabled);
@@ -184,14 +178,15 @@ bool st_stream_init(st_stream_t *st, uint32_t song_start_block, uint32_t song_bl
 /* Which STSC sector index the CURRENT song_frame requires. Always
  * < st->sector_count by construction (st_stream_init()'s own geometry
  * check guarantees it) -- this function itself performs no bounds
- * checking because none can ever be needed. */
+ * checking because none can ever be needed. Audio-thread-only (reads
+ * the audio-thread-owned song_frame). */
 uint32_t st_stream_required_sector(const st_stream_t *st);
 
 /*
  * Validates one freshly-read sector's header against this song's own
  * geometry and the sector index the caller claims to have physically
  * read (which need not already equal st_stream_required_sector() --
- * Slice 3B's caller may prefetch ahead of the playhead). Checked in this
+ * the producer may prefetch ahead of the playhead). Checked in this
  * fixed order:
  *   1. sector_index < st->sector_count            ("never read beyond
  *      the selected song region")
@@ -202,10 +197,9 @@ uint32_t st_stream_required_sector(const st_stream_t *st);
  *      (st->frames - header->first_frame) for the last sector -- "handle
  *      the final partial sector exactly"
  * Does NOT itself check the 'STSC' magic -- that is
- * st11_sector_read_header()'s own job; a caller whose read failed there
- * (or a short/incomplete physical read) must call
- * st_stream_report_corrupt() directly instead of fabricating header
- * fields to pass in here.
+ * st11_sector_read_header()'s own job. Reads ONLY the immutable geometry
+ * fields (see this struct's own doc comment) -- safe to call from the
+ * producer thread on a shared instance the audio thread also owns.
  */
 bool st_stream_validate_sector(const st_stream_t *st, uint32_t sector_index,
 				const st11_sector_header_t *header);
@@ -217,28 +211,17 @@ bool st_stream_validate_sector(const st_stream_t *st, uint32_t sector_index,
  * for (st_stream_required_sector() at the moment of the call), recovers
  * the state back to PLAYING. Harmless (records the index, no state
  * change) if called while STOPPED/END_OF_SONG/already-PLAYING.
+ * Audio-thread-only: called after the mailbox (st_stem_bufmbox.h)
+ * confirms the sector is genuinely published, never by the producer.
  */
 void st_stream_sector_ready(st_stream_t *st, uint32_t sector_index);
-
-/*
- * A sector read/validate genuinely FAILED (bad header, wrong sector_
- * index/first_frame/frame_count, out-of-range, or a short physical
- * read). Stops playback SAFELY: state -> STOPPED, song_frame frozen
- * wherever it was, ready_sector invalidated back to ST_STREAM_NO_SECTOR
- * (never let a caller assume a since-discarded buffer is still current),
- * corrupt_count incremented. Unlike UNDERRUN this does not auto-recover
- * -- corrupt data does not become valid by itself; resuming requires an
- * explicit st_stream_play() once the caller has a validated sector
- * ready again.
- */
-void st_stream_report_corrupt(st_stream_t *st);
 
 /*
  * Transport control, reusing the same "freeze, never reset" convention
  * main.c's own existing g_playing/p_w already follow: st_stream_play()
  * moves STOPPED -> PLAYING without touching song_frame (a no-op from any
  * other state); st_stream_stop() moves any state -> STOPPED, freezing
- * song_frame wherever it currently is.
+ * song_frame wherever it currently is. Audio-thread-only.
  */
 void st_stream_play(st_stream_t *st);
 void st_stream_stop(st_stream_t *st);
@@ -257,11 +240,12 @@ typedef enum {
 
 /*
  * Called once per output audio frame while the caller wants playback to
- * advance. Never touches any sector buffer itself -- pure bookkeeping;
+ * advance. Never touches any sector buffer, and never touches the
+ * mailbox, itself -- pure bookkeeping over this thread-owned struct;
  * the caller decodes+mixes the CURRENT song_frame using whatever buffer
  * holds st->ready_sector, before or after calling this (order does not
  * matter to this function, it only ever advances position). See the enum
- * above for the full set of outcomes.
+ * above for the full set of outcomes. Audio-thread-only.
  */
 st_stream_tick_t st_stream_advance_frame(st_stream_t *st);
 

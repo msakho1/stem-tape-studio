@@ -154,8 +154,7 @@ static void test_init_rejects_invalid_geometry(void)
 	CHECK(st.state == ST_STREAM_STOPPED, "a freshly initialized stream starts STOPPED");
 	CHECK(st.song_frame == 0u, "a freshly initialized stream starts at song_frame 0");
 	CHECK(st.ready_sector == ST_STREAM_NO_SECTOR, "a freshly initialized stream has no sector marked ready");
-	CHECK(st.underrun_count == 0u && st.corrupt_count == 0u,
-	      "a freshly initialized stream has zeroed diagnostic counters");
+	CHECK(st.underrun_count == 0u, "a freshly initialized stream has a zeroed underrun diagnostic counter");
 }
 
 /* ========================================================================
@@ -237,40 +236,15 @@ static void test_validate_sector_real_fixture_and_corrupt_header(void)
 	free(data);
 }
 
-/* ========================================================================
- * st_stream_report_corrupt(): stops safely (distinct from underrun),
- * covers both a validate_sector() rejection and a short/failed physical
- * read (no header ever obtained at all).
- * ======================================================================== */
-static void test_report_corrupt_stops_safely(void)
-{
-	st_stream_t st;
-
-	st_stream_init(&st, 4096u, SONG_BLOCK_COUNT_EXACT, SONG_FRAMES, SONG_SECTOR_COUNT, false);
-	st_stream_play(&st);
-	st_stream_sector_ready(&st, 0u);
-	st_stream_advance_frame(&st); /* song_frame is now 1, mid-sector-0, PLAYING */
-
-	uint32_t frame_before = st.song_frame;
-
-	/* Short/failed physical read: the caller's own emmc_read_blocks()
-	 * returned false, so no header was ever obtained -- report_corrupt()
-	 * is called directly, with nothing to validate. */
-	st_stream_report_corrupt(&st);
-
-	CHECK(st.state == ST_STREAM_STOPPED, "report_corrupt() from PLAYING stops safely (state -> STOPPED)");
-	CHECK(st.song_frame == frame_before, "report_corrupt() freezes song_frame exactly where it was");
-	CHECK(st.ready_sector == ST_STREAM_NO_SECTOR,
-	      "report_corrupt() invalidates ready_sector -- a discarded buffer is never trusted again");
-	CHECK(st.corrupt_count == 1u, "report_corrupt() increments the corrupt diagnostic counter");
-
-	/* Unlike underrun, this does NOT auto-recover: further advance
-	 * attempts stay NOT_PLAYING until an explicit st_stream_play(). */
-	st_stream_tick_t t = st_stream_advance_frame(&st);
-
-	CHECK(t == ST_STREAM_TICK_NOT_PLAYING, "a corrupt-stopped stream does not auto-resume on its own");
-	CHECK(st.corrupt_count == 1u, "a second failed tick after the stop does not re-increment corrupt_count");
-}
+/* NOTE (Slice 3B.1): st_stream_report_corrupt() no longer exists -- this
+ * pure module is now exclusively audio-thread-owned (see st_stem_
+ * stream.h's own doc comment), and corrupt-sector handling moved
+ * entirely to the producer/mailbox layer (st_stem_bufmbox.h + main.c's
+ * own diagnostic counter): a sector that fails validation is simply
+ * never published ready, which this module already represents as
+ * UNDERRUN. See tests/test_stem_bufmbox.c for the mailbox-level
+ * coverage, and st_stem_stream.h's own note on why this is an
+ * intentional, behavior-preserving simplification. */
 
 /* ========================================================================
  * Underrun: a "missing sector" (never marked ready) freezes song_frame,
@@ -429,8 +403,13 @@ static void test_full_song_walk_transitions_and_hash(void)
 			bool valid = header_ok && st_stream_validate_sector(&st, needed, &hdr);
 
 			if (!valid) {
-				st_stream_report_corrupt(&st);
-				break; /* would fail the checks below -- real fixture never hits this */
+				/* The real fixture never hits this -- a genuinely
+				 * corrupt sector is exercised at the mailbox level
+				 * instead (tests/test_stem_bufmbox.c), since this
+				 * pure module no longer has a "report corrupt" entry
+				 * point (see this file's own note near the top). */
+				CHECK(false, "unexpected: real fixture sector %u failed validation", needed);
+				break;
 			}
 			st_stream_sector_ready(&st, needed);
 		}
@@ -508,7 +487,6 @@ int main(void)
 {
 	RUN(test_init_rejects_invalid_geometry);
 	RUN(test_validate_sector_real_fixture_and_corrupt_header);
-	RUN(test_report_corrupt_stops_safely);
 	RUN(test_underrun_missing_sector_and_recovery);
 	RUN(test_loop_transition);
 	RUN(test_full_song_walk_transitions_and_hash);

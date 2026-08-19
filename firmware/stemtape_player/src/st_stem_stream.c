@@ -43,7 +43,6 @@ bool st_stream_init(st_stream_t *st, uint32_t song_start_block, uint32_t song_bl
 	st->ready_sector = ST_STREAM_NO_SECTOR;
 	st->state = ST_STREAM_STOPPED;
 	st->underrun_count = 0u;
-	st->corrupt_count = 0u;
 	return true;
 }
 
@@ -84,13 +83,6 @@ void st_stream_sector_ready(st_stream_t *st, uint32_t sector_index)
 	if (st->state == ST_STREAM_UNDERRUN && sector_index == st_stream_required_sector(st)) {
 		st->state = ST_STREAM_PLAYING;
 	}
-}
-
-void st_stream_report_corrupt(st_stream_t *st)
-{
-	st->state = ST_STREAM_STOPPED;
-	st->ready_sector = ST_STREAM_NO_SECTOR;
-	st->corrupt_count++;
 }
 
 void st_stream_play(st_stream_t *st)

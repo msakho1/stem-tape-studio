@@ -39,11 +39,28 @@ include(${ZEPHYR_BASE}/samples/subsys/usb/common/common.cmake)
 # CONTINUOUS streaming state machine (see st_stem_stream.h's own doc) --
 # is now linked and genuinely called: streamer_thread() seeds it from the
 # selected song's own real STIX geometry and validates every sector (not
-# just the first) through it before publishing that sector to the audio
-# path; looper_audio_block() (PASS C) drives its per-frame song-position
-# bookkeeping and reads its sector-readiness/underrun state. Was added
-# unlinked, host-test-only, in slice 3A (see git log); this is the commit
-# that gives it its real caller, per this file's own established policy.
+# just the first) through it; audio_thread (looper_audio_block()'s own
+# PASS C) is its EXCLUSIVE owner as of slice 3B.1's concurrency
+# correction, driving its per-frame song-position/sector-readiness/
+# underrun bookkeeping. Was added unlinked, host-test-only, in slice 3A
+# (see git log); slice 3B gave it its real caller, per this file's own
+# established policy.
+#
+# Phase 2 slice 3B.1 (concurrency correction): src/st_stem_bufmbox.c --
+# the formally specified, lock-free single-producer/single-consumer
+# double-buffer publication mailbox (see st_stem_bufmbox.h's own full
+# protocol spec) -- replaces slice 3B's `volatile`-fields-plus-
+# documented-write-order cross-thread handoff between streamer_thread
+# (producer) and audio_thread (consumer) with real atomics and acquire/
+# release ordering. Compiled with -DST_STEM_BUFMBOX_ZEPHYR (below) so its
+# atomic primitives resolve to Zephyr's own atomic_t, unconditionally
+# sequentially consistent on every architecture Zephyr supports --
+# strictly stronger than the acquire/release the protocol requires. The
+# SAME source file, built instead against C11 <stdatomic.h> with the
+# minimal acquire/release ordering the protocol actually needs, is what
+# tests/test_stem_bufmbox.c's real concurrent-pthread host tests exercise
+# (see that file's own doc comment for why that is a faithful stand-in,
+# and where the faithfulness gap actually is).
 #
 # The OLD, now-retired v1.0 Gate 2 contract's own engine -- src/
 # st_storage_layout.c, src/st_sector_codec.c, src/st_transfer.c, src/
@@ -82,6 +99,7 @@ target_sources(app PRIVATE
 	src/st_ab_session.c
 	src/st_stem_mix.c
 	src/st_stem_stream.c
+	src/st_stem_bufmbox.c
 )
 
 # See firmware/CMakeLists.txt's identical note: the batchbuf/meta-block code
@@ -89,5 +107,11 @@ target_sources(app PRIVATE
 # storage through other lvalue types; -fno-strict-aliasing removes the TBAA
 # assumption that would make that idiom undefined.
 target_compile_options(app PRIVATE -fno-strict-aliasing)
+
+# Selects st_stem_bufmbox.h's real-Zephyr-atomic_t backend for this
+# firmware target only -- the host test build (plain `cc`, no Zephyr
+# headers available) never defines this, so it takes the C11
+# <stdatomic.h> backend instead. See st_stem_bufmbox.h's own doc comment.
+target_compile_definitions(app PRIVATE ST_STEM_BUFMBOX_ZEPHYR)
 
 target_link_libraries(app PRIVATE m)
