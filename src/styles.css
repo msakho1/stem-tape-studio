@@ -417,37 +417,18 @@
   opacity: 1;
 }
 
-/* Hardware behaviour: all four LEDs flash on/off together, ~600ms period. */
-.st-connect-led--pulse .st-connect-led__halo {
-  animation: st-connect-blink-halo 600ms steps(1, end) infinite;
+/* Hardware behaviour: all four LEDs flash on/off together, driven from JS. */
+.st-connect-led__halo,
+.st-connect-led__core {
+  transition: none;
 }
 
-.st-connect-led--pulse .st-connect-led__core {
-  animation: st-connect-blink 600ms steps(1, end) infinite;
+.st-connect-led--lit .st-connect-led__core {
+  opacity: 1;
 }
 
-@keyframes st-connect-blink {
-  0% {
-    opacity: 1;
-  }
-  66% {
-    opacity: 0;
-  }
-  100% {
-    opacity: 0;
-  }
-}
-
-@keyframes st-connect-blink-halo {
-  0% {
-    opacity: 0.85;
-  }
-  66% {
-    opacity: 0;
-  }
-  100% {
-    opacity: 0;
-  }
+.st-connect-led--lit .st-connect-led__halo {
+  opacity: 0.85;
 }
 
 @keyframes st-connect-chase {
@@ -459,19 +440,6 @@
   }
   100% {
     opacity: 0.2;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .st-connect-led--pulse .st-connect-led__core,
-  .st-connect-led--chase .st-connect-led__core {
-    animation: none;
-    opacity: 0.85;
-  }
-  .st-connect-led--pulse .st-connect-led__halo,
-  .st-connect-led--chase .st-connect-led__halo {
-    animation: none;
-    opacity: 0.25;
   }
 }
 
