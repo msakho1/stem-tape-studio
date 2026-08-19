@@ -17,6 +17,7 @@ import {
   ClipboardCopy,
   Download,
   Info,
+  Loader2,
   Trash2,
   Upload,
   Usb,
