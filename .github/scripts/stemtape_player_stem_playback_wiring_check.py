@@ -80,8 +80,23 @@ find_call_sites() in stemtape_player_safety_gate.py already does):
      audibility formula looper_audio_block()'s own mixer uses
      internally, so LED feedback can never drift from what the mixer
      actually plays), and drives the real track_led_on()/track_led_
-     ghost() primitives -- proving stem mute/solo status reaches the
-     physical LEDs, not just the mixer.
+     ghost()/track_led_off() primitives -- proving stem mute/solo status
+     reaches the physical LEDs, not just the mixer.
+
+  6. Phase 3 control-matrix, beat-sync LED slice: streamer_thread()'s
+     boot code genuinely reads lib.active.bpm_q8/downbeat_frame (the
+     selected STIX record's own authoritative song-level timing) AND
+     cross-checks them against hdr.bpm_q8/hdr.downbeat_frame (the first
+     sector's own header) before calling the real st_beat_timing_init()
+     (REQUIRED_CALLS); looper_audio_block() genuinely calls atomic_set(
+     &g_stem_song_frame_pub, ...) once per block (REQUIRED_SUBSTRINGS --
+     an atomic-write call whose OWN argument is what proves it is the
+     right one, not just any atomic_set); led_service() genuinely reads
+     both g_stem_beat_timing and atomic_get(&g_stem_song_frame_pub) and
+     calls the real st_beat_phase_on_beat()/st_beat_led_decide()
+     (REQUIRED_CALLS) -- proving the whole chain from the selected
+     song's own tempo metadata through to the physical LED pulse is
+     real, not merely linked.
 
 Fails closed: main.c missing, either function's body not found, or any
 required call site/substring absent.
@@ -117,6 +132,7 @@ REQUIRED_CALLS = {
         "st_stem_mbox_init",
         "st_stem_mbox_producer_target_slot",
         "st_stem_mbox_publish_ready",
+        "st_beat_timing_init",
     ],
     "audio_thread": [
         "looper_audio_block",
@@ -127,6 +143,8 @@ REQUIRED_CALLS = {
     ],
     "led_service": [
         "st_stem_mix_channel_audible",
+        "st_beat_phase_on_beat",
+        "st_beat_led_decide",
     ],
 }
 
@@ -142,6 +160,7 @@ REQUIRED_SUBSTRINGS = {
         "trk[s].vol_q8",
         "trk[s].muted",
         "trk[s].solo",
+        "atomic_set(&g_stem_song_frame_pub",
     ],
     "main": [
         "track_hold[ti].solo_active",
@@ -152,6 +171,15 @@ REQUIRED_SUBSTRINGS = {
         "trk[i].muted",
         "track_led_on(i)",
         "track_led_ghost(i)",
+        "track_led_off(i)",
+        "atomic_get(&g_stem_song_frame_pub)",
+        "g_stem_beat_timing",
+    ],
+    "streamer_thread": [
+        "lib.active.bpm_q8",
+        "lib.active.downbeat_frame",
+        "hdr.bpm_q8",
+        "hdr.downbeat_frame",
     ],
 }
 

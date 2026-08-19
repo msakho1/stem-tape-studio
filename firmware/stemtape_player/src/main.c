@@ -99,6 +99,7 @@
 #include "st_midi_queue.h"
 #include "st_sector_v11.h"
 #include "st_stcp.h"
+#include "st_beat_phase.h"
 #include "st_stem_bufmbox.h"
 #include "st_stem_mix.h"
 #include "st_stem_stream.h"
@@ -1222,6 +1223,25 @@ static atomic_t g_stem_corrupt_count;      /* validated-but-wrong sectors (st_st
 					     * distinct from a failed physical read, which is not itself proof the
 					     * sector's DATA is bad (see the prefetch step's own comment) */
 
+/* STEM TAPE Phase 3 control-matrix (beat-sync LED slice). g_stem_beat_
+ * timing: written EXACTLY ONCE, by streamer_thread()'s own boot block,
+ * strictly before the existing atomic_set(&g_stem_song_selected, 1)
+ * publish below it -- the SAME established happens-before idiom
+ * g_stem_stream's own construction already relies on (plain fields,
+ * written before the release fence, safe to read by anyone who first
+ * observes the fence via atomic_get()); never written again afterward,
+ * so plain (non-atomic) is correct here for the exact same reason it is
+ * correct for g_stem_stream's own immutable geometry fields. g_stem_
+ * song_frame_pub: g_stem_stream.song_frame's real, ongoing atomic
+ * mirror, refreshed every audio block (see looper_audio_block()'s own
+ * comment at its publish site) -- audio-thread-exclusive g_stem_stream
+ * itself is never read from led_service() (control thread); this
+ * published copy is the only safe cross-thread source for "where is
+ * playback right now", the SAME one-writer/many-reader atomic pattern
+ * g_stem_underrun_count above already uses. */
+static st_beat_timing_t g_stem_beat_timing;
+static atomic_t g_stem_song_frame_pub;
+
 /* Sustained read throughput, bytes/sec, computed from the two CUMULATIVE
  * counters above (successful-read bytes and successful-read time only --
  * deliberately excludes idle time between reads and failed-read time, so
@@ -2303,6 +2323,27 @@ static void looper_audio_block(int16_t *s)
 		g_beat_phase = (uint32_t)((g_sample_clock % BEAT_SAMPLES_I2S) / DECIM);
 	}
 
+#if SP1_XFER_ENABLE
+	/* STEM TAPE Phase 3 control-matrix (beat-sync LED slice): publishes
+	 * g_stem_stream.song_frame -- "the ONE authoritative absolute song
+	 * frame" (st_stem_stream.h's own words), audio-thread-EXCLUSIVE -- to
+	 * its atomic cross-thread mirror ONCE per block, the SAME "computed
+	 * once per block, ~5 ms granularity is plenty for an LED" rationale
+	 * the classic engine's own g_beat_phase above already uses (see that
+	 * block's own comment), not a new convention. led_service() (control
+	 * thread, st_beat_phase.c) reads this mirror -- never g_stem_stream
+	 * itself -- to derive on-beat phase; this is the ONE clock stem beat-
+	 * sync is derived from (see st_beat_phase.h's own doc comment on why
+	 * a loop wrap or a future variable-speed change can never desync a
+	 * second clock: there is no second clock, only this published copy
+	 * of the real one, refreshed every block). Unconditional (not gated
+	 * on stem_active): when no stem song is active this mirror simply
+	 * holds whatever g_stem_stream.song_frame last was (0 if never
+	 * selected) -- harmless, since led_service() only reads it behind
+	 * its own g_stem_song_selected gate. */
+	atomic_set(&g_stem_song_frame_pub, (atomic_val_t)g_stem_stream.song_frame);
+#endif
+
 	/* diag WATERMARKS (once per block): how close each ring got to its cliff
 	 * this window — shows near-misses even when no starve/overrun fired. */
 	{
@@ -3137,6 +3178,49 @@ static void streamer_thread(void *a, void *b, void *c)
 
 							if (st11_sector_read_header(g_stem_bufs[0], &hdr) &&
 							    st_stream_validate_sector(&g_stem_stream, 0u, &hdr)) {
+								/* STEM TAPE Phase 3 (beat-sync LED
+								 * slice): the STIX record is the
+								 * authoritative song-level timing
+								 * source (lib.active.bpm_q8/
+								 * downbeat_frame/sample_rate) --
+								 * sector 0's own header carries the
+								 * SAME two fields (see st_sector_v11.h)
+								 * and is cross-checked here, once, for
+								 * consistency ONLY: a mismatch is
+								 * logged as a boot diagnostic, never
+								 * acted on -- the STIX record always
+								 * wins, matching this whole block's
+								 * own established "one selector, used
+								 * identically" rule for geometry. See
+								 * st_beat_phase.h's own doc comment for
+								 * why this is the sole place tempo is
+								 * ever read, and g_stem_beat_timing's
+								 * own doc comment for why writing it
+								 * here, strictly before the release
+								 * fence below, needs no separate
+								 * synchronization. */
+								if (hdr.bpm_q8 != lib.active.bpm_q8 ||
+								    hdr.downbeat_frame != lib.active.downbeat_frame) {
+									printk("V11 lib: sector 0 header timing "
+									       "(bpm_q8=%u downbeat=%u) disagrees "
+									       "with the STIX record's own "
+									       "(bpm_q8=%u downbeat=%u) -- STIX "
+									       "wins, sector data is not re-checked "
+									       "again\n",
+									       (unsigned)hdr.bpm_q8, (unsigned)hdr.downbeat_frame,
+									       (unsigned)lib.active.bpm_q8,
+									       (unsigned)lib.active.downbeat_frame);
+								}
+								if (!st_beat_timing_init(&g_stem_beat_timing, lib.active.bpm_q8,
+											  lib.active.downbeat_frame,
+											  lib.active.sample_rate)) {
+									printk("V11 lib: tempo absent or invalid "
+									       "(bpm_q8=%u sample_rate=%u) -- LED "
+									       "beat pulse disabled, steady display "
+									       "only\n",
+									       (unsigned)lib.active.bpm_q8,
+									       (unsigned)lib.active.sample_rate);
+								}
 								st_stem_mbox_init(&g_stem_mbox, 0u, 0u);
 								atomic_set(&g_stem_song_selected, 1); /* release fence */
 							}
@@ -4417,9 +4501,10 @@ static void shutdown_leds(void)
  * a UAC2 host streamed audio (`ever_streamed`); that signal no longer exists
  * (see this file's own top-of-file comment) and a stale one-way latch that
  * could never fire again would be dishonest, not a clean removal, so it is
- * dropped here rather than kept dead. A real stem-playback-aware LED state
- * (Phase 4 of the MVP plan) will replace this whole function's semantics;
- * until then the standby chase simply tracks `active`. */
+ * dropped here rather than kept dead. This describes the CLASSIC-engine
+ * fallback below only, reached when no stem song is selected -- see this
+ * function's own comment just past the `#if SP1_XFER_ENABLE` guard for the
+ * real, beat-synced stem-playback LED state that takes over otherwise. */
 static void led_service(void)
 {
 	show_song_leds();                              /* status row = current song */
@@ -4432,28 +4517,35 @@ static void led_service(void)
 	 * stem song -- see the classic-source-absence gate -- so that logic
 	 * would otherwise just show the standby chase throughout real stem
 	 * playback, uninformative about the mixer this slice just wired).
-	 * Reuses the SAME track_led_on()/track_led_ghost() primitives and
-	 * the SAME "ghost = loaded but not currently audible" vocabulary
-	 * the classic engine's own TS_PLAY-and-muted case already
-	 * established a few lines below -- not a new LED language. Audibility
-	 * is decided by st_stem_mix_channel_audible() -- the SAME shared
-	 * function looper_audio_block()'s own mixer channels are checked
-	 * against internally (see st_stem_mix.c's own channel_active()),
-	 * exposed precisely so this control-thread query can never drift
-	 * from what the audio thread actually plays: one formula, read by
-	 * both threads from their own independently-populated channel
-	 * arrays (each built from the SAME trk[].vol_q8/muted/solo fields),
-	 * never two maintained copies of the rule itself. This deliberately
-	 * does not distinguish "muted" from "silenced by another stem's
-	 * solo" -- both read as ghost, matching the classic engine's own
-	 * one-ghost-state precedent; a future slice could add a distinct
-	 * pattern per cause, not required for this one. Beat-synced pulsing
-	 * (like the classic engine's on-beat blink for TS_PLAY) is
-	 * deliberately not reused here: it is driven by the classic
-	 * engine's own detected-tempo machinery (g_beat_phase), not a stem
-	 * song's own bpm_q8 -- reusing it would risk a visibly wrong pulse
-	 * rate, so this slice stays with steady on/ghost until a stem-
-	 * tempo-aware pulse is built as its own, separately verified piece. */
+	 * Reuses the SAME track_led_on()/track_led_ghost()/track_led_off()
+	 * primitives and the SAME on/off/ghost vocabulary the classic
+	 * engine's own TS_PLAY logic already established a few lines below
+	 * -- not a new LED language (see st_beat_phase.h's own doc comment
+	 * on st_beat_led_decide()). Audibility is decided by st_stem_mix_
+	 * channel_audible() -- the SAME shared function looper_audio_
+	 * block()'s own mixer channels are checked against internally (see
+	 * st_stem_mix.c's own channel_active()), exposed precisely so this
+	 * control-thread query can never drift from what the audio thread
+	 * actually plays: one formula, read by both threads from their own
+	 * independently-populated channel arrays (each built from the SAME
+	 * trk[].vol_q8/muted/solo fields), never two maintained copies of
+	 * the rule itself. This deliberately does not distinguish "muted"
+	 * from "silenced by another stem's solo" -- both read as ghost,
+	 * matching the classic engine's own one-ghost-state precedent.
+	 *
+	 * BEAT PULSE: g_stem_beat_timing (published once at boot from the
+	 * selected STIX record's own bpm_q8/downbeat_frame -- see that
+	 * global's own doc comment) and g_stem_song_frame_pub (the master
+	 * song position's own atomic mirror, refreshed every audio block --
+	 * see looper_audio_block()'s own publish site) are the ONLY inputs;
+	 * st_beat_phase_on_beat() derives phase fresh from whatever the
+	 * mirror currently holds, so a loop wrap or a future variable-speed
+	 * change can never desync a second clock (there isn't one). An
+	 * invalid/absent tempo (g_stem_beat_timing.frames_per_beat == 0,
+	 * logged as a boot diagnostic where it was set) makes on_beat always
+	 * false, which st_beat_led_decide() already turns into the plain,
+	 * pre-existing steady audible/ghost display -- never a fabricated
+	 * tempo, never a new pattern for that case either. */
 	if (atomic_get(&g_stem_song_selected)) {
 		st_stem_mix_channel_t channels[ST11_STEM_COUNT];
 
@@ -4463,10 +4555,26 @@ static void led_service(void)
 			channels[i].mute = trk[i].muted != 0;
 			channels[i].solo = trk[i].solo != 0;
 		}
+
+		uint32_t song_frame = (uint32_t)atomic_get(&g_stem_song_frame_pub);
+		bool playing = g_playing != 0;
+		bool on_beat = st_beat_phase_on_beat(&g_stem_beat_timing, song_frame,
+						      g_stem_beat_timing.frames_per_beat / 8u);
+
 		for (int i = 0; i < NUM_TRACK_LEDS && i < ST11_STEM_COUNT; i++) {
 			bool audible = st_stem_mix_channel_audible(channels, (uint32_t)i);
 
-			audible ? track_led_on(i) : track_led_ghost(i);
+			switch (st_beat_led_decide(audible, playing, on_beat)) {
+			case ST_TRACK_LED_ON:
+				track_led_on(i);
+				break;
+			case ST_TRACK_LED_GHOST:
+				track_led_ghost(i);
+				break;
+			default:
+				track_led_off(i);
+				break;
+			}
 		}
 		return;
 	}

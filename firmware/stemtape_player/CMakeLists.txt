@@ -71,6 +71,19 @@ include(${ZEPHYR_BASE}/samples/subsys/usb/common/common.cmake)
 # ticks one instance per track every scan pass, and looper_audio_block()/
 # led_service() both read the resulting trk[].solo state it drives.
 #
+# Phase 3 control-matrix (beat-sync LED slice): src/st_beat_phase.c -- the
+# pure, host-tested, RAM-only beat-phase computation (see that file's own
+# doc comment: the selected STIX record's own bpm_q8/downbeat_frame are
+# the sole authoritative tempo source, sector-header timing is cross-
+# checked for consistency only, and phase is always re-derived from the
+# master song_frame position's own atomic mirror -- never a second,
+# independently-ticking clock) -- is linked and genuinely called: main.c's
+# own streamer_thread() boot code publishes the timing snapshot once (from
+# the SAME already-read STIX record slice 3B/3B.1 already consume for
+# geometry), looper_audio_block() publishes the song-position mirror once
+# per block, and led_service() calls st_beat_phase_on_beat()/st_beat_led_
+# decide() every control pass.
+#
 # The OLD, now-retired v1.0 Gate 2 contract's own engine -- src/
 # st_storage_layout.c, src/st_sector_codec.c, src/st_transfer.c, src/
 # st_library_io.c, src/st_xfer_wire.c, and src/st_stem_validate.c (an
@@ -110,6 +123,7 @@ target_sources(app PRIVATE
 	src/st_stem_stream.c
 	src/st_stem_bufmbox.c
 	src/st_track_hold.c
+	src/st_beat_phase.c
 )
 
 # See firmware/CMakeLists.txt's identical note: the batchbuf/meta-block code

@@ -1,0 +1,104 @@
+/*
+ * st_beat_phase.h — pure, RAM-only beat-phase computation for stem
+ * playback LED feedback (Phase 3 control-matrix, beat-sync slice).
+ *
+ * SOURCE OF TRUTH: the selected, validated STIX record's own bpm_q8 and
+ * downbeat_frame (docs/stem-tape-transfer-v1.1.md's song-level timing
+ * metadata) are the authoritative inputs this module trusts for tempo —
+ * never fabricated, never guessed from sector content. main.c's own boot
+ * code (streamer_thread(), the one thread that reads eMMC) additionally
+ * cross-checks the first sector's own header bpm_q8/downbeatFrame against
+ * the STIX record's, for consistency, as a boot-time diagnostic only (see
+ * main.c's own comment at that call site) — the STIX record always wins.
+ * This module itself never reads a sector, never touches eMMC, and has no
+ * concept of either source beyond the plain bpm_q8/downbeat_frame/
+ * sample_rate values st_beat_timing_init() is given.
+ *
+ * ONE CLOCK, NOT TWO: st_beat_phase_on_beat() takes the CURRENT master
+ * song_frame (st_stream_t's own "the ONE authoritative absolute song
+ * frame") fresh on every call — there is no second, independently-
+ * ticking clock anywhere in this module. A loop wrap (song_frame resets
+ * via st_stream_t's own LOOPED tick) or any future variable-speed
+ * playback changes song_frame's own rate of advance; since phase is
+ * always re-derived from whatever song_frame IS right now, neither can
+ * ever desynchronize a second clock from the real one.
+ *
+ * FIXED-POINT, NO FLOATS: frames_per_beat is computed once, in
+ * st_beat_timing_init(), from 64-bit integer arithmetic (bpm_q8 is
+ * Q8.8; the intermediate product is a uint64_t, rounded to the nearest
+ * whole frame before the one division — no floating point anywhere,
+ * matching this whole codebase's real-time-audio-path convention). The
+ * per-call phase query is one subtraction and one plain uint32_t modulo
+ * — cheap enough to call from led_service()'s own ~8 ms control-loop
+ * resolution without concern.
+ *
+ * FAIL CLOSED, NEVER FABRICATED: bpm_q8 == 0 or sample_rate == 0 (tempo
+ * absent or invalid) leaves the timing snapshot invalid
+ * (frames_per_beat == 0); st_beat_phase_on_beat() always returns false
+ * for an invalid snapshot — the caller's existing steady audible/ghost
+ * display is the correct fallback, never an invented tempo or pattern.
+ * song_frame < downbeat_frame (the song has not yet reached its first
+ * downbeat — true briefly after boot on a song with a pickup/lead-in,
+ * and again briefly after every loop wrap if downbeat_frame > 0) uses
+ * the SAME fallback: false, steady display, not a fabricated pre-roll
+ * pattern.
+ *
+ * DISPLAY DECISION REUSES THE ESTABLISHED VOCABULARY, ADDS NOTHING NEW:
+ * st_beat_led_decide() is the exact same on/off/ghost split the classic
+ * engine's own TS_PLAY track-LED logic already used (stopped-but-loaded
+ * = solid; playing + on-beat = solid; playing + off-beat = off; muted
+ * (here: not audible, which already folds in solo per st_stem_mix.h's
+ * own rule) = ghost) — no fourth state, no new pattern.
+ *
+ * PURE: no I/O, no Zephyr, no dynamic allocation.
+ */
+
+#ifndef STEMTAPE_PLAYER_BEAT_PHASE_H_
+#define STEMTAPE_PLAYER_BEAT_PHASE_H_
+
+#include <stdbool.h>
+#include <stdint.h>
+
+typedef struct {
+	uint32_t downbeat_frame;
+	uint32_t frames_per_beat; /* 0 == invalid/unavailable -- see this header's own doc comment */
+} st_beat_timing_t;
+
+/*
+ * Computes and stores frames_per_beat from `bpm_q8` (Q8.8, STIX record
+ * convention; 0 = absent/unknown) and `sample_rate` (the STIX record's
+ * own field). Returns true and leaves a valid (frames_per_beat != 0)
+ * snapshot iff both bpm_q8 and sample_rate are nonzero and the result
+ * fits a uint32_t; otherwise returns false and leaves *out with
+ * frames_per_beat == 0 (downbeat_frame is still copied through either
+ * way, but is meaningless without a valid frames_per_beat).
+ */
+bool st_beat_timing_init(st_beat_timing_t *out, uint32_t bpm_q8, uint32_t downbeat_frame, uint32_t sample_rate);
+
+/*
+ * True iff `song_frame` (the master absolute song position, fresh every
+ * call — see this header's own doc comment) falls within the first
+ * `window_frames` frames of its current beat, given a VALID `timing`
+ * snapshot and song_frame >= timing->downbeat_frame. Returns false in
+ * every other case (invalid timing, or song_frame still before the
+ * first downbeat) — never crashes, never fabricates a beat.
+ */
+bool st_beat_phase_on_beat(const st_beat_timing_t *timing, uint32_t song_frame, uint32_t window_frames);
+
+typedef enum {
+	ST_TRACK_LED_OFF = 0,
+	ST_TRACK_LED_ON,
+	ST_TRACK_LED_GHOST,
+} st_track_led_state_t;
+
+/*
+ * The one place the per-stem LED display decision is made, given
+ * `audible` (st_stem_mix_channel_audible()'s own mute/solo rule),
+ * `playing` (transport state), and `on_beat` (st_beat_phase_on_beat()'s
+ * own result, ignored if !playing). See this header's own doc comment
+ * for why this is exactly the classic engine's established on/off/ghost
+ * vocabulary, not a new one.
+ */
+st_track_led_state_t st_beat_led_decide(bool audible, bool playing, bool on_beat);
+
+#endif /* STEMTAPE_PLAYER_BEAT_PHASE_H_ */
