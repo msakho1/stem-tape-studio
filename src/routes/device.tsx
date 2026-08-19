@@ -30,7 +30,7 @@ import { Sp1Transport, Sp1Session, BAUD_RATE, type SerialLikePort } from "@/sp1/
 import { STEM_ORDER, STEM_LABEL, type StemSlotName } from "@/sp1/prepare";
 import { prepareCanonicalSong, type CanonicalSong } from "@/sp1/song";
 import { parseCapabilities, readOnlyVerdict, type CompatibilityVerdict } from "@/sp1/compatibility";
-import { StemTapeTransport, type UploadResult } from "@/sp1/transport";
+import { StemTapeTransport, type UploadResult, type BulkTransactionRecord } from "@/sp1/transport";
 import { assignFiles, inferTitle } from "@/sp1/stemNaming";
 import { analyzeTiming, timingLabel, type SongTiming } from "@/sp1/autoTiming";
 import {
@@ -127,6 +127,18 @@ function DevicePage() {
 
   const transportRef = useRef<StemTapeTransport | null>(null);
   const abortRef = useRef({ aborted: false });
+  /* bulkTransactions lives only on the live Sp1Transport/StemTapeTransport
+   * instance, in memory. If the SP-1 drops the connection after a failed
+   * upload (or the user reconnects before downloading the report), a fresh
+   * instance replaces transportRef.current with an empty bulkTransactions
+   * array -- silently discarding exactly the per-sector status/writeMs/
+   * ackMs detail a failed transfer's diagnostic report most needs, even
+   * though the human-readable `events` log (separate React state, not tied
+   * to the transport object) still shows the same responses were received.
+   * Snapshot the finished attempt's records here, right when they're still
+   * live, so downloadReport() below has them regardless of what happens to
+   * the connection afterward. */
+  const lastBulkTransactionsRef = useRef<readonly BulkTransactionRecord[]>([]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const replaceRef = useRef<StemSlotName | null>(null);
   const storageRef = useRef<PrepStorage | null>(null);
@@ -517,6 +529,13 @@ function DevicePage() {
     } catch (e) {
       say(e instanceof Error ? e.message : String(e), "error");
     } finally {
+      // Snapshot regardless of how the attempt ended (success, a clean
+      // failure response, or a thrown transport error) -- `t` is still the
+      // exact instance that ran this attempt even if transportRef.current
+      // has since moved on to a reconnect. See lastBulkTransactionsRef's
+      // own doc comment above for why this can't just be read live at
+      // download time.
+      lastBulkTransactionsRef.current = t.bulkTransactions;
       setUploading(false);
     }
   }, [manifest, say, song, title]);
@@ -555,7 +574,17 @@ function DevicePage() {
         queryState,
       },
       device: { sectorsPerSong, bulkVerifiedSectorUpload: bulkCapable },
-      bulkTransactions: transportRef.current?.bulkTransactions ?? [],
+      // Prefer the live connection's own records when it has any (the
+      // common case: report downloaded right after an attempt, same
+      // instance still connected); fall back to the last completed
+      // attempt's snapshot otherwise, since a reconnect between that
+      // attempt and this download replaces transportRef.current with a
+      // fresh, empty-by-construction StemTapeTransport. See
+      // lastBulkTransactionsRef's own doc comment for why this matters.
+      bulkTransactions:
+        transportRef.current?.bulkTransactions?.length
+          ? transportRef.current.bulkTransactions
+          : lastBulkTransactionsRef.current,
       song: manifest,
       timing,
       capacity,
