@@ -55,26 +55,33 @@ find_call_sites() in stemtape_player_safety_gate.py already does):
      test_stem_playback_gate.c's own doc comment for the complementary,
      REAL two-thread algorithmic proof over the real fixture).
 
-  4. Phase 3 control-matrix (fader + mute + solo): looper_audio_block()
-     builds its st_stem_mix_channel_t array from the SAME control
-     surface the classic engine's own PASS A/B already read
-     (trk[s].vol_q8, trk[s].muted, trk[s].solo -- see main.c's own PASS C
-     comment for why that cross-thread read is safe), not from a
-     hardcoded placeholder. This is a substring check, not a call-site
-     check (an array-field read is not a call expression), so it is
-     REQUIRED_SUBSTRINGS below, checked the same fail-closed way. Also
-     proves main()'s own release handler actually WRITES trk[ti].solo
-     (the hold-to-solo gesture substituting for the documented-but-
-     hardware-unreadable PLAY+Track chord -- see TRACK_HOLD_SOLO_MS's
-     own comment in main.c), so solo is a real, sourced toggle, not a
-     field that exists but nothing ever sets.
+  4. Phase 3 control-matrix (fader + mute + solo, momentary hold
+     corrected): looper_audio_block() builds its st_stem_mix_channel_t
+     array from the SAME control surface the classic engine's own PASS
+     A/B already read (trk[s].vol_q8, trk[s].muted, trk[s].solo -- see
+     main.c's own PASS C comment for why that cross-thread read is
+     safe), not from a hardcoded placeholder. This is a substring check,
+     not a call-site check (an array-field read is not a call
+     expression), so it is REQUIRED_SUBSTRINGS below, checked the same
+     fail-closed way. Also proves main() genuinely CALLS
+     st_track_hold_tick() (REQUIRED_CALLS -- the pure, host-tested
+     momentary hold-timing state machine that actually drives trk[].solo
+     now, not a hardcoded placeholder or the earlier, corrected release-
+     time toggle) AND that main()'s own release-episode handler reads
+     track_hold[ti].solo_active (REQUIRED_SUBSTRINGS) to decide whether
+     to suppress its own tap-to-mute action -- both ends of the
+     corrected wire proven present in source, not just one.
 
   5. Phase 3 control-matrix, LED slice: led_service() (the single real
      owner of the physical LEDs -- see its own doc comment) reads the
      SAME trk[].muted/trk[].solo state as check 4, gated on the SAME
-     g_stem_song_selected flag PASS C itself gates on, and drives the
-     real track_led_on()/track_led_ghost() primitives -- proving stem
-     mute/solo status reaches the physical LEDs, not just the mixer.
+     g_stem_song_selected flag PASS C itself gates on, calls the real
+     st_stem_mix_channel_audible() (REQUIRED_CALLS -- the SAME shared
+     audibility formula looper_audio_block()'s own mixer uses
+     internally, so LED feedback can never drift from what the mixer
+     actually plays), and drives the real track_led_on()/track_led_
+     ghost() primitives -- proving stem mute/solo status reaches the
+     physical LEDs, not just the mixer.
 
 Fails closed: main.c missing, either function's body not found, or any
 required call site/substring absent.
@@ -115,6 +122,12 @@ REQUIRED_CALLS = {
         "looper_audio_block",
         "i2s_write",
     ],
+    "main": [
+        "st_track_hold_tick",
+    ],
+    "led_service": [
+        "st_stem_mix_channel_audible",
+    ],
 }
 
 # Substring checks (see REQUIRED_CALLS's doc comment, check 4): these are
@@ -131,7 +144,7 @@ REQUIRED_SUBSTRINGS = {
         "trk[s].solo",
     ],
     "main": [
-        "trk[ti].solo = !trk[ti].solo",
+        "track_hold[ti].solo_active",
     ],
     "led_service": [
         "atomic_get(&g_stem_song_selected)",

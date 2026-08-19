@@ -330,6 +330,108 @@ static void test_mix_mute_wins_over_solo_on_same_stem(void)
 	      "silences every OTHER stem -- total output is exact silence");
 }
 
+/* CORRECTION (Phase 3 control-matrix, momentary hold-to-solo): the hold-
+ * to-solo gesture's own state model supports independent per-track solo
+ * flags (see st_track_hold.h's own doc comment on why, even though
+ * today's hardware ladder can only physically report one track held at a
+ * time) -- this proves the MIXER side of that: two simultaneously soloed
+ * stems both play, and every non-soloed stem stays silent regardless. */
+static void test_mix_multiple_stems_soloed_play_together(void)
+{
+	st11_audio_frame_t frame;
+
+	build_synthetic_frame(&frame);
+
+	st_stem_mix_channel_t channels[ST11_STEM_COUNT];
+
+	unity_channels(channels);
+	channels[0].solo = true;
+	channels[2].solo = true; /* stems 0 and 2 both soloed */
+
+	int32_t stems_0_and_2[ST11_STEM_COUNT] = { frame.stem_l[0], 0, frame.stem_l[2], 0 };
+	int16_t expect_l = reference_unity_mix(stems_0_and_2);
+
+	int16_t out_l, out_r;
+
+	st_stem_mix_frame(&frame, channels, &out_l, &out_r);
+
+	CHECK(out_l == expect_l,
+	      "multi-solo: soloing stems 0 AND 2 together mixes both, silences stems 1 and 3 (got %d, expected %d)",
+	      out_l, expect_l);
+}
+
+/* st_stem_mix_channel_audible() must answer EXACTLY what st_stem_mix_frame()
+ * would actually play -- these exercise it directly (not via a mixed audio
+ * sample) across the same solo/mute scenarios above, since this is the
+ * function LED feedback now calls (see main.c's led_service()) and it must
+ * never drift from the real mixer's own decision. */
+static void test_channel_audible_no_mute_no_solo_all_audible(void)
+{
+	st_stem_mix_channel_t channels[ST11_STEM_COUNT];
+
+	unity_channels(channels);
+
+	bool all_audible = true;
+
+	for (uint32_t s = 0; s < ST11_STEM_COUNT; s++) {
+		all_audible = all_audible && st_stem_mix_channel_audible(channels, s);
+	}
+	CHECK(all_audible, "audible: no mute, no solo -- every stem is audible");
+}
+
+static void test_channel_audible_one_muted(void)
+{
+	st_stem_mix_channel_t channels[ST11_STEM_COUNT];
+
+	unity_channels(channels);
+	channels[1].mute = true;
+
+	CHECK(!st_stem_mix_channel_audible(channels, 1), "audible: muted stem 1 is not audible");
+	CHECK(st_stem_mix_channel_audible(channels, 0) && st_stem_mix_channel_audible(channels, 2) &&
+		      st_stem_mix_channel_audible(channels, 3),
+	      "audible: the other three unmuted, unsoloed stems stay audible");
+}
+
+static void test_channel_audible_one_soloed(void)
+{
+	st_stem_mix_channel_t channels[ST11_STEM_COUNT];
+
+	unity_channels(channels);
+	channels[2].solo = true;
+
+	CHECK(st_stem_mix_channel_audible(channels, 2), "audible: soloed stem 2 is audible");
+	CHECK(!st_stem_mix_channel_audible(channels, 0) && !st_stem_mix_channel_audible(channels, 1) &&
+		      !st_stem_mix_channel_audible(channels, 3),
+	      "audible: every non-soloed stem is silenced by stem 2's solo");
+}
+
+static void test_channel_audible_multiple_soloed(void)
+{
+	st_stem_mix_channel_t channels[ST11_STEM_COUNT];
+
+	unity_channels(channels);
+	channels[0].solo = true;
+	channels[3].solo = true;
+
+	CHECK(st_stem_mix_channel_audible(channels, 0) && st_stem_mix_channel_audible(channels, 3),
+	      "audible: both simultaneously soloed stems (0 and 3) are audible");
+	CHECK(!st_stem_mix_channel_audible(channels, 1) && !st_stem_mix_channel_audible(channels, 2),
+	      "audible: the two non-soloed stems (1 and 2) stay silent");
+}
+
+static void test_channel_audible_mute_wins_over_own_solo_and_still_silences_others(void)
+{
+	st_stem_mix_channel_t channels[ST11_STEM_COUNT];
+
+	unity_channels(channels);
+	channels[0].solo = true;
+	channels[0].mute = true;
+
+	CHECK(!st_stem_mix_channel_audible(channels, 0), "audible: stem 0's own mute wins over its own solo");
+	CHECK(!st_stem_mix_channel_audible(channels, 1), "audible: stem 0's solo still silences stem 1 even though "
+							  "stem 0 itself is muted-and-thus-inaudible");
+}
+
 static void test_mix_no_channels_active_is_silence(void)
 {
 	st11_audio_frame_t frame;
@@ -421,6 +523,12 @@ int main(void)
 	RUN(test_mix_mute_silences_one_stem);
 	RUN(test_mix_solo_isolates_one_stem);
 	RUN(test_mix_mute_wins_over_solo_on_same_stem);
+	RUN(test_mix_multiple_stems_soloed_play_together);
+	RUN(test_channel_audible_no_mute_no_solo_all_audible);
+	RUN(test_channel_audible_one_muted);
+	RUN(test_channel_audible_one_soloed);
+	RUN(test_channel_audible_multiple_soloed);
+	RUN(test_channel_audible_mute_wins_over_own_solo_and_still_silences_others);
 	RUN(test_mix_no_channels_active_is_silence);
 	RUN(test_mix_saturates_at_positive_full_scale);
 	RUN(test_mix_saturates_at_negative_full_scale_with_high_gain);

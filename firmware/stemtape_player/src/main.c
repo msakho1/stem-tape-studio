@@ -102,6 +102,7 @@
 #include "st_stem_bufmbox.h"
 #include "st_stem_mix.h"
 #include "st_stem_stream.h"
+#include "st_track_hold.h"
 #include "st_stix.h"
 #include "st_v11_format.h"
 
@@ -1311,19 +1312,25 @@ static volatile int g_play_bpm = 80;
 /* track-button gesture timing */
 #define HOLD_RECORD_MS   180   /* physical button-down this long (ms) => RECORD; shorter => TAP */
 #define DTAP_GAP_MS      420   /* 2nd tap within this of the 1st tap's release => DOUBLE-TAP delete */
-/* STEM TAPE Phase 3 control-matrix, slice 2 (solo): docs/FIRMWARE_CONTRACT_
- * V1.md specifies PLAY+Track (<stemSoloLinkThresholdMs=700ms overlap) as the
+/* STEM TAPE Phase 3 control-matrix (solo): docs/FIRMWARE_CONTRACT_V1.md
+ * specifies PLAY+Track (<stemSoloLinkThresholdMs=700ms overlap) as the
  * solo gesture, but PLAY and TRACK1-4 share one resistor ladder (see
  * decode_tracks() -- only one of them is ever readable as pressed at a
  * time), so that chord cannot be read on this hardware as wired -- see the
  * fader/mute wiring commit's own note. Product decision: a track held
- * physically down at least this long toggles SOLO instead of MUTE (release
- * sooner = the existing tap-to-mute gesture, unchanged); this constant
- * reuses the contract's own stemSoloLinkThresholdMs value verbatim rather
- * than inventing a new one, even though the gesture SHAPE (hold vs. a
- * second control) deviates from the documented chord. HOLD_RECORD_MS above
- * (180 ms) is a different, much shorter threshold for a capability Stem
- * Tape does not have (recording) and does not apply here. */
+ * physically down at least this long activates SOLO for as long as it
+ * stays held -- MOMENTARY, not a toggle: release always clears it, and
+ * release sooner (never crossing this threshold) is the existing tap-to-
+ * mute gesture, unchanged and never suppressed by a hold that never
+ * qualified. See st_track_hold.h for the corrected state machine that
+ * implements this exactly (an earlier version wrongly toggled solo once,
+ * at release -- a latch, not what this comment or the product decision
+ * ever specified). This constant reuses the contract's own
+ * stemSoloLinkThresholdMs value verbatim rather than inventing a new one,
+ * even though the gesture SHAPE (hold vs. a second control) deviates from
+ * the documented chord. HOLD_RECORD_MS above (180 ms) is a different,
+ * much shorter threshold for a capability Stem Tape does not have
+ * (recording) and does not apply here. */
 #define TRACK_HOLD_SOLO_MS 700
 
 /* BEAT GRID for the LED pulse + MIDI clock — defaults to the nominal beat, but
@@ -2099,8 +2106,10 @@ static void looper_audio_block(int16_t *s)
 		 * (fader ladder -> Q8, main-thread-written every ~32 ms round-
 		 * robin), trk[s].muted (bare-track-tap toggle -- the real,
 		 * already-proven "tap -> mute" gesture a few hundred lines up),
-		 * and trk[s].solo (hold-to-solo, TRACK_HOLD_SOLO_MS, same
-		 * release handler) -- all three already `volatile`, single-
+		 * and trk[s].solo (MOMENTARY hold-to-solo -- active only while
+		 * held past TRACK_HOLD_SOLO_MS, cleared the instant of release;
+		 * see st_track_hold.h's own doc comment) -- all three already
+		 * `volatile`, single-
 		 * writer(main thread)/single-reader(audio thread), the SAME
 		 * cross-thread convention PASS A/B's own `vol_s[i] =
 		 * trk[i].vol_q8` snapshot already relies on (see this file's
@@ -4426,28 +4435,36 @@ static void led_service(void)
 	 * Reuses the SAME track_led_on()/track_led_ghost() primitives and
 	 * the SAME "ghost = loaded but not currently audible" vocabulary
 	 * the classic engine's own TS_PLAY-and-muted case already
-	 * established a few lines below -- not a new LED language. `audible`
-	 * mirrors st_stem_mix.h's own documented solo/mute rule exactly
-	 * (mute always wins for that stem; otherwise any soloed stem
-	 * silences every non-soloed one) so what lights up is exactly what
-	 * plays, not an approximation. This deliberately does not
-	 * distinguish "muted" from "silenced by another stem's solo" --
-	 * both read as ghost, matching the classic engine's own one-ghost-
-	 * state precedent; a future slice could add a distinct pattern per
-	 * cause, not required for this one. Beat-synced pulsing (like the
-	 * classic engine's on-beat blink for TS_PLAY) is deliberately not
-	 * reused here: it is driven by the classic engine's own detected-
-	 * tempo machinery (g_beat_phase), not a stem song's own bpm_q8 --
-	 * reusing it would risk a visibly wrong pulse rate, so this slice
-	 * stays with steady on/ghost until a stem-tempo-aware pulse is
-	 * built as its own, separately verified piece. */
+	 * established a few lines below -- not a new LED language. Audibility
+	 * is decided by st_stem_mix_channel_audible() -- the SAME shared
+	 * function looper_audio_block()'s own mixer channels are checked
+	 * against internally (see st_stem_mix.c's own channel_active()),
+	 * exposed precisely so this control-thread query can never drift
+	 * from what the audio thread actually plays: one formula, read by
+	 * both threads from their own independently-populated channel
+	 * arrays (each built from the SAME trk[].vol_q8/muted/solo fields),
+	 * never two maintained copies of the rule itself. This deliberately
+	 * does not distinguish "muted" from "silenced by another stem's
+	 * solo" -- both read as ghost, matching the classic engine's own
+	 * one-ghost-state precedent; a future slice could add a distinct
+	 * pattern per cause, not required for this one. Beat-synced pulsing
+	 * (like the classic engine's on-beat blink for TS_PLAY) is
+	 * deliberately not reused here: it is driven by the classic
+	 * engine's own detected-tempo machinery (g_beat_phase), not a stem
+	 * song's own bpm_q8 -- reusing it would risk a visibly wrong pulse
+	 * rate, so this slice stays with steady on/ghost until a stem-
+	 * tempo-aware pulse is built as its own, separately verified piece. */
 	if (atomic_get(&g_stem_song_selected)) {
-		bool any_solo = false;
+		st_stem_mix_channel_t channels[ST11_STEM_COUNT];
 
-		for (int i = 0; i < NUM_TRACK_LEDS && i < NTRK; i++)
-			if (trk[i].solo) any_solo = true;
-		for (int i = 0; i < NUM_TRACK_LEDS && i < NTRK; i++) {
-			bool audible = !trk[i].muted && (!any_solo || trk[i].solo);
+		_Static_assert(NTRK == ST11_STEM_COUNT, "trk[]/stem lane count must match 1:1");
+		for (int i = 0; i < ST11_STEM_COUNT; i++) {
+			channels[i].gain_q8 = (int32_t)trk[i].vol_q8;
+			channels[i].mute = trk[i].muted != 0;
+			channels[i].solo = trk[i].solo != 0;
+		}
+		for (int i = 0; i < NUM_TRACK_LEDS && i < ST11_STEM_COUNT; i++) {
+			bool audible = st_stem_mix_channel_audible(channels, (uint32_t)i);
 
 			audible ? track_led_on(i) : track_led_ghost(i);
 		}
@@ -5467,6 +5484,14 @@ int main(void)
 			static enum trk_btn committed = TRK_NONE, cand = TRK_NONE;
 			static int cand_cnt;
 			static int64_t press_t[NTRK];        /* when committed first named this track */
+			/* STEM TAPE Phase 3 control-matrix (momentary hold-to-
+			 * solo, corrected): one independent st_track_hold_t
+			 * per track -- see st_track_hold.h's own doc comment.
+			 * Ticked every pass for every track, below, from the
+			 * SAME press_t[]/committed this block already tracks
+			 * for its own, unrelated purposes -- no new debounce,
+			 * no new time source. */
+			static st_track_hold_t track_hold[NTRK];
 			static int64_t tap_deadline[NTRK];   /* >0: a single tap awaiting a possible 2nd */
 			static uint8_t armed_press[NTRK];    /* this press already armed a take */
 			static int stop_tap_trk = -1;        /* R1: stop already fired at press;
@@ -5633,18 +5658,29 @@ int main(void)
 						 * handler) is never reached. */
 						tap_deadline[ti] = 0;   /* 2nd tap: recognized, no-op */
 						trk[ti].muted = 0;
-					} else if (tnow - press_t[ti] >= TRACK_HOLD_SOLO_MS) {
-						/* STEM TAPE Phase 3: HOLD >= TRACK_HOLD_SOLO_MS
-						 * -> SOLO toggle, in place of the documented-but-
-						 * hardware-unreadable PLAY+Track chord (see that
-						 * constant's own comment). Mute is untouched by
-						 * this gesture -- solo and mute are independent
-						 * per-stem flags (st_stem_mix.h's own solo/mute
-						 * interaction rule: mute always wins for that
-						 * stem; otherwise any soloed stem silences every
-						 * non-soloed one). No double-tap window is armed
-						 * here -- a held gesture was never a tap. */
-						trk[ti].solo = !trk[ti].solo;
+					} else if (track_hold[ti].solo_active) {
+						/* STEM TAPE Phase 3 (corrected, momentary):
+						 * this hold crossed TRACK_HOLD_SOLO_MS while
+						 * still down -- the per-pass loop below (R1-
+						 * STOP-ON-PRESS's own neighbor) already set
+						 * trk[ti].solo = true the pass it crossed,
+						 * and will clear both trk[ti].solo and
+						 * track_hold[ti].solo_active on ITS OWN next
+						 * pass (committed no longer names ti). Read
+						 * track_hold[ti].solo_active HERE, on THIS
+						 * pass, before that clear runs -- correct
+						 * because this release-episode block always
+						 * runs before that per-pass loop within one
+						 * iteration (see st_track_hold.h's own doc
+						 * comment on this exact ordering). Momentary,
+						 * not latched: clear trk[ti].solo immediately
+						 * too (belt-and-suspenders with the per-pass
+						 * loop's own clear) and, critically, do NOT
+						 * fall through to mute -- a long hold must
+						 * never also toggle mute. No double-tap
+						 * window is armed here -- a held gesture was
+						 * never a tap. */
+						trk[ti].solo = 0;
 					} else {
 						/* tap -> mute, INSTANT on gridded and
 						 * ungridded songs alike (v2.0.0: the M8c
@@ -5696,6 +5732,30 @@ int main(void)
 					tap_deadline[ti] = 0;
 					stop_tap_trk = ti;
 				}
+			}
+			/* STEM TAPE Phase 3 control-matrix (momentary hold-to-
+			 * solo, corrected): ticks EVERY track's own st_track_
+			 * hold_t every pass -- not just the currently-committed
+			 * one -- since a track that is no longer `committed`
+			 * this pass is exactly how st_track_hold_tick() learns
+			 * it was released (pressed=false) and clears. This runs
+			 * AFTER the release-episode handler above in program
+			 * order, which matters: on the exact pass a release is
+			 * detected, that handler already read track_hold[ti].
+			 * solo_active (see its own comment) BEFORE this loop can
+			 * clear it -- so the ordering here is load-bearing, not
+			 * incidental. On every earlier pass, while still held,
+			 * this is what actually flips trk[ti].solo true the
+			 * instant held time crosses TRACK_HOLD_SOLO_MS -- solo
+			 * takes effect DURING the hold, not only at release,
+			 * which is what makes it read as momentary rather than a
+			 * delayed toggle. */
+			for (int k = 0; k < NTRK; k++) {
+				bool held_now = (committed == (enum trk_btn)k);
+				uint32_t held_ms = held_now ? (uint32_t)(k_uptime_get() - press_t[k]) : 0u;
+
+				trk[k].solo = st_track_hold_tick(&track_hold[k], held_now, held_ms,
+								  TRACK_HOLD_SOLO_MS) ? 1u : 0u;
 			}
 			/* HOLD-ARM, always LATCHED on release. EMPTY tracks arm after
 			 * just 100 ms: a tap has no meaning there (nothing to mute or

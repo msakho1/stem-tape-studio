@@ -972,6 +972,37 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Stem Tape v1.1 momentary hold-to-solo host tests (Phase 3 correction)
+        # Phase 3 control-matrix correction: src/st_track_hold.c's own
+        # pure momentary hold-timing state machine (see that file's own
+        # doc comment for why this replaced a first version that wrongly
+        # toggled solo once at release -- a latch, not the momentary
+        # behavior specified). Linked into the real firmware target
+        # (CMakeLists.txt) and genuinely called from main.c's own track-
+        # button scan loop (one instance per track, ticked every scan
+        # pass) -- proven by the "stored four-stem playback wiring check"
+        # step below, not merely by this host-test step, which only
+        # re-proves the pure timing state machine itself in isolation
+        # (no Zephyr/nRF toolchain, no real time source needed for that
+        # part -- every held_ms value here is fabricated timing, not
+        # fabricated audio content; see test_track_hold.c's own doc
+        # comment on why that is not the fabrication this suite's rule
+        # forbids).
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          cc -std=c11 -Wall -Wextra -Ifirmware/stemtape_player/src \
+            firmware/stemtape_player/src/st_track_hold.c \
+            firmware/stemtape_player/tests/test_track_hold.c \
+            -o audit/test_track_hold
+          ./audit/test_track_hold | tee audit/track-hold-selftest.txt
+          {
+            echo '### Stem Tape v1.1 momentary hold-to-solo host tests (Phase 3 correction)'
+            echo '```text'
+            cat audit/track-hold-selftest.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Stem Tape v1.1 continuous streaming state machine host tests (Slice 3A)
         # Phase 2 continuous streaming: src/st_stem_stream.c's own pure
         # stored-song streaming state machine (see that file's own doc

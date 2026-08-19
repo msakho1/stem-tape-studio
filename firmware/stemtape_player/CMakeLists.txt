@@ -62,6 +62,15 @@ include(${ZEPHYR_BASE}/samples/subsys/usb/common/common.cmake)
 # (see that file's own doc comment for why that is a faithful stand-in,
 # and where the faithfulness gap actually is).
 #
+# Phase 3 control-matrix (momentary hold-to-solo, corrected): src/
+# st_track_hold.c -- the pure, host-tested momentary hold-timing state
+# machine (see st_track_hold.h's own doc comment for the semantics, and
+# why this replaced a first version that wrongly toggled solo once at
+# release -- a latch, not the momentary behavior actually specified) --
+# is linked and genuinely called: main.c's own track-button scan loop
+# ticks one instance per track every scan pass, and looper_audio_block()/
+# led_service() both read the resulting trk[].solo state it drives.
+#
 # The OLD, now-retired v1.0 Gate 2 contract's own engine -- src/
 # st_storage_layout.c, src/st_sector_codec.c, src/st_transfer.c, src/
 # st_library_io.c, src/st_xfer_wire.c, and src/st_stem_validate.c (an
@@ -100,6 +109,7 @@ target_sources(app PRIVATE
 	src/st_stem_mix.c
 	src/st_stem_stream.c
 	src/st_stem_bufmbox.c
+	src/st_track_hold.c
 )
 
 # See firmware/CMakeLists.txt's identical note: the batchbuf/meta-block code

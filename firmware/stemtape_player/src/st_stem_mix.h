@@ -80,4 +80,17 @@ typedef struct {
 void st_stem_mix_frame(const st11_audio_frame_t *frame, const st_stem_mix_channel_t channels[ST11_STEM_COUNT],
 			int16_t *out_l, int16_t *out_r);
 
+/*
+ * True if channels[index] would actually be heard by st_stem_mix_frame()
+ * given the WHOLE channels[] array's current mute/solo state -- the exact
+ * same rule st_stem_mix_frame() applies internally (see this header's own
+ * "Solo/mute convention" doc comment above: mute always wins; if ANY
+ * channel is soloed, only soloed channels play), exposed so a caller that
+ * needs to know audibility WITHOUT decoding/mixing an actual audio frame
+ * (e.g. LED feedback, run from the control thread at ~8 ms resolution, far
+ * below audio rate) can never drift from the real mixer's own decision --
+ * one formula, not two independently-maintained copies.
+ */
+bool st_stem_mix_channel_audible(const st_stem_mix_channel_t channels[ST11_STEM_COUNT], uint32_t index);
+
 #endif /* STEMTAPE_PLAYER_STEM_MIX_H_ */
