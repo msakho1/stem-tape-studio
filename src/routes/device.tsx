@@ -23,6 +23,8 @@ import {
   X,
 } from "lucide-react";
 import sp1Outline from "@/assets/stem-tape-sp1-outline.svg";
+import { Sp1ConnectLeds } from "@/device/Sp1ConnectLeds";
+
 import { Sp1Transport, Sp1Session, BAUD_RATE, type SerialLikePort } from "@/sp1/protocol";
 import { STEM_ORDER, STEM_LABEL, type StemSlotName } from "@/sp1/prepare";
 import { prepareCanonicalSong, type CanonicalSong } from "@/sp1/song";
