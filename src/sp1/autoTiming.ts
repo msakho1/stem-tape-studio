@@ -87,8 +87,7 @@ export function analyzeTiming(sources: TimingSource[]): SongTiming {
   }
 
   const reference = drumsGrid ? combinedGrid : null;
-  const agrees =
-    !!reference && Math.abs(reference.bpm - chosen.bpm) / chosen.bpm <= 0.02;
+  const agrees = !!reference && Math.abs(reference.bpm - chosen.bpm) / chosen.bpm <= 0.02;
 
   // A stronger downbeat could not be established when the two estimates
   // disagree; default safely to the first detected musical onset.

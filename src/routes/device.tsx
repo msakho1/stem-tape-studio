@@ -312,7 +312,12 @@ function DevicePage() {
         const prepared = await prepareCanonicalSong(
           STEM_ORDER.map((n) => ({ name: n, filename: files[n]!.name, buffer: decoded[n]! })),
           {
-            metadata: { title, artist: "", bpm: timing.bpm, downbeatSeconds: timing.downbeatSeconds },
+            metadata: {
+              title,
+              artist: "",
+              bpm: timing.bpm,
+              downbeatSeconds: timing.downbeatSeconds,
+            },
           },
         );
         if (prepTokenRef.current !== token) return;
@@ -330,7 +335,8 @@ function DevicePage() {
             fingerprint,
             storage,
             onProgress: (f) => {
-              if (prepTokenRef.current === token) setPrepDetail(`Preparing audio… ${Math.round(f * 100)}%`);
+              if (prepTokenRef.current === token)
+                setPrepDetail(`Preparing audio… ${Math.round(f * 100)}%`);
             },
           }));
         if (prepTokenRef.current !== token) return;
@@ -381,7 +387,15 @@ function DevicePage() {
     setResult(null);
     const total = manifest.totalBytes;
     const started = performance.now();
-    setProgress({ fraction: 0, bytes: 0, total, rate: 0, eta: NaN, retries: 0, checkpoint: "none yet" });
+    setProgress({
+      fraction: 0,
+      bytes: 0,
+      total,
+      rate: 0,
+      eta: NaN,
+      retries: 0,
+      checkpoint: "none yet",
+    });
     say(`Upload started · ${fmtMiB(total)}.`);
     try {
       const out = await t.uploadSong({
@@ -505,7 +519,13 @@ function DevicePage() {
         </div>
         <div className="flex flex-wrap items-center gap-x-8 gap-y-3 px-4 pb-4 pt-2 md:px-8">
           <Link to="/" className="flex items-center gap-3">
-            <svg width="34" height="34" viewBox="0 0 34 34" aria-hidden className="text-[var(--ink)]">
+            <svg
+              width="34"
+              height="34"
+              viewBox="0 0 34 34"
+              aria-hidden
+              className="text-[var(--ink)]"
+            >
               <path d="M17 5 L30 28 H4 Z" fill="none" stroke="currentColor" strokeWidth="1.2" />
             </svg>
             <div>
@@ -570,7 +590,10 @@ function DevicePage() {
             </div>
           )}
           {incompatible && (
-            <p className="mt-2 font-mono text-[13px] text-[var(--ink-dim)]" data-testid="incompatible">
+            <p
+              className="mt-2 font-mono text-[13px] text-[var(--ink-dim)]"
+              data-testid="incompatible"
+            >
               This SP-1 needs a compatible Stem Tape firmware update before songs can be uploaded.
             </p>
           )}
@@ -627,7 +650,15 @@ function DevicePage() {
                 </span>
                 <span className="text-[var(--ink-faint)]">{buf ? fmtDur(buf.duration) : "—"}</span>
                 <span className="text-[var(--ink-faint)]" data-testid={`state-${name}`}>
-                  {!file ? "waiting" : !buf ? "reading" : prepState === "ready" ? "ready" : prepState === "working" ? "preparing" : "loaded"}
+                  {!file
+                    ? "waiting"
+                    : !buf
+                      ? "reading"
+                      : prepState === "ready"
+                        ? "ready"
+                        : prepState === "working"
+                          ? "preparing"
+                          : "loaded"}
                 </span>
                 <button
                   className="st-btn st-btn--quiet"
@@ -711,7 +742,10 @@ function DevicePage() {
             </div>
           )}
           {timing && editTiming && (
-            <div className="mt-2 flex flex-wrap items-center gap-3 font-mono text-[12px]" data-testid="timing-editor">
+            <div
+              className="mt-2 flex flex-wrap items-center gap-3 font-mono text-[12px]"
+              data-testid="timing-editor"
+            >
               <label className="flex items-center gap-2">
                 <span className="text-[var(--ink-dim)]">BPM</span>
                 <input
@@ -805,7 +839,10 @@ function DevicePage() {
               </div>
 
               {!canUpload && !uploading && (
-                <p className="mt-2 font-mono text-[12px] text-[var(--ink-dim)]" data-testid="upload-hint">
+                <p
+                  className="mt-2 font-mono text-[12px] text-[var(--ink-dim)]"
+                  data-testid="upload-hint"
+                >
                   {!connected
                     ? "Connect your SP-1 to upload."
                     : incompatible
@@ -855,13 +892,25 @@ function DevicePage() {
         <section className="st-section" data-testid="activity">
           <p className="st-section__title">activity</p>
           <div className="flex flex-wrap gap-2">
-            <button className="st-btn st-btn--quiet" data-testid="copy-activity" onClick={copyActivity}>
+            <button
+              className="st-btn st-btn--quiet"
+              data-testid="copy-activity"
+              onClick={copyActivity}
+            >
               Copy activity
             </button>
-            <button className="st-btn st-btn--quiet" data-testid="download-report" onClick={downloadReport}>
+            <button
+              className="st-btn st-btn--quiet"
+              data-testid="download-report"
+              onClick={downloadReport}
+            >
               Download diagnostic report
             </button>
-            <button className="st-btn st-btn--quiet" data-testid="clear-activity" onClick={() => setLog([])}>
+            <button
+              className="st-btn st-btn--quiet"
+              data-testid="clear-activity"
+              onClick={() => setLog([])}
+            >
               Clear activity
             </button>
           </div>

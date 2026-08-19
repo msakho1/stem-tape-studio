@@ -33,7 +33,11 @@ export interface SourceFingerprintInput {
 
 /** Deterministic, collision-resistant enough for a local cache key. */
 export function fingerprintSources(input: SourceFingerprintInput): string {
-  const parts: string[] = [`t=${input.title}`, `bpm=${input.timing.bpm.toFixed(4)}`, `db=${input.timing.downbeatSeconds.toFixed(6)}`];
+  const parts: string[] = [
+    `t=${input.title}`,
+    `bpm=${input.timing.bpm.toFixed(4)}`,
+    `db=${input.timing.downbeatSeconds.toFixed(6)}`,
+  ];
   for (const role of STEM_ORDER) {
     const f = input.files[role];
     parts.push(f ? `${role}:${f.name}:${f.size}:${f.lastModified}` : `${role}:-`);
@@ -58,7 +62,13 @@ export interface PreparedManifest {
   sectorCrc: number[];
   bpm: number;
   downbeatSeconds: number;
-  stems: { name: StemSlotName; filename: string; padFrames: number; peak: number; clipped: boolean }[];
+  stems: {
+    name: StemSlotName;
+    filename: string;
+    padFrames: number;
+    peak: number;
+    clipped: boolean;
+  }[];
   preparedAt: number;
 }
 
@@ -110,7 +120,12 @@ function idbOpen(): Promise<IDBDatabase> {
   });
 }
 
-function idbRun<T>(db: IDBDatabase, store: string, mode: IDBTransactionMode, fn: (s: IDBObjectStore) => IDBRequest): Promise<T> {
+function idbRun<T>(
+  db: IDBDatabase,
+  store: string,
+  mode: IDBTransactionMode,
+  fn: (s: IDBObjectStore) => IDBRequest,
+): Promise<T> {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(store, mode);
     const req = fn(tx.objectStore(store));
@@ -126,7 +141,11 @@ export function browserStorage(): PrepStorage {
   const db = () => (dbp ??= idbOpen());
   return {
     async getManifest(f) {
-      return (await idbRun<PreparedManifest | undefined>(await db(), "manifests", "readonly", (s) => s.get(f))) ?? null;
+      return (
+        (await idbRun<PreparedManifest | undefined>(await db(), "manifests", "readonly", (s) =>
+          s.get(f),
+        )) ?? null
+      );
     },
     async putManifest(m) {
       await idbRun(await db(), "manifests", "readwrite", (s) => s.put(m, m.fingerprint));
@@ -135,15 +154,20 @@ export function browserStorage(): PrepStorage {
       await idbRun(await db(), "chunks", "readwrite", (s) => s.put(bytes, `${f}#${i}`));
     },
     async getChunk(f, i) {
-      const v = await idbRun<Uint8Array | undefined>(await db(), "chunks", "readonly", (s) => s.get(`${f}#${i}`));
+      const v = await idbRun<Uint8Array | undefined>(await db(), "chunks", "readonly", (s) =>
+        s.get(`${f}#${i}`),
+      );
       return v ? new Uint8Array(v) : null;
     },
     async prune(keep) {
       const d = await db();
       const mk = await idbRun<IDBValidKey[]>(d, "manifests", "readonly", (s) => s.getAllKeys());
-      for (const k of mk) if (k !== keep) await idbRun(d, "manifests", "readwrite", (s) => s.delete(k));
+      for (const k of mk)
+        if (k !== keep) await idbRun(d, "manifests", "readwrite", (s) => s.delete(k));
       const ck = await idbRun<IDBValidKey[]>(d, "chunks", "readonly", (s) => s.getAllKeys());
-      for (const k of ck) if (!String(k).startsWith(`${keep}#`)) await idbRun(d, "chunks", "readwrite", (s) => s.delete(k));
+      for (const k of ck)
+        if (!String(k).startsWith(`${keep}#`))
+          await idbRun(d, "chunks", "readwrite", (s) => s.delete(k));
     },
   };
 }

@@ -6,12 +6,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { assignFiles, inferTitle, roleForFilename, stripRoleToken } from "../stemNaming";
 import { analyzeTiming, timingLabel, TEMPO_RANGE } from "../autoTiming";
-import {
-  fingerprintSources,
-  loadPrepared,
-  memoryStorage,
-  prepareChunked,
-} from "../preparation";
+import { fingerprintSources, loadPrepared, memoryStorage, prepareChunked } from "../preparation";
 import { prepareCanonicalSong } from "../song";
 import { STEM_ORDER, type StemSlotName } from "../prepare";
 
@@ -185,10 +180,24 @@ describe("automatic tempo and downbeat", () => {
   });
 
   it("never says beat zero", () => {
-    expect(timingLabel({ bpm: 92, downbeatSeconds: 0.2, confidence: "low", origin: "drums", edited: false }))
-      .toBe("Tempo estimated at 92 BPM — edit if needed");
-    expect(timingLabel({ bpm: 92, downbeatSeconds: 0.2, confidence: "high", origin: "drums", edited: false }))
-      .toBe("Detected: 92 BPM");
+    expect(
+      timingLabel({
+        bpm: 92,
+        downbeatSeconds: 0.2,
+        confidence: "low",
+        origin: "drums",
+        edited: false,
+      }),
+    ).toBe("Tempo estimated at 92 BPM — edit if needed");
+    expect(
+      timingLabel({
+        bpm: 92,
+        downbeatSeconds: 0.2,
+        confidence: "high",
+        origin: "drums",
+        edited: false,
+      }),
+    ).toBe("Detected: 92 BPM");
   });
 });
 
@@ -250,9 +259,14 @@ describe("chunked preparation and caching", () => {
     const fp = fingerprintSources(base);
     expect(fingerprintSources(base)).toBe(fp);
     expect(
-      fingerprintSources({ ...base, files: { vocal: { name: "a_Vocal.wav", size: 11, lastModified: 5 } } }),
+      fingerprintSources({
+        ...base,
+        files: { vocal: { name: "a_Vocal.wav", size: 11, lastModified: 5 } },
+      }),
     ).not.toBe(fp);
-    expect(fingerprintSources({ ...base, timing: { bpm: 93, downbeatSeconds: 0.25 } })).not.toBe(fp);
+    expect(fingerprintSources({ ...base, timing: { bpm: 93, downbeatSeconds: 0.25 } })).not.toBe(
+      fp,
+    );
     expect(fingerprintSources({ ...base, title: "b" })).not.toBe(fp);
 
     const storage = memoryStorage();
