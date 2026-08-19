@@ -13,6 +13,16 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { SupportButton } from "@/components/SupportButton";
+import {
+  ClipboardCopy,
+  Download,
+  Info,
+  Trash2,
+  Upload,
+  Usb,
+  X,
+} from "lucide-react";
+import sp1Outline from "@/assets/stem-tape-sp1-outline.svg";
 import { Sp1Transport, Sp1Session, BAUD_RATE, type SerialLikePort } from "@/sp1/protocol";
 import { STEM_ORDER, STEM_LABEL, type StemSlotName } from "@/sp1/prepare";
 import { prepareCanonicalSong, type CanonicalSong } from "@/sp1/song";
