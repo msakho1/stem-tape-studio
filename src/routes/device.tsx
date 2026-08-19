@@ -636,12 +636,16 @@ function DevicePage() {
                 </p>
               )}
             </div>
-            <img
-              src={sp1Outline}
-              alt="Line illustration of the SP-1"
-              className="hidden w-full select-none sm:block"
-              draggable={false}
-            />
+            <div className="relative hidden w-full sm:block">
+              <img
+                src={sp1Outline}
+                alt="Line illustration of the SP-1"
+                className="w-full select-none"
+                draggable={false}
+              />
+              <Sp1ConnectLeds connected={connected} />
+            </div>
+
           </div>
         </section>
 
