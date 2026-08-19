@@ -2,7 +2,6 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useState } from "react";
 import hero from "@/assets/sp1-hero-grey.png.asset.json";
 import { SupportButton } from "@/components/SupportButton";
-import { SupportButton } from "@/components/SupportButton";
 
 export const Route = createFileRoute("/shop")({
   component: ShopPage,
