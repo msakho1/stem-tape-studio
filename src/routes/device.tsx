@@ -107,6 +107,7 @@ function DevicePage() {
   const [manifest, setManifest] = useState<PreparedManifest | null>(null);
   const [prepState, setPrepState] = useState<"idle" | "working" | "ready" | "error">("idle");
   const [prepDetail, setPrepDetail] = useState("");
+  const [prepFraction, setPrepFraction] = useState<number | null>(null);
 
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState<{
