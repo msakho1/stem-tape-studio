@@ -281,6 +281,14 @@ function DevicePage() {
 
   const allFour = STEM_ORDER.every((n) => !!decoded[n] && !!files[n]);
 
+  /* pre-preparation work that used to look like nothing was happening */
+  const decodingStems = STEM_ORDER.some((n) => !!files[n] && !decoded[n]);
+  const busyPhase: string | null = decodingStems
+    ? "Reading stem files…"
+    : allFour && !timing
+      ? "Analyzing tempo and downbeat…"
+      : null;
+
   /* automatic timing as soon as the four stems are decoded */
   useEffect(() => {
     if (!allFour) {
