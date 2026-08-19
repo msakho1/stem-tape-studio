@@ -43,7 +43,9 @@ function baseState(patch: Partial<AuthoritativeSp1LedState> = {}): Authoritative
     heads: { active: false },
     song: 0,
     bankJumpArmed: false,
+    connectGreeting: null,
     flash: null,
+
     ...patch,
   };
 }

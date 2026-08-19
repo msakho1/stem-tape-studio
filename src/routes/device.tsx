@@ -23,6 +23,8 @@ import {
   X,
 } from "lucide-react";
 import sp1Outline from "@/assets/stem-tape-sp1-outline.svg";
+import { Sp1ConnectLeds } from "@/device/Sp1ConnectLeds";
+
 import { Sp1Transport, Sp1Session, BAUD_RATE, type SerialLikePort } from "@/sp1/protocol";
 import { STEM_ORDER, STEM_LABEL, type StemSlotName } from "@/sp1/prepare";
 import { prepareCanonicalSong, type CanonicalSong } from "@/sp1/song";
@@ -636,12 +638,16 @@ function DevicePage() {
                 </p>
               )}
             </div>
-            <img
-              src={sp1Outline}
-              alt="Line illustration of the SP-1"
-              className="hidden w-full select-none sm:block"
-              draggable={false}
-            />
+            <div className="relative hidden w-full sm:block">
+              <img
+                src={sp1Outline}
+                alt="Line illustration of the SP-1"
+                className="w-full select-none"
+                draggable={false}
+              />
+              <Sp1ConnectLeds connected={connected} />
+            </div>
+
           </div>
         </section>
 
