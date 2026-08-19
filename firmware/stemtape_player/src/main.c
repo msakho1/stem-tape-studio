@@ -3412,7 +3412,28 @@ static void feed_wdt(void);
  * "xfer_bulk_write_sector") rather than asking that gate to special-case a
  * different shape. The caller (xfer_service()) does not use the return
  * value -- every path already sends its own response over CDC (or, for
- * the one un-parseable-header case, a raw resync byte) before returning. */
+ * the one un-parseable-header case, a raw resync byte) before returning.
+ *
+ * __attribute__((noinline, noclone)): confirmed necessary by a real CI
+ * run, not anticipated -- this function has exactly one, always-taken
+ * call site (the 'U' branch in xfer_service()'s dispatcher), the same
+ * -Os single-call-site inlining shape xfer_v11_refresh_session()/
+ * xfer_v11_send_caps() already carry this exact attribute for (see
+ * either one's own comment for the full reasoning); without it, -Os
+ * folded this function's body entirely into its caller, leaving no
+ * standalone symbol for the runtime symbol-presence gate to find AND --
+ * more importantly -- no standalone symbol for the strict persistence
+ * safety gate's disassembly-based ALLOWED_WRITE_FUNCS attribution to
+ * enclose this function's own emmc_write_blocks() call site in. Keeping
+ * this specific function un-inlined is not merely a test-passing
+ * convenience: it is what keeps this safety-boundary function's own
+ * machine code independently auditable in the final binary at all.
+ * Trailing, same-line attribute placement matches this file's own
+ * established convention for this exact function-signature shape (see
+ * xfer_v11_write()'s own identical placement, which the strict
+ * persistence safety gate's parser is proven against). */
+static int xfer_bulk_write_sector(void)
+	__attribute__((noinline, noclone));
 static int xfer_bulk_write_sector(void)
 {
 	uint8_t hdr_bytes[ST_BULK_REQ_HEADER_BYTES];
