@@ -13,6 +13,16 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { SupportButton } from "@/components/SupportButton";
+import {
+  ClipboardCopy,
+  Download,
+  Info,
+  Trash2,
+  Upload,
+  Usb,
+  X,
+} from "lucide-react";
+import sp1Outline from "@/assets/stem-tape-sp1-outline.svg";
 import { Sp1Transport, Sp1Session, BAUD_RATE, type SerialLikePort } from "@/sp1/protocol";
 import { STEM_ORDER, STEM_LABEL, type StemSlotName } from "@/sp1/prepare";
 import { prepareCanonicalSong, type CanonicalSong } from "@/sp1/song";
@@ -496,8 +506,10 @@ function DevicePage() {
     <div className="min-h-screen">
       <header className="border-b border-[var(--bench-line)]">
         <div className="flex items-start justify-between gap-4 px-4 pt-3 md:px-8">
-          <p className="font-mono text-[9px] uppercase tracking-[0.24em] text-[var(--ink-faint)] md:text-[10px]">
-            not affiliated with teenage engineering
+          <p className="font-mono text-[9px] uppercase leading-relaxed tracking-[0.24em] text-[var(--ink-faint)] md:text-[10px]">
+            not affiliated with
+            <br />
+            teenage engineering
           </p>
           <div className="flex shrink-0 items-center gap-4">
             <nav className="hidden items-center gap-6 lg:flex" aria-label="Site">
@@ -517,11 +529,11 @@ function DevicePage() {
             <SupportButton />
           </div>
         </div>
-        <div className="flex flex-wrap items-center gap-x-8 gap-y-3 px-4 pb-4 pt-2 md:px-8">
-          <Link to="/" className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-x-8 gap-y-3 px-4 pb-5 pt-3 md:px-8">
+          <Link to="/" className="flex items-center gap-4">
             <svg
-              width="34"
-              height="34"
+              width="52"
+              height="52"
               viewBox="0 0 34 34"
               aria-hidden
               className="text-[var(--ink)]"
@@ -529,8 +541,10 @@ function DevicePage() {
               <path d="M17 5 L30 28 H4 Z" fill="none" stroke="currentColor" strokeWidth="1.2" />
             </svg>
             <div>
-              <p className="font-mono text-xl tracking-tight text-[var(--ink)]">SP-1 uploader</p>
-              <p className="font-mono text-[11px] text-[var(--ink-dim)]">
+              <h1 className="font-mono text-[28px] leading-none tracking-tight text-[var(--ink)]">
+                stem tape uploader
+              </h1>
+              <p className="mt-2 font-mono text-[12px] tracking-[0.08em] text-[var(--ink-dim)]">
                 connect · load stems · upload
               </p>
             </div>
@@ -538,20 +552,32 @@ function DevicePage() {
         </div>
       </header>
 
-      <main className="mx-auto w-full max-w-[720px] px-4 pb-24 pt-6 md:px-8">
+      <main className="mx-auto grid w-full max-w-[760px] gap-5 px-4 pb-24 pt-6 md:px-8">
         {supported === false && (
-          <section className="st-section" data-testid="unsupported">
-            <p className="st-section__title">this browser cannot talk to the SP-1</p>
-            <p className="font-mono text-[13px] leading-relaxed text-[var(--ink-dim)]">
-              Uploading needs Chrome or Edge on a desktop computer, or a Chromium browser on
-              Android. iPhone and iPad cannot transfer songs.
-            </p>
+          <section className="up-card" data-testid="unsupported">
+            <div className="flex gap-4">
+              <Info size={22} strokeWidth={1.2} className="mt-0.5 shrink-0 text-[var(--ink-dim)]" />
+              <div>
+                <p className="font-mono text-[13px] uppercase tracking-[0.18em] text-[var(--ink)]">
+                  browser limitation
+                </p>
+                <p className="mt-2 font-mono text-[12px] leading-relaxed text-[var(--ink-dim)]">
+                  This browser cannot talk to the SP-1.
+                  <br />
+                  Uploading needs Chrome or Edge on a desktop computer,
+                  <br />
+                  or a Chromium browser on Android.
+                  <br />
+                  iPhone and iPad cannot transfer songs.
+                </p>
+              </div>
+            </div>
           </section>
         )}
 
         {mockMode && (
           <p
-            className="st-section font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--ink)]"
+            className="up-card font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--ink)]"
             data-testid="simulated-badge"
           >
             simulated device — nothing is written to hardware
@@ -559,49 +585,69 @@ function DevicePage() {
         )}
 
         {/* 1 — connect */}
-        <section className="st-section" data-testid="step-connect">
-          <p className="st-section__title">1 · connect sp-1</p>
-          {!connected ? (
-            <div className="flex flex-wrap items-center gap-3">
-              <button
-                className="st-btn st-btn--primary"
-                data-testid="connect"
-                disabled={connecting}
-                onClick={() => void connect()}
-              >
-                {connecting ? "Connecting…" : "Connect SP-1"}
-              </button>
-              <span className="font-mono text-[12px] text-[var(--ink-dim)]" data-testid="status">
-                Plug the SP-1 in over USB.
-              </span>
+        <section className="up-card" data-testid="step-connect">
+          <div className="up-card__head">
+            <span className="up-card__num">1</span>
+            <span className="up-card__title">connect sp-1</span>
+            <span className="up-state" data-on={connected}>
+              <i />
+              {connected ? "connected" : "not connected"}
+            </span>
+          </div>
+
+          <div className="grid items-end gap-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,300px)]">
+            <div>
+              {!connected ? (
+                <>
+                  <p className="font-mono text-[13px] text-[var(--ink-dim)]" data-testid="status">
+                    Plug the SP-1 in over USB.
+                  </p>
+                  <button
+                    className="st-btn st-btn--primary mt-8 flex w-full items-center justify-center gap-4 py-4 sm:w-auto sm:px-10"
+                    data-testid="connect"
+                    disabled={connecting}
+                    onClick={() => void connect()}
+                  >
+                    <Usb size={16} strokeWidth={1.4} />
+                    {connecting ? "Connecting…" : "Connect SP-1"}
+                  </button>
+                </>
+              ) : (
+                <div className="flex flex-wrap items-center gap-3">
+                  <p className="font-mono text-[14px] text-[var(--ink)]" data-testid="status">
+                    Stem Tape SP-1 connected
+                  </p>
+                  <button
+                    className="st-btn st-btn--quiet"
+                    data-testid="disconnect"
+                    onClick={() => void disconnect()}
+                  >
+                    Disconnect
+                  </button>
+                </div>
+              )}
+              {incompatible && (
+                <p
+                  className="mt-3 font-mono text-[12px] leading-relaxed text-[var(--ink-dim)]"
+                  data-testid="incompatible"
+                >
+                  This SP-1 needs a compatible Stem Tape firmware update before songs can be
+                  uploaded.
+                </p>
+              )}
             </div>
-          ) : (
-            <div className="flex flex-wrap items-center gap-3">
-              <p className="font-mono text-[14px] text-[var(--ink)]" data-testid="status">
-                Stem Tape SP-1 connected
-              </p>
-              <button
-                className="st-btn st-btn--quiet ml-auto"
-                data-testid="disconnect"
-                onClick={() => void disconnect()}
-              >
-                Disconnect
-              </button>
-            </div>
-          )}
-          {incompatible && (
-            <p
-              className="mt-2 font-mono text-[13px] text-[var(--ink-dim)]"
-              data-testid="incompatible"
-            >
-              This SP-1 needs a compatible Stem Tape firmware update before songs can be uploaded.
-            </p>
-          )}
+            <img
+              src={sp1Outline}
+              alt="Line illustration of the SP-1"
+              className="hidden w-full select-none sm:block"
+              draggable={false}
+            />
+          </div>
         </section>
 
         {/* 2 — load stems */}
         <section
-          className="st-section"
+          className="up-card"
           data-testid="step-stems"
           onDragOver={(e) => e.preventDefault()}
           onDrop={(e) => {
@@ -609,7 +655,17 @@ function DevicePage() {
             acceptFiles([...e.dataTransfer.files]);
           }}
         >
-          <p className="st-section__title">2 · load stems</p>
+          <div className="up-card__head">
+            <span className="up-card__num">2</span>
+            <span className="up-card__title">load stems</span>
+          </div>
+
+          <p className="font-mono text-[12px] leading-relaxed text-[var(--ink-dim)]">
+            Select all four stem files, or drag them here.
+            <br />
+            Accepted formats: WAV (44.1 kHz / 16-bit or 24-bit)
+          </p>
+
           <input
             ref={fileInputRef}
             type="file"
@@ -624,41 +680,40 @@ function DevicePage() {
               e.target.value = "";
             }}
           />
-          <button
-            type="button"
-            className="st-btn st-btn--primary w-full py-4 text-[15px]"
-            data-testid="choose-files"
-            onClick={() => fileInputRef.current?.click()}
-          >
-            Choose stem files
-          </button>
-          <p className="mt-2 font-mono text-[11px] text-[var(--ink-faint)]">
-            Select all four at once, or drag them here. Vocal, drums, bass and instrument are
-            recognised from the filenames.
-          </p>
 
-          <div className="mt-3 grid gap-2">
-            {stemRows.map(({ name, file, buf }) => (
-              <div
-                key={name}
-                className="flex flex-wrap items-center gap-3 border border-[var(--bench-line)] px-3 py-2 font-mono text-[12px]"
-                data-testid={`stem-${name}`}
-              >
-                <span className="w-[88px] text-[var(--ink)]">{STEM_LABEL[name]}</span>
-                <span className="min-w-0 flex-1 truncate text-[var(--ink-dim)]">
-                  {file ? file.name : "no file"}
-                </span>
-                <span className="text-[var(--ink-faint)]">{buf ? fmtDur(buf.duration) : "—"}</span>
-                <span className="text-[var(--ink-faint)]" data-testid={`state-${name}`}>
-                  {!file
-                    ? "waiting"
-                    : !buf
-                      ? "reading"
-                      : prepState === "ready"
-                        ? "ready"
-                        : prepState === "working"
-                          ? "preparing"
-                          : "loaded"}
+          <div className="up-drop mt-4">
+            <span className="flex min-w-0 items-center gap-3">
+              <Download size={16} strokeWidth={1.4} className="shrink-0" />
+              <span className="truncate">drag &amp; drop stem files here</span>
+            </span>
+            <button
+              type="button"
+              className="st-btn shrink-0"
+              data-testid="choose-files"
+              onClick={() => fileInputRef.current?.click()}
+            >
+              Choose files
+            </button>
+          </div>
+
+          <div className="mt-4 grid gap-2">
+            {stemRows.map(({ name, file, buf }, i) => (
+              <div key={name} className="up-row" data-testid={`stem-${name}`}>
+                <span className="up-row__n">{String(i + 1).padStart(2, "0")}</span>
+                <span className="up-row__role">{STEM_LABEL[name]}</span>
+                <span className="up-row__meta">
+                  {file ? file.name : "no file"} ·{" "}
+                  <span data-testid={`state-${name}`}>
+                    {!file
+                      ? "waiting"
+                      : !buf
+                        ? "reading"
+                        : prepState === "ready"
+                          ? `ready · ${fmtDur(buf.duration)}`
+                          : prepState === "working"
+                            ? "preparing"
+                            : `loaded · ${fmtDur(buf.duration)}`}
+                  </span>
                 </span>
                 <button
                   className="st-btn st-btn--quiet"
@@ -667,14 +722,15 @@ function DevicePage() {
                     fileInputRef.current?.click();
                   }}
                 >
-                  Replace
+                  {file ? "Replace file" : "Choose file"}
                 </button>
                 <button
                   className="st-btn st-btn--quiet"
+                  aria-label={`Remove ${STEM_LABEL[name]}`}
                   disabled={!file}
                   onClick={() => removeStem(name)}
                 >
-                  Remove
+                  <X size={14} strokeWidth={1.5} />
                 </button>
               </div>
             ))}
@@ -713,19 +769,24 @@ function DevicePage() {
             </div>
           )}
 
-          <label className="mt-3 flex items-center gap-3 font-mono text-[12px]">
-            <span className="w-[88px] text-[var(--ink-dim)]">song title</span>
+          <p className="mt-5 font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--ink-faint)]">
+            song title
+          </p>
+          <div className="up-field mt-2">
             <input
-              className="flex-1 border border-[var(--bench-line)] bg-transparent px-2 py-1 text-[var(--ink)]"
               data-testid="title"
               value={title}
+              maxLength={32}
               placeholder="untitled"
               onChange={(e) => {
                 setTitle(e.target.value);
                 setTitleTouched(true);
               }}
             />
-          </label>
+            <span className="shrink-0 font-mono text-[11px] tabular-nums text-[var(--ink-faint)]">
+              {title.length} / 32
+            </span>
+          </div>
 
           {timing && (
             <div className="mt-3 flex flex-wrap items-center gap-3 font-mono text-[12px]">
@@ -792,7 +853,7 @@ function DevicePage() {
 
           {prepState !== "idle" && (
             <p
-              className={`mt-3 font-mono text-[12px] ${prepState === "error" ? "text-[var(--ink)]" : "text-[var(--ink-dim)]"}`}
+              className="mt-3 font-mono text-[12px] text-[var(--ink-dim)]"
               data-testid="prep-status"
             >
               {prepDetail}
@@ -801,8 +862,11 @@ function DevicePage() {
         </section>
 
         {/* 3 — upload */}
-        <section className="st-section" data-testid="step-upload">
-          <p className="st-section__title">3 · upload</p>
+        <section className="up-card" data-testid="step-upload">
+          <div className="up-card__head">
+            <span className="up-card__num">3</span>
+            <span className="up-card__title">upload</span>
+          </div>
 
           {result?.ok ? (
             <div data-testid="success">
@@ -816,49 +880,51 @@ function DevicePage() {
             </div>
           ) : (
             <>
-              <div className="flex flex-wrap items-center gap-3">
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div className="min-w-0">
+                  {!canUpload && !uploading && (
+                    <p
+                      className="font-mono text-[12px] text-[var(--ink-dim)]"
+                      data-testid="upload-hint"
+                    >
+                      {!connected
+                        ? "Connect your SP-1 to upload."
+                        : incompatible
+                          ? "This SP-1 needs a compatible Stem Tape firmware update before songs can be uploaded."
+                          : !allFour
+                            ? "Load all four stems."
+                            : prepState !== "ready"
+                              ? "Preparing audio…"
+                              : capacity.status === "insufficient"
+                                ? "This song is too long for the space on your SP-1."
+                                : "Checking your SP-1…"}
+                    </p>
+                  )}
+                  {uploading && (
+                    <button
+                      className="st-btn st-btn--quiet"
+                      data-testid="cancel"
+                      onClick={() => {
+                        abortRef.current.aborted = true;
+                      }}
+                    >
+                      Cancel
+                    </button>
+                  )}
+                </div>
                 <button
-                  className="st-btn st-btn--primary"
+                  className="st-btn st-btn--primary flex items-center justify-center gap-4 px-8 py-5"
                   data-testid="upload"
                   disabled={!canUpload}
                   onClick={() => void startUpload()}
                 >
+                  <Upload size={16} strokeWidth={1.4} />
                   Upload to SP-1
                 </button>
-                {uploading && (
-                  <button
-                    className="st-btn st-btn--quiet"
-                    data-testid="cancel"
-                    onClick={() => {
-                      abortRef.current.aborted = true;
-                    }}
-                  >
-                    Cancel
-                  </button>
-                )}
               </div>
 
-              {!canUpload && !uploading && (
-                <p
-                  className="mt-2 font-mono text-[12px] text-[var(--ink-dim)]"
-                  data-testid="upload-hint"
-                >
-                  {!connected
-                    ? "Connect your SP-1 to upload."
-                    : incompatible
-                      ? "This SP-1 needs a compatible Stem Tape firmware update before songs can be uploaded."
-                      : !allFour
-                        ? "Load all four stems."
-                        : prepState !== "ready"
-                          ? "Preparing audio…"
-                          : capacity.status === "insufficient"
-                            ? "This song is too long for the space on your SP-1."
-                            : "Checking your SP-1…"}
-                </p>
-              )}
-
               {progress && (
-                <div className="mt-3" data-testid="progress">
+                <div className="mt-4" data-testid="progress">
                   <div className="h-[6px] w-full bg-[var(--bench-line)]">
                     <div
                       className="h-full bg-[var(--ink)]"
@@ -889,43 +955,44 @@ function DevicePage() {
         </section>
 
         {/* activity */}
-        <section className="st-section" data-testid="activity">
-          <p className="st-section__title">activity</p>
-          <div className="flex flex-wrap gap-2">
-            <button
-              className="st-btn st-btn--quiet"
-              data-testid="copy-activity"
-              onClick={copyActivity}
-            >
-              Copy activity
+        <section className="up-card" data-testid="activity">
+          <div className="mb-4 flex items-center justify-between gap-4">
+            <span className="font-mono text-[13px] uppercase tracking-[0.18em] text-[var(--ink)]">
+              activity
+            </span>
+            <span className="font-mono text-[11px] text-[var(--ink-faint)]">
+              {log.length === 0 ? "No recent activity" : `${log.length} events`}
+            </span>
+          </div>
+          <div className="grid gap-2">
+            <button className="up-act" data-testid="copy-activity" onClick={copyActivity}>
+              <ClipboardCopy size={15} strokeWidth={1.4} />
+              copy activity
             </button>
-            <button
-              className="st-btn st-btn--quiet"
-              data-testid="download-report"
-              onClick={downloadReport}
-            >
-              Download diagnostic report
+            <button className="up-act" data-testid="download-report" onClick={downloadReport}>
+              <Download size={15} strokeWidth={1.4} />
+              download diagnostic report
             </button>
-            <button
-              className="st-btn st-btn--quiet"
-              data-testid="clear-activity"
-              onClick={() => setLog([])}
-            >
-              Clear activity
+            <button className="up-act" data-testid="clear-activity" onClick={() => setLog([])}>
+              <Trash2 size={15} strokeWidth={1.4} />
+              clear activity
             </button>
           </div>
-          <ul
-            className="mt-3 max-h-[220px] overflow-auto font-mono text-[11px] text-[var(--ink-dim)]"
-            data-testid="log"
-          >
-            {log.map((e, i) => (
-              <li key={i} data-level={e.level}>
-                {e.at} · {e.level} · {e.text}
-              </li>
-            ))}
-          </ul>
+          {log.length > 0 && (
+            <ul
+              className="mt-3 max-h-[220px] overflow-auto font-mono text-[11px] text-[var(--ink-dim)]"
+              data-testid="log"
+            >
+              {log.map((e, i) => (
+                <li key={i} data-level={e.level}>
+                  {e.at} · {e.level} · {e.text}
+                </li>
+              ))}
+            </ul>
+          )}
         </section>
       </main>
     </div>
   );
 }
+
