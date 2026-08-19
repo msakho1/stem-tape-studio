@@ -39,6 +39,7 @@ extract_function_name = gate.extract_function_name
 index_functions = gate.index_functions
 find_call_sites = gate.find_call_sites
 function_body_bounds = gate.function_body_bounds
+function_body_bounds_by_name = gate.function_body_bounds_by_name
 ALLOWED_WRITE_FUNCS = gate.ALLOWED_WRITE_FUNCS
 TARGET_SYMBOLS = gate.TARGET_SYMBOLS
 
@@ -216,13 +217,19 @@ print()
 
 # ============================================================================
 # Part 4: end-to-end against the REAL, current firmware/stemtape_player/
-# src/main.c -- exactly ONE emmc_write_blocks() call site, enclosed by the
-# one allowed v1.1 write adapter (xfer_v11_write()), with its real safety-
-# mechanism pattern (g_v11_layout_ready, st_ab_session_check_write(), an
-# early `return -1;` guard) genuinely present in its own body -- and proves
-# the retired v1.0 adapters no longer exist as functions at all. Run from
-# the repo root, matching every other script/test in this repo's own
-# convention.
+# src/main.c -- every emmc_write_blocks() call site enclosed by one of the
+# allowed write adapters in ALLOWED_WRITE_FUNCS (xfer_v11_write(), the sole
+# v1.1 write adapter, and -- since the T0 throughput benchmark slice --
+# xfer_bench_run(), the benchmark's own write path), each with its real
+# safety-mechanism pattern genuinely present in its own body -- and proves
+# the retired v1.0 adapters no longer exist as functions at all. Uses
+# function_body_bounds_by_name() (index_functions()'s own per-line
+# attribution), not function_body_bounds()'s single-call-site brace walk --
+# xfer_bench_run()'s call sites are nested several blocks deep, which is
+# exactly the shape function_body_bounds() cannot resolve to the whole
+# function (see that helper's own doc comment in the gate module for the
+# real CI failure this replaced). Run from the repo root, matching every
+# other script/test in this repo's own convention.
 # ============================================================================
 
 DERIVED_MAIN_C = gate.DERIVED_MAIN_C
@@ -237,27 +244,24 @@ if os.path.exists(DERIVED_MAIN_C):
 
     real_write_sites = {fn: lns for (fn, sym), lns in real_sites.items()
                          if sym == "emmc_write_blocks"}
-    check(set(real_write_sites) == {"xfer_v11_write"},
-          f"real main.c: emmc_write_blocks() call site(s) enclosed by exactly "
-          f"the one allowed adapter -- {sorted(real_write_sites)}")
+    check(set(real_write_sites) != set() and set(real_write_sites) <= set(ALLOWED_WRITE_FUNCS),
+          f"real main.c: every emmc_write_blocks() call site enclosed by an "
+          f"allowed adapter -- {sorted(real_write_sites)} <= {sorted(ALLOWED_WRITE_FUNCS)}")
     total_sites = sum(len(v) for v in real_write_sites.values())
-    check(total_sites == 1,
-          f"real main.c: exactly 1 emmc_write_blocks() call site total (got {total_sites})")
+    check(total_sites >= 1,
+          f"real main.c: at least 1 emmc_write_blocks() call site total (got {total_sites})")
 
-    lower_const, upper_const = ALLOWED_WRITE_FUNCS.get("xfer_v11_write", (None, None))
-    lns = real_write_sites.get("xfer_v11_write")
-    if lns:
-        start, end = function_body_bounds(real_lines, lns[0])
+    for fn, lns in sorted(real_write_sites.items()):
+        lower_const, upper_const = ALLOWED_WRITE_FUNCS.get(fn, (None, None))
+        start, end = function_body_bounds_by_name(real_func_of_line, fn)
         body = "\n".join(real_lines[start:end])
         has_lower = lower_const in body
         has_upper = upper_const in body
         has_return = re.search(r"return\s+-1\s*;", body) is not None
         check(has_lower and has_upper and has_return,
-              f"real main.c: xfer_v11_write()'s own body contains its lower bound "
+              f"real main.c: {fn}()'s own body contains its lower bound "
               f"({lower_const}: {has_lower}), upper bound ({upper_const}: {has_upper}), "
               f"and an early `return -1;` guard ({has_return})")
-    else:
-        check(False, "real main.c: xfer_v11_write() has a real emmc_write_blocks() call site")
 
     # index_functions()'s own values() (not a raw text search, which would
     # also match this very doc comment) are the actual top-level functions

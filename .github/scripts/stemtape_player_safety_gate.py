@@ -50,7 +50,8 @@ Usage: stemtape_player_safety_gate.py <nm.txt> <objdump-d.txt> <.config> \
 
 The function-name-extraction machinery below (TARGET_SYMBOLS,
 ALLOWED_WRITE_FUNCS, top_level_paren_groups(), extract_function_name(),
-index_functions(), find_call_sites(), function_body_bounds()) is defined at
+index_functions(), find_call_sites(), function_body_bounds(),
+function_body_bounds_by_name()) is defined at
 MODULE level, before main(), and has no side effects and no dependency on
 sys.argv -- so `import stemtape_player_safety_gate` and calling these
 functions directly (e.g. from
@@ -80,6 +81,19 @@ ALLOWED_WRITE_FUNCS = {
     # decides whether this specific block/data pair may be written (see
     # st_ab_session.h's own doc for what that call enforces).
     "xfer_v11_write": ("g_v11_layout_ready", "st_ab_session_check_write"),
+    # STEM TAPE Phase T0: the throughput benchmark's own write path (see
+    # main.c's own doc comment on xfer_bench_run(), immediately above
+    # xfer_v11_write()). Bounded by the SAME st_ab_session_check_write()
+    # per-block gate xfer_v11_write() itself uses -- not a parallel,
+    # unverified bounds check -- plus bench_inactive_song_region(), which
+    # opens/refreshes that session fresh (via the SAME xfer_v11_refresh_
+    # session() 'Q' already calls) and computes the current inactive song
+    # region's own base+capacity before any write is attempted. Refactored
+    # to return -1 on every rejected/failed path specifically so it fits
+    # this gate's existing `return -1;` verification, matching xfer_v11_
+    # write()'s own idiom rather than asking this gate to special-case a
+    # different shape.
+    "xfer_bench_run": ("bench_inactive_song_region", "st_ab_session_check_write"),
 }
 
 # ---- function-name extraction ---------------------------------------------
@@ -256,6 +270,39 @@ def function_body_bounds(lines: list[str], line_1based: int) -> tuple[int, int]:
             end = i + 1
             break
     return start, end
+
+
+def function_body_bounds_by_name(func_of_line: dict[int, str | None], func_name: str) -> tuple[int, int]:
+    """[start, end) 0-based bounds covering every line index_functions()
+    itself attributed to `func_name` -- i.e. the SAME per-line enclosing-
+    function map find_call_sites() already uses to decide which function a
+    call site belongs to, not a second, independent brace-depth walk.
+
+    function_body_bounds() above answers a different question: starting
+    from ONE line, walk outward to the nearest enclosing unmatched '{'.
+    That coincides with the whole function only when the starting line
+    isn't itself nested inside an inner block. A real CI run of this gate's
+    own extension (ALLOWED_WRITE_FUNCS gaining xfer_bench_run(), whose
+    emmc_write_blocks() call sites sit inside nested `if`/`for`/`switch`
+    blocks, unlike xfer_v11_write()'s own call site which happens to sit at
+    the end of the function with no enclosing block in between) caught this
+    the hard way: function_body_bounds(lines, <call site line>) walked
+    backward from the call line, hit the immediately-enclosing `if (ok) {`
+    block's own opening brace on the very first step (depth goes negative
+    at 1 level up, not at the function's own outer brace), and returned
+    only that 3-4 line inner block -- so the required bound-check
+    identifiers, genuinely present just outside that inner block, were
+    reported absent.
+
+    This function instead reuses index_functions()'s own attribution
+    directly: every line it already mapped to `func_name` (necessarily
+    contiguous, since function names don't repeat) IS the function's body,
+    by construction -- no separate brace walk to get wrong."""
+    owned = [ln for ln, fn in func_of_line.items() if fn == func_name]
+    if not owned:
+        return 0, 0
+    lo, hi = min(owned), max(owned)
+    return lo - 1, hi
 
 
 def main() -> int:
@@ -715,7 +762,7 @@ def main() -> int:
             any_bad = True
             continue
         lower_const, upper_const = ALLOWED_WRITE_FUNCS[fn]
-        start, end = function_body_bounds(derived_lines, lines_[0])
+        start, end = function_body_bounds_by_name(derived_func_of_line, fn)
         body = "\n".join(derived_lines[start:end])
         has_lower = lower_const in body
         has_upper = upper_const in body
