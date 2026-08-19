@@ -20,24 +20,29 @@ gate for the property that actually matters here:
      (emmc_write_blocks/meta_write_blocks) -- Zephyr's own disk_access/
      SD-MMC/filesystem subsystems remain forbidden.
 
-  3. `emmc_write_blocks` itself is allowed ONLY from inside
-     xfer_v11_write() -- the sole write adapter for the Stem Tape v1.1 A/B
-     storage engine (docs/stem-tape-transfer-v1.1.md) in the derived
-     src/main.c. This gate does not just trust the symbol being linked, or
+  3. `emmc_write_blocks` itself is allowed ONLY from inside one of exactly
+     two write adapters for the Stem Tape v1.1 A/B storage engine (docs/
+     stem-tape-transfer-v1.1.md, docs/stem-tape-bulk-upload-v1.md) in the
+     derived src/main.c: xfer_v11_write() (the single-block 'W' path) and
+     xfer_bulk_write_sector() (the multi-block 'U' bulk-verified-sector
+     path). This gate does not just trust the symbols being linked, or
      trust a caller's promise: it proves, for every real
-     `emmc_write_blocks` call site, that it is inside that one function
-     AND that the function's OWN source body references the real
-     safety mechanism it claims to be bounded by -- g_v11_layout_ready
+     `emmc_write_blocks` call site, that it is inside one of those two
+     functions AND that the function's OWN source body references the
+     real safety mechanism it claims to be bounded by -- g_v11_layout_ready
      (fails closed on an unconfigured/undersized device) and
      st_ab_session_check_write() (the stateful per-block gate that
      enforces the CURRENT session's frozen A/B destination pair, per
      st_ab_session.h) -- with an early `return -1;` guard before the write
-     is ever reached, a structural property of the function itself,
+     is ever reached, a structural property of each function itself,
      independent of who calls it or in what order. The RETIRED v1.0 Gate 2
-     adapters (xfer_staging_write/xfer_header_write/xfer_songdata_write)
-     and `meta_write_blocks` (the classic looper's own index writer) must
-     all have ZERO call sites -- none of them has a definition left to
-     link in this derivative at all. See pass D below for the exact
+     adapters (xfer_staging_write/xfer_header_write/xfer_songdata_write),
+     the RETIRED Slice T0 throughput-benchmark adapter (xfer_bench_run,
+     removed once the real bulk path superseded it -- see docs/stem-tape-
+     benchmark-t0.md's own status note), and `meta_write_blocks` (the
+     classic looper's own index writer) must all have ZERO call sites --
+     none of them has a definition left to link in this derivative at
+     all. See pass D below for the exact
      per-function evidence.
 
 Any call site this script cannot confidently classify FAILS the gate. This
@@ -72,28 +77,16 @@ DERIVED_MAIN_C = "firmware/stemtape_player/src/main.c"
 TARGET_SYMBOLS = ["emmc_write_blocks", "meta_write_blocks"]
 
 ALLOWED_WRITE_FUNCS = {
-    # Stem Tape v1.1's sole write adapter. Unlike the retired v1.0 adapters'
-    # simple numeric region-boundary constants, this function's real bound
-    # is a stateful session check, not two scalar limits -- so the two
-    # "constants" pass D looks for are the two identifiers that together
-    # prove the real safety mechanism is genuinely present in the body:
-    # the fail-closed layout-readiness gate, and the call that actually
-    # decides whether this specific block/data pair may be written (see
-    # st_ab_session.h's own doc for what that call enforces).
+    # Stem Tape v1.1's single-block write adapter (the 'W' path). Unlike
+    # the retired v1.0 adapters' simple numeric region-boundary constants,
+    # this function's real bound is a stateful session check, not two
+    # scalar limits -- so the two "constants" pass D looks for are the two
+    # identifiers that together prove the real safety mechanism is
+    # genuinely present in the body: the fail-closed layout-readiness
+    # gate, and the call that actually decides whether this specific
+    # block/data pair may be written (see st_ab_session.h's own doc for
+    # what that call enforces).
     "xfer_v11_write": ("g_v11_layout_ready", "st_ab_session_check_write"),
-    # STEM TAPE Phase T0: the throughput benchmark's own write path (see
-    # main.c's own doc comment on xfer_bench_run(), immediately above
-    # xfer_v11_write()). Bounded by the SAME st_ab_session_check_write()
-    # per-block gate xfer_v11_write() itself uses -- not a parallel,
-    # unverified bounds check -- plus bench_inactive_song_region(), which
-    # opens/refreshes that session fresh (via the SAME xfer_v11_refresh_
-    # session() 'Q' already calls) and computes the current inactive song
-    # region's own base+capacity before any write is attempted. Refactored
-    # to return -1 on every rejected/failed path specifically so it fits
-    # this gate's existing `return -1;` verification, matching xfer_v11_
-    # write()'s own idiom rather than asking this gate to special-case a
-    # different shape.
-    "xfer_bench_run": ("bench_inactive_song_region", "st_ab_session_check_write"),
     # Upload-reliability phase, Slice C2: the REAL production bulk verified-
     # sector write path (docs/stem-tape-bulk-upload-v1.md; main.c's own doc
     # comment on xfer_bulk_write_sector(), immediately above xfer_service()).
@@ -102,9 +95,18 @@ ALLOWED_WRITE_FUNCS = {
     # a parallel/unverified bounds check -- and gated on g_v11_layout_ready
     # exactly like xfer_v11_write() itself, before that per-block loop is
     # ever reached. Refactored to return -1 on every rejected/failed path
-    # for the same reason xfer_bench_run() was: fits this gate's existing
+    # for the same reason xfer_v11_write() was: fits this gate's existing
     # `return -1;` verification rather than asking it to special-case a
     # different shape.
+    #
+    # This is now the ONLY other entry (Slice C4): the Slice T0 throughput
+    # benchmark's own write path, xfer_bench_run() (previously bounded by
+    # the SAME st_ab_session_check_write() per-block gate, plus
+    # bench_inactive_song_region()), has been fully removed from main.c now
+    # that this real bulk path supersedes it -- see docs/stem-tape-
+    # benchmark-t0.md's own status note. Its removal is what makes this
+    # dict exactly two entries again, not the three a stale mid-slice
+    # report once described.
     "xfer_bulk_write_sector": ("g_v11_layout_ready", "st_ab_session_check_write"),
 }
 
@@ -294,9 +296,12 @@ def function_body_bounds_by_name(func_of_line: dict[int, str | None], func_name:
     from ONE line, walk outward to the nearest enclosing unmatched '{'.
     That coincides with the whole function only when the starting line
     isn't itself nested inside an inner block. A real CI run of this gate's
-    own extension (ALLOWED_WRITE_FUNCS gaining xfer_bench_run(), whose
-    emmc_write_blocks() call sites sit inside nested `if`/`for`/`switch`
-    blocks, unlike xfer_v11_write()'s own call site which happens to sit at
+    own extension (originally ALLOWED_WRITE_FUNCS gaining the Slice T0
+    throughput benchmark's xfer_bench_run(), since removed -- see docs/
+    stem-tape-benchmark-t0.md's own status note -- but the identical shape
+    persists today in xfer_bulk_write_sector(), whose real emmc_write_
+    blocks() call site sits inside nested `if`/`for`/`switch` blocks,
+    unlike xfer_v11_write()'s own call site which happens to sit at
     the end of the function with no enclosing block in between) caught this
     the hard way: function_body_bounds(lines, <call site line>) walked
     backward from the call line, hit the immediately-enclosing `if (ok) {`
@@ -709,36 +714,54 @@ def main() -> int:
     # v1.0 Gate 2 transactional-commit design (three separate region-bounded
     # eMMC-write adapters, one per fixed sector range -- staging/header/
     # song-data -- deleted from src/main.c entirely, not merely disabled)
-    # with ONE write adapter, xfer_v11_write(), whose real bound is not a
-    # fixed numeric range but a stateful per-block decision:
-    # st_ab_session_check_write() against the CURRENT session's frozen A/B
-    # destination pair (see st_ab_session.h). This pass proves that bound
-    # structurally -- confirming both g_v11_layout_ready (the fail-closed
-    # gate) and the actual st_ab_session_check_write() call are present in
-    # xfer_v11_write()'s own body, with an early `return -1;` before ever
-    # reaching `emmc_write_blocks` -- not merely by caller trust or
+    # with a small, exact set of write adapters -- ALLOWED_WRITE_FUNCS above
+    # -- each bound not by a fixed numeric range but by the SAME stateful
+    # per-block decision: st_ab_session_check_write() against the CURRENT
+    # session's frozen A/B destination pair (see st_ab_session.h). This pass
+    # proves that bound structurally for EVERY entry -- confirming both its
+    # fail-closed gate and the actual st_ab_session_check_write() call are
+    # present in that function's own body, with an early `return -1;` before
+    # ever reaching `emmc_write_blocks` -- not merely by caller trust or
     # call-graph position.
+    #
+    # The report text below is built FROM ALLOWED_WRITE_FUNCS itself (never
+    # a hardcoded count or function name) specifically because a hardcoded
+    # "the sole write adapter" sentence went stale mid-slice once: it kept
+    # saying "sole" through a whole slice where xfer_bench_run() was ALSO a
+    # real, legitimately allowed entry, and a separate hardcoded "three" a
+    # slice after that no longer matched ALLOWED_WRITE_FUNCS's real size
+    # either. Deriving the sentence from the dict itself means the report
+    # can never describe a different set of adapters than the one this pass
+    # actually verifies.
+    adapter_names = sorted(ALLOWED_WRITE_FUNCS)
+    adapter_count = len(adapter_names)
+    adapter_list_md = " and ".join(f"`{n}()`" for n in adapter_names) if adapter_count <= 2 \
+        else ", ".join(f"`{n}()`" for n in adapter_names[:-1]) + f", and `{adapter_names[-1]}()`"
     report.append("## D. eMMC write call-site provenance (the property that "
                   "actually differs from stemtape-m0)")
     report.append("")
     report.append(
-        "`emmc_write_blocks` may be called ONLY from inside `xfer_v11_write()` "
-        "in the derived src/main.c -- the sole write adapter for the Stem Tape "
-        "v1.1 A/B storage engine. It is bounded not by a fixed numeric sector "
-        "range (the retired v1.0 adapters' design) but by a stateful call to "
-        "`st_ab_session_check_write()`, which enforces the CURRENT session's "
-        "frozen A/B destination pair: the active song and active index are "
-        "rejected outright, anything outside the frozen inactive pair is "
-        "rejected, and a commit record is validated field-by-field "
+        f"`emmc_write_blocks` may be called ONLY from inside one of exactly "
+        f"{adapter_count} allowed write adapter function(s) in the derived "
+        f"src/main.c: {adapter_list_md}. Each is bounded not by a fixed "
+        "numeric sector range (the retired v1.0 adapters' design) but by a "
+        "stateful call to `st_ab_session_check_write()`, which enforces the "
+        "CURRENT session's frozen A/B destination pair: the active song and "
+        "active index are rejected outright, anything outside the frozen "
+        "inactive pair is rejected, and (for the index-record-carrying path) "
+        "a commit record is validated field-by-field "
         "(CRC/version/slot-identity/generation/song-reference/bounds) before "
         "being allowed to land.\n\n"
-        "Any `emmc_write_blocks` call site OUTSIDE this one function, or "
-        "inside it without its real safety-mechanism pattern actually present "
-        "in the source, FAILS closed. The RETIRED v1.0 adapters "
-        "(`xfer_staging_write`/`xfer_header_write`/`xfer_songdata_write`) and "
-        "`meta_write_blocks` (the classic looper's own index writer) must all "
-        "have ZERO call sites -- none of them has a definition left to link "
-        "in this derivative at all."
+        f"Any `emmc_write_blocks` call site OUTSIDE these {adapter_count} "
+        "function(s), or inside one of them without its real safety-"
+        "mechanism pattern actually present in the source, FAILS closed. "
+        "The RETIRED v1.0 adapters "
+        "(`xfer_staging_write`/`xfer_header_write`/`xfer_songdata_write`), "
+        "the RETIRED Slice T0 throughput-benchmark adapter "
+        "(`xfer_bench_run`, removed once the real bulk path superseded it), "
+        "and `meta_write_blocks` (the classic looper's own index writer) "
+        "must all have ZERO call sites -- none of them has a definition "
+        "left to link in this derivative at all."
     )
     report.append("")
 
@@ -804,8 +827,9 @@ def main() -> int:
     if any_bad:
         report.append("FAIL — pass D: see above.")
     else:
-        report.append("PASS — pass D: every `emmc_write_blocks` call site is inside the "
-                      "one allowed write adapter, and its real safety-mechanism pattern "
+        report.append(f"PASS — pass D: every `emmc_write_blocks` call site is inside one of "
+                      f"the {adapter_count} allowed write adapter function(s) "
+                      f"({adapter_list_md}), and each one's real safety-mechanism pattern "
                       "is confirmed present in its own source body.")
     report.append("")
 
@@ -851,9 +875,9 @@ def main() -> int:
         for f in failures:
             report.append(f"- {f}")
     else:
-        report.append("GATE PASSED — no persistent-write capability outside the three "
-                      "proven, independently region-bounded eMMC adapter functions was "
-                      "detected in the image.")
+        report.append(f"GATE PASSED — no persistent-write capability outside the "
+                      f"{adapter_count} proven, session-bounded eMMC adapter function(s) "
+                      f"({adapter_list_md}) was detected in the image.")
     report.append("")
 
     open(out_path, "w").write("\n".join(report) + "\n")

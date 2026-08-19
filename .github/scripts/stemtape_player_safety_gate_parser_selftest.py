@@ -218,18 +218,21 @@ print()
 # ============================================================================
 # Part 4: end-to-end against the REAL, current firmware/stemtape_player/
 # src/main.c -- every emmc_write_blocks() call site enclosed by one of the
-# allowed write adapters in ALLOWED_WRITE_FUNCS (xfer_v11_write(), the sole
-# v1.1 write adapter, and -- since the T0 throughput benchmark slice --
-# xfer_bench_run(), the benchmark's own write path), each with its real
-# safety-mechanism pattern genuinely present in its own body -- and proves
-# the retired v1.0 adapters no longer exist as functions at all. Uses
-# function_body_bounds_by_name() (index_functions()'s own per-line
-# attribution), not function_body_bounds()'s single-call-site brace walk --
-# xfer_bench_run()'s call sites are nested several blocks deep, which is
-# exactly the shape function_body_bounds() cannot resolve to the whole
-# function (see that helper's own doc comment in the gate module for the
-# real CI failure this replaced). Run from the repo root, matching every
-# other script/test in this repo's own convention.
+# allowed write adapters in ALLOWED_WRITE_FUNCS (xfer_v11_write(), the
+# single-block v1.1 'W' write adapter, and xfer_bulk_write_sector(), the
+# multi-block bulk-verified-sector 'U' write adapter -- see docs/stem-tape-
+# bulk-upload-v1.md), each with its real safety-mechanism pattern genuinely
+# present in its own body -- and proves the retired v1.0 adapters no longer
+# exist as functions at all. Uses function_body_bounds_by_name()
+# (index_functions()'s own per-line attribution), not
+# function_body_bounds()'s single-call-site brace walk -- this matters
+# because at least one real allowed adapter's own call site is nested
+# several blocks deep (originally caught via the now-retired T0 throughput
+# benchmark's xfer_bench_run(), the same shape xfer_bulk_write_sector()
+# has today), which is exactly the shape function_body_bounds() cannot
+# resolve to the whole function (see that helper's own doc comment in the
+# gate module for the real CI failure this replaced). Run from the repo
+# root, matching every other script/test in this repo's own convention.
 # ============================================================================
 
 DERIVED_MAIN_C = gate.DERIVED_MAIN_C

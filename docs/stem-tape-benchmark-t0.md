@@ -1,5 +1,34 @@
 # Stem Tape T0 — throughput budget and physical benchmark
 
+Status: **RETIRED as of Slice C4.** The T0 "STOP and wait for physical
+results" plan below was superseded mid-flight by a controlling directive
+that moved straight to building the real production bulk-upload path
+(`'U'`, `xfer_bulk_write_sector()` — see `docs/stem-tape-bulk-upload-v1.md`)
+without waiting for a physical T0 measurement first. That real path now
+exists, is wired into the production firmware, and supersedes this
+benchmark entirely: the `'Y'` command and its whole write path
+(`xfer_bench_run()`, `bench_inactive_song_region()`, and everything else
+this document specifies) have been **removed from `main.c`** — not merely
+disabled — because production firmware has no further use for an
+unbounded, arbitrary-pattern eMMC writer once the real verified bulk path
+exists. This document is kept, unmodified below this notice, purely as a
+historical record of the real engineering it did before removal: the two
+real physical failure block numbers (4611, 4745) it documents, the RAM/
+safety analysis, and the wire-protocol design that shaped the real bulk-
+upload contract's own decisions (e.g. reusing `s_v11_verify_scratch`
+rather than a second 8 KiB buffer, and using `st_ab_session_check_write()`
+as the sole authoritative per-block gate). No further physical measurement
+against this specific benchmark will happen; the real bulk path's own
+physical verification is what matters now.
+
+---
+
+*Everything below this line is the ORIGINAL Slice T0 document, unmodified,
+kept for historical/design-provenance reasons only — see the retirement
+notice above.*
+
+---
+
 Status: **CI-verified, physical measurement PENDING.** This is Slice T0 of
 the upload-reliability phase. Per the phase directive: *"Build the safe
 benchmark, get CI green, provide the firmware artifact and stop for my

@@ -1,12 +1,17 @@
 # Stem Tape bulk verified-sector upload — wire contract v1
 
-Status: **Slice C3 — wire contract frozen, host-tested, wired into the
-real production firmware dispatcher, AND the post-commit runtime reload
-(new song selectable and playable without reflashing/rebooting) is
-implemented and host-verified.** Removing the now-superseded `'Y'`
-benchmark command and the final CI/handoff proof bundle is Slice C4. This
-document is extended, not replaced, by later slices — see the
-end-of-document changelog.
+Status: **Slice C4 — DONE.** The wire contract is frozen and host-tested;
+the command is wired into the real production firmware dispatcher; the
+post-commit runtime reload (new song selectable and playable without
+reflashing/rebooting) is implemented and host-verified; the now-superseded
+`'Y'` throughput-benchmark command has been removed from the production
+target entirely (not merely disabled); and the strict persistence safety
+gate's own report language has been corrected to accurately describe the
+real, current set of write adapters. This is the final slice of the
+upload-reliability phase's PRIMARY DELIVERABLE. This document is extended,
+not replaced, by later work — see the end-of-document changelog. The exact
+machine-readable and human-readable handoff for the companion
+implementation is `docs/stem-tape-bulk-upload-handoff.md`.
 
 ## 0. Why this exists
 
@@ -233,3 +238,31 @@ if `g_v11_layout_ready` is false, neither part is transmitted.
   fixture) — including the exact offsets (499/609/633 blocks into the
   inactive region) the phase directive's own physical failure report
   named.
+- **Slice C4** (this revision, final slice of the upload-reliability
+  phase's PRIMARY DELIVERABLE): the `'Y'` throughput-benchmark command
+  (Slice T0 — `xfer_bench_run()`, `bench_inactive_song_region()`,
+  `bench_fill_pattern()`, `bench_send_result()`, `bench_send_error()`, and
+  the `BENCH_MODE_*`/`BENCH_MAX_*` constants) is **removed from `main.c`
+  entirely** — not merely disabled — now that this real bulk path
+  supersedes it; the production firmware has no further use for an
+  unbounded, arbitrary-pattern eMMC writer. `docs/stem-tape-benchmark-
+  t0.md` is kept with a status note for its historical/design-provenance
+  value (the real physical failure block numbers it recorded, and the RAM/
+  safety analysis that shaped this contract's own design), but is no
+  longer live. The runtime symbol-presence gate now asserts every one of
+  those five symbols is absent from the final ELF (the same "definition,
+  not just call site, must be gone" standard already applied to the
+  retired v1.0 write path). `.github/scripts/stemtape_player_safety_
+  gate.py`'s `ALLOWED_WRITE_FUNCS` no longer has an entry for
+  `xfer_bench_run` (exactly two entries remain: `xfer_v11_write` and
+  `xfer_bulk_write_sector`), and every place its own generated report
+  described "the sole write adapter" or a stale hardcoded adapter count
+  (a real staleness bug: the report kept saying "sole" through the whole
+  slice where `xfer_bench_run` was also a legitimately allowed entry, and
+  a separately hardcoded "three" no longer matched `ALLOWED_WRITE_FUNCS`'s
+  real size either) now derives that language from `ALLOWED_WRITE_FUNCS`
+  itself, so the report can never again describe a different adapter set
+  than the one it actually verifies. Full CI proof bundle (RAM/flash
+  report, ELF symbol/call-site proof, all safety gates green) and the
+  exact Lovable handoff document (`docs/stem-tape-bulk-upload-
+  handoff.md`) are part of this same slice.

@@ -1613,12 +1613,27 @@ jobs:
           absent st_libio_load
           absent st_libio_save
           absent st_xfer_wire_decode_begin_req
+          # Stem Tape upload-reliability phase, Slice T0 (RETIRED as of
+          # Slice C4 -- see main.c's own removal note where these used to
+          # be defined, and docs/stem-tape-benchmark-t0.md's own status
+          # note): the throughput benchmark's own 'Y' command and its
+          # entire write path must never come back now that the real bulk
+          # verified-sector path (xfer_bulk_write_sector(), 'U') supersedes
+          # it. Not merely "unreachable" -- these functions' own
+          # DEFINITIONS, not just call sites, must be entirely absent from
+          # the ELF, the same standard already applied to the retired v1.0
+          # write path just above.
+          absent xfer_bench_run
+          absent bench_inactive_song_region
+          absent bench_fill_pattern
+          absent bench_send_result
+          absent bench_send_error
 
           if [ "$missing" -ne 0 ]; then
             echo "one or more required runtime symbols are missing, or one or more forbidden symbols are present, in the final ELF" >&2
             exit 1
           fi
-          echo "all required Stem Tape runtime symbols are linked (USB MIDI receive, the v1.1 Q/A-B-storage capability, and the stored four-stem playback data path), and all forbidden recording/overdub, UAC2/USB-audio-playback, AND retired-v1.0-write-path symbols are confirmed absent, in zephyr.elf"
+          echo "all required Stem Tape runtime symbols are linked (USB MIDI receive, the v1.1 Q/A-B-storage capability, and the stored four-stem playback data path), and all forbidden recording/overdub, UAC2/USB-audio-playback, retired-v1.0-write-path, AND retired-T0-benchmark symbols are confirmed absent, in zephyr.elf"
 
       - name: Effective configuration assertion (fail-closed)
         # Checks the REAL effective .config the build actually used (not
