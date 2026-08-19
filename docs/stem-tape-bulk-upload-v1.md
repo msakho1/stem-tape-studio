@@ -286,3 +286,18 @@ if `g_v11_layout_ready` is false, neither part is transmitted.
   iteration; every existing (≤ 4000ms) call site is behaviorally
   unaffected. See `docs/stem-tape-bulk-upload-handoff.md` §6 for the
   full derivation and the corresponding companion-side timeout value.
+- **Slice C6** (physical-test-driven fix): the second physical attempt
+  (with C5's fix live) got further -- a real 64-second `ERR_TIMEOUT_PAYLOAD`
+  -- but the host's automatic retry then received an undefined status
+  value, not one of the 17 frozen codes. Root cause: `xfer_bulk_write_
+  sector()`'s timeout-response path sent its reply without draining the
+  RX ring first, so leftover host-to-device bytes from the abandoned
+  payload misframed the retry's next header. Fixed by draining the ring
+  the moment the timeout is known, reusing the same drain-to-clean-
+  boundary idiom `xfer_resync()` already uses elsewhere for this exact
+  class of problem. Does not touch `ALLOWED_WRITE_FUNCS`, the eMMC write
+  path, or the wire format. See `docs/stem-tape-bulk-upload-handoff.md`
+  §6.1 for the full writeup, including the still-open, larger question
+  this attempt also surfaced: real transmission of one 8192-byte sector
+  did not complete within the 64-second ceiling at all, which points at
+  the companion/OS/browser transmission path rather than firmware sizing.
