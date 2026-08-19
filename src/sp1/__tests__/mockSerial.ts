@@ -30,6 +30,17 @@ import {
 } from "../stemTapeFormat";
 import { serializeCapabilities, type StemTapeCapabilities } from "../compatibility";
 import { readSlot, selectActiveIndex, type LibraryState } from "../activeIndex";
+import {
+  BULK_CMD,
+  BULK_PAYLOAD_BYTES,
+  BULK_REQ_HEADER_BYTES,
+  BULK_STATUS,
+  BULK_PROTO_VERSION,
+  buildBulkCaps,
+  buildBulkResponse,
+  parseBulkHeader,
+} from "../bulkTransfer";
+import { crc32 } from "../crc32";
 
 /** What the mock does with one incoming 'W' block write. */
 export interface WriteAction {
@@ -48,6 +59,20 @@ export interface WriteAction {
 export interface FlushAction {
   ack?: "ok" | "nak" | "none";
   disconnect?: boolean;
+}
+
+/** What the mock does with one incoming 'U' bulk verified-sector write. */
+export interface BulkAction {
+  /** Force this status instead of performing the real write+read-back. */
+  status?: number;
+  /** Withhold the 14-byte response entirely (models a lost acknowledgement). */
+  ack?: "ok" | "none";
+  /** Corrupt what actually lands in storage, so the read-back CRC disagrees. */
+  mangle?: (data: Uint8Array) => Uint8Array;
+  /** Drop the connection after handling this request. */
+  disconnect?: boolean;
+  /** Drop the connection before handling this request at all. */
+  disconnectBefore?: boolean;
 }
 
 export interface MockOptions {
@@ -83,6 +108,10 @@ export interface MockOptions {
   onFlush?: (n: number, op: number) => FlushAction | undefined;
   /** Per-read interruption injection. */
   onRead?: (ctx: { n: number; blk: number; op: number }) => { disconnect?: boolean; disconnectAfter?: boolean; corrupt?: boolean } | undefined;
+  /** Advertise the "STBC" bulk verified-sector extension on the 'Q' reply. */
+  bulk?: boolean;
+  /** Per-bulk-sector interruption injection. */
+  onBulk?: (ctx: { n: number; seq: number; destBlock: number; crc: number }) => BulkAction | undefined;
 }
 
 export class MockSp1 {
@@ -93,6 +122,12 @@ export class MockSp1 {
   ops = 0;
   pings = 0;
   capQueries = 0;
+  /** Bulk verified-sector round trips actually handled. */
+  bulkWrites = 0;
+  /** Session state the 'U' command is gated on: opened by 'Q', closed by 'X'. */
+  private sessionOpen = false;
+  private expectedSeq = 0;
+  private lastBulkResponse: Uint8Array | null = null;
   flushes = 0;
   exits = 0;
   closedPort = false;
@@ -326,9 +361,15 @@ export class MockSp1 {
         this.capQueries++;
         if (!this.opts.stemTape) continue; // stock firmware: no reply at all
         const caps = serializeCapabilities(this.capabilities);
-        const reply = new Uint8Array(4 + CAPS_BYTES);
+        const bulk = this.opts.bulk === true;
+        const reply = new Uint8Array(4 + CAPS_BYTES + (bulk ? 12 : 0));
         reply.set(new TextEncoder().encode("STCP"));
         reply.set(caps, 4);
+        if (bulk) reply.set(buildBulkCaps(), 4 + CAPS_BYTES);
+        // 'Q' (re)opens the write session and resets the bulk sequence to 0.
+        this.sessionOpen = bulk;
+        this.expectedSeq = 0;
+        this.lastBulkResponse = null;
         this.push(reply);
         continue;
       }
@@ -347,8 +388,116 @@ export class MockSp1 {
         }
         continue;
       }
+      if (cmd === BULK_CMD) {
+        if (b.length < 1 + BULK_REQ_HEADER_BYTES) return;
+        const header = parseBulkHeader(b.slice(1, 1 + BULK_REQ_HEADER_BYTES));
+        const declared = header.payloadLen;
+        // Only a well-formed length can tell us where this request ends.
+        const payloadLen = declared === BULK_PAYLOAD_BYTES ? BULK_PAYLOAD_BYTES : 0;
+        if (b.length < 1 + BULK_REQ_HEADER_BYTES + payloadLen) return;
+        const payload = b.slice(1 + BULK_REQ_HEADER_BYTES, 1 + BULK_REQ_HEADER_BYTES + payloadLen);
+        this.inbox = b.slice(1 + BULK_REQ_HEADER_BYTES + payloadLen);
+        this.bulkWrites++;
+        this.ops++;
+        const act =
+          this.opts.onBulk?.({ n: this.bulkWrites, seq: header.seq, destBlock: header.destBlock, crc: header.payloadCrc32 }) ?? {};
+        if (act.disconnectBefore) {
+          this.disconnected = true;
+          this.wake?.();
+          return;
+        }
+        const answer = (status: number, verified: number) => {
+          const resp = buildBulkResponse(status, header.seq, header.destBlock, verified);
+          this.lastBulkResponse = status === BULK_STATUS.OK ? resp : this.lastBulkResponse;
+          if ((act.ack ?? "ok") === "ok") this.push(resp);
+          if (act.disconnect) {
+            this.disconnected = true;
+            this.wake?.();
+          }
+        };
+        if (act.status !== undefined) {
+          answer(act.status, 0);
+          if (act.disconnect) return;
+          continue;
+        }
+        if (header.version !== BULK_PROTO_VERSION) {
+          answer(BULK_STATUS.UNSUPPORTED_VERSION, 0);
+          continue;
+        }
+        if (declared !== BULK_PAYLOAD_BYTES) {
+          answer(BULK_STATUS.BAD_LENGTH, 0);
+          continue;
+        }
+        if (!this.sessionOpen) {
+          answer(BULK_STATUS.NO_SESSION, 0);
+          continue;
+        }
+        if (crc32(payload) !== header.payloadCrc32) {
+          answer(BULK_STATUS.CRC_MISMATCH, 0);
+          continue;
+        }
+        // A retry of the immediately preceding accepted sector replays the
+        // byte-identical response and never advances the sequence.
+        if (header.seq === this.expectedSeq - 1 && this.lastBulkResponse) {
+          if ((act.ack ?? "ok") === "ok") this.push(this.lastBulkResponse.slice(0));
+          if (act.disconnect) {
+            this.disconnected = true;
+            this.wake?.();
+            return;
+          }
+          continue;
+        }
+        if (header.seq !== this.expectedSeq) {
+          answer(BULK_STATUS.OUT_OF_SEQUENCE, 0);
+          continue;
+        }
+        const caps2 = this.capabilities;
+        const lib2 = this.parseLibrary(caps2);
+        const inactive = lib2.inactiveSongSlot;
+        const region = caps2.song[inactive];
+        const expectDest = region.start + header.seq * BLOCKS_PER_SECTOR;
+        if (header.destBlock !== expectDest) {
+          const activeRegion = lib2.activeSongSlot === null ? null : caps2.song[lib2.activeSongSlot];
+          if (
+            activeRegion &&
+            header.destBlock >= activeRegion.start &&
+            header.destBlock < activeRegion.start + activeRegion.blocks
+          ) {
+            answer(BULK_STATUS.ACTIVE_REGION, 0);
+          } else if (header.destBlock < region.start || header.destBlock >= region.start + region.blocks) {
+            answer(BULK_STATUS.OUT_OF_BOUNDS, 0);
+          } else {
+            answer(BULK_STATUS.DEST_MISMATCH, 0);
+          }
+          continue;
+        }
+        if (header.destBlock + BLOCKS_PER_SECTOR > region.start + region.blocks) {
+          answer(BULK_STATUS.OUT_OF_BOUNDS, 0);
+          continue;
+        }
+        const stored = act.mangle ? act.mangle(payload.slice(0)) : payload;
+        for (let i = 0; i < BLOCKS_PER_SECTOR; i++) {
+          this.blocks.set(header.destBlock + i, stored.slice(i * PHYSICAL_BLOCK_BYTES, (i + 1) * PHYSICAL_BLOCK_BYTES));
+        }
+        this.writes += BLOCKS_PER_SECTOR;
+        // Real read-back off storage, then a real CRC of those bytes.
+        const back = new Uint8Array(BULK_PAYLOAD_BYTES);
+        for (let i = 0; i < BLOCKS_PER_SECTOR; i++) {
+          back.set(this.block(header.destBlock + i), i * PHYSICAL_BLOCK_BYTES);
+        }
+        const verified = crc32(back);
+        if (verified !== header.payloadCrc32) {
+          answer(BULK_STATUS.READBACK_CRC_MISMATCH, verified);
+          continue;
+        }
+        this.expectedSeq = header.seq + 1;
+        answer(BULK_STATUS.OK, verified);
+        if (act.disconnect) return;
+        continue;
+      }
       if (cmd === 0x58) {
         this.exits++;
+        this.sessionOpen = false;
         this.transferMode = false;
         this.inbox = b.slice(1);
         this.push(new Uint8Array([0x78]));

@@ -342,7 +342,7 @@ export class Sp1Session {
    * 14-byte response. Retries are the caller's business: the wire contract
    * makes resending the identical request idempotent.
    */
-  async writeSectorBulk(seq: number, destBlock: number, payload: Uint8Array, timeoutMs = 20000): Promise<BulkResponse> {
+  async writeSectorBulk(seq: number, destBlock: number, payload: Uint8Array, timeoutMs = 5000): Promise<BulkResponse> {
     if (payload.length !== BULK_PAYLOAD_BYTES) {
       throw new Error(`bulk sector must be exactly ${BULK_PAYLOAD_BYTES} bytes`);
     }

@@ -142,6 +142,26 @@ export interface UploadResult {
   failure?: { operation: string; block: number } | undefined;
 }
 
+/**
+ * One recorded bulk round trip, kept for the diagnostic report. Successful
+ * sectors are sampled (first, last, every 64th) and every non-OK response is
+ * kept verbatim: the report carries the exact firmware answers without an
+ * array of tens of thousands of per-sector CRCs.
+ */
+export interface BulkTransactionRecord {
+  seq: number;
+  destBlock: number;
+  attempt: number;
+  status: number;
+  statusText: string;
+  declaredCrc32: number;
+  verifiedCrc32: number;
+  retryable: boolean;
+  /** Present instead of a status when no response arrived at all. */
+  transportError?: string;
+  atMs: number;
+}
+
 /** A bulk refusal that resending the identical request can never fix. */
 class FatalBulkError extends Error {}
 
@@ -326,6 +346,18 @@ export class StemTapeTransport {
     return this.session.bulkCaps?.supported === true;
   }
 
+  private readonly bulkRecords: BulkTransactionRecord[] = [];
+
+  private record(r: BulkTransactionRecord) {
+    this.bulkRecords.push(r);
+    if (this.bulkRecords.length > 400) this.bulkRecords.splice(0, this.bulkRecords.length - 400);
+  }
+
+  /** Sampled successes plus every verbatim non-OK firmware response. */
+  get bulkTransactions(): readonly BulkTransactionRecord[] {
+    return this.bulkRecords;
+  }
+
   /**
    * One bulk sector with bounded automatic retries. A lost acknowledgement or
    * a transient device failure is retried by resending the IDENTICAL request:
@@ -339,11 +371,26 @@ export class StemTapeTransport {
     payload: Uint8Array,
     expectCrc: number,
     counter: { retries: number },
+    total = 0,
   ): Promise<BulkResponse> {
     let last = "";
     for (let attempt = 0; attempt <= MAX_CHUNK_RETRIES; attempt++) {
       try {
         const resp = await this.session.writeSectorBulk(seq, destBlock, payload);
+        const sampled = attempt > 0 || seq === 0 || seq === total - 1 || seq % 64 === 0;
+        if (resp.status !== BULK_STATUS.OK || sampled) {
+          this.record({
+            seq,
+            destBlock,
+            attempt,
+            status: resp.status,
+            statusText: describeBulkStatus(resp.status),
+            declaredCrc32: expectCrc,
+            verifiedCrc32: resp.verifiedCrc32,
+            retryable: resp.retryable,
+            atMs: Date.now(),
+          });
+        }
         if (resp.status === BULK_STATUS.OK && resp.verifiedCrc32 === expectCrc) return resp;
         last =
           resp.status === BULK_STATUS.OK
@@ -357,6 +404,18 @@ export class StemTapeTransport {
         // A timeout means the acknowledgement (or the request) was lost. The
         // identical request is safe to resend: same seq, same block, same bytes.
         last = e instanceof Error ? e.message : String(e);
+        this.record({
+          seq,
+          destBlock,
+          attempt,
+          status: -1,
+          statusText: "no acknowledgement — the identical transaction is being resent",
+          declaredCrc32: expectCrc,
+          verifiedCrc32: 0,
+          retryable: true,
+          transportError: last,
+          atMs: Date.now(),
+        });
         counter.retries++;
       }
     }
@@ -541,7 +600,7 @@ export class StemTapeTransport {
           const expectCrc = crc32(payload);
           const dest = bulkDestBlock(regionStart, s);
           failure = { operation: "bulk-write", block: dest };
-          const resp = await this.bulkWithRetry(s, dest, payload, expectCrc, counter);
+          const resp = await this.bulkWithRetry(s, dest, payload, expectCrc, counter, sectors.length);
           if (resp.seq !== s || resp.destBlock !== dest) {
             throw new Error(`the SP-1 answered for a different sector (sector ${resp.seq}, block ${resp.destBlock})`);
           }

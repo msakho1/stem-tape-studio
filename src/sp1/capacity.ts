@@ -100,6 +100,12 @@ export interface UploadGateInput {
   /** Capability negotiation passed (verdict.writable). */
   capabilitiesNegotiated: boolean;
   capacity: CapacityStatus;
+  /**
+   * The device's own 'Q' reply carried the "STBC" bulk verified-sector
+   * extension. Song audio is uploaded exclusively through that command, so
+   * firmware without it may not be written to at all.
+   */
+  bulkCapable: boolean;
   /** All four stems + metadata prepared into a canonical song. */
   songPrepared: boolean;
   /** A transfer or other device operation is running. */
@@ -111,6 +117,7 @@ export function uploadEnabled(g: UploadGateInput): boolean {
   return (
     g.deviceConnected &&
     g.capabilitiesNegotiated &&
+    g.bulkCapable &&
     g.capacity === "fits" &&
     g.songPrepared &&
     !g.transferActive
