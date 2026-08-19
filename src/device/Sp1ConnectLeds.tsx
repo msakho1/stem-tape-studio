@@ -35,21 +35,27 @@ export function Sp1ConnectLeds({ connected }: { connected: boolean }) {
     return () => window.clearInterval(id);
   }, [connected]);
 
+  const greeting = chaseIndex !== null;
+
   return (
     <div className="pointer-events-none absolute inset-0" aria-hidden data-testid="sp1-connect-leds">
       {LED_POSITIONS.map((pos, i) => {
-        const on = connected && (chaseIndex === null || chaseIndex === i);
+        const on = connected && (!greeting || chaseIndex === i);
+        const pulsing = connected && !greeting;
         return (
           <span
             key={i}
             data-led={`track-${i + 1}`}
             data-on={on}
-            className="absolute block h-[2%] w-[2%] -translate-x-1/2 -translate-y-1/2 rounded-full transition-[background-color,box-shadow] duration-100"
+            data-pulsing={pulsing}
+            className={`absolute block h-[2%] w-[2%] -translate-x-1/2 -translate-y-1/2 rounded-full transition-[background-color,box-shadow] duration-100 ${
+              pulsing ? "pulse" : ""
+            }`}
             style={{
               left: pos.left,
               top: pos.top,
-              backgroundColor: on ? "var(--accent, #ef7479)" : "transparent",
-              boxShadow: on ? "0 0 0 3px rgba(239, 116, 121, 0.25)" : "none",
+              backgroundColor: on ? "#ffffff" : "transparent",
+              boxShadow: on ? "0 0 6px 2px rgba(255, 255, 255, 0.55)" : "none",
             }}
           />
         );
@@ -57,3 +63,4 @@ export function Sp1ConnectLeds({ connected }: { connected: boolean }) {
     </div>
   );
 }
+
