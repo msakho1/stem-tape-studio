@@ -203,6 +203,12 @@ export interface SurfaceState {
    * The LED arbiter turns this into a rapid double flash on all four Tracks.
    */
   headsRejectFlashAt: number | null;
+  /**
+   * `performance.now()` of the moment a physical Stem Tape SP-1 was recognized
+   * on the wire. The LED arbiter turns this into a short one-after-the-other
+   * greeting chase across the four Track LEDs.
+   */
+  sp1ConnectedAt: number | null;
   /** Per-lane shuttle direction (FUNCTION + Track held + rocker). 0 = idle. */
   laneScrub: (0 | 1 | -1)[];
 
@@ -400,6 +406,7 @@ export function initialSurfaceState(): SurfaceState {
     scrubLatched: false,
     fxFlashAt: null,
     headsRejectFlashAt: null,
+    sp1ConnectedAt: null,
     laneScrub: [0, 0, 0, 0],
     auditionChord: [],
 
@@ -1489,6 +1496,11 @@ export function deriveLeds(
     state.headsRejectFlashAt != null &&
     now - state.headsRejectFlashAt >= 0 &&
     now - state.headsRejectFlashAt < HEADS_REJECT_FLASH_MS;
+  // Physical SP-1 recognized: the four Track LEDs greet one after the other.
+  const greeting =
+    state.sp1ConnectedAt != null &&
+    now - state.sp1ConnectedAt >= 0 &&
+    now - state.sp1ConnectedAt < SP1_CONNECT_GREETING_MS;
 
   state.tracks.forEach((track, i) => {
     const id = `track-led-${i + 1}` as LedId;
@@ -1497,6 +1509,12 @@ export function deriveLeds(
       frame[id] = { pattern: "dark", reason: "powered off (FUNCTION hold)", priority: 100 };
     } else if (state.grid.rejected) {
       frame[id] = { pattern: "blink", reason: "grid far off — all four blink, nothing moves (v2.6)", priority: 98 };
+    } else if (greeting) {
+      frame[id] = {
+        pattern: "chase",
+        reason: "Stem Tape SP-1 connected — Track LEDs greet one after the other",
+        priority: 97,
+      };
     } else if (rejecting) {
       frame[id] = {
         pattern: "blink",
