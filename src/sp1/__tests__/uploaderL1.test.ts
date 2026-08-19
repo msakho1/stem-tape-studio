@@ -42,7 +42,8 @@ describe("device route presents exactly three steps", () => {
 
   it("keeps the file input off-screen behind a real styled button", () => {
     expect(route).toContain('data-testid="choose-files"');
-    expect(route.toLowerCase()).toContain("choose stem files");
+    expect(route).toContain("Choose files");
+    expect(route).toContain("Choose file");
     expect(route).toMatch(/type="file"[\s\S]{0,240}className="sr-only"/);
   });
 
