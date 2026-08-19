@@ -384,7 +384,12 @@ export class StemTapeTransport {
     let last = "";
     for (let attempt = 0; attempt <= MAX_CHUNK_RETRIES; attempt++) {
       try {
-        const resp = await this.session.writeSectorBulk(seq, destBlock, payload);
+        const resp = await this.session.writeSectorBulk(
+          seq,
+          destBlock,
+          payload,
+          ...(this.bulkTimeoutMs === undefined ? [] : [this.bulkTimeoutMs]),
+        );
         const sampled = attempt > 0 || seq === 0 || seq === total - 1 || seq % 64 === 0;
         if (resp.status !== BULK_STATUS.OK || sampled) {
           this.record({
