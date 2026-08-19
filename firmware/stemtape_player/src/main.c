@@ -3090,6 +3090,39 @@ static int xfer_bulk_write_sector(void)
 
 	feed_wdt();
 
+	/* payload_ok false means cdc_rx() gave up before ST_BULK_PAYLOAD_BYTES
+	 * ever fully arrived -- the RX ring may still hold a partial fragment
+	 * of that payload, and (if the host was still genuinely mid-write when
+	 * we gave up) more of it can keep landing for a little while after this
+	 * point too. Left alone, either would misframe the very next header
+	 * this device tries to parse -- on the host's retry, its fresh 17-byte
+	 * request header would be read starting from wherever this abandoned
+	 * payload's leftovers happen to end, not from a real header boundary,
+	 * corrupting hdr.seq/hdr.dest_block/hdr.payload_len with garbage and
+	 * cascading into a nonsense response. This is exactly the class of
+	 * problem xfer_resync() exists for elsewhere in this file (see its own
+	 * doc comment); reuse its same drain-to-clean-boundary step here rather
+	 * than inventing a different one, even though this path -- unlike
+	 * xfer_resync()'s callers -- still owes the host the real, structured
+	 * 14-byte response below (with seq/dest_block correctly echoed) instead
+	 * of a raw resync error byte, since the header already parsed fine.
+	 * Applied unconditionally on !payload_ok, before the version/length
+	 * checks below get a chance to return first: those checks read hdr
+	 * fields that were parsed before this drain and are unaffected by it,
+	 * so whichever specific error status ends up being reported, the ring
+	 * is left clean for it. One immediate pass only, matching xfer_resync()
+	 * exactly -- it does not wait for more bytes to arrive, since this
+	 * function has already waited up to ST_BULK_PAYLOAD_TIMEOUT_MS and must
+	 * return promptly now; a host still transmitting long after that point
+	 * is a transport-level problem no single bounded drain here can fully
+	 * cover. */
+	if (!payload_ok) {
+		uint8_t dump;
+
+		while (ring_buf_get(&g_cdc_rx, &dump, 1) == 1) {
+		}
+	}
+
 	if (hdr.version != ST_BULK_PROTO_VERSION) {
 		uint8_t resp[ST_BULK_RESP_BYTES];
 
