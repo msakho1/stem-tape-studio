@@ -52,6 +52,14 @@ import {
   type StemTapeIndexDraft,
 } from "./stemIndex";
 import { checksum32, type CanonicalSong } from "./song";
+import { crc32 } from "./crc32";
+import {
+  BULK_STATUS,
+  bulkDestBlock,
+  bulkStatusIsRetryable,
+  describeBulkStatus,
+  type BulkResponse,
+} from "./bulkTransfer";
 
 export type UploadStage =
   | "preparing"
