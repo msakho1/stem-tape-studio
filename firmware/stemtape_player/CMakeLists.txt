@@ -109,6 +109,17 @@ include(${ZEPHYR_BASE}/samples/subsys/usb/common/common.cmake)
 # from the Tape Looper). Preserved and still host-tested for reference;
 # deliberately NOT linked into this ELF so as not to present unwired
 # modules as part of the real runtime.
+#
+# Upload-reliability phase, Slice C2: src/st_bulk_xfer.c -- the pure wire-
+# contract parser/builder + per-session sequence state machine behind the
+# new 'U' bulk verified-sector command (see st_bulk_xfer.h's own doc and
+# docs/stem-tape-bulk-upload-v1.md) -- is now linked and genuinely called:
+# main.c's real xfer_bulk_write_sector() (xfer_service()'s 'U' handler)
+# calls st_bulk_parse_header()/st_bulk_build_response()/st_bulk_seq_check()/
+# st_bulk_seq_advance() against the real CDC/eMMC environment. Was added
+# unlinked, host-test-only, in Slice C1 (see git log); this slice gave it
+# its real caller, per this file's own established policy (see
+# st_stem_stream.c's own identical slice-3A/3B split above).
 target_sources(app PRIVATE
 	src/main.c
 	src/sp1_emmc.c
@@ -119,6 +130,7 @@ target_sources(app PRIVATE
 	src/st_stix.c
 	src/st_stcp.c
 	src/st_ab_session.c
+	src/st_bulk_xfer.c
 	src/st_stem_mix.c
 	src/st_stem_stream.c
 	src/st_stem_bufmbox.c

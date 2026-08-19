@@ -369,6 +369,24 @@ static void test_seq_bounds_every_region_edge(void)
 	      "song B region: one sector past ITS OWN real capacity is rejected as out of bounds");
 }
 
+/* ========================================================================
+ * Q/STCP capability extension.
+ * ======================================================================== */
+
+static void test_caps_extension_build(void)
+{
+	uint8_t out[ST_BULK_CAPS_BYTES];
+
+	st_bulk_build_caps(out);
+	CHECK(out[ST_BULK_CAPS_OFF_TAG + 0] == 'S' && out[ST_BULK_CAPS_OFF_TAG + 1] == 'T' &&
+		      out[ST_BULK_CAPS_OFF_TAG + 2] == 'B' && out[ST_BULK_CAPS_OFF_TAG + 3] == 'C',
+	      "capability extension: tag is literal ASCII 'STBC'");
+	CHECK(rd_u32le_test(out + ST_BULK_CAPS_OFF_FLAGS) == ST_BULK_CAP_FLAG_SUPPORTED,
+	      "capability extension: flags == ST_BULK_CAP_FLAG_SUPPORTED");
+	CHECK(rd_u32le_test(out + ST_BULK_CAPS_OFF_MAX_SECTOR_BYTES) == ST_BULK_PAYLOAD_BYTES,
+	      "capability extension: max_sector_bytes == 8192 (ST_BULK_PAYLOAD_BYTES)");
+}
+
 int main(void)
 {
 	RUN(test_header_round_trip_arbitrary_values);
@@ -381,6 +399,7 @@ int main(void)
 	RUN(test_seq_advance_only_moves_frontier_for_the_new_seq);
 	RUN(test_seq_dest_mismatch);
 	RUN(test_seq_bounds_every_region_edge);
+	RUN(test_caps_extension_build);
 
 	printf("\n");
 	printf("%d distinct test cases, %d assertion checks\n", g_test_cases, g_checks);

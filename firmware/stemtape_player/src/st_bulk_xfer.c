@@ -110,3 +110,13 @@ void st_bulk_seq_advance(st_bulk_seq_t *sq, uint32_t seq)
 	sq->next_seq = seq + 1u;
 	sq->has_committed = true;
 }
+
+void st_bulk_build_caps(uint8_t out[ST_BULK_CAPS_BYTES])
+{
+	out[ST_BULK_CAPS_OFF_TAG + 0] = 'S';
+	out[ST_BULK_CAPS_OFF_TAG + 1] = 'T';
+	out[ST_BULK_CAPS_OFF_TAG + 2] = 'B';
+	out[ST_BULK_CAPS_OFF_TAG + 3] = 'C';
+	wr_u32le(out + ST_BULK_CAPS_OFF_FLAGS, ST_BULK_CAP_FLAG_SUPPORTED);
+	wr_u32le(out + ST_BULK_CAPS_OFF_MAX_SECTOR_BYTES, ST_BULK_PAYLOAD_BYTES);
+}

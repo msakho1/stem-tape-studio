@@ -191,4 +191,35 @@ st_bulk_seq_check_t st_bulk_seq_check(const st_bulk_seq_t *sq, uint32_t seq, uin
  * the tracker). */
 void st_bulk_seq_advance(st_bulk_seq_t *sq, uint32_t seq);
 
+/* ---- Q/STCP capability extension --------------------------------------
+ *
+ * Per the phase directive ("the companion must not infer support from
+ * firmware version alone"): an EXPLICIT, self-describing signal that this
+ * firmware supports the bulk verified-sector command, plus the exact
+ * payload size it accepts. Appended by xfer_v11_send_caps() (main.c)
+ * immediately AFTER the existing, byte-for-byte FROZEN 100-byte 'Q' ->
+ * STCP reply (docs/stem-tape-transfer-v1.1.md 12.5, verified against
+ * handoff/v1.1/binaries/stcp-capability-response.bin) -- deliberately
+ * NOT folded into that reply's own `flags`/reserved fields, which stay
+ * completely untouched (that fixture's byte-exact equality test in
+ * test_stem_v11.c must keep passing unconditionally; st11_stcp_build()
+ * itself is never modified by this contract). A companion that only
+ * reads the original 100 bytes and does not know about this extension is
+ * unaffected as long as it also does not try to parse whatever the wire
+ * carries next as something else -- see docs/stem-tape-bulk-upload-v1.md
+ * for the full compatibility note. */
+#define ST_BULK_CAPS_BYTES 12u /* 4-byte "STBC" tag + flags:u32 + max_sector_bytes:u32 */
+
+#define ST_BULK_CAPS_OFF_TAG               0u /* 4 bytes: 'S' 'T' 'B' 'C' */
+#define ST_BULK_CAPS_OFF_FLAGS             4u /* u32 */
+#define ST_BULK_CAPS_OFF_MAX_SECTOR_BYTES  8u /* u32 */
+
+#define ST_BULK_CAP_FLAG_SUPPORTED (1u << 0)
+
+/* Builds the ST_BULK_CAPS_BYTES-byte extension block: tag "STBC",
+ * flags = ST_BULK_CAP_FLAG_SUPPORTED (this firmware always sets it --
+ * there is no partial/conditional bulk support once the command exists
+ * at all), max_sector_bytes = ST_BULK_PAYLOAD_BYTES (8192). */
+void st_bulk_build_caps(uint8_t out[ST_BULK_CAPS_BYTES]);
+
 #endif /* STEMTAPE_PLAYER_BULK_XFER_H_ */

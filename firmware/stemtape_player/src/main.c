@@ -96,6 +96,7 @@
 #include <zephyr/sys/atomic.h>
 #include <sample_usbd.h>
 #include "st_ab_session.h"
+#include "st_bulk_xfer.h"
 #include "st_crc32.h"
 #include "st_midi_queue.h"
 #include "st_sector_v11.h"
@@ -1130,13 +1131,22 @@ static uint32_t             g_v11_device_blocks_total; /* the real, EXT_CSD-dete
  * st_ab_session_check_write() against this session. */
 static st_ab_session_t g_v11_session;
 
+/* Bulk upload (docs/stem-tape-bulk-upload-v1.md), Slice C2: the ONE open
+ * session's own per-sector sequence/destination tracker for the 'U'
+ * command -- st_bulk_xfer.h's own pure state machine. Reset every time
+ * g_v11_session itself (re)opens (xfer_v11_refresh_session(), same
+ * cadence, same call site) so a bulk upload always starts a fresh
+ * session expecting seq 0 at the frozen inactive song region's own
+ * start -- never carries stale sequence state across sessions. */
+static st_bulk_seq_t g_v11_bulk_seq;
+
 /* Non-stack (static) ST11_SECTOR_BYTES (8192-byte) scratch buffer for
  * st_ab_session_verify_song_before_commit()'s real read-back -- same "no
  * 8192-byte automatic stack buffer" discipline the retired v1.0 code's own
- * s_commit_copy_buf followed. Used ONLY inside xfer_v11_write(), itself only
- * ever reached one command at a time (xfer_service() services one command
- * per call, audio paused throughout a transfer), so there is no concurrent
- * use to guard against. */
+ * s_commit_copy_buf followed. Used inside xfer_v11_write() AND (Slice C2)
+ * xfer_bulk_write_sector() -- both reached only one command at a time
+ * (xfer_service() services one command per call, audio paused throughout
+ * a transfer), so there is no concurrent use to guard against. */
 static uint8_t s_v11_verify_scratch[ST11_SECTOR_BYTES];
 
 /* ============================================================
@@ -2511,6 +2521,7 @@ static void xfer_v11_refresh_session(void)
 {
 	if (!g_v11_layout_ready) {
 		memset(&g_v11_session, 0, sizeof(g_v11_session));
+		st_bulk_seq_reset(&g_v11_bulk_seq, 0u, 0u);
 		return;
 	}
 
@@ -2520,6 +2531,7 @@ static void xfer_v11_refresh_session(void)
 	if (!emmc_read_blocks(g_v11_layout.index_a_start, idx_a, 1) ||
 	    !emmc_read_blocks(g_v11_layout.index_b_start, idx_b, 1)) {
 		memset(&g_v11_session, 0, sizeof(g_v11_session));
+		st_bulk_seq_reset(&g_v11_bulk_seq, 0u, 0u);
 		return;
 	}
 
@@ -2529,19 +2541,46 @@ static void xfer_v11_refresh_session(void)
 	if (r == ST_AB_OPEN_ERR_NOT_INITIALIZED) {
 		(void)st_ab_session_open_init(&g_v11_session, idx_a, idx_b, &g_v11_layout, true);
 	}
+
+	/* Bulk upload (Slice C2): reset the sequence tracker to match the
+	 * session that just (re)opened. Only a REPLACE session ever has a
+	 * real inactive SONG region to upload into (docs section 7: an INIT
+	 * session's only writable blocks are the two index records, no song
+	 * region) -- region_cap 0 for any other case makes every real 'U'
+	 * request fail closed (OUT_OF_BOUNDS/DEST_MISMATCH) rather than
+	 * silently accept a bulk write this session was never meant to
+	 * allow. region_cap reuses the SAME g_v11_session.needed_song_blocks
+	 * st_ab_session_check_write() itself enforces per block (see that
+	 * function's own is_frozen_song branch) -- not a second, independently
+	 * derived capacity number that could drift from the real gate. */
+	if (g_v11_session.open && g_v11_session.kind == ST_AB_SESSION_REPLACE) {
+		uint32_t region_start = (g_v11_session.inactive_song_slot == ST11_SLOT_A)
+						 ? g_v11_session.layout.song_a_start
+						 : g_v11_session.layout.song_b_start;
+
+		st_bulk_seq_reset(&g_v11_bulk_seq, region_start, g_v11_session.needed_song_blocks);
+	} else {
+		st_bulk_seq_reset(&g_v11_bulk_seq, 0u, 0u);
+	}
 }
 
 /*
- * Builds and sends the real 'Q' -> STCP capability reply (docs section 2).
- * Re-reads both index blocks and runs the SAME selector st_ab_session
- * itself uses (st_stix_read_library()) so the advisory active-slot/
- * generation fields reflect the current on-disk truth -- advisory only
- * (docs section 4: "the device's advisory activeIndexSlot is never
- * trusted"), the companion always re-derives its own answer from the raw
- * index bytes it reads independently via 'R'. Sends nothing at all if
- * g_v11_layout_ready is false (docs section 2: "Silence = stock firmware
- * = read-only") or either index block can't be read -- fails closed
- * exactly like every other v1.1 path here.
+ * Builds and sends the real 'Q' -> STCP capability reply (docs section 2),
+ * immediately followed by the bulk-upload capability extension (docs/
+ * stem-tape-bulk-upload-v1.md) -- ONE continuous transmission, both parts
+ * of the same 'Q' response. Re-reads both index blocks and runs the SAME
+ * selector st_ab_session itself uses (st_stix_read_library()) so the
+ * advisory active-slot/generation fields reflect the current on-disk
+ * truth -- advisory only (docs section 4: "the device's advisory
+ * activeIndexSlot is never trusted"), the companion always re-derives its
+ * own answer from the raw index bytes it reads independently via 'R'.
+ * Sends nothing at all (neither part) if g_v11_layout_ready is false
+ * (docs section 2: "Silence = stock firmware = read-only") or either
+ * index block can't be read -- fails closed exactly like every other
+ * v1.1 path here. The original 100-byte STCP reply is byte-for-byte
+ * UNCHANGED by the extension below -- st11_stcp_build() itself is never
+ * modified, so the frozen fixture equality test in test_stem_v11.c is
+ * unaffected.
  */
 /* __attribute__((noinline, noclone)): same reasoning as
  * xfer_v11_refresh_session() immediately above. */
@@ -2571,6 +2610,11 @@ static void xfer_v11_send_caps(void)
 	st11_stcp_build(&g_v11_layout, g_v11_device_blocks_total, lib.active_index_slot, lib.active_song_slot,
 			lib.generation, reply);
 	cdc_tx(reply, sizeof reply);
+
+	uint8_t bulk_caps[ST_BULK_CAPS_BYTES];
+
+	st_bulk_build_caps(bulk_caps);
+	cdc_tx(bulk_caps, sizeof bulk_caps);
 }
 
 /* Read-adapter for st_ab_session_verify_song_before_commit()'s injected I/O
@@ -3077,6 +3121,243 @@ static int xfer_bench_run(void)
 	return 0;
 }
 
+/*
+ * Bulk verified-sector upload (docs/stem-tape-bulk-upload-v1.md), Slice C2
+ * -- the REAL production replacement for the old per-512-byte-block song-
+ * data write path. Command 'U': receives one complete 8192-byte Stem Tape
+ * v1.1 sector, validates it, writes all 16 physical blocks in ONE real
+ * multi-block eMMC burst (emmc_write_blocks(..., 16) -> CMD25, not sixteen
+ * independent CMD24s), reads the SAME 16 blocks back in one burst, and
+ * only acknowledges success once the read-back bytes' own CRC-32 matches
+ * what was sent -- replacing the separate 512-byte-at-a-time read-back
+ * pass entirely (see st_bulk_xfer.h's own doc for the full wire contract).
+ *
+ * SAFETY: identical boundary to xfer_v11_write()'s own -- every block is
+ * proven safe by st_ab_session_check_write() against g_v11_session's
+ * CURRENT frozen destination pair before a single byte reaches eMMC (loop
+ * below, one call per physical block, exactly like xfer_v11_write() itself
+ * does for every 'W'). st_bulk_xfer.h's own sequence/bounds check
+ * (g_v11_bulk_seq) is an earlier, cheap, redundant-but-harmless fast-
+ * rejection -- never the authoritative gate. This command is NEVER used
+ * for index blocks: 'W' remains the sole path for the STIX v2 index
+ * region and xfer_v11_write()'s own magic-commit detection, both
+ * completely untouched by this function.
+ *
+ * IDEMPOTENCY: the sequence tracker only ever advances after a REAL
+ * write+read-back+CRC round trip fully succeeds for a genuinely NEW
+ * sector (st_bulk_seq_check() == ST_BULK_SEQ_NEW) -- never on the
+ * strength of an acknowledgement alone. A lost-ACK retry
+ * (ST_BULK_SEQ_RETRY) reprocesses the exact same write+verify pipeline in
+ * full and does not advance the tracker again -- writing the same bytes
+ * to the same block twice is safe by construction (eMMC program is not
+ * order-sensitive across identical data).
+ *
+ * BACKPRESSURE / FRAMING: the payload always follows the request header
+ * in ONE continuous host transmission (matching the classic 'W' verb's
+ * own single-shot address+data convention), so this function ALWAYS
+ * drains the wire-fixed ST_BULK_PAYLOAD_BYTES (8192) after a successfully
+ * received header, regardless of what the header's own (untrusted) declared
+ * payload_len says -- a malformed header can therefore never leave unread
+ * payload bytes behind to misframe the next command. Reuses the SAME
+ * cdc_rx() backpressure-correct receive loop every other verb uses (see
+ * that function's own doc); the CDC ring-overflow counter added in the T0
+ * slice (g_cdc_rx_dropped_bytes) is checked across the exact span of this
+ * receive, so an overflow during THIS payload is reported precisely
+ * (ERR_CDC_OVERFLOW) rather than silently risking a corrupted accept.
+ *
+ * RAM: reuses s_v11_verify_scratch (the SAME ST11_SECTOR_BYTES buffer
+ * xfer_v11_write()'s own verify-before-commit step uses) for both the
+ * received payload AND the read-back bytes -- zero new large static
+ * allocation. Safe: this function and xfer_v11_write() are never both
+ * mid-flight at once (xfer_service() services exactly one command at a
+ * time), and by the time this function's own read-back overwrites the
+ * buffer, the received payload's CRC has already been captured into a
+ * plain local (hdr.payload_crc32), so nothing of the payload is still
+ * needed from the buffer itself.
+ */
+/* Returns -1 on every rejected/failed path (never reaching the real eMMC
+ * write or a magic-committing anything past it), 0 on the one accepted
+ * path -- the SAME `return -1;` early-guard idiom xfer_v11_write() itself
+ * uses, deliberately, so this function fits the strict persistence safety
+ * gate's own existing, proven verification pattern (see .github/scripts/
+ * stemtape_player_safety_gate.py's ALLOWED_WRITE_FUNCS entry for
+ * "xfer_bulk_write_sector") rather than asking that gate to special-case a
+ * different shape. The caller (xfer_service()) does not use the return
+ * value -- every path already sends its own response over CDC (or, for
+ * the one un-parseable-header case, a raw resync byte) before returning. */
+static int xfer_bulk_write_sector(void)
+{
+	uint8_t hdr_bytes[ST_BULK_REQ_HEADER_BYTES];
+
+	if (!cdc_rx(hdr_bytes, sizeof hdr_bytes, 2000)) {
+		/* The request header itself never fully arrived -- there is no
+		 * real seq/dest_block to echo yet, so this is NOT the structured
+		 * 14-byte response case; matches 'R'/'W's own established
+		 * xfer_resync() idiom for "not enough is known yet to answer". */
+		xfer_resync('E');
+		return -1;
+	}
+
+	st_bulk_req_header_t hdr;
+
+	st_bulk_parse_header(hdr_bytes, &hdr);
+	feed_wdt();
+
+	/* From here on seq/dest_block are known -- EVERY remaining path sends
+	 * the real, structured response with them correctly echoed (see this
+	 * function's own doc comment on why the payload is always drained
+	 * next, regardless of what is wrong with the header). */
+	uint32_t dropped_before = (uint32_t)atomic_get(&g_cdc_rx_dropped_bytes);
+	bool payload_ok = cdc_rx(s_v11_verify_scratch, ST_BULK_PAYLOAD_BYTES, 4000);
+	uint32_t dropped_after = (uint32_t)atomic_get(&g_cdc_rx_dropped_bytes);
+
+	feed_wdt();
+
+	if (hdr.version != ST_BULK_PROTO_VERSION) {
+		uint8_t resp[ST_BULK_RESP_BYTES];
+
+		st_bulk_build_response(ST_BULK_ERR_UNSUPPORTED_VERSION, hdr.seq, hdr.dest_block, 0u, resp);
+		cdc_tx(resp, sizeof resp);
+		return -1;
+	}
+	if (hdr.payload_len != ST_BULK_PAYLOAD_BYTES) {
+		uint8_t resp[ST_BULK_RESP_BYTES];
+
+		st_bulk_build_response(ST_BULK_ERR_BAD_LENGTH, hdr.seq, hdr.dest_block, 0u, resp);
+		cdc_tx(resp, sizeof resp);
+		return -1;
+	}
+	if (!payload_ok) {
+		uint8_t resp[ST_BULK_RESP_BYTES];
+
+		st_bulk_build_response(ST_BULK_ERR_TIMEOUT_PAYLOAD, hdr.seq, hdr.dest_block, 0u, resp);
+		cdc_tx(resp, sizeof resp);
+		return -1;
+	}
+	if (dropped_after != dropped_before) {
+		uint8_t resp[ST_BULK_RESP_BYTES];
+
+		st_bulk_build_response(ST_BULK_ERR_CDC_OVERFLOW, hdr.seq, hdr.dest_block, 0u, resp);
+		cdc_tx(resp, sizeof resp);
+		return -1;
+	}
+
+	/* Validate the incoming CRC before touching eMMC at all. */
+	uint32_t recv_crc = st_crc32_compute(s_v11_verify_scratch, ST_BULK_PAYLOAD_BYTES);
+
+	if (recv_crc != hdr.payload_crc32) {
+		uint8_t resp[ST_BULK_RESP_BYTES];
+
+		st_bulk_build_response(ST_BULK_ERR_CRC_MISMATCH, hdr.seq, hdr.dest_block, 0u, resp);
+		cdc_tx(resp, sizeof resp);
+		return -1;
+	}
+
+	if (!g_v11_layout_ready) {
+		uint8_t resp[ST_BULK_RESP_BYTES];
+
+		st_bulk_build_response(ST_BULK_ERR_LAYOUT_NOT_READY, hdr.seq, hdr.dest_block, 0u, resp);
+		cdc_tx(resp, sizeof resp);
+		return -1;
+	}
+	if (!g_v11_session.open || g_v11_session.closed) {
+		uint8_t resp[ST_BULK_RESP_BYTES];
+
+		st_bulk_build_response(g_v11_session.closed ? ST_BULK_ERR_SESSION_CLOSED : ST_BULK_ERR_NO_SESSION,
+					hdr.seq, hdr.dest_block, 0u, resp);
+		cdc_tx(resp, sizeof resp);
+		return -1;
+	}
+
+	st_bulk_seq_check_t seqchk = st_bulk_seq_check(&g_v11_bulk_seq, hdr.seq, hdr.dest_block);
+
+	if (seqchk != ST_BULK_SEQ_NEW && seqchk != ST_BULK_SEQ_RETRY) {
+		st_bulk_status_t status = (seqchk == ST_BULK_SEQ_DEST_MISMATCH)   ? ST_BULK_ERR_DEST_MISMATCH
+					   : (seqchk == ST_BULK_SEQ_OUT_OF_BOUNDS) ? ST_BULK_ERR_OUT_OF_BOUNDS
+										    : ST_BULK_ERR_OUT_OF_SEQUENCE;
+		uint8_t resp[ST_BULK_RESP_BYTES];
+
+		st_bulk_build_response(status, hdr.seq, hdr.dest_block, 0u, resp);
+		cdc_tx(resp, sizeof resp);
+		return -1;
+	}
+
+	/* THE authoritative bounds/active-region gate: one call per physical
+	 * block, exactly like xfer_v11_write() itself uses for every 'W' --
+	 * never write a single byte to eMMC before EVERY block in this
+	 * sector has passed. A song-region block is never magic-interpreted
+	 * (st_ab_session_check_write()'s own doc: `data` is only examined for
+	 * the frozen INDEX destination), and this pure per-block check has no
+	 * side effects on non-index blocks (verified against st_ab_session.c's
+	 * own is_frozen_song branch), so calling it 16 times per sector --
+	 * including on every retry -- is always safe. */
+	for (uint32_t k = 0; k < ST_BULK_BLOCKS_PER_SECTOR; k++) {
+		st_ab_write_check_t chk = st_ab_session_check_write(
+			&g_v11_session, hdr.dest_block + k, s_v11_verify_scratch + k * ST11_PHYSICAL_BLOCK_BYTES);
+
+		if (chk != ST_AB_WRITE_OK) {
+			st_bulk_status_t status =
+				(chk == ST_AB_WRITE_ERR_ACTIVE_REGION) ? ST_BULK_ERR_ACTIVE_REGION
+									: ST_BULK_ERR_OUTSIDE_FROZEN_PAIR;
+			uint8_t resp[ST_BULK_RESP_BYTES];
+
+			st_bulk_build_response(status, hdr.seq, hdr.dest_block, 0u, resp);
+			cdc_tx(resp, sizeof resp);
+			return -1;
+		}
+	}
+
+	/* The real multi-block eMMC program -- ONE burst (CMD25), not sixteen
+	 * independent single-block CMD24s. */
+	if (!emmc_write_blocks(hdr.dest_block, s_v11_verify_scratch, ST_BULK_BLOCKS_PER_SECTOR)) {
+		uint8_t resp[ST_BULK_RESP_BYTES];
+
+		st_bulk_build_response(ST_BULK_ERR_EMMC_WRITE_FAIL, hdr.seq, hdr.dest_block, 0u, resp);
+		cdc_tx(resp, sizeof resp);
+		return -1;
+	}
+
+	feed_wdt();
+
+	/* Read the SAME 16 blocks back -- one real multi-block burst, reusing
+	 * the SAME scratch buffer (the sent payload's own CRC is already
+	 * captured in hdr.payload_crc32/recv_crc; nothing more is needed from
+	 * those bytes). This IS the read-back verification the wire contract
+	 * replaces the old separate 512-byte read-back pass with. */
+	if (!emmc_read_blocks(hdr.dest_block, s_v11_verify_scratch, ST_BULK_BLOCKS_PER_SECTOR)) {
+		uint8_t resp[ST_BULK_RESP_BYTES];
+
+		st_bulk_build_response(ST_BULK_ERR_EMMC_READBACK_FAIL, hdr.seq, hdr.dest_block, 0u, resp);
+		cdc_tx(resp, sizeof resp);
+		return -1;
+	}
+
+	feed_wdt();
+
+	uint32_t verified_crc = st_crc32_compute(s_v11_verify_scratch, ST_BULK_PAYLOAD_BYTES);
+
+	if (verified_crc != hdr.payload_crc32) {
+		uint8_t resp[ST_BULK_RESP_BYTES];
+
+		st_bulk_build_response(ST_BULK_ERR_READBACK_CRC_MISMATCH, hdr.seq, hdr.dest_block, verified_crc, resp);
+		cdc_tx(resp, sizeof resp);
+		return -1;
+	}
+
+	/* Only now, after a FULLY verified round trip, advance the sequence
+	 * tracker -- and only for a genuinely NEW sector; a retry must never
+	 * advance it again (see st_bulk_seq_advance()'s own doc). */
+	if (seqchk == ST_BULK_SEQ_NEW) {
+		st_bulk_seq_advance(&g_v11_bulk_seq, hdr.seq);
+	}
+
+	uint8_t resp[ST_BULK_RESP_BYTES];
+
+	st_bulk_build_response(ST_BULK_OK, hdr.seq, hdr.dest_block, verified_crc, resp);
+	cdc_tx(resp, sizeof resp);
+	return 0;
+}
+
 /* STEM TAPE PHASE 1: g_xfer_dirty (which track regions the host wrote this
  * transfer session, used by the classic committer to merge host writes into
  * the durable index) and xfer_commit() (the classic looper's write-cache-to-
@@ -3213,6 +3494,15 @@ static void xfer_service(void)
 	} else if (cmd == 'Q') {                               /* v1.1 capability query -> STCP */
 		xfer_v11_refresh_session();
 		xfer_v11_send_caps();
+
+	/* Bulk verified-sector upload (docs/stem-tape-bulk-upload-v1.md),
+	 * Slice C2: 'U' is a NEW verb, additive only -- P/Q/R/W/F/X above are
+	 * byte-for-byte unchanged, and 'W' remains the sole path for STIX
+	 * index records. See xfer_bulk_write_sector()'s own doc comment
+	 * (immediately above xfer_service(), right after xfer_bench_run())
+	 * for the full wire protocol, safety argument, and idempotency rules. */
+	} else if (cmd == ST_BULK_CMD) {
+		(void)xfer_bulk_write_sector();
 
 	/* STEM TAPE Phase T0: 'Y' is a NEW verb, additive only -- P/Q/R/W/F/X
 	 * above are byte-for-byte unchanged. See xfer_bench_run()'s own doc

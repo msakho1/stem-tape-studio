@@ -1,8 +1,11 @@
 # Stem Tape bulk verified-sector upload — wire contract v1
 
-Status: **Slice C1 — wire contract frozen, host-tested. Not yet wired into
-production firmware** (that is Slice C2). This document is extended, not
-replaced, by later slices — see the end-of-document changelog.
+Status: **Slice C2 — wire contract frozen, host-tested, AND wired into the
+real production firmware dispatcher** (`xfer_service()`'s `'U'` handler,
+`firmware/stemtape_player/src/main.c`). Commit/reload integration (the
+post-commit runtime reload without reboot, and coordination with stored-
+song playback) is Slice C3. This document is extended, not replaced, by
+later slices — see the end-of-document changelog.
 
 ## 0. Why this exists
 
@@ -149,21 +152,49 @@ region, unchanged.
 
 ## 6. Q/STCP capability negotiation
 
-*Reserved for Slice C2* — the existing, byte-for-byte frozen `'Q' -> STCP`
-100-byte reply (`docs/stem-tape-transfer-v1.1.md` §2/§12.5, verified against
-`handoff/v1.1/binaries/stcp-capability-response.bin`) is **not** modified by
-this contract — that fixture stays byte-exact. Capability negotiation for
-this command is added as an **additional**, separately-tagged block
-appended after the existing 100-byte reply on the same `'Q'` response, so
-old and new companions can coexist without ambiguity. Exact format to be
-specified in Slice C2 once the real firmware wiring exists to test it
-against.
+The existing, byte-for-byte frozen `'Q' -> STCP` 100-byte reply (`docs/
+stem-tape-transfer-v1.1.md` §2/§12.5, verified against `handoff/v1.1/
+binaries/stcp-capability-response.bin`) is **not** modified by this
+contract — that fixture stays byte-exact; `st11_stcp_build()` itself is
+never touched. Capability negotiation for this command is a separate,
+explicitly-tagged **12-byte extension block**, appended immediately after
+the existing 100-byte reply, in the same continuous `'Q'` response (one
+transmission, 112 bytes total):
+
+| field | offset (within the 12-byte block) | size | meaning |
+| --- | ---: | ---: | --- |
+| tag | 0 | 4 | literal ASCII `"STBC"` |
+| flags | 4 | 4 | bit 0 = `ST_BULK_CAP_FLAG_SUPPORTED` (always set — there is no partial/conditional support once this command exists in a build at all) |
+| max_sector_bytes | 8 | 4 | `8192` — the exact payload size this command accepts per call |
+
+The companion must check for this tag explicitly rather than inferring
+support from `protoMinor`/`formatMinor` or any other version field. This
+block is additive at the tail of the `'Q'` response; it does not change
+the length or content of anything already there.
+
+Sent (or not) exactly when the original 100-byte reply is sent (or not):
+if `g_v11_layout_ready` is false, neither part is transmitted.
 
 ## Changelog
 
-- **Slice C1** (this revision): wire format, status codes, sequencing rules
-  frozen. Host-tested (`st_bulk_xfer.c`/`test_bulk_xfer.c`) against a real
-  frozen sector from `handoff/v1.1/binaries/song-sectors-four-stem.bin` and
-  the real region geometry from `handoff/v1.1/decoded/
+- **Slice C1**: wire format, status codes, sequencing rules frozen. Host-
+  tested (`st_bulk_xfer.c`/`test_bulk_xfer.c`) against a real frozen
+  sector from `handoff/v1.1/binaries/song-sectors-four-stem.bin` and the
+  real region geometry from `handoff/v1.1/decoded/
   stcp-capability-response.json`. Not yet linked into the real firmware
   target.
+- **Slice C2** (this revision): `xfer_bulk_write_sector()` wired into the
+  real `xfer_service()` dispatcher in `main.c` — receives with correct
+  backpressure and CDC-overflow detection, validates CRC before touching
+  eMMC, validates all 16 physical blocks through the real
+  `st_ab_session_check_write()` gate (the exact same one `'W'` uses),
+  writes via one real `emmc_write_blocks(..., 16)` burst, reads back via
+  one real `emmc_read_blocks(..., 16)` burst, and only acknowledges
+  success once the read-back CRC matches. §6 (Q/STCP capability
+  extension) specified and wired into `xfer_v11_send_caps()`.
+  `st_bulk_xfer.c` now linked into the real Zephyr target
+  (`CMakeLists.txt`), and `ALLOWED_WRITE_FUNCS` in the strict persistence
+  safety gate extended to structurally prove
+  `xfer_bulk_write_sector()`'s own body genuinely bounds every write
+  through the real session gate before it can ever reach
+  `emmc_write_blocks()`.

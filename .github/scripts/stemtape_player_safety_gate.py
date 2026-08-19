@@ -94,6 +94,18 @@ ALLOWED_WRITE_FUNCS = {
     # write()'s own idiom rather than asking this gate to special-case a
     # different shape.
     "xfer_bench_run": ("bench_inactive_song_region", "st_ab_session_check_write"),
+    # Upload-reliability phase, Slice C2: the REAL production bulk verified-
+    # sector write path (docs/stem-tape-bulk-upload-v1.md; main.c's own doc
+    # comment on xfer_bulk_write_sector(), immediately above xfer_service()).
+    # Bounded by the SAME st_ab_session_check_write() per-block gate
+    # xfer_v11_write() itself uses -- called once per physical block, never
+    # a parallel/unverified bounds check -- and gated on g_v11_layout_ready
+    # exactly like xfer_v11_write() itself, before that per-block loop is
+    # ever reached. Refactored to return -1 on every rejected/failed path
+    # for the same reason xfer_bench_run() was: fits this gate's existing
+    # `return -1;` verification rather than asking it to special-case a
+    # different shape.
+    "xfer_bulk_write_sector": ("g_v11_layout_ready", "st_ab_session_check_write"),
 }
 
 # ---- function-name extraction ---------------------------------------------

@@ -167,6 +167,16 @@ static int replay_write(st_ab_session_t *session, uint32_t block, const uint8_t 
  * has no separate confirmation verb, matching main.c's own comment), then
  * builds the real 100-byte STCP reply via the SAME st_stix_read_library()/
  * st11_stcp_build() calls.
+ *
+ * Upload-reliability phase, Slice C2: main.c's real xfer_v11_send_caps()
+ * now sends a further 12-byte bulk-capability extension (st_bulk_build_
+ * caps()) immediately after this same 100-byte reply -- deliberately NOT
+ * reproduced here, since these transcripts are real, byte-for-byte
+ * recordings that predate that extension; adding it to THIS mirror would
+ * make it stop matching the real recorded bytes it exists to verify. This
+ * function still proves the part of 'Q' those recordings actually cover
+ * (the original 100-byte STCP reply, byte-for-byte); the extension itself
+ * is covered by st_bulk_xfer.h's own host tests (tests/test_bulk_xfer.c).
  */
 static void replay_query(st_ab_session_t *session, uint8_t reply[4 + ST11_CAPS_BYTES])
 {

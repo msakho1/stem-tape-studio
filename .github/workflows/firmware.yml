@@ -1447,6 +1447,14 @@ jobs:
           check xfer_v11_send_caps
           check xfer_v11_write
           check xfer_v11_block_read
+          # Upload-reliability phase, Slice C2: the real bulk verified-
+          # sector upload handler main.c's xfer_service() calls directly
+          # for 'U' (docs/stem-tape-bulk-upload-v1.md). Deeper st_bulk_*
+          # helpers it in turn calls are NOT checked here, matching this
+          # gate's own established policy just above for st_stix_
+          # validate()/the STSC codec/FNV-1a/CRC-32 -- confirmed by a real
+          # CI run, not anticipated.
+          check xfer_bulk_write_sector
           check st_stix_read_library
           check st11_storage_layout_compute
           check st11_stcp_build
