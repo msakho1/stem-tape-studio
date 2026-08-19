@@ -294,11 +294,22 @@ export class Sp1Session {
    * Looper protocol: stock firmware simply never answers, which is exactly the
    * fail-closed signal the compatibility gate needs. Returns the raw
    * capability payload following the "STCP" tag, or null on silence.
+   *
+   * Bulk-capable firmware transmits the 12-byte "STBC" extension in the SAME
+   * continuous 'Q' reply. Those bytes are consumed here (leaving them in the
+   * buffer would desynchronise every later command) and parsed into
+   * `bulkCaps`. Firmware without the extension simply sends nothing more, and
+   * `bulkCaps` stays null — support is never inferred from a version number.
+   *
+   * 'Q' also (re)opens the device's v1.1 write session and resets its bulk
+   * sequence tracker to sector 0 of the frozen inactive song region, so it must
+   * never be sent in the middle of a bulk upload.
    */
   async queryCapabilities(timeoutMs = 700): Promise<Uint8Array | null> {
     return this.lock.run(async () => {
       try {
         this.io.drain();
+        this.bulkCaps = null;
         await this.io.write(new Uint8Array([CMD_CAPS]));
         const deadline = Date.now() + timeoutMs;
         const win: number[] = [];
@@ -307,7 +318,13 @@ export class Sp1Session {
           win.push(b);
           if (win.length > 4) win.shift();
           if (win.length === 4 && String.fromCharCode(...win) === CAPS_TAG) {
-            return await this.io.read(CAPS_BYTES, 1000);
+            const caps = await this.io.read(CAPS_BYTES, 1000);
+            try {
+              this.bulkCaps = parseBulkCaps(await this.io.read(BULK_CAPS_BYTES, 300));
+            } catch {
+              this.bulkCaps = null; // firmware without the extension: silence
+            }
+            return caps;
           }
         }
         return null;
@@ -315,6 +332,20 @@ export class Sp1Session {
         return null;
       }
     });
+  }
+
+  /**
+   * One bulk verified-sector round trip ('U'). Sends the command byte, the
+   * 17-byte request header and exactly 8,192 bytes of payload, then reads the
+   * 14-byte response. Retries are the caller's business: the wire contract
+   * makes resending the identical request idempotent.
+   */
+  async writeSectorBulk(seq: number, destBlock: number, payload: Uint8Array, timeoutMs = 20000): Promise<BulkResponse> {
+    if (payload.length !== BULK_PAYLOAD_BYTES) {
+      throw new Error(`bulk sector must be exactly ${BULK_PAYLOAD_BYTES} bytes`);
+    }
+    await this.io.write(buildBulkRequest({ seq, destBlock, payload }));
+    return parseBulkResponse(await this.io.read(BULK_RESP_BYTES, timeoutMs));
   }
 }
 
