@@ -193,6 +193,8 @@ export class CommandLock {
 export class Sp1Session {
   readonly lock = new CommandLock();
   layout: Sp1Layout | null = null;
+  /** Parsed "STBC" extension from the last 'Q' reply; null when absent. */
+  bulkCaps: BulkCapabilities | null = null;
   private keepalive: ReturnType<typeof setInterval> | null = null;
 
   constructor(public io: Sp1Transport) {}
