@@ -17,6 +17,7 @@ import {
   ClipboardCopy,
   Download,
   Info,
+  Loader2,
   Trash2,
   Upload,
   Usb,
@@ -106,6 +107,7 @@ function DevicePage() {
   const [manifest, setManifest] = useState<PreparedManifest | null>(null);
   const [prepState, setPrepState] = useState<"idle" | "working" | "ready" | "error">("idle");
   const [prepDetail, setPrepDetail] = useState("");
+  const [prepFraction, setPrepFraction] = useState<number | null>(null);
 
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState<{
@@ -279,6 +281,14 @@ function DevicePage() {
 
   const allFour = STEM_ORDER.every((n) => !!decoded[n] && !!files[n]);
 
+  /* pre-preparation work that used to look like nothing was happening */
+  const decodingStems = STEM_ORDER.some((n) => !!files[n] && !decoded[n]);
+  const busyPhase: string | null = decodingStems
+    ? "Reading stem files…"
+    : allFour && !timing
+      ? "Analyzing tempo and downbeat…"
+      : null;
+
   /* automatic timing as soon as the four stems are decoded */
   useEffect(() => {
     if (!allFour) {
@@ -319,6 +329,7 @@ function DevicePage() {
     void (async () => {
       setPrepState("working");
       setPrepDetail("Preparing audio…");
+      setPrepFraction(0);
       try {
         const cached = await loadPrepared(storage, fingerprint);
         const prepared = await prepareCanonicalSong(
@@ -347,13 +358,16 @@ function DevicePage() {
             fingerprint,
             storage,
             onProgress: (f) => {
-              if (prepTokenRef.current === token)
+              if (prepTokenRef.current === token) {
+                setPrepFraction(f);
                 setPrepDetail(`Preparing audio… ${Math.round(f * 100)}%`);
+              }
             },
           }));
         if (prepTokenRef.current !== token) return;
         setManifest(m);
         setPrepState("ready");
+        setPrepFraction(1);
         setPrepDetail("Ready to upload");
         say(
           cached
@@ -366,6 +380,7 @@ function DevicePage() {
         setPrepState("error");
         setSong(null);
         setManifest(null);
+        setPrepFraction(null);
         const msg = e instanceof Error ? e.message : String(e);
         setPrepDetail(`Preparation failed: ${msg}`);
         say(`Preparation failed: ${msg}`, "error");
@@ -857,13 +872,39 @@ function DevicePage() {
             </div>
           )}
 
-          {prepState !== "idle" && (
-            <p
-              className="mt-3 font-mono text-[12px] text-[var(--ink-dim)]"
-              data-testid="prep-status"
-            >
-              {prepDetail}
-            </p>
+          {(busyPhase || prepState !== "idle") && (
+            <div className="mt-4" data-testid="prep-status">
+              <div className="flex items-center gap-3 font-mono text-[12px] text-[var(--ink-dim)]">
+                {(busyPhase || prepState === "working") && (
+                  <Loader2
+                    size={14}
+                    strokeWidth={1.6}
+                    className="shrink-0 animate-spin text-[var(--ink)]"
+                    data-testid="prep-spinner"
+                  />
+                )}
+                <span className="min-w-0 flex-1 truncate">
+                  {busyPhase ?? prepDetail}
+                </span>
+                {prepState === "working" && prepFraction !== null && (
+                  <span className="shrink-0 tabular-nums text-[var(--ink)]">
+                    {Math.round(prepFraction * 100)}%
+                  </span>
+                )}
+              </div>
+              {(busyPhase || prepState === "working") && (
+                <div className="mt-2 h-[3px] w-full overflow-hidden bg-[var(--bench-line)]">
+                  <div
+                    className={`h-full bg-[var(--ink)] transition-[width] duration-200 ${
+                      busyPhase || prepFraction === null ? "animate-pulse" : ""
+                    }`}
+                    style={{
+                      width: busyPhase ? "100%" : `${Math.max(4, (prepFraction ?? 0) * 100)}%`,
+                    }}
+                  />
+                </div>
+              )}
+            </div>
           )}
         </section>
 
