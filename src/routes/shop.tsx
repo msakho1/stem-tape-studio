@@ -117,22 +117,41 @@ function ShopPage() {
         {/* product photo */}
         <figure className="relative flex flex-col items-center">
           <img
-            src={productAsset.url}
-            alt="Stem Tape for SP-1 — four-fader stem player hardware, three-quarter view"
+            src={GALLERY[shot].url}
+            alt={GALLERY[shot].alt}
             className="relative z-10 w-full max-w-[560px] select-none"
             draggable={false}
           />
-          <figcaption className="mt-4 flex items-center gap-2" aria-hidden>
-            {[0, 1, 2, 3, 4].map((i) => (
-              <span
-                key={i}
-                className="h-[5px] w-[5px] rounded-full"
+          <figcaption className="mt-4 flex items-center gap-2">
+            {GALLERY.map((g, i) => (
+              <button
+                key={g.url}
+                type="button"
+                aria-label={`View photo ${i + 1}`}
+                aria-current={i === shot}
+                onClick={() => setShot(i)}
+                className="h-[9px] w-[9px] rounded-full p-0"
                 style={{
-                  background: i === 0 ? "var(--ink)" : "var(--bench-line)",
+                  background: i === shot ? "var(--ink)" : "var(--bench-line)",
                 }}
               />
             ))}
           </figcaption>
+          <div className="mt-4 flex flex-wrap justify-center gap-2">
+            {GALLERY.map((g, i) => (
+              <button
+                key={g.url}
+                type="button"
+                onClick={() => setShot(i)}
+                className="border p-1 transition-colors"
+                style={{
+                  borderColor: i === shot ? "var(--ink)" : "var(--bench-line)",
+                }}
+              >
+                <img src={g.url} alt={g.alt} className="h-14 w-14 object-contain" draggable={false} />
+              </button>
+            ))}
+          </div>
         </figure>
 
 
