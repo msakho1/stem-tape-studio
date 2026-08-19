@@ -77,6 +77,9 @@ const SECTIONS: { id: string; label: string; body: string[] }[] = [
 
 function ShopPage() {
   const [open, setOpen] = useState<string | null>(null);
+  const [shot, setShot] = useState(0);
+  const current = GALLERY[shot] ?? GALLERY[0]!;
+
 
   return (
     <div className="min-h-screen">
