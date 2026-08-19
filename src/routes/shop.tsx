@@ -1,14 +1,7 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useState } from "react";
-import shop1 from "@/assets/sp1-white-front.png.asset.json";
-import shop2 from "@/assets/sp1-white-back.png.asset.json";
-import shop3 from "@/assets/sp1-white-side.png.asset.json";
-
-const GALLERY = [
-  { url: shop1.url, alt: "SP-1 front face — four faders, four track buttons and status LEDs" },
-  { url: shop2.url, alt: "SP-1 rear panel — aluminium back plate with markings and side switch" },
-  { url: shop3.url, alt: "SP-1 side profile — edge buttons, LED indicators and rear plate" },
-];
+import hero from "@/assets/sp1-hero-grey.png.asset.json";
+import { SupportButton } from "@/components/SupportButton";
 import { SupportButton } from "@/components/SupportButton";
 
 export const Route = createFileRoute("/shop")({
