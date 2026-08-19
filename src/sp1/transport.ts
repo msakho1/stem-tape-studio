@@ -315,6 +315,52 @@ export class StemTapeTransport {
     return after;
   }
 
+  /**
+   * True only when the device's own 'Q' reply carried the "STBC" extension
+   * with the supported flag set. Never inferred from a version number.
+   */
+  get bulkSupported(): boolean {
+    return this.session.bulkCaps?.supported === true;
+  }
+
+  /**
+   * One bulk sector with bounded automatic retries. A lost acknowledgement or
+   * a transient device failure is retried by resending the IDENTICAL request:
+   * the wire contract makes that idempotent (same seq, same destination, same
+   * bytes), and the device answers the repeat as a legal retry. A structural
+   * refusal is never retried — resending it verbatim can never succeed.
+   */
+  private async bulkWithRetry(
+    seq: number,
+    destBlock: number,
+    payload: Uint8Array,
+    expectCrc: number,
+    counter: { retries: number },
+  ): Promise<BulkResponse> {
+    let last = "";
+    for (let attempt = 0; attempt <= MAX_CHUNK_RETRIES; attempt++) {
+      try {
+        const resp = await this.session.writeSectorBulk(seq, destBlock, payload);
+        if (resp.status === BULK_STATUS.OK && resp.verifiedCrc32 === expectCrc) return resp;
+        last =
+          resp.status === BULK_STATUS.OK
+            ? "the sector did not read back correctly on the SP-1"
+            : describeBulkStatus(resp.status);
+        const retryable = resp.status === BULK_STATUS.OK ? true : resp.retryable && bulkStatusIsRetryable(resp.status);
+        if (!retryable) throw new Error(last);
+        counter.retries++;
+      } catch (e) {
+        // A timeout means the acknowledgement (or the request) was lost. The
+        // identical request is safe to resend.
+        const msg = e instanceof Error ? e.message : String(e);
+        if (msg === last && last !== "") throw e;
+        last = msg;
+        counter.retries++;
+      }
+    }
+    throw new Error(`sector ${seq + 1} failed after ${MAX_CHUNK_RETRIES} retries: ${last}`);
+  }
+
   private async writeWithRetry(blk: number, data: Uint8Array, counter: { retries: number }) {
     let last: unknown = null;
     for (let attempt = 0; attempt <= MAX_CHUNK_RETRIES; attempt++) {
