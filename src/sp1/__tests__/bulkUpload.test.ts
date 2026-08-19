@@ -185,6 +185,11 @@ describe("full upload over the bulk path", () => {
         return undefined;
       },
     });
+    // The production acknowledgement ceiling is 80,000 ms (firmware's 64 s
+    // payload-receive window plus headroom). A dropped ACK must wait it out,
+    // so the mock run shortens only that wait; the retry logic under test is
+    // identical.
+    t.bulkTimeoutMs = 400;
     const s = await song("RETRY", 1400, 6);
     const res = await t.uploadSong({ song: s });
     expect(dropped).toBe(true);
