@@ -995,6 +995,33 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Classic native-storage playback source absence gate (fail-closed)
+        # STEM TAPE architecture correction (pre-Slice-3A): a valid, playing
+        # stored Stem Tape song REPLACES the inherited classic mono-loop
+        # audio source in looper_audio_block()'s PASS C -- it is never
+        # summed with it. Proves, source-level and fail-closed: (1) every
+        # assignment to a present[] array element in main.c writes the
+        # literal 0, so the classic per-track engine's own TS_PLAY gate can
+        # never be set live from this file; (2) no arithmetic combination of
+        # the classic sample and either stem output sample exists anywhere
+        # in main.c; (3) PASS C's stem-active branch writes both stereo
+        # output slots directly from the stem mix and `continue`s, never
+        # falling through to the classic computation in the same iteration.
+        # See .github/scripts/stemtape_player_classic_source_absence_gate.py's
+        # own doc comment.
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/stemtape_player_classic_source_absence_gate.py \
+            firmware/stemtape_player/src/main.c \
+            audit/classic-source-absence-gate.md | tee audit/classic-source-absence-gate.txt
+          {
+            echo '### Classic native-storage playback source absence gate'
+            echo '```text'
+            cat audit/classic-source-absence-gate.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Image assertions (origin, bounds, storage, UICR, entry, vectors, size, BIN identity)
         working-directory: ${{ github.workspace }}/project
         run: |

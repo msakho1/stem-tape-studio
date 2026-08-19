@@ -1985,8 +1985,28 @@ static void looper_audio_block(int16_t *s)
 		}
 	}
 
-	/* ==== PASS C: master volume + soft limiter -> stereo out, plus the
-	 * real stored-song stereo stem mix (STEM TAPE Phase 2 slice 2) ==== */
+	/* ==== PASS C: master volume + soft limiter -> stereo out, OR the real
+	 * stored-song stereo stem mix (STEM TAPE: architecture correction,
+	 * Phase 2 slice 3 pre-work) ====
+	 *
+	 * ARCHITECTURE CORRECTION: a validated, playing Stem Tape song
+	 * REPLACES the inherited classic mono-loop bus outright -- the two
+	 * are never summed. Product rationale: Stem Tape never records or
+	 * overdubs, so the classic per-track engine inherited byte-for-byte
+	 * from the Tape Looper (PASS A/B above, mix32[]/trk[].pring) is not
+	 * a second, independently-mixable audio source in this firmware --
+	 * it is dead weight that must not leak into the real output even in
+	 * a latent-bug scenario. (In this build present[] is in fact never
+	 * assigned a nonzero value anywhere in this file -- see the
+	 * classic-source-absence CI gate -- so trk[].state can never reach
+	 * TS_PLAY and mix32[] is always silence today; the if/else below is
+	 * the defense-in-depth architectural guarantee regardless, so a
+	 * future change to that invariant could never reintroduce summed
+	 * classic+stem audio by accident.) PASS A/B keep computing mix32[]
+	 * unconditionally, unchanged -- the proven Tape-Looper-derived
+	 * engine, its soft limiter, and this whole I2S output stage stay
+	 * exactly as they were -- PASS C simply never reads mix32[] while a
+	 * stem song is active. */
 	{
 		/* the VOL buttons step ~3 dB at a time — ramp each step across the
 		 * block instead of applying it as a hard gain jump (a click). */
@@ -2015,10 +2035,6 @@ static void looper_audio_block(int16_t *s)
 		bool stem_active = g_stem_song_ready && g_playing;
 #endif
 		for (uint32_t f = 0; f < BLK_FRAMES; f++) {
-			int32_t m = md ? (m0 + ((md * (int32_t)(f + 1)) >> 8)) : mv;
-			int16_t classic = soft_limit((mix32[f] * m) >> 8);
-			int16_t stem_l = 0, stem_r = 0;
-
 #if SP1_XFER_ENABLE
 			if (stem_active) {
 				/* RAM-only: decodes ONE frame out of the already-
@@ -2026,6 +2042,7 @@ static void looper_audio_block(int16_t *s)
 				 * own boot-time comment for how it got there) --
 				 * never touches flash from this real-time thread. */
 				st11_audio_frame_t frame;
+				int16_t stem_l, stem_r;
 
 				st11_sector_decode_frame(g_stem_sector_buf, g_stem_play_pos, &frame);
 				st_stem_mix_frame(&frame, stem_channels, &stem_l, &stem_r);
@@ -2034,18 +2051,29 @@ static void looper_audio_block(int16_t *s)
 							       * known limitation at g_stem_play_pos's own
 							       * declaration */
 				}
+				/* st_stem_mix_frame() already saturates its own int64
+				 * accumulation to the int16 range as part of its own
+				 * contract -- there is no classic contribution left to
+				 * combine it with, so no second soft_limit() pass is
+				 * applied here (that pass existed ONLY to clamp a
+				 * classic+stem SUM, which this architecture no longer
+				 * produces). */
+				s[2 * f]     = stem_l;
+				s[2 * f + 1] = stem_r;
+				continue;
 			}
 #endif
-			/* The classic mono bus (currently always silent -- recording
-			 * is unreachable, see this file's own PHASE 1 notes) and the
-			 * real stem stereo mix are summed per channel, THEN limited
-			 * once more -- st_stem_mix_frame() already saturates its own
-			 * output to the int16 range, but classic+stem summed together
-			 * can still exceed it, so this is the one place that clamps
-			 * the FINAL combined output, reusing the same proven
-			 * soft_limit() the classic bus alone already used here. */
-			s[2 * f]     = soft_limit((int32_t)classic + stem_l);
-			s[2 * f + 1] = soft_limit((int32_t)classic + stem_r);
+			/* No stem song is active this block: fall back to the
+			 * classic mono bus + master volume + the same proven
+			 * soft_limit(), byte-for-byte as the Tape-Looper-derived
+			 * engine always computed it. */
+			{
+				int32_t m = md ? (m0 + ((md * (int32_t)(f + 1)) >> 8)) : mv;
+				int16_t classic = soft_limit((mix32[f] * m) >> 8);
+
+				s[2 * f]     = classic;
+				s[2 * f + 1] = classic;
+			}
 		}
 	}
 	g_sample_clock += BLK_FRAMES;
