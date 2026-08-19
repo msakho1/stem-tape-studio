@@ -215,9 +215,16 @@ function ShopPage() {
                   </span>
                 </button>
                 {on && (
-                  <p className="-mt-1 pb-4 font-mono text-[11px] leading-relaxed text-[var(--ink-dim)]">
-                    {s.body}
-                  </p>
+                  <div className="-mt-1 grid gap-3 pb-4">
+                    {s.body.map((para) => (
+                      <p
+                        key={para}
+                        className="font-mono text-[11px] leading-relaxed text-[var(--ink-dim)]"
+                      >
+                        {para}
+                      </p>
+                    ))}
+                  </div>
                 )}
               </div>
             );
