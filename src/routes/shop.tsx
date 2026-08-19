@@ -1,14 +1,6 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useState } from "react";
-import shop1 from "@/assets/sp1-white-front.png.asset.json";
-import shop2 from "@/assets/sp1-white-back.png.asset.json";
-import shop3 from "@/assets/sp1-white-side.png.asset.json";
-
-const GALLERY = [
-  { url: shop1.url, alt: "SP-1 front face — four faders, four track buttons and status LEDs" },
-  { url: shop2.url, alt: "SP-1 rear panel — aluminium back plate with markings and side switch" },
-  { url: shop3.url, alt: "SP-1 side profile — edge buttons, LED indicators and rear plate" },
-];
+import hero from "@/assets/sp1-hero-grey.png.asset.json";
 import { SupportButton } from "@/components/SupportButton";
 
 export const Route = createFileRoute("/shop")({
@@ -74,7 +66,6 @@ const SECTIONS: { id: string; label: string; body: string[] }[] = [
 
 function ShopPage() {
   const [open, setOpen] = useState<string | null>(null);
-  const [shot, setShot] = useState(0);
 
   return (
     <div className="min-h-screen">
@@ -127,44 +118,14 @@ function ShopPage() {
       </div>
 
       <main className="mx-auto w-full max-w-[820px] px-4 pb-20 md:px-8">
-        {/* product photo */}
+        {/* hero product photo */}
         <figure className="relative flex flex-col items-center">
           <img
-            src={(GALLERY[shot] ?? GALLERY[0]!).url}
-            alt={(GALLERY[shot] ?? GALLERY[0]!).alt}
+            src={hero.url}
+            alt="Teenage Engineering SP-1 with Stem Tape — front view on grey"
             className="relative z-10 w-full max-w-[560px] select-none"
             draggable={false}
           />
-          <figcaption className="mt-4 flex items-center gap-2">
-            {GALLERY.map((g, i) => (
-              <button
-                key={g.url}
-                type="button"
-                aria-label={`View photo ${i + 1}`}
-                aria-current={i === shot}
-                onClick={() => setShot(i)}
-                className="h-[9px] w-[9px] rounded-full p-0"
-                style={{
-                  background: i === shot ? "var(--ink)" : "var(--bench-line)",
-                }}
-              />
-            ))}
-          </figcaption>
-          <div className="mt-4 flex flex-wrap justify-center gap-2">
-            {GALLERY.map((g, i) => (
-              <button
-                key={g.url}
-                type="button"
-                onClick={() => setShot(i)}
-                className="border p-1 transition-colors"
-                style={{
-                  borderColor: i === shot ? "var(--ink)" : "var(--bench-line)",
-                }}
-              >
-                <img src={g.url} alt={g.alt} className="h-14 w-14 object-contain" draggable={false} />
-              </button>
-            ))}
-          </div>
         </figure>
 
 
