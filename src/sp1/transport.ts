@@ -68,6 +68,13 @@ export interface UploadProgress {
   stage: UploadStage;
   fraction: number;
   detail: string;
+  /** Verified 8 KiB sectors so far (bulk path reports one per round trip). */
+  sectorsDone?: number;
+  sectorsTotal?: number;
+  bytesDone?: number;
+  bytesTotal?: number;
+  /** Automatic retries spent so far. */
+  retries?: number;
 }
 
 export interface DeviceSongSlot {
