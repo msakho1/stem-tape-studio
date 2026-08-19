@@ -1167,6 +1167,19 @@
 }
 .st-btn:hover:not(:disabled) { border-color: var(--signal); }
 .st-btn:disabled { color: var(--ink-faint); cursor: not-allowed; opacity: 0.6; }
+.st-btn:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
+.st-btn--primary {
+  border-color: var(--ink);
+  background: var(--ink);
+  color: var(--bench, #0d0d0d);
+  font-size: 12px;
+  padding: 10px 18px;
+}
+.st-btn--primary:hover:not(:disabled) { background: var(--signal); border-color: var(--signal); }
+.st-btn--primary:disabled { background: transparent; color: var(--ink-faint); border-color: var(--bench-line); }
+.st-btn--quiet { border-color: transparent; color: var(--ink-dim); }
+.st-btn--quiet:hover:not(:disabled) { border-color: var(--bench-line); color: var(--ink); }
+
 .st-input {
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 12px;
