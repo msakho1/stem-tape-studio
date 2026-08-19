@@ -315,17 +315,36 @@ in the commit mechanism at all.
 
 ## 10. Firmware identity (this slice)
 
-- **Firmware commit:** `922af31e120f32a15995e270381696fd924b6b75` (branch
-  `claude/stemtape-m0-safety-audit-1vg9pq`) — CI-verified green (build,
-  stemtape-player, stemtape-m0 all passed). This commit contains the wire
-  contract, the production dispatcher wiring, and the post-commit runtime
-  reload (Slices C1–C3). The `'Y'` benchmark removal and safety-gate
-  report corrections (Slice C4, this document's own accompanying commit)
-  land in a follow-up commit on the same branch — **this section will be
-  updated with that commit's own SHA, BIN filename, size, and SHA-256
-  once its own CI run completes**, following this document's own standing
-  rule of never stating an artifact identity that hasn't been produced by
-  a real, observed CI run.
+- **Firmware commit:** `b2df682513cc4e2c91f0fbedcae326256682a84b` (branch
+  `claude/stemtape-m0-safety-audit-1vg9pq`) — CI-verified green: the real
+  `stemtape-player` job (workflow run
+  [32292675001](https://github.com/msakho1/stem-tape-studio/actions/runs/32292675001),
+  job [96196927124](https://github.com/msakho1/stem-tape-studio/actions/runs/32292675001/job/96196927124))
+  completed successfully, including the runtime symbol-presence gate (all
+  required v1.1/bulk-upload symbols present, all retired v1.0- and
+  T0-benchmark-path symbols confirmed absent) and the strict persistence
+  safety gate (`GATE PASSED — no persistent-write capability outside the
+  2 proven, session-bounded eMMC adapter function(s)
+  (xfer_bulk_write_sector() and xfer_v11_write())`). This commit contains
+  the complete upload-reliability phase deliverable: wire contract,
+  production dispatcher wiring, post-commit runtime reload, and the `'Y'`
+  benchmark removal + safety-gate report corrections (Slices C1–C4).
+- **BIN artifact** (from that same real, green CI run — every value
+  below is copied directly from the build job's own `sha256sum` output,
+  not computed or guessed locally):
+
+  | file | SHA-256 | size |
+  | --- | --- | --- |
+  | `stemtape_player.bin` | `d9f23369236b7f72b7a904307bd0f4bfbe060ecccff4df878f8a443108bd3f52` | 98,940 bytes |
+  | `zephyr.bin` | `d9f23369236b7f72b7a904307bd0f4bfbe060ecccff4df878f8a443108bd3f52` | 98,940 bytes (identical to `stemtape_player.bin`) |
+  | `zephyr.elf` | `2175ff816beadc23e8e59b39299e3a9911f56f0bc42979c9655ac830c0e5cd42` | — |
+  | `zephyr.hex` | `51751b7ec85cb3e2410a3dcd91ae9748333893ca3c1dbf1a6460dbfa1765f359` | — |
+
+  Downloadable from the `stemtape-player-audit` GitHub Actions artifact:
+  <https://github.com/msakho1/stem-tape-studio/actions/runs/32292675001/artifacts/9380234871>
+  (requires repo access; artifacts expire ~90 days after the run). Verify
+  the downloaded `stemtape_player.bin`'s own SHA-256 against the table
+  above before flashing.
 
 ## Definition of done — what is proven vs. not
 
