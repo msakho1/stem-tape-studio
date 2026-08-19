@@ -460,38 +460,77 @@ export class StemTapeTransport {
 
       // 8. Write the new song to the inactive song slot.
       totalBlocks = sectors.length * BLOCKS_PER_SECTOR;
-      for (let s = 0; s < sectors.length; s++) {
-        const blocks = sectorToBlocks(sectors[s]!);
-        for (let k = 0; k < BLOCKS_PER_SECTOR; k++) {
-          abort();
-          const blk = this.songBlock(targetSongSlot, s) + k;
-          failure = { operation: "write", block: blk };
-          await this.writeWithRetry(blk, blocks[k]!, counter);
-          written++;
-          if (written % 16 === 0 || written === totalBlocks) {
-            report("writing", written / totalBlocks, `sector ${s + 1}/${sectors.length} · block ${blk}`);
-          }
-        }
-      }
-
-      // 9/10. Read the entire new song back and verify every byte.
+      const bulk = this.bulkSupported;
       const readBack: Uint8Array[] = [];
-      for (let s = 0; s < sectors.length; s++) {
-        const got: Uint8Array[] = [];
-        for (let k = 0; k < BLOCKS_PER_SECTOR; k++) {
+
+      if (bulk) {
+        // 8/9/10 in one pass. Each 'U' round trip writes one whole sector AND
+        // returns the CRC-32 the device computed from the bytes it read back
+        // off its own storage, so there is no separate 512-byte read-back pass.
+        const regionStart = this.caps!.song[targetSongSlot].start;
+        for (let s = 0; s < sectors.length; s++) {
           abort();
-          const blk = this.songBlock(targetSongSlot, s) + k;
-          failure = { operation: "read-back", block: blk };
-          const back = await this.session.readBlock(blk);
-          const expect = sectors[s]!.subarray(k * BLOCK_BYTES, (k + 1) * BLOCK_BYTES);
-          for (let i = 0; i < BLOCK_BYTES; i++) {
-            if (back[i] !== expect[i]) throw new Error(`read-back mismatch at block ${blk}, byte ${i}`);
+          const payload = sectors[s]!;
+          const expectCrc = crc32(payload);
+          const dest = bulkDestBlock(regionStart, s);
+          failure = { operation: "bulk-write", block: dest };
+          const resp = await this.bulkWithRetry(s, dest, payload, expectCrc, counter);
+          if (resp.seq !== s || resp.destBlock !== dest) {
+            throw new Error(`the SP-1 answered for a different sector (sector ${resp.seq}, block ${resp.destBlock})`);
           }
-          got.push(back);
-          verified++;
-          report("verifying", verified / totalBlocks, `block ${blk}`);
+          if (resp.verifiedCrc32 !== expectCrc) {
+            throw new Error(`sector ${s + 1} did not read back correctly on the SP-1`);
+          }
+          written += BLOCKS_PER_SECTOR;
+          verified += BLOCKS_PER_SECTOR;
+          readBack.push(payload);
+          report("writing", written / totalBlocks, `sector ${s + 1}/${sectors.length} written and verified`, {
+            sectorsDone: s + 1,
+            sectorsTotal: sectors.length,
+            bytesDone: written * BLOCK_BYTES,
+            bytesTotal: totalBlocks * BLOCK_BYTES,
+            retries: counter.retries,
+          });
         }
-        readBack.push(blocksToSector(got));
+      } else {
+        for (let s = 0; s < sectors.length; s++) {
+          const blocks = sectorToBlocks(sectors[s]!);
+          for (let k = 0; k < BLOCKS_PER_SECTOR; k++) {
+            abort();
+            const blk = this.songBlock(targetSongSlot, s) + k;
+            failure = { operation: "write", block: blk };
+            await this.writeWithRetry(blk, blocks[k]!, counter);
+            written++;
+            if (written % 16 === 0 || written === totalBlocks) {
+              report("writing", written / totalBlocks, `sector ${s + 1}/${sectors.length} · block ${blk}`, {
+                sectorsDone: s,
+                sectorsTotal: sectors.length,
+                bytesDone: written * BLOCK_BYTES,
+                bytesTotal: totalBlocks * BLOCK_BYTES,
+                retries: counter.retries,
+              });
+            }
+          }
+        }
+
+        // 9/10. Read the entire new song back and verify every byte.
+        for (let s = 0; s < sectors.length; s++) {
+          const got: Uint8Array[] = [];
+          for (let k = 0; k < BLOCKS_PER_SECTOR; k++) {
+            abort();
+            const blk = this.songBlock(targetSongSlot, s) + k;
+            failure = { operation: "read-back", block: blk };
+            const back = await this.session.readBlock(blk);
+            const expect = sectors[s]!.subarray(k * BLOCK_BYTES, (k + 1) * BLOCK_BYTES);
+            for (let i = 0; i < BLOCK_BYTES; i++) {
+              if (back[i] !== expect[i]) throw new Error(`read-back mismatch at block ${blk}, byte ${i}`);
+            }
+            got.push(back);
+            verified++;
+            report("verifying", verified / totalBlocks, `block ${blk}`);
+          }
+          readBack.push(blocksToSector(got));
+        }
       }
 
       // 10 (checksums). Recomputed from what the device holds.
