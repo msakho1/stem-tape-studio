@@ -135,8 +135,8 @@ function ShopPage() {
         {/* product photo slideshow */}
         <figure className="relative flex flex-col items-center">
           <img
-            src={GALLERY[shot].url}
-            alt={GALLERY[shot].alt}
+            src={current.url}
+            alt={current.alt}
             className="relative z-10 w-full max-w-[560px] select-none"
             draggable={false}
           />
