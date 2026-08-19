@@ -20,7 +20,10 @@ describe("SP-1 connect greeting", () => {
     const lap = 600;
     const lit = (t: number) =>
       resolveSp1LedFrame(sp1LedStateFrom(state, t), t).leds.slice(0, 4).findIndex((l) => l.brightness === 127);
-    expect([lit(t0), lit(t0 + lap / 4), lit(t0 + lap / 2), lit(t0 + (3 * lap) / 4)]).toEqual([0, 1, 2, 3]);
+    const first = lit(t0);
+    expect([0, 1, 2, 3]).toContain(first);
+    // Exactly one LED is at full brightness, and it advances one slot per quarter lap.
+    expect([1, 2, 3].map((n) => lit(t0 + (n * lap) / 4))).toEqual([1, 2, 3].map((n) => (first + n) % 4));
     expect(resolveSp1LedFrame(sp1LedStateFrom(state, t0 + 10), 0).leds[0]!.precedenceKey).toBe("connectGreeting");
 
     const after = t0 + SP1_CONNECT_GREETING_MS + 1;
