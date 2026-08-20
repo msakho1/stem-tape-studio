@@ -14,9 +14,23 @@ board on its own, with USB entirely optional.
   combo is **removed** (product ruling): Track 1 and Track 4 are ordinary
   performance controls on this instrument, and a gesture that reset the
   device out of the running firmware mid-song was never compatible with
-  playing it. Recovery is unaffected — the UF2 bootloader runs its own
-  button scan at reset, outside this image, so holding 1+4 through a
-  power-on still enters DFU.
+  playing it. Recovery is unaffected — see below.
+
+## Entering the UF2 bootloader
+
+**With the SP-1 off, hold Track 1 + Track 4 and plug in USB. One track light
+comes on — that is bootloader mode.** (Owner-confirmed procedure.)
+
+That scan lives in the bootloader image and runs before this firmware is
+entered at all, so nothing in this application can affect it. Note the cue is
+**one** track LED; the removed in-firmware `enter_dfu()` lit **all four** —
+they were always two different code paths, and the surviving one is not ours
+to break.
+
+`firmware/README.md`'s rule — "must always offer a path back to the
+bootloader … do not remove those" — still holds, satisfied twice over: the
+boot-time combo above, and FUNCTION held 2.5 s → `power_off()` →
+`SYSTEM_OFF`, which is unchanged.
 - **The eight-LED PWM renderer** (`led_duty.c`, `led_render.c`,
   `led_render_policy.c`) — byte-for-byte the same hardware driver already
   proven and CI-built for the M0 target — now driving a NEW **local

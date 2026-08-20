@@ -5657,12 +5657,26 @@ static void power_off(void)
  * ruling; see the control scanner's own note where the combo was detected).
  * Track 1 and Track 4 are ordinary performance controls on this instrument.
  *
- * This removes NO recovery capability. The UF2 bootloader performs its own
- * button scan at every reset, in the bootloader image, with no involvement
- * from this firmware: holding 1+4 through a power-on still enters DFU. All
- * this code ever did was let the ALREADY-RUNNING firmware reset itself into
- * that same bootloader mid-performance -- which is exactly the behavior being
- * removed. GPREGRET is untouched by this image now. */
+ * This removes NO recovery capability, and that is not an inference -- it is
+ * the device owner's own confirmed procedure:
+ *
+ *   With the SP-1 OFF, hold Track 1 + Track 4 and plug in USB.
+ *   ONE track light comes on: that is UF2 bootloader mode.
+ *
+ * That scan lives in the BOOTLOADER image and runs before this firmware is
+ * entered at all, so nothing here can affect it. Note the distinct cue: the
+ * bootloader lights ONE track LED, whereas the removed enter_dfu() lit all
+ * FOUR -- visible proof they were always two different code paths, and that
+ * the surviving one is not ours to break.
+ *
+ * All the removed code ever did was let the ALREADY-RUNNING firmware reset
+ * itself into that same bootloader mid-performance -- exactly the behavior
+ * being removed. GPREGRET is untouched by this image now.
+ *
+ * (firmware/README.md's "must always offer a path back to the bootloader ...
+ * do not remove those" rule still holds and is still satisfied twice over:
+ * the boot-time combo above, and FUNCTION held 2.5 s -> power_off() ->
+ * SYSTEM_OFF, which is unchanged in this file.) */
 
 /* Jump to song slot ns (M4b: FUNCTION+Track bank jump, and the tap-advance).
  * Saves the current song's BPM, loads the target's, signals the audio thread
