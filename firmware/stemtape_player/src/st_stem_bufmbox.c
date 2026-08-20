@@ -140,5 +140,22 @@ void st_stem_mbox_release(st_stem_mbox_t *mb)
 
 void st_stem_mbox_set_requested_sector(st_stem_mbox_t *mb, uint32_t sector_index)
 {
-	st_atomic_set(&mb->requested_sector, (int32_t)sector_index);
+	/* Store only when it changes -- the same rule, for the same reason, as
+	 * st_stem_mbox_release() right above (see its own comment). This is
+	 * called from the real-time audio thread on EVERY output frame, 48000
+	 * times a second, but the value it publishes only actually changes
+	 * when the playhead crosses a sector boundary: once every
+	 * ST11_FRAMES_PER_SECTOR frames, i.e. on well under 1% of calls. The
+	 * other 99% were paying a full atomic store -- on Zephyr's Cortex-M
+	 * backend an exclusive read-modify-write with barriers on both sides,
+	 * which drains the pipeline -- to write back the value already there.
+	 *
+	 * Reading it back here is race-free: the consumer (audio) thread is
+	 * the ONLY writer of requested_sector; the producer only ever loads
+	 * it. So this cannot lose an update or observe a torn value, and the
+	 * producer sees exactly the same sequence of published values it saw
+	 * before -- just without the redundant ones. */
+	if (st_atomic_get(&mb->requested_sector) != (int32_t)sector_index) {
+		st_atomic_set(&mb->requested_sector, (int32_t)sector_index);
+	}
 }

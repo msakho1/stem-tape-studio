@@ -60,6 +60,17 @@ extern volatile uint32_t emmc_dbg_wr_busy_us_peak;   /* worst write program-busy
 extern volatile uint32_t emmc_dbg_rd_wait_us_max;    /* worst read start-bit access wait, us (window) */
 extern volatile uint32_t emmc_dbg_switch_busy_us_max;/* worst R1b busy: CMD6 flush/BKOPS/TRIM, us */
 extern volatile uint32_t emmc_dbg_busy_timeouts;     /* busy-poll expiries (SEPARATE from CRC errs) */
+/* READ-PATH PHASE BREAKDOWN of the LATEST emmc_read_blocks() call (reset at
+ * the top of each call, published on every exit path). Wall time, DWT-timed
+ * at 64 MHz, so audio-thread preemption is attributed to whichever phase it
+ * interrupted -- deliberate: the deficit these exist to explain IS a CPU
+ * competition. hunt+dma+crc plus the CMD18/CMD12 handshake account for the
+ * whole call, so comparing their sum against STEMIO's own rdus= says
+ * directly where a sector read's time went. */
+extern volatile uint32_t emmc_dbg_rd_hunt_us;        /* bit-banged start-bit hunt, all blocks */
+extern volatile uint32_t emmc_dbg_rd_dma_us;         /* SPIM3 DMA of the payloads, all blocks */
+extern volatile uint32_t emmc_dbg_rd_crc_us;         /* copy-out + CRC16 verify, all blocks */
+extern volatile uint32_t emmc_dbg_rd_hunt_clks;      /* clock pulses the hunts cost, all blocks */
 extern volatile uint32_t emmc_dbg_hpi_fires;         /* HPI aborts issued (maintenance ops cut short) */
 
 

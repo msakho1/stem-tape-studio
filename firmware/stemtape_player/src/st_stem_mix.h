@@ -27,12 +27,23 @@
  * Gain convention: Q8 fixed-point, 256 = unity -- the SAME scale and
  * meaning main.c's own `struct looptrk.vol_q8` field already uses for its
  * 4 classic loop tracks (see main.c's own comment: "fader volume, 256 =
- * unity"), reused here rather than inventing a second convention. No
- * ceiling is enforced here on the caller-supplied gain value itself
- * (mapping a physical fader's ADC range to a gain_q8 value, including any
- * maximum-boost policy, is a Phase 3 control-matrix concern, not this
- * module's) -- whatever gain is supplied, the mixdown always saturates
- * safely to the output range.
+ * unity"), reused here rather than inventing a second convention.
+ *
+ * GAIN CEILING (changed, deliberately): the applied gain is clamped to
+ * +/-ST_STEM_MIX_GAIN_MAX_Q8 == unity. This module used to accept an
+ * unbounded gain and absorb it in an int64_t accumulator. That int64_t was
+ * the single most expensive thing in the firmware's 48 kHz hot path -- two
+ * 64-bit multiplies, two 64-bit signed divisions and two 64-bit adds per
+ * stem, 48000 times a second -- and on this device audio-thread CPU is not
+ * spare capacity: the eMMC read path is CPU-bound, so cycles burned here
+ * come straight out of stream throughput (measured on hardware: audio at
+ * 51% left the streamer 40% and only 644 kB/s against the 1152 kB/s that
+ * 48 kHz four-stem playback needs, which is why playback ran slow).
+ * Clamping at unity is what lets the whole mixdown run in int32_t. Nothing
+ * loses a capability it had: main.c's own fader handler already clamps
+ * every stem gain to 256 before it ever reaches here (see its `q > 256u ?
+ * 256u : q`), so above-unity boost was a path no caller could reach --
+ * exactly the dead weight this build does not carry.
  *
  * Solo/mute convention (standard mixing-console semantics, chosen because
  * neither docs/FIRMWARE_CONTRACT_V1.md nor docs/firmware-contract-v1.json
@@ -61,11 +72,66 @@
 
 #define ST_STEM_MIX_GAIN_UNITY_Q8 256
 
+/*
+ * The ceiling every applied gain is clamped to (see this header's own
+ * "GAIN CEILING" note). It is exactly unity, and that is not arbitrary:
+ * a decoded stem sample is a sign-extended signed 24-bit value, so
+ * |sample| <= 2^23, and |sample * ST_STEM_MIX_GAIN_MAX_Q8| <= 2^31 --
+ * representable in int32_t. That bound is the whole reason the 48 kHz
+ * mixdown below can be int32_t arithmetic instead of int64_t.
+ */
+#define ST_STEM_MIX_GAIN_MAX_Q8 ST_STEM_MIX_GAIN_UNITY_Q8
+
 typedef struct {
 	int32_t gain_q8; /* 256 = unity; see this header's own doc comment */
 	bool mute;
 	bool solo;
 } st_stem_mix_channel_t;
+
+/*
+ * The per-stem EFFECTIVE gain, with mute/solo already resolved and the
+ * ceiling already applied -- everything about a channel strip that is
+ * constant for a whole audio block, collapsed into the only thing the
+ * per-frame mixdown actually needs.
+ *
+ * A stem that is inaudible (muted, or silenced by another stem's solo)
+ * has effective gain 0, so the per-frame path multiplies by zero rather
+ * than branching. There is no second audibility rule anywhere: 0 here IS
+ * "not heard", and st_stem_mix_channel_audible() answers from the same
+ * st_stem_mix_prepare() logic.
+ */
+typedef struct {
+	int32_t gain_q8[ST11_STEM_COUNT];
+} st_stem_mix_prepared_t;
+
+/*
+ * Resolves channels[]'s mute/solo state and gain ceiling into the compact
+ * per-block form above. Call this ONCE per audio block (channel strip
+ * state is a control-rate quantity -- faders, mute, solo -- and cannot
+ * change inside a block), then call st_stem_mix_frame_prepared() per
+ * frame. Pure, bounded, no allocation.
+ */
+void st_stem_mix_prepare(const st_stem_mix_channel_t channels[ST11_STEM_COUNT],
+			  st_stem_mix_prepared_t *out);
+
+/*
+ * THE 48 kHz HOT PATH. Mixes one decoded frame's ST11_STEM_COUNT stems
+ * down to one stereo sample pair using an already-prepared gain set, and
+ * writes the saturated signed-16-bit result to `*out_l`/`*out_r`.
+ *
+ * Branchless and entirely int32_t: no solo scan, no mute test, no 64-bit
+ * arithmetic. Identical output to st_stem_mix_frame() given the same
+ * inputs -- it is literally the second half of it.
+ *
+ * PRECONDITION on `frame`: each stem sample is a sign-extended signed
+ * 24-bit value (|sample| <= 2^23). That is exactly, and only, what
+ * st11_sector_decode_frame() produces (see st_sector_v11.c's get_i24le(),
+ * which sign-extends from bit 23), and it is what makes the int32_t
+ * product bound in ST_STEM_MIX_GAIN_MAX_Q8's own comment hold.
+ */
+void st_stem_mix_frame_prepared(const st11_audio_frame_t *frame,
+				 const st_stem_mix_prepared_t *prepared,
+				 int16_t *out_l, int16_t *out_r);
 
 /*
  * Mixes one decoded frame's ST11_STEM_COUNT stems down to one stereo
@@ -76,6 +142,13 @@ typedef struct {
  * anything else; safe to call from a hard-real-time audio ISR/thread
  * context (no allocation, no loops beyond the fixed ST11_STEM_COUNT,
  * bounded, deterministic execution time).
+ *
+ * This is exactly st_stem_mix_prepare() followed by
+ * st_stem_mix_frame_prepared() -- ONE implementation, not two. It is the
+ * convenient form for callers that mix a single frame (tests, and any
+ * non-real-time caller); the real-time audio path calls the two halves
+ * separately so the prepare half runs once per block instead of 48000
+ * times a second.
  */
 void st_stem_mix_frame(const st11_audio_frame_t *frame, const st_stem_mix_channel_t channels[ST11_STEM_COUNT],
 			int16_t *out_l, int16_t *out_r);

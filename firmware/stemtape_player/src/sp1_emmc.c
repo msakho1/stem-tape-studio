@@ -235,6 +235,34 @@ volatile uint32_t emmc_dbg_switch_busy_us_max;
 volatile uint32_t emmc_dbg_busy_timeouts;
 bool emmc_spim_active(void) { return s_spim_ok; }  /* diag: 32MHz SPIM3 DMA live vs slow bit-bang fallback */
 
+/* READ-PATH PHASE BREAKDOWN (see sp1_emmc.h). The whole point of these is to
+ * answer ONE question with a measurement instead of an argument: a stored-song
+ * sector read is 16 blocks and was measured on hardware at ~13.25 ms against
+ * the 7.08 ms of audio it contains, and the three phases below are the only
+ * places that time can be. Wall time per phase, so audio-thread preemption
+ * lands in whichever phase it interrupted -- which is exactly what is wanted
+ * here, since the deficit is a competition for CPU.
+ *
+ * DWT->CYCCNT (the CPU's own 64 MHz cycle counter, already enabled in main()
+ * for the audio-block watermark) rather than k_cycle_get_32(): the RTC's
+ * 30.5 us granularity is coarser than the phases being measured. Cost is one
+ * core-register read per phase boundary.
+ *
+ * Reset at the top of each multi-block call, so they describe the LATEST
+ * sector read and can be compared directly against STEMIO's own rdus=. */
+volatile uint32_t emmc_dbg_rd_hunt_us;    /* start-bit hunt, bit-banged */
+volatile uint32_t emmc_dbg_rd_dma_us;     /* SPIM3 DMA of the 512+CRC payload */
+volatile uint32_t emmc_dbg_rd_crc_us;     /* copy-out + CRC16 verify */
+volatile uint32_t emmc_dbg_rd_hunt_clks;  /* clock pulses spent hunting, all blocks */
+
+static uint32_t s_rd_hunt_cyc;
+static uint32_t s_rd_dma_cyc;
+static uint32_t s_rd_crc_cyc;
+
+/* 64 MHz core -> microseconds, the same conversion main.c's own DWT
+ * diagnostics use. */
+#define CYC_TO_US(c) ((c) / 64u)
+
 /* Table-driven CRC16-CCITT: the bitwise version costs ~14% CPU at the 48 kHz
  * read rate; the table costs ~1%. Built once at init. */
 static uint16_t s_crc16_tab[256];
@@ -376,6 +404,8 @@ static bool read_data_block(uint8_t *buf)
 	 * when the rings were draining. Waiting inside ONE command delivers data
 	 * the instant the card frees up. The card only advances its output on OUR
 	 * clock edges, so pausing the clock to yield can never miss the token. */
+	uint32_t phase_c0 = DWT->CYCCNT;
+	uint32_t hunt_clks = 0;
 	{
 		uint32_t t0 = k_cycle_get_32();
 		const uint32_t lim = k_us_to_cyc_ceil32(80000u);    /* 80 ms bound: rides real
@@ -388,6 +418,7 @@ static bool read_data_block(uint8_t *buf)
 			for (int burst = 0; burst < 64 && !got_start; burst++) {
 				RCLK_HIGH();
 				HALF(hd); EDGE_SETTLE();
+				hunt_clks++;
 				if (!RDAT_GET()) {
 					got_start = true;    /* leave with RCLK HIGH (as before) */
 					break;
@@ -411,22 +442,37 @@ static bool read_data_block(uint8_t *buf)
 	}
 	RCLK_LOW();
 	HALF(hd);
+	{
+		uint32_t now = DWT->CYCCNT;
+
+		s_rd_hunt_cyc += now - phase_c0;
+		emmc_dbg_rd_hunt_clks += hunt_clks;
+		phase_c0 = now;
+	}
 
 	if (s_spim_ok) {
 		/* FAST PATH: the start bit was just consumed by the bit-bang hunt
 		 * above, so the remaining 512 data bytes + CRC16 are exactly byte-
 		 * aligned — one 8 MHz SPIM RX DMA (~515 us vs ~1.7 ms bit-banged). */
 		spim_xfer(NULL, 0, s_dma_rx, sizeof(s_dma_rx));
+		{
+			uint32_t now = DWT->CYCCNT;
+
+			s_rd_dma_cyc += now - phase_c0;
+			phase_c0 = now;
+		}
 		memcpy(buf, s_dma_rx, EMMC_BLOCK_SIZE);
 		emmc_dbg_rd_crc = (uint16_t)(((uint16_t)s_dma_rx[EMMC_BLOCK_SIZE] << 8) |
 					     s_dma_rx[EMMC_BLOCK_SIZE + 1]);
 		RCLK_HIGH(); HALF(hd); RCLK_LOW(); HALF(hd);  /* end bit */
 		if (crc16(buf, EMMC_BLOCK_SIZE) != emmc_dbg_rd_crc) {
+			s_rd_crc_cyc += DWT->CYCCNT - phase_c0;
 			emmc_crc_rd_errs++;          /* corrupt read: caller retries */
 			DAT0_OUT();
 			DAT0_HIGH();
 			return false;
 		}
+		s_rd_crc_cyc += DWT->CYCCNT - phase_c0;
 	} else {
 		for (uint32_t i = 0; i < EMMC_BLOCK_SIZE; i++) {
 			uint8_t byte = 0;
@@ -1003,18 +1049,40 @@ bool emmc_pon_power_off_short(void)
 }
 
 
+/* Convert this call's accumulated phase cycles into the microsecond
+ * diagnostics the serial line prints. One place, called on every exit path
+ * of emmc_read_blocks() so a failed read reports its breakdown too. */
+static void rd_phase_publish(void)
+{
+	emmc_dbg_rd_hunt_us = CYC_TO_US(s_rd_hunt_cyc);
+	emmc_dbg_rd_dma_us = CYC_TO_US(s_rd_dma_cyc);
+	emmc_dbg_rd_crc_us = CYC_TO_US(s_rd_crc_cyc);
+}
+
 bool emmc_read_blocks(uint32_t block_addr, uint8_t *buf, uint32_t count)
 {
 	if (!s_ready) {
 		return false;
 	}
 	uint8_t r1[6];
+	/* Start this call's phase breakdown from zero -- these describe ONE
+	 * read call (see their declarations). Published at every return path
+	 * below, including the failing ones, because a slow failing read is
+	 * exactly as interesting as a slow succeeding one. */
+	s_rd_hunt_cyc = 0u;
+	s_rd_dma_cyc = 0u;
+	s_rd_crc_cyc = 0u;
+	emmc_dbg_rd_hunt_clks = 0u;
 	if (count == 1) {
 		emmc_dbg_last_cmd_resp = send_command_retry(17, block_addr, r1, 8);
 		if (!emmc_dbg_last_cmd_resp) {
+			rd_phase_publish();
 			return false;
 		}
-		return read_data_block(buf);
+		bool ok = read_data_block(buf);
+
+		rd_phase_publish();
+		return ok;
 	}
 	/* RETRY like CMD17 above: at high bus duty (4 playing tracks, or reads
 	 * interleaved with a take's writes) the card intermittently misses the
@@ -1037,14 +1105,17 @@ bool emmc_read_blocks(uint32_t block_addr, uint8_t *buf, uint32_t count)
 		if (i && (k_cycle_get_32() - bt0) >= blim) {
 			(void)send_command_retry(12, 0, r1, 3);
 			emmc_dbg_busy_timeouts++;
+			rd_phase_publish();
 			return false;
 		}
 		if (!read_data_block(buf + i * EMMC_BLOCK_SIZE)) {
 			(void)send_command_retry(12, 0, r1, 3);
+			rd_phase_publish();
 			return false;
 		}
 	}
 	(void)send_command_retry(12, 0, r1, 3);
+	rd_phase_publish();
 	return true;
 }
 

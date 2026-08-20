@@ -1525,7 +1525,7 @@ jobs:
           check st_stix_deserialize
           # Phase 2 slice 2/3B/3B.1: the stored four-stem playback data
           # path -- looper_audio_block() (real-time, RAM-only, the
-          # mailbox CONSUMER) calls the st_stream_*/st_stem_mix_frame
+          # mailbox CONSUMER) calls the st_stream_*/st_stem_mix_*
           # ones and the two st_stem_mbox_* consumer-side entries;
           # streamer_thread() (the mailbox PRODUCER) calls the rest,
           # both at boot and on every per-pass prefetch, to validate
@@ -1537,7 +1537,16 @@ jobs:
           # step below, which parses main.c's own source.
           check st11_sector_decode_frame
           check st11_sector_read_header
-          check st_stem_mix_frame
+          # st_stem_mix_prepare()/st_stem_mix_frame_prepared(), not
+          # st_stem_mix_frame(): the audio path calls the two halves
+          # separately so the mute/solo/gain-ceiling work runs once per
+          # block instead of 48000 times a second. st_stem_mix_frame()
+          # itself is the two of them back to back, kept for callers that
+          # mix a single frame (the host tests), and -ffunction-sections/
+          # --gc-sections is right to drop it from an image that never
+          # calls it -- requiring it would be requiring dead weight.
+          check st_stem_mix_prepare
+          check st_stem_mix_frame_prepared
           check st_stream_init
           check st_stream_required_sector
           check st_stream_validate_sector

@@ -484,10 +484,15 @@ static void test_mix_saturates_at_positive_full_scale(void)
 	      out_l, out_r);
 }
 
-/* Same shape, negative full scale (-2^23), plus a caller-supplied gain
- * well above unity, exercising BOTH overflow sources the header's own
- * doc comment calls out (several stems summed near full-scale, AND
- * above-unity gain). */
+/* Same shape, NEGATIVE full scale (-2^23) -- the exact int32_t boundary
+ * case for the mixdown's arithmetic: -2^23 * ST_STEM_MIX_GAIN_MAX_Q8 is
+ * -2^31, i.e. INT32_MIN, the largest-magnitude product this path can ever
+ * form. It must produce clean saturation, never a wraparound.
+ *
+ * The gain asked for here is deliberately WELL ABOVE unity, so this also
+ * pins the ceiling from st_stem_mix.h's "GAIN CEILING" note: the request
+ * is clamped to unity rather than boosting, and the clamped result is
+ * still the correct saturated output. */
 static void test_mix_saturates_at_negative_full_scale_with_high_gain(void)
 {
 	st11_audio_frame_t frame;
@@ -516,6 +521,118 @@ static void test_mix_saturates_at_negative_full_scale_with_high_gain(void)
 	      out_l, out_r);
 }
 
+/* THE GAIN CEILING, stated directly rather than only through a saturating
+ * case: a request above unity must produce EXACTLY what unity produces --
+ * not more, and not a wrapped or otherwise surprising value. This is the
+ * behaviour change that lets the 48 kHz path be int32_t (see st_stem_mix.h's
+ * own "GAIN CEILING" note); it is pinned here so it cannot drift back into
+ * an unbounded gain by accident. */
+static void test_gain_above_unity_clamps_to_unity(void)
+{
+	st11_audio_frame_t frame;
+	st_stem_mix_channel_t unity[ST11_STEM_COUNT];
+	st_stem_mix_channel_t boosted[ST11_STEM_COUNT];
+	st_stem_mix_prepared_t prep;
+	int16_t unity_l, unity_r, boost_l, boost_r;
+	uint32_t s;
+
+	/* A mid-level frame, comfortably below saturation, so a real boost
+	 * WOULD show up as a different number if the ceiling were missing. */
+	for (s = 0; s < ST11_STEM_COUNT; s++) {
+		frame.stem_l[s] = 100000 + (int32_t)s;
+		frame.stem_r[s] = -70000 - (int32_t)s;
+		unity[s].gain_q8 = ST_STEM_MIX_GAIN_UNITY_Q8;
+		unity[s].mute = false;
+		unity[s].solo = false;
+		boosted[s] = unity[s];
+		boosted[s].gain_q8 = ST_STEM_MIX_GAIN_UNITY_Q8 * 4;
+	}
+
+	st_stem_mix_frame(&frame, unity, &unity_l, &unity_r);
+	st_stem_mix_frame(&frame, boosted, &boost_l, &boost_r);
+
+	CHECK(boost_l == unity_l && boost_r == unity_r,
+	      "a 4x gain request produces exactly the unity result (%d/%d vs %d/%d)",
+	      boost_l, boost_r, unity_l, unity_r);
+
+	st_stem_mix_prepare(boosted, &prep);
+	for (s = 0; s < ST11_STEM_COUNT; s++) {
+		CHECK(prep.gain_q8[s] == ST_STEM_MIX_GAIN_MAX_Q8,
+		      "prepared stem %u gain is the ceiling (%d)", s, prep.gain_q8[s]);
+	}
+
+	/* Negative gains obey the SAME magnitude bound -- gain_q8 is signed,
+	 * and the int32_t product bound has to hold on that side too. */
+	for (s = 0; s < ST11_STEM_COUNT; s++) {
+		boosted[s].gain_q8 = -ST_STEM_MIX_GAIN_UNITY_Q8 * 4;
+	}
+	st_stem_mix_prepare(boosted, &prep);
+	for (s = 0; s < ST11_STEM_COUNT; s++) {
+		CHECK(prep.gain_q8[s] == -ST_STEM_MIX_GAIN_MAX_Q8,
+		      "prepared stem %u negative gain is the negative ceiling (%d)", s, prep.gain_q8[s]);
+	}
+}
+
+/* THE ONE-IMPLEMENTATION PROPERTY: main.c's audio thread does not call
+ * st_stem_mix_frame() -- it calls st_stem_mix_prepare() once per block and
+ * st_stem_mix_frame_prepared() per frame, precisely so the mute/solo/ceiling
+ * work leaves the 48 kHz path. That split is only safe if the two forms are
+ * the same function. Every mute/solo combination is swept here (2^8 of
+ * them: mute and solo independently per stem) and the two forms must agree
+ * on every single one, sample for sample.
+ *
+ * The audibility helper is swept alongside, since the beat-pulse meters now
+ * read audibility as "prepared gain is nonzero" -- that has to be the same
+ * answer st_stem_mix_channel_audible() gives, or the LEDs and the mixer
+ * would be applying two different rules. */
+static void test_prepared_form_matches_single_call_form(void)
+{
+	st11_audio_frame_t frame;
+	unsigned combo;
+	int mismatches = 0;
+	int audible_mismatches = 0;
+	uint32_t s;
+
+	for (s = 0; s < ST11_STEM_COUNT; s++) {
+		frame.stem_l[s] = (int32_t)(1 + s) * 913741;   /* distinct, mid-level, both signs */
+		frame.stem_r[s] = -(int32_t)(1 + s) * 517033;
+	}
+
+	for (combo = 0; combo < 256u; combo++) {
+		st_stem_mix_channel_t channels[ST11_STEM_COUNT];
+		st_stem_mix_prepared_t prep;
+		int16_t a_l, a_r, b_l, b_r;
+
+		for (s = 0; s < ST11_STEM_COUNT; s++) {
+			channels[s].gain_q8 = (int32_t)(64u + 48u * s);  /* four different faders */
+			channels[s].mute = ((combo >> s) & 1u) != 0u;
+			channels[s].solo = ((combo >> (s + ST11_STEM_COUNT)) & 1u) != 0u;
+		}
+
+		st_stem_mix_frame(&frame, channels, &a_l, &a_r);
+		st_stem_mix_prepare(channels, &prep);
+		st_stem_mix_frame_prepared(&frame, &prep, &b_l, &b_r);
+
+		if (a_l != b_l || a_r != b_r) {
+			mismatches++;
+		}
+		for (s = 0; s < ST11_STEM_COUNT; s++) {
+			bool by_gain = prep.gain_q8[s] != 0;
+
+			if (by_gain != st_stem_mix_channel_audible(channels, s)) {
+				audible_mismatches++;
+			}
+		}
+	}
+
+	CHECK(mismatches == 0,
+	      "prepared and single-call mixdown agree across all 256 mute/solo combinations (%d differed)",
+	      mismatches);
+	CHECK(audible_mismatches == 0,
+	      "a nonzero prepared gain means exactly what st_stem_mix_channel_audible() means (%d differed)",
+	      audible_mismatches);
+}
+
 int main(void)
 {
 	RUN(test_mix_real_decoded_frame_unity_gain);
@@ -532,6 +649,8 @@ int main(void)
 	RUN(test_mix_no_channels_active_is_silence);
 	RUN(test_mix_saturates_at_positive_full_scale);
 	RUN(test_mix_saturates_at_negative_full_scale_with_high_gain);
+	RUN(test_gain_above_unity_clamps_to_unity);
+	RUN(test_prepared_form_matches_single_call_form);
 
 	printf("\n");
 	printf("%d distinct test cases, %d assertion checks\n", g_test_cases, g_checks);

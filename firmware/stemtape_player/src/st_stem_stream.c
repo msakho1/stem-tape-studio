@@ -46,6 +46,13 @@ bool st_stream_init(st_stream_t *st, uint32_t song_start_block, uint32_t song_bl
 	return true;
 }
 
+/* -O2 FOR THIS FUNCTION ONLY -- see st_stem_mix.c's matching note and
+ * sp1_emmc.c's crc16() for the established precedent. Pure computation, no
+ * timing or aliasing dependency. main.c's audio thread calls this on every
+ * output frame at 48 kHz (and st_stream_advance_frame() below calls it
+ * again), so the division by a compile-time constant wants to be the
+ * multiply-and-shift -O2 emits rather than the call -Os is entitled to. */
+__attribute__((optimize("O2")))
 uint32_t st_stream_required_sector(const st_stream_t *st)
 {
 	return st->song_frame / ST11_FRAMES_PER_SECTOR;
@@ -97,6 +104,9 @@ void st_stream_stop(st_stream_t *st)
 	st->state = ST_STREAM_STOPPED;
 }
 
+/* -O2, same reason as st_stream_required_sector() above: this is the other
+ * per-output-frame call on the 48 kHz path. */
+__attribute__((optimize("O2")))
 st_stream_tick_t st_stream_advance_frame(st_stream_t *st)
 {
 	if (st->state == ST_STREAM_STOPPED || st->state == ST_STREAM_END_OF_SONG) {

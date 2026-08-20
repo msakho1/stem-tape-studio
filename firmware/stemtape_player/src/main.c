@@ -2270,12 +2270,25 @@ static void looper_audio_block(int16_t *s)
 		 * approved this substitute gesture. */
 		_Static_assert(NTRK == ST11_STEM_COUNT, "trk[]/stem lane count must match 1:1");
 		st_stem_mix_channel_t stem_channels[ST11_STEM_COUNT];
+		st_stem_mix_prepared_t stem_prepared;
 
 		for (uint32_t s = 0; s < ST11_STEM_COUNT; s++) {
 			stem_channels[s].gain_q8 = (int32_t)trk[s].vol_q8;
 			stem_channels[s].mute = trk[s].muted != 0;
 			stem_channels[s].solo = trk[s].solo != 0;
 		}
+		/* ONCE PER BLOCK, never per frame. Fader/mute/solo are
+		 * control-rate quantities that cannot change inside a block
+		 * (the control path runs at a lower priority than this thread),
+		 * so resolving them here collapses the whole channel-strip
+		 * decision -- the solo scan, the mute test, the gain ceiling --
+		 * into four integers the 48 kHz loop just multiplies by. That
+		 * work used to happen inside the mixer on every one of 48000
+		 * frames a second; on this device that is not spare capacity,
+		 * because the eMMC read path is CPU-bound and every cycle the
+		 * audio thread takes is a cycle of read throughput lost. See
+		 * st_stem_mix.h's own "GAIN CEILING" note for the measurement. */
+		st_stem_mix_prepare(stem_channels, &stem_prepared);
 		/* Both audio-thread-EXCLUSIVE (Slice 3B.1): which physical
 		 * buffer (0/1) the last successful mailbox acquire named --
 		 * plain, not shared, not atomic, since only this thread ever
@@ -2362,22 +2375,24 @@ static void looper_audio_block(int16_t *s)
 		 * st_stem_meter.h). Block-local, audio-thread-private until the
 		 * single atomic store below -- no per-frame atomics. */
 		uint32_t stem_peak[ST11_STEM_COUNT] = { 0u, 0u, 0u, 0u };
-		/* Audibility is a property of stem_channels[], which is built
-		 * ONCE per block and cannot change within it -- so resolve it
-		 * once here rather than per frame. The first version of the
-		 * beat-pulse metering called st_stem_mix_channel_audible()
-		 * inside the frame loop, once per stem: four cross-module calls
-		 * per frame, each running its own four-iteration solo scan, at
-		 * 48 kHz. That is pure waste, and on this device it is not
-		 * harmless waste -- the eMMC read path is CPU-bound (bit-banged
-		 * start-bit hunt, SPIM setup, CRC), so every cycle the audio
-		 * thread takes is a cycle the streamer does not get, and read
-		 * throughput falls in direct proportion. */
-		bool stem_audible[ST11_STEM_COUNT];
-
-		for (uint32_t sa = 0; sa < ST11_STEM_COUNT; sa++) {
-			stem_audible[sa] = st_stem_mix_channel_audible(stem_channels, sa);
-		}
+		/* Audibility for the meters is read straight off stem_prepared:
+		 * a zero effective gain IS "this stem is not heard", and it is
+		 * the very value the mixer multiplies by a line below, so the
+		 * lights and the audio cannot possibly be applying two
+		 * different rules (host-tested across all 256 mute/solo
+		 * combinations -- see tests/test_stem_mix.c's own prepared-form
+		 * equivalence case). It also means a stem whose FADER is at
+		 * zero meters dark, which is right: it is producing silence.
+		 *
+		 * The first version of this metering called
+		 * st_stem_mix_channel_audible() inside the frame loop, once per
+		 * stem: four cross-module calls per frame, each running its own
+		 * four-iteration solo scan, at 48 kHz. That is pure waste, and
+		 * on this device it is not harmless waste -- the eMMC read path
+		 * is CPU-bound (bit-banged start-bit hunt, SPIM setup, CRC), so
+		 * every cycle the audio thread takes is a cycle the streamer
+		 * does not get, and read throughput falls in direct
+		 * proportion. */
 #endif
 		for (uint32_t f = 0; f < BLK_FRAMES; f++) {
 #if SP1_XFER_ENABLE
@@ -2481,7 +2496,7 @@ static void looper_audio_block(int16_t *s)
 					st11_audio_frame_t frame;
 
 					st11_sector_decode_frame(buf, frame_in_sector, &frame);
-					st_stem_mix_frame(&frame, stem_channels, &stem_l, &stem_r);
+					st_stem_mix_frame_prepared(&frame, &stem_prepared, &stem_l, &stem_r);
 
 					/* BEAT PULSE: per-stem peak magnitude for
 					 * this block, SAMPLED rather than computed
@@ -2502,20 +2517,20 @@ static void looper_audio_block(int16_t *s)
 					 * value only lights an LED, it never touches
 					 * the audio path.
 					 *
-					 * stem_audible[] is the block-hoisted form of
-					 * the SAME st_stem_mix_channel_audible() rule
-					 * the mixer applied a line above, so a muted
-					 * or solo-silenced stem still meters 0 with
-					 * no second rule to keep in sync. Absolute
-					 * value is taken on the int32 24-bit sample;
-					 * INT32_MIN cannot occur in a sign-extended
-					 * 24-bit value, so plain negation is safe. */
+					 * A zero prepared gain is the SAME value the
+					 * mixer just multiplied by a line above, so a
+					 * muted, solo-silenced or faded-out stem still
+					 * meters 0 with no second rule to keep in sync.
+					 * Absolute value is taken on the int32 24-bit
+					 * sample; INT32_MIN cannot occur in a
+					 * sign-extended 24-bit value, so plain negation
+					 * is safe. */
 					if ((f & 31u) == 0u) {
 						for (uint32_t sp = 0; sp < ST11_STEM_COUNT; sp++) {
 							int32_t l, r;
 							uint32_t mag;
 
-							if (!stem_audible[sp]) {
+							if (stem_prepared.gain_q8[sp] == 0) {
 								continue;
 							}
 							l = frame.stem_l[sp];
@@ -4560,6 +4575,21 @@ static void streamer_thread(void *a, void *b, void *c)
 			bool quiet = (g_rec_track < 0) && !g_xfer_mode &&
 				     g_hpi_on && g_emmc_ready && !g_emmc_quiesce &&
 				     !g_meta_save_req && !g_cache_flush_req;
+#if SP1_XFER_ENABLE
+			/* NEVER while a stored song is streaming. A cache flush
+			 * programs NAND and freezes the bus for as long as it
+			 * takes -- this file's own eMMC-cache comment already
+			 * states the rule ("There is deliberately NO flush
+			 * during play (that freezes the bus and starves
+			 * playback)"), but the condition it was written for only
+			 * covered the classic looper's recording states, which
+			 * predate stem playback entirely. A stem song streams
+			 * continuously with under one sector of slack, so a
+			 * mid-song flush is a guaranteed audible stall. */
+			if (atomic_get(&g_stem_song_selected)) {
+				quiet = false;
+			}
+#endif
 			if (quiet)
 				for (int j = 0; j < NTRK; j++) {
 					uint8_t sj = trk[j].state;
@@ -5194,6 +5224,24 @@ static void controls_diag(void)
 	       (unsigned)atomic_get(&g_stem_diag_read_us_last), (unsigned)atomic_get(&g_stem_diag_read_us_max),
 	       (unsigned)stem_diag_sustained_read_bytes_per_sec(), (unsigned)atomic_get(&g_stem_underrun_count),
 	       (unsigned)atomic_get(&g_stem_corrupt_count), (unsigned)atomic_get(&g_stem_reload_fail_count));
+	/* WHERE THE LATEST SECTOR READ'S TIME WENT (see sp1_emmc.h's own
+	 * "READ-PATH PHASE BREAKDOWN"). A sector is 16 blocks = 8192 bytes =
+	 * 7.08 ms of audio, so a read that takes longer than 7.08 ms is a
+	 * playback deficit by definition, and these three numbers say which
+	 * phase to cut next instead of leaving it to be guessed:
+	 *   hunt= bit-banged start-bit search (GPIO-toggle bound, and the one
+	 *         phase whose cost is set by how long the CARD makes us wait --
+	 *         huntclk= is that same wait counted in clock pulses rather
+	 *         than time, which separates "the card is slow" from "our hunt
+	 *         loop is slow")
+	 *   dma=  SPIM3 hardware transfer of the payloads: 514 bytes x 16 at
+	 *         32 MHz is ~2.05 ms and cannot go lower on this bus
+	 *   crc=  copy-out + CRC16 verify, pure CPU
+	 * Their sum plus the CMD18/CMD12 handshake is the whole of rdus=; any
+	 * large remainder is audio-thread preemption. */
+	printk("STEMRD hunt=%uus dma=%uus crc=%uus huntclk=%u\n",
+	       (unsigned)emmc_dbg_rd_hunt_us, (unsigned)emmc_dbg_rd_dma_us,
+	       (unsigned)emmc_dbg_rd_crc_us, (unsigned)emmc_dbg_rd_hunt_clks);
 #endif
 	emmc_dbg_wr_busy_max = 0u;   /* per-window worst, reset each print */
 	emmc_dbg_wr_busy_us_max = 0u;

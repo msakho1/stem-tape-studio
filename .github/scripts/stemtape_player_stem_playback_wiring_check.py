@@ -138,7 +138,14 @@ from stemtape_player_safety_gate import function_body_bounds, index_functions  #
 REQUIRED_CALLS = {
     "looper_audio_block": [
         "st11_sector_decode_frame",
-        "st_stem_mix_frame",
+        # The mixdown is wired in as its two halves, on purpose: prepare
+        # once per block (mute/solo/gain ceiling -- all control-rate), then
+        # frame_prepared per output frame. Requiring BOTH is what stops the
+        # split from silently regressing back into a per-frame
+        # st_stem_mix_frame() call, which is what it cost the streamer
+        # before (see st_stem_mix.h's own "GAIN CEILING" measurement).
+        "st_stem_mix_prepare",
+        "st_stem_mix_frame_prepared",
         "st_stream_required_sector",
         "st_stream_sector_ready",
         "st_stream_advance_frame",
