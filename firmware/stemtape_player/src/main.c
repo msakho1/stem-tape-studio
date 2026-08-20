@@ -4127,7 +4127,7 @@ static void streamer_thread(void *a, void *b, void *c)
 									       (unsigned)lib.active.bpm_q8,
 									       (unsigned)lib.active.sample_rate);
 								}
-								st_stem_mbox_init(&g_stem_mbox, 0u, 0u);
+								st_stem_mbox_init(&g_stem_mbox, 0u);
 								atomic_set(&g_stem_song_selected, 1); /* release fence */
 							}
 						}
