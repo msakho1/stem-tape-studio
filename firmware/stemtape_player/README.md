@@ -7,11 +7,16 @@ board on its own, with USB entirely optional.
 
 ## What this pass actually delivers (real, built, tested)
 
-- **Watchdog, power button hold-to-off, and the early Track1+Track4 DFU
-  recovery combo** — reused verbatim from the pinned Tape Looper
-  (`firmware/src/main.c`, commit `a8dd127`) and the M0 target, checked
-  before any other subsystem so recovery works even if something later
-  hangs.
+- **Watchdog and power button hold-to-off** — reused verbatim from the
+  pinned Tape Looper (`firmware/src/main.c`, commit `a8dd127`) and the M0
+  target, checked before any other subsystem so recovery works even if
+  something later hangs. The Tape Looper's in-firmware Track1+Track4 DFU
+  combo is **removed** (product ruling): Track 1 and Track 4 are ordinary
+  performance controls on this instrument, and a gesture that reset the
+  device out of the running firmware mid-song was never compatible with
+  playing it. Recovery is unaffected — the UF2 bootloader runs its own
+  button scan at reset, outside this image, so holding 1+4 through a
+  power-on still enters DFU.
 - **The eight-LED PWM renderer** (`led_duty.c`, `led_render.c`,
   `led_render_policy.c`) — byte-for-byte the same hardware driver already
   proven and CI-built for the M0 target — now driving a NEW **local

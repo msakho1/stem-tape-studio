@@ -5526,9 +5526,10 @@ static void pwr_btn_arm_wake(void)
  *  POWER / PERSISTENCE  —  battery charger control, the graceful
  *  stop_and_flush() (finalize any take, then flush the card's volatile write
  *  cache so loops + the slot index survive a power cut), power_off() ->
- *  SYSTEM_OFF (clean return to the bootloader; there is no reset pin),
- *  enter_dfu() (a track combo forces the bootloader for reflashing), and
- *  song-slot switching.
+ *  SYSTEM_OFF (clean return to the bootloader; there is no reset pin), and
+ *  song-slot switching. (The Tape Looper's enter_dfu() track combo is gone --
+ *  see its removal note below; the UF2 bootloader's own reset-time button
+ *  scan is the recovery path and needs nothing from this image.)
  * ======================================================================== */
 /* ---------- battery charger ---------- */
 /* Explicitly enable charging by driving the BQ24232 /CE pin low, and set the
@@ -5651,22 +5652,17 @@ static void power_off(void)
 	for (;;) { /* CPU is now off; wakes via the bootloader on button press */ }
 }
 
-/* FAILSAFE recovery: reset into the bootloader so the device can ALWAYS be
- * reflashed. Triggered by holding Track1+Track4 together (the same combo the
- * bootloader scans for at boot). We flush any recording first, then show a clean
- * cue (status row dark, all 4 track LEDs lit = "loading firmware"), write the
- * UF2 magic (harmless if the bootloader ignores it) and reset; the user keeps
- * holding 1+4 through the reset and the bootloader's own button scan enters DFU. */
-static void enter_dfu(void)
-{
-	stop_and_flush();
-	all_off();                                                 /* status row dark */
-	for (int i = 0; i < NUM_TRACK_LEDS; i++) track_led_on(i);  /* 4 track LEDs = DFU */
-	NRF_POWER->GPREGRET = 0x57u;
-	__DSB();
-	NVIC_SystemReset();
-	for (;;) { }
-}
+/* STEM TAPE: enter_dfu() -- the Tape Looper's in-firmware "hold Track1+Track4
+ * for 1.2 s to reset into the UF2 bootloader" recovery -- is REMOVED (product
+ * ruling; see the control scanner's own note where the combo was detected).
+ * Track 1 and Track 4 are ordinary performance controls on this instrument.
+ *
+ * This removes NO recovery capability. The UF2 bootloader performs its own
+ * button scan at every reset, in the bootloader image, with no involvement
+ * from this firmware: holding 1+4 through a power-on still enters DFU. All
+ * this code ever did was let the ALREADY-RUNNING firmware reset itself into
+ * that same bootloader mid-performance -- which is exactly the behavior being
+ * removed. GPREGRET is untouched by this image now. */
 
 /* Jump to song slot ns (M4b: FUNCTION+Track bank jump, and the tap-advance).
  * Saves the current song's BPM, loads the target's, signals the audio thread
@@ -6062,7 +6058,7 @@ int main(void)
 			 * fixed/variable loop-length mode. The normal ladder decode below
 			 * is skipped while FUNCTION is held, so read PLAY here. PLAY is at
 			 * the TOP of the AIN0 ladder (~1823); require >1600 so a Track-4
-			 * (~1220) or the 1+4 bootloader combo (~1325) can never be mistaken
+			 * (~1220) or the ambiguous 1+4 band (~1325) can never be mistaken
 			 * for it. FUNCTION is a separate GPIO, so holding it does not shift
 			 * the ladder voltage. While the combo is engaged the power-off
 			 * countdown/shutdown is suppressed (this gesture must never risk a
@@ -6135,9 +6131,13 @@ int main(void)
 			 * passes (~75 ms) — a finger transiting the ladder can't fire.
 			 * Keeping FUNCTION held and pressing another track jumps again
 			 * (bank surfing). While recording, jump_to_slot() refuses, as
-			 * the tap-advance always has. Note: physically pressing T1+T4
-			 * with FUNCTION held reads as the Track-4 band -> bank 4; the
-			 * DFU combo remains a no-FUNCTION gesture. */
+			 * the tap-advance always has. Note: this FUNCTION-held path
+			 * gates on `fraw < 1500`, so the ambiguous T1+T4 band (~1325)
+			 * still decodes as Track 4 -> bank 4 here. That is unchanged
+			 * and harmless (a bank jump, not a reset), but it is the same
+			 * ladder-aliasing class the DFU removal addressed, and it goes
+			 * away for good when st_gesture.c takes over control decoding
+			 * with a real multi-press model. */
 			{
 				enum trk_btn tb = (fraw >= 110 && fraw < 1500)
 						  ? decode_tracks(fraw) : TRK_NONE;
@@ -6355,27 +6355,31 @@ int main(void)
 
 		/* ---- looper controls + LEDs ---- */
 		{
-			/* FAILSAFE: Track1+Track4 combo (AIN0 ~1325, between T4 1220 and PLAY
-			 * 1823) held ~1.2 s -> reset into the bootloader for reflashing. Checked
-			 * BEFORE the normal decode so the combo isn't mistaken for a Track-4 press. */
+			/* STEM TAPE: the inherited Tape Looper's Track1+Track4 DFU combo
+			 * is REMOVED (product ruling). Track 1 and Track 4 are ordinary
+			 * performance controls here -- Stem Tape's own control matrix
+			 * gives them mute (tap), momentary solo (hold), lane loop
+			 * (double-tap) and reverse (FN + double-tap) -- so a gesture that
+			 * silently reset the device out of the running firmware was never
+			 * compatible with playing the instrument. Nothing about firmware
+			 * recovery depends on this block: the UF2 bootloader runs its OWN
+			 * button scan at reset, entirely outside this image, so holding
+			 * 1+4 through a power-on still reaches DFU exactly as before.
+			 *
+			 * The BAND ITSELF still has to be recognised and rejected. PLAY
+			 * and TRACK1-4 share one resistor ladder (see decode_tracks()),
+			 * and decode_tracks() maps every voltage onto some button -- it
+			 * has no notion of "two pressed". Pressing 1+4 lands at ~1325,
+			 * which would otherwise decode as a Track-4 press (< 1500) that
+			 * the user never made. Reading it as TRK_NONE is the truthful
+			 * answer for an ambiguous ladder voltage: 1+4 now does nothing
+			 * at all, rather than doing something else. */
 			int trk_raw = ladder_read(&adc_ladder[LAD_TRACKS]);
-			static int64_t combo14_t = -1;     /* when the 1+4 band was first seen */
 			enum trk_btn raw;
-			/* This DFU check runs BEFORE ctl_flush is consumed below, so clear
-			 * the stale 1+4 timestamp here: after a FUNCTION+PLAY mode toggle
-			 * (which freezes this block for the whole combo) a PLAY release
-			 * sweeping through the 1280-1390 band must not find a >1.2 s-old
-			 * combo14_t and reboot to the bootloader mid-performance. */
-			if (ctl_flush) combo14_t = -1;
+
 			if (trk_raw >= 1280 && trk_raw <= 1390) {
-				/* time-based (not a +8/iter counter) so the diag-print path can't
-				 * skew the 1.2 s threshold; the oversampled read + the band needing
-				 * to hold for a full 1.2 s makes an accidental Track-4 drift safe. */
-				if (combo14_t < 0) combo14_t = k_uptime_get();
-				else if (k_uptime_get() - combo14_t >= 1200) enter_dfu();
 				raw = TRK_NONE;
 			} else {
-				combo14_t = -1;
 				raw = decode_tracks(trk_raw);
 			}
 			/* trailing-PLAY guard (see the FUNCTION+PLAY combo exit): ignore
