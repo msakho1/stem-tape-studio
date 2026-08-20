@@ -322,7 +322,84 @@ rewrite of `st_stem_stream.c`, and the 149 KB from §3a is what pays for it.
 | Projects / Product model / Web UI | 25 | Companion | Device library view is the live ask |
 | Hardware | 9 | Power, DFU, battery live | **`CAP-211` RAM/CPU budget — §3a is the answer** |
 | Diagnostics / Validation / Firmware proof | 10 | Extensive | `FW-15`…`FW-23` need bench capture |
+| Stock reference (`AUD-02`, `AUD-35`) | 2 | **Captured 2026-08-20** | See §5a — no longer `Unverified` |
 | **Recording (obsolete)** | **13** | Correctly unreachable | **`CAP-213`…`CAP-225` — delete, per your ruling** |
+
+---
+
+## 5a. The stock SP-1 baseline — captured 2026-08-20
+
+The workbook has carried three rows waiting on this and nothing else:
+`AUD-02` *"Startup stock behavior/signature — reference behavior not
+established"*, `AUD-35` *"Stock SP-1 reference — reference behavior not
+captured"*, and Sources authority #10 *"exact parity still needs captured
+baseline"*. They are no longer unverified. An unmodified retail SP-1 was
+enumerated on macOS (`system_profiler SPUSBDataType` + `ioreg -w0 -l -r -n
+"stem player"`); this is what it is:
+
+```
+Product name        "stem player"
+Vendor ID           0x2367 (teenage engineering)
+Product ID          0x1701
+bcdDevice           0x0100
+bcdUSB              0x0200        USB 2.0 compliant
+Device Speed        1             FULL SPEED (12 Mb/s)
+bMaxPacketSize0     64
+bDeviceClass        0             defined at interface level
+bNumConfigurations  1
+Current required    500 mA
+
+  Interface 0  (the only one)
+    bInterfaceClass     255       0xFF, VENDOR-SPECIFIC
+    bInterfaceSubClass  0
+    bInterfaceProtocol  0
+    bNumEndpoints       0         <-- zero
+```
+
+**`bNumEndpoints = 0` is the whole finding.** A single vendor-specific
+interface with no endpoints beyond the mandatory control endpoint means
+every byte a host exchanges with a stock SP-1 travels over **EP0 control
+transfers**. By descriptor, that rules out — with no interpretation
+required — MIDI (needs interrupt/bulk), audio (needs isochronous),
+CDC/serial (needs bulk), mass storage and HID.
+
+Four consequences, in descending order of how much they change our plan:
+
+1. **There is no stock reference for the Cue MIDI path.** The hope was that
+   stock exposed a class-compliant MIDI interface we could match for the
+   KO II work (`FW-22`, the 15 Cue MIDI CAP rows). It does not — TE's design
+   has no MIDI endpoint at all. Our `CONFIG_USBD_MIDI2_CLASS` approach is
+   entirely our own invention, and "match stock" is **not available as a
+   fallback** if it gives trouble. Worth knowing before that work starts,
+   not during it.
+
+2. **"Run the serial diagnostic on a stock unit" is impossible, not merely
+   empty.** Stock presents no CDC interface, so no `/dev/cu.*` appears at
+   all (verified directly: the port list is byte-identical unplugged and
+   plugged in). There is nothing to listen to. Any future stock comparison
+   has to be descriptor-level or audio-level, never console-level.
+
+3. **Stock is Full Speed, exactly like ours.** `bcdUSB 0x0200` declares USB
+   2.0 while `Device Speed = 1` reports 12 Mb/s — the nRF52840's USB
+   controller is full-speed-only, so TE ships at the same ceiling we do. We
+   concede nothing to stock on the transfer path, and the ~1.2 MB/s
+   theoretical USB bulk cap applies to both.
+
+4. **No VID collision is possible.** Stock is `0x2367:0x1701` (teenage
+   engineering's own vendor ID). The classic Tape Looper is `0x1915:0x5210`
+   and this firmware is `0x1915:0x5211`, both under Nordic's VID. Stock and
+   modded differ at the *vendor* level, not just the product level, so a
+   host driver cache can never confuse the two. prj.conf's "distinct PID"
+   note is satisfied more strongly than it claims.
+
+Method note for anyone repeating this: `system_profiler` emits
+`IOCreatePlugInInterfaceForService failed 0xe00002be`
+(`kIOReturnNotPermitted`) on stderr for devices it cannot open a plug-in
+interface for. That is a permissions warning, not a failure — stdout is
+still complete. `ioreg` reads the IORegistry directly and does not hit it,
+so prefer `ioreg -w0 -l -r -n "stem player"` when the two disagree. Also
+expect a browser to appear holding an `AppleUSBHostDeviceUserClient` on the
+device if any WebUSB page has claimed it.
 
 ---
 
