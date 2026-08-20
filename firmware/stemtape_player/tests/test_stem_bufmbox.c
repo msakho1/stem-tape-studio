@@ -114,8 +114,18 @@ static void test_producer_fills_nearest_gap_first(void)
 	CHECK(slot == st_stem_mbox_slot_of(1u), "and it is targeted at sector 1's own slot");
 
 	st_stem_mbox_publish_ready(&mb, 1u, slot);
-	CHECK(st_stem_mbox_producer_next_fill(&mb, BIG_COUNT, &sec, &slot) && sec == 2u,
-	      "after sector 1 lands the next gap is sector 2");
+	if (SLOTS >= 3u) {
+		CHECK(st_stem_mbox_producer_next_fill(&mb, BIG_COUNT, &sec, &slot) && sec == 2u,
+		      "after sector 1 lands the next gap is sector 2");
+	} else {
+		/* At SLOTS==2 the ring holds exactly one sector of read-ahead,
+		 * so publishing sector 1 already fills the window -- there is
+		 * no sector 2 slot to put anything in. Asserting sector 2 here
+		 * would be asserting a particular DEPTH rather than the
+		 * nearest-gap-first RULE this case exists to pin. */
+		CHECK(!st_stem_mbox_producer_next_fill(&mb, BIG_COUNT, &sec, &slot),
+		      "at SLOTS==2 the single read-ahead slot is now full");
+	}
 }
 
 /* THE WINDOW IS FULL: once every legal slot holds its sector, the

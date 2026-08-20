@@ -1241,15 +1241,13 @@ static uint8_t s_v11_verify_scratch[ST11_SECTOR_BYTES];
  * the needed sector is missing), which is why an under-fed stream played
  * back slow and distorted rather than merely glitching.
  *
- * WHY FOUR AND NOT MORE, YET: four slots is three sectors of read-ahead
- * = 21.2 ms, the first configuration with POSITIVE margin over that
- * 16.1 ms worst case. Going deeper is purely a RAM question and the RAM
- * is not free yet: at 8 KB per slot, 16 slots would need 114 KB more than
- * the 33.5 KB currently unused. The classic Tape Looper engine is sitting
- * on ~149 KB of provably-silent buffers (see docs/stem-tape-capability-
- * gap-analysis.md); reclaiming that is what pays for a deeper ring, and
- * it is deliberately a separate change from this one so the ring protocol
- * lands and is proven on its own. */
+ * DEPTH IS NOT RAISED HERE. ST_STEM_MBOX_SLOTS is 2 in this commit --
+ * the same one sector of read-ahead, and the same 16 KB, as the
+ * double-buffer being replaced -- so the ring protocol lands in the
+ * shipped image at unchanged RAM cost. Raising it is what actually fixes
+ * the starvation, and it is blocked on reclaiming the classic engine's
+ * ~149 KB of provably-silent buffers; see ST_STEM_MBOX_SLOTS' own note in
+ * st_stem_bufmbox.h for the full reasoning and the measured numbers. */
 static uint8_t g_stem_sector_bufs[ST_STEM_MBOX_SLOTS][ST11_SECTOR_BYTES];
 
 /* The lock-free SPSC handoff (st_stem_bufmbox.h) -- see this block's own

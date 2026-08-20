@@ -160,18 +160,29 @@ static inline void st_atomic_set(st_atomic32_t *a, int32_t v)
  * (one sector, 7.08 ms) was structurally unable to meet that; see this
  * header's own "WHY N SLOTS AND NOT TWO".
  *
- * FOUR is the first value with positive margin: 3 sectors = 21.2 ms
- * against that 16.1 ms worst case. It is not the value this ultimately
- * wants -- deeper is strictly better for absorbing consecutive slow reads
- * -- but depth is bought with RAM (8 KB per slot) and the RAM is not free
- * yet. Sixteen slots would need 114 KB more than currently exists unused.
- * The classic Tape Looper engine holds ~149 KB of provably-silent
- * buffers (docs/stem-tape-capability-gap-analysis.md); reclaiming those
- * is what raises this number, and is deliberately a separate change so
- * this protocol lands and is proven on its own first.
+ * TWO, FOR NOW, AND THAT IS THE POINT OF THIS COMMIT, NOT ITS GOAL.
+ * Two slots is one sector of read-ahead -- the same depth (and the same
+ * 16 KB) as the double-buffer this replaces -- so this change lands the
+ * RING PROTOCOL in the shipped firmware at unchanged RAM cost, with the
+ * loop-wrap release fix and the whole test suite proving it, while
+ * changing nothing about the memory budget.
+ *
+ * It is deliberately NOT the depth the product needs. Four slots
+ * (3 sectors = 21.2 ms) is the first value with positive margin over the
+ * 16.1 ms measured worst-case read, and deeper is better still. But depth
+ * costs 8 KB per slot, and this firmware has only ~17 KB genuinely spare:
+ * raising this to 4 pushed RAM to 245,086 B and the CI budget gate
+ * correctly rejected it for leaving under its required 32 KiB free. That
+ * gate is right and is not to be relaxed to make a feature fit.
+ *
+ * What pays for depth is the ~149 KB of provably-silent classic Tape
+ * Looper buffers (docs/stem-tape-capability-gap-analysis.md). Once that
+ * reclaim lands, raising this number is a one-line change on top of a
+ * protocol that is already proven in the real image -- which is exactly
+ * why the two are separate commits.
  */
 #ifndef ST_STEM_MBOX_SLOTS
-#define ST_STEM_MBOX_SLOTS 4u
+#define ST_STEM_MBOX_SLOTS 2u
 #endif
 
 /* Value of a slot that holds no valid sector, and of held_sector before
