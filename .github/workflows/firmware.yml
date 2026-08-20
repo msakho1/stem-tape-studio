@@ -1231,7 +1231,7 @@ jobs:
         # requested_sector()/st11_sector_decode_frame()/st_stem_mix_
         # frame(), streamer_thread() (the mailbox producer) calling
         # st_stream_init()/st_stream_validate_sector()/st_stem_mbox_
-        # init()/st_stem_mbox_producer_target_slot()/st_stem_mbox_
+        # init()/st_stem_mbox_producer_next_fill()/st_stem_mbox_
         # publish_ready()/st11_sector_read_header(), AND (new in slice
         # 3C) audio_thread() calling looper_audio_block()/i2s_write() --
         # the final link, proving the mixer's real output reaches the
@@ -1546,8 +1546,17 @@ jobs:
           check st_stem_mbox_init
           check st_stem_mbox_try_acquire
           check st_stem_mbox_set_requested_sector
-          check st_stem_mbox_producer_target_slot
-          check st_stem_mbox_producer_requested_sector
+          # The ring (st_stem_bufmbox.h) replaced the two-buffer mailbox's
+          # producer_target_slot() with producer_next_fill(), which picks
+          # BOTH the sector and its slot. requested_sector() is no longer
+          # in the required set: next_fill() reads that field internally,
+          # so main.c has no reason to call the accessor and -ffunction-
+          # sections/--gc-sections correctly drops it from the image. It
+          # is still part of the producer-side API and still exercised by
+          # tests/test_stem_bufmbox.c; requiring a symbol the runtime does
+          # not use would be requiring dead weight in the ELF.
+          check st_stem_mbox_producer_next_fill
+          check st_stem_mbox_release
           check st_stem_mbox_publish_ready
 
           # REQUIRED-ABSENT: any of these appearing in the final ELF (any nm
