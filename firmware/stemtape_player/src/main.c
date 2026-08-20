@@ -2283,6 +2283,9 @@ static void looper_audio_block(int16_t *s)
 		 * underrun_count so the atomic diagnostic mirror below is only
 		 * ever touched on a genuine change. */
 		static uint8_t g_stem_active_buf_idx_local;
+		/* Audio-thread-private latch: "I have already told the mailbox I
+		 * am holding nothing." See the release call site below. */
+		static bool s_stem_released;
 		static uint32_t s_stem_underrun_shadow;
 		/* Reuses the existing PLAY/STOP transport flag as-is (the
 		 * "minimum existing transport state necessary to exercise
@@ -2359,6 +2362,22 @@ static void looper_audio_block(int16_t *s)
 		 * st_stem_meter.h). Block-local, audio-thread-private until the
 		 * single atomic store below -- no per-frame atomics. */
 		uint32_t stem_peak[ST11_STEM_COUNT] = { 0u, 0u, 0u, 0u };
+		/* Audibility is a property of stem_channels[], which is built
+		 * ONCE per block and cannot change within it -- so resolve it
+		 * once here rather than per frame. The first version of the
+		 * beat-pulse metering called st_stem_mix_channel_audible()
+		 * inside the frame loop, once per stem: four cross-module calls
+		 * per frame, each running its own four-iteration solo scan, at
+		 * 48 kHz. That is pure waste, and on this device it is not
+		 * harmless waste -- the eMMC read path is CPU-bound (bit-banged
+		 * start-bit hunt, SPIM setup, CRC), so every cycle the audio
+		 * thread takes is a cycle the streamer does not get, and read
+		 * throughput falls in direct proportion. */
+		bool stem_audible[ST11_STEM_COUNT];
+
+		for (uint32_t sa = 0; sa < ST11_STEM_COUNT; sa++) {
+			stem_audible[sa] = st_stem_mix_channel_audible(stem_channels, sa);
+		}
 #endif
 		for (uint32_t f = 0; f < BLK_FRAMES; f++) {
 #if SP1_XFER_ENABLE
@@ -2380,15 +2399,26 @@ static void looper_audio_block(int16_t *s)
 					if (st_stem_mbox_try_acquire(&g_stem_mbox, needed, &acquired_slot)) {
 						g_stem_active_buf_idx_local = (uint8_t)acquired_slot;
 						st_stream_sector_ready(&g_stem_stream, needed);
-					} else {
-						/* Genuinely reading nothing this frame.
-						 * Say so, so the producer is free to
-						 * fill every slot -- including the one
-						 * the previously-held sector maps to.
-						 * See st_stem_mbox_release()'s own doc
+						s_stem_released = false;   /* holding a buffer again */
+					} else if (!s_stem_released) {
+						/* Genuinely reading nothing. Say so, so
+						 * the producer is free to fill every
+						 * slot -- including the one the
+						 * previously-held sector maps to. See
+						 * st_stem_mbox_release()'s own doc
 						 * comment for the loop-wrap stall this
-						 * specifically prevents. */
+						 * specifically prevents.
+						 *
+						 * ONCE per starvation episode, not once
+						 * per starved frame: the mailbox call is
+						 * a sequentially-consistent atomic pair,
+						 * and on a starving stream this branch is
+						 * taken on most of 48000 frames a second.
+						 * The state it publishes is idempotent,
+						 * so repeating it bought nothing and cost
+						 * a memory barrier every frame. */
 						st_stem_mbox_release(&g_stem_mbox);
+						s_stem_released = true;
 					}
 				}
 				/* Publish what we need NEXT (only actually stores
@@ -2454,30 +2484,48 @@ static void looper_audio_block(int16_t *s)
 					st_stem_mix_frame(&frame, stem_channels, &stem_l, &stem_r);
 
 					/* BEAT PULSE: per-stem peak magnitude for
-					 * this block. Only stems that are actually
-					 * AUDIBLE contribute -- st_stem_mix_channel_
-					 * audible() is the SAME shared rule the mixer
-					 * itself applied a line above, so a muted or
-					 * solo-silenced stem meters 0 and its light
-					 * goes dark with no separate rule to keep in
-					 * sync. Absolute value taken on the int32
-					 * 24-bit sample; INT32_MIN cannot occur in a
-					 * sign-extended 24-bit value, so plain
-					 * negation is safe here. */
-					for (uint32_t sp = 0; sp < ST11_STEM_COUNT; sp++) {
-						int32_t l, r;
-						uint32_t mag;
+					 * this block, SAMPLED rather than computed
+					 * on every frame.
+					 *
+					 * These peaks drive an envelope that
+					 * led_service() reads at roughly 40 Hz, so
+					 * sampling one frame in 32 (1.5 kHz) is still
+					 * two orders of magnitude finer than anything
+					 * the display can show, and it cuts this work
+					 * by 32x. Metering at the full 48 kHz was
+					 * buying resolution nothing consumes, and
+					 * paying for it out of the CPU budget the
+					 * eMMC streamer needs to keep audio fed.
+					 *
+					 * A peak can be missed between samples. That
+					 * is acceptable HERE and nowhere else: this
+					 * value only lights an LED, it never touches
+					 * the audio path.
+					 *
+					 * stem_audible[] is the block-hoisted form of
+					 * the SAME st_stem_mix_channel_audible() rule
+					 * the mixer applied a line above, so a muted
+					 * or solo-silenced stem still meters 0 with
+					 * no second rule to keep in sync. Absolute
+					 * value is taken on the int32 24-bit sample;
+					 * INT32_MIN cannot occur in a sign-extended
+					 * 24-bit value, so plain negation is safe. */
+					if ((f & 31u) == 0u) {
+						for (uint32_t sp = 0; sp < ST11_STEM_COUNT; sp++) {
+							int32_t l, r;
+							uint32_t mag;
 
-						if (!st_stem_mix_channel_audible(stem_channels, sp)) {
-							continue;
-						}
-						l = frame.stem_l[sp];
-						r = frame.stem_r[sp];
-						if (l < 0) l = -l;
-						if (r < 0) r = -r;
-						mag = (uint32_t)((l > r) ? l : r);
-						if (mag > stem_peak[sp]) {
-							stem_peak[sp] = mag;
+							if (!stem_audible[sp]) {
+								continue;
+							}
+							l = frame.stem_l[sp];
+							r = frame.stem_r[sp];
+							if (l < 0) l = -l;
+							if (r < 0) r = -r;
+							mag = (uint32_t)((l > r) ? l : r);
+							if (mag > stem_peak[sp]) {
+								stem_peak[sp] = mag;
+							}
 						}
 					}
 				}

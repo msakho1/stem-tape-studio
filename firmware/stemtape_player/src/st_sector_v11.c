@@ -91,6 +91,13 @@ bool st11_sector_read_header(const uint8_t in[ST11_SECTOR_BYTES], st11_sector_he
 	return true;
 }
 
+/* -O2 FOR THIS FUNCTION ONLY -- see st_stem_mix.c's matching note and
+ * sp1_emmc.c's crc16() for the established precedent. Pure computation,
+ * no timing or aliasing dependency, called once per output frame at
+ * 48 kHz alongside st_stem_mix_frame(); the eight 24-bit little-endian
+ * sign-extending loads it performs are exactly the shape -Os pessimises
+ * and -O2 does not. */
+__attribute__((optimize("O2")))
 void st11_sector_decode_frame(const uint8_t in[ST11_SECTOR_BYTES], uint32_t frame_index,
 			       st11_audio_frame_t *frame_out)
 {

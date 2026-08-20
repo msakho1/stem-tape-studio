@@ -51,6 +51,18 @@ bool st_stem_mix_channel_audible(const st_stem_mix_channel_t channels[ST11_STEM_
 	return channel_active(channels, index, any_channel_soloed(channels));
 }
 
+/* -O2 FOR THIS FUNCTION ONLY, same justification as sp1_emmc.c's crc16()
+ * (see that file's own note): this is pure computation with no timing or
+ * aliasing dependency, so -O2 can only make it faster and cannot change
+ * the value it produces. It matters because it is the single hottest
+ * function in the firmware -- called once per output frame at 48 kHz --
+ * and because on this device audio-thread CPU is not free: the eMMC read
+ * path is CPU-bound (bit-banged start-bit hunt, SPIM setup, CRC), so
+ * every cycle spent here is a cycle the streamer does not get, and read
+ * throughput falls in direct proportion. Measured on hardware: with the
+ * audio thread at 51% the streamer got 40% and sustained only 644 kB/s
+ * against the 1,152 kB/s that 48 kHz four-stem playback requires. */
+__attribute__((optimize("O2")))
 void st_stem_mix_frame(const st11_audio_frame_t *frame, const st_stem_mix_channel_t channels[ST11_STEM_COUNT],
 			int16_t *out_l, int16_t *out_r)
 {
