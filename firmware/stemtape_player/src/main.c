@@ -2436,6 +2436,28 @@ static void looper_audio_block(int16_t *s)
 				 * is applied here (that pass existed ONLY to clamp a
 				 * classic+stem SUM, which this architecture no longer
 				 * produces). */
+				/* MASTER VOLUME. This was missing: the stem path
+				 * wrote stem_l/stem_r straight out while only the
+				 * classic fallback below applied g_master_vol_q8,
+				 * so the VOL buttons did nothing whatsoever during
+				 * stored-song playback. Uses the SAME per-frame
+				 * ramp (m0/md, computed once per block above) the
+				 * classic path uses, for the same reason: a VOL
+				 * step is ~3 dB and applying it as a hard jump at
+				 * a block boundary is an audible click.
+				 *
+				 * st_stem_mix_frame() has already saturated its
+				 * own int64 accumulation into int16 range, and
+				 * master volume only ever attenuates (Q8 unity =
+				 * 256 is the maximum -- see g_master_vol_q8's own
+				 * clamp), so the product cannot leave int16 range
+				 * and needs no second soft_limit() pass. */
+				{
+					const int32_t m = md ? (m0 + ((md * (int32_t)(f + 1)) >> 8)) : mv;
+
+					stem_l = (int16_t)(((int32_t)stem_l * m) >> 8);
+					stem_r = (int16_t)(((int32_t)stem_r * m) >> 8);
+				}
 				s[2 * f]     = stem_l;
 				s[2 * f + 1] = stem_r;
 				continue;
