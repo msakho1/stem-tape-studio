@@ -2357,7 +2357,46 @@ static void looper_audio_block(int16_t *s)
 				 * sector matched above, so a sector-crossing that
 				 * just happened this very frame is announced
 				 * immediately, not one frame late. */
-				st_stem_mbox_set_requested_sector(&g_stem_mbox, needed);
+				/* THE prefetch lookahead. Publishing `needed` --
+				 * the sector being played RIGHT NOW -- is what
+				 * this did before, and it made the second buffer
+				 * dead weight: the producer only ever started
+				 * fetching a sector at the moment the consumer
+				 * had already crossed into it, so every single
+				 * crossing stalled for the whole ~6.3ms eMMC read
+				 * while the mixer emitted silence. Real physical
+				 * measurement: underrun episodes tracked the read
+				 * count exactly 1:1 (und == rdc, thousands of
+				 * each), i.e. one underrun per sector forever --
+				 * roughly a 10% duty cycle of real audio, which
+				 * is why a correctly stored song was unlistenable.
+				 *
+				 * Once the current sector is resident, ask for the
+				 * one AFTER it instead, so the producer fills the
+				 * idle buffer during the ~7.08ms this sector plays
+				 * for. That is what makes a two-buffer scheme
+				 * actually double-buffer. While the current sector
+				 * is NOT yet resident (a genuine underrun, or the
+				 * first tick after a seek/reload) keep asking for
+				 * it -- fetching further ahead then would strand
+				 * the consumer waiting on a sector nobody is
+				 * fetching. */
+				uint32_t want = needed;
+
+				if (g_stem_stream.ready_sector == needed) {
+					uint32_t ahead = needed + 1u;
+
+					if (ahead >= g_stem_stream.sector_count) {
+						/* End of song: wrap only if this song
+						 * loops; otherwise there is nothing
+						 * further to fetch and re-publishing
+						 * `needed` is a no-op for the producer
+						 * (it already published that sector). */
+						ahead = g_stem_stream.loop_enabled ? 0u : needed;
+					}
+					want = ahead;
+				}
+				st_stem_mbox_set_requested_sector(&g_stem_mbox, want);
 
 				if (g_stem_stream.ready_sector == needed) {
 					/* RAM-only: decodes ONE frame out of whichever
