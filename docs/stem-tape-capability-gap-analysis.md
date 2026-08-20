@@ -124,30 +124,84 @@ There are two completely different kinds here and conflating them would cost us.
 
 ### 3a. Dead RAM in the shipped image — this is the real cost
 
-Total device RAM 228,574 bytes; ~33,570 free.
+The linker's own figure, from the green CI build of `e8e189b`:
 
-| Item | Bytes | Verdict |
-|---|---:|---|
-| `trk[4].pring[16384]` int16 play rings + fields (`main.c:989`, `1028`) | **131,264** | **Dead.** Only PASS A/B read them; PASS A/B are provably silent. |
-| Zephyr / USB / I2S / eMMC drivers | ~48,000 | Live |
-| Stem buffers: 2 × 8192 sector + 8192 verify scratch | 24,576 | Live |
-| `batchbuf[32 × 512]` (`main.c:3801`) | **16,384** | **Dead** — classic play-ring refill staging (`main.c:4363–4390`); dies with `pring` |
-| Thread stacks (audio 3072, streamer 4096, midi 768, main 4096, isr/idle) | 12,672 | Live |
-| CDC RX ring | 8,274 | Live (sized to one whole bulk request — this was the upload fix) |
-| `posb[256]`, `fracb[256]`, `mix32[256]` (`main.c:2009–2011`) | 2,560 | **Dead** — classic resampler scratch |
-| `struct meta_blk g_meta` (`main.c:930`) | 2,048 | **Dead** — classic 16-slot loop index, superseded by STIX |
-| `metabuf[4 × 512]` (`main.c:3796`) | 2,048 | **Dead** — reads that same classic index at boot |
-| `blk[512]` (`main.c:3795`) | 512 | **Dead** — classic single-block scratch |
+```
+Memory region     Used Size   Region Size   %age Used
+        FLASH:      99308 B        892 KB      10.87%
+          RAM:     228574 B        256 KB      87.19%
+RAM budget OK: 228574 bytes used, 33570 bytes free
+```
 
-**Reclaimable: 154,816 bytes ≈ 151 KB — roughly 68% of all device RAM.**
+Every allocation in `main.c` below is enumerated with its array dimensions
+resolved from the real headers; the kernel/driver line is then **derived by
+subtraction from the linker total**, not estimated.
 
-For scale: 151 KB buys **18 more 8192-byte sector buffers**. That is the entire
-budget for Heads and for the read-ahead depth that makes dropouts structurally
-impossible. This is the single highest-leverage change in the project.
+| Item | Bytes | %RAM | Verdict |
+|---|---:|---:|---|
+| `trk[4]` — classic play rings `pring[16384]`×4 + per-track fields | **131,328** | 57.5% | **Dead** — only PASS A/B read them, and PASS A/B is provably silent |
+| `batchbuf[32×512]` (`main.c:3801`) | **16,384** | 7.2% | **Dead** — classic play-ring refill staging; dies with `pring` |
+| `tx_slab` — I2S DMA output, 10 × 1024 B | 10,240 | 4.5% | Live — 53 ms output cushion |
+| `g_cdc_rx` upload receive ring | 8,274 | 3.6% | Live — **upload only** |
+| `s_v11_verify_scratch[8192]` | 8,192 | 3.6% | Live — **upload only** (read-back verify) |
+| `g_stem_sector_buf[8192]` | 8,192 | 3.6% | **Live — this is playback** |
+| `g_stem_sector_buf_b[8192]` | 8,192 | 3.6% | **Live — this is playback** |
+| Thread stacks in `main.c` (audio 3072, streamer 4096, midi 768) | 7,936 | 3.5% | Live |
+| `posb` / `fracb` / `mix32` (`main.c:2009–2011`) | **2,560** | 1.1% | **Dead** — classic resampler scratch |
+| `metabuf[4×512]` (`main.c:3796`) | **2,048** | 0.9% | **Dead** — reads the classic index at boot |
+| `sec[512]` (`main.c:3469`) | 512 | 0.2% | Live — single-block upload staging |
+| `blk[512]` (`main.c:3795`) | **512** | 0.2% | **Dead** — classic scratch |
+| `g_meta` (`struct meta_blk`, `main.c:930`) | **64** | — | **Dead** — classic 16-slot loop index, superseded by STIX |
+| **Everything else** — Zephyr kernel, USB device stack, CDC ACM, USB MIDI2, I2S/ADC/I2C/WDT drivers, main + ISR + idle stacks | **24,140** | 10.6% | Live |
+| **Total (matches the linker exactly)** | **228,574** | 100% | |
+
+Read that table by what it says about **playback**, because that is the
+question worth asking:
+
+> **Playing a song costs 16,384 bytes — 7.2% of RAM.** Two sector buffers.
+> Nothing else in the image belongs to playback at all.
+
+Nothing here is bloated. The entire Zephyr kernel plus every driver — USB,
+CDC, MIDI, I2S, ADC, I2C, watchdog — comes to 24,140 bytes, **10.6%**. (My
+earlier estimate of "~48,000" for that line was roughly 2× too high; it was a
+guess, and this table replaces it with arithmetic.)
+
+What actually occupies the device is a tape looper that can never make a
+sound:
+
+| Bucket | Bytes | %RAM |
+|---|---:|---:|
+| **Classic Tape Looper engine — provably silent** | **152,896** | **66.9%** |
+| Upload path (resident even while playing) | 16,978 | 7.4% |
+| **Stem playback** | **16,384** | **7.2%** |
+| I2S output slab | 10,240 | 4.5% |
+| `main.c` thread stacks | 7,936 | 3.5% |
+| Zephyr kernel + all drivers + remaining stacks | 24,140 | 10.6% |
+
+**Reclaimable: 152,896 bytes ≈ 149 KB — 66.9% of RAM in use.** Everything the
+device genuinely does today — play a song, receive an upload, drive I2S, run
+Zephyr — fits in **75,678 bytes, 29% of the 256 KB region**, leaving ~180 KB
+free.
+
+For scale: 149 KB buys **18 more 8192-byte sector buffers**. That is the
+entire budget for Heads and for the read-ahead depth that makes dropouts
+structurally impossible. And it reframes the dropout problem — playback is not
+using too much memory, it is using far too little: two buffers is 14.2 ms of
+audio against a 16.1 ms worst-case read (§4, Decision 3).
+
+Two live items are worth revisiting once the reclaim lands, though neither is
+urgent next to 149 KB:
+
+- `s_v11_verify_scratch` (8,192 B) is used **only during upload**, when
+  playback is stopped. It can overlay a stem sector buffer instead of holding
+  its own allocation for the device's whole life.
+- `tx_slab`'s comment claims a "~106 ms DMA cushion". At 10 × 256 stereo
+  frames it is **53 ms** — the 106 ms figure is left over from the 24 kHz
+  (`DECIM=2`) build. Stale comment, not a bug.
 
 Note the precedent is already in this file — `main.c:1040`, where I removed
-`g_rring` and wrote *"This reclaims 32 KB of RAM."* Same reasoning, four times
-the size.
+`g_rring` and wrote *"This reclaims 32 KB of RAM."* Same reasoning, nearly
+five times the size.
 
 ### 3b. Dead source in the tree — costs zero RAM, and mostly must NOT be deleted
 
@@ -166,7 +220,7 @@ the `target_sources(app PRIVATE …)` list, which names 15 files.
 | `led_render.c`, `led_render_policy.c`, `led_duty.c/.h`, `led_protocol.h` | 656 | 8-channel PWM renderer + duty policy | **Decide.** `main.c` already drives LEDs directly. Either adopt this renderer or delete it — but not both. |
 | `st_storage_layout`, `st_sector_codec`, `st_transfer`, `st_library_io`, `st_xfer_wire`, `st_stem_validate` | 1,767 | The **retired v1.0 transfer contract**, fully superseded by v1.1 (`st_bulk_xfer` + `st_ab_session` + `st_stix`) | **DELETE.** This is the only genuinely obsolete island. It is kept today for regression evidence, but v1.1 is now *physically proven* on hardware — the evidence has been superseded by something strictly better. |
 
-So the real answer to "zero dead weight" is: **~151 KB of RAM and 1,767 lines of
+So the real answer to "zero dead weight" is: **~149 KB of RAM and 1,767 lines of
 retired v1.0 transfer code are dead. The other 2,115 lines are the product,
 sitting unwired.** The workbook's own warning applies to our own tree — unwired
 modules present as more complete than they are.
@@ -243,7 +297,7 @@ What the workbook actually requires of the streamer:
 
 So the target is: **N independent, direction-aware, fractional-rate read
 positions over a shared sector cache**, not a two-buffer ping-pong. That is a
-rewrite of `st_stem_stream.c`, and the 151 KB from §3a is what pays for it.
+rewrite of `st_stem_stream.c`, and the 149 KB from §3a is what pays for it.
 
 ---
 
@@ -302,7 +356,7 @@ capability instead of a stranded one.
 rate-driven and direction-aware. Varispeed and semitone become real on your
 device for the first time. Reverse becomes reachable.
 
-**Step 3 — Reclaim the 151 KB.** Only now is removing `pring[]`, the classic
+**Step 3 — Reclaim the 149 KB.** Only now is removing `pring[]`, the classic
 mixer scratch, `g_meta` and `batchbuf` safe — nothing needed survives in there.
 Delete the 1,767-line retired v1.0 transfer island at the same time.
 
