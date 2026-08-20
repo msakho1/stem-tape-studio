@@ -1,99 +1,103 @@
 /*
- * st_stem_bufmbox.h — lock-free single-producer/single-consumer double-
- * buffer publication mailbox (STEM TAPE Phase 2 continuous streaming,
- * Slice 3B.1 concurrency correction).
+ * st_stem_bufmbox.h — lock-free single-producer/single-consumer N-slot
+ * sector ring for STEM TAPE continuous streaming.
  *
- * WHY THIS EXISTS: Slice 3B wired st_stem_stream.c's pure state machine
- * into two real threads by having BOTH of them mutate one shared
- * st_stream_t instance directly, relying on `volatile` fields plus a
- * DOCUMENTED write order (buffer index published before the ready flag)
- * for correctness. That is not a formally safe synchronization
- * primitive -- `volatile` only tells the compiler not to cache a value
- * across a sequence point; it says nothing about cross-thread visibility
- * ordering, and a "we always write A before B" convention has no
- * mechanism enforcing that the other thread cannot observe B before A
- * on hardware where a plain store is not immediately globally visible.
- * This module replaces that with a real, formally specified handoff:
- * every value that crosses the thread boundary is an atomic object, and
- * every ordering requirement is expressed as acquire/release pairing
- * (Zephyr's own atomic_t operations, used in the real firmware build,
- * are unconditionally sequentially consistent -- strictly STRONGER than
- * acquire/release, so they satisfy every ordering requirement this
- * module states; the host test build below uses C11 <stdatomic.h> with
- * EXPLICIT memory_order_acquire/memory_order_release, the minimal
- * ordering the protocol actually needs, so the tests exercise the real
- * requirement, not a stronger one that would hide a weaker bug).
+ * WHY THIS EXISTS: the first version of this handoff was two `volatile`
+ * fields plus a DOCUMENTED write order, which is not a synchronization
+ * primitive at all -- `volatile` says nothing about cross-thread
+ * visibility ordering, and "we always write A before B" has no mechanism
+ * enforcing that the other thread cannot observe B before A. That was
+ * replaced by a formally specified atomic handoff, which this file still
+ * is: every value crossing the thread boundary is an atomic object and
+ * every ordering requirement is expressed as acquire/release pairing.
+ *
+ * WHY N SLOTS AND NOT TWO: the double-buffer version could hold at most
+ * ONE sector of read-ahead. A sector is 7.08 ms of audio and a worst-case
+ * eMMC read measured 16.1 ms on real hardware, so the design had
+ * PERMANENTLY NEGATIVE margin -- the producer could not, even in
+ * principle, stay ahead of a single slow read. The consumer then stalls,
+ * and because st_stream_advance_frame() freezes song_frame while the
+ * needed sector is missing, a stall does not drop audio, it TIME-STRETCHES
+ * it: the song plays at whatever fraction of real time the card can
+ * sustain. That is what a starving stream actually sounds like, and no
+ * amount of correctness elsewhere fixes it. N slots give (N-1) sectors of
+ * read-ahead so ordinary read jitter is absorbed instead of becoming
+ * audible.
  *
  * ROLES (exactly one thread each, for the whole lifetime of a mailbox):
  *   PRODUCER (real firmware: streamer_thread) -- the ONLY thread that
- *     ever fills or validates the free physical buffer, and the only
- *     thread that calls st_stem_mbox_publish_ready().
+ *     ever fills or validates a buffer, and the only caller of
+ *     st_stem_mbox_producer_next_fill() / st_stem_mbox_publish_ready().
  *   CONSUMER (real firmware: audio_thread) -- the ONLY thread that ever
- *     decodes/reads buffer bytes for playback, and the only thread that
- *     calls st_stem_mbox_try_acquire() / st_stem_mbox_set_requested_
- *     sector().
+ *     decodes/reads buffer bytes, and the only caller of
+ *     st_stem_mbox_try_acquire() / st_stem_mbox_set_requested_sector().
  * Calling a "wrong side" function from the other role is a caller bug
  * this module does not defend against (matches every other single-
  * writer-per-field convention already used throughout this codebase).
  *
+ * THE MAPPING: sector s always lives in slot (s % ST_STEM_MBOX_SLOTS).
+ * This is what keeps the consumer wait-free: to find out whether the one
+ * sector it needs is resident it computes a single index and does a
+ * single atomic load -- never a scan, never a search. It is also what
+ * makes a seek or a loop wrap self-correcting: after a discontinuity the
+ * slot for the newly needed sector simply holds some other sector index,
+ * so try_acquire() fails, and the producer refills it. Nothing has to
+ * detect the discontinuity or reset anything.
+ *
  * THE HANDOFF, exactly:
- *   - `ready_word` (producer writes, consumer reads): packs BOTH the
- *     ready sector index and which physical buffer slot (0/1) holds it
- *     into ONE atomic word, so the pair is always observed together,
- *     never torn -- there is no possible interleaving where a consumer
- *     could see a NEW sector index paired with an OLD buffer slot (or
- *     vice versa), because there is only ever one atomic load involved.
- *   - `requested_sector` (consumer writes, producer reads): which
- *     sector the consumer currently needs -- the producer's own
- *     "what should I fetch" input. Only the consumer can know this (it
- *     owns song position), so it must publish it.
- *   - `consumer_slot` (consumer writes, producer reads): which physical
- *     buffer slot the consumer is CURRENTLY reading from. This doubles
- *     as the release signal: the producer's only safe fill target is
- *     ALWAYS `1 - consumer_slot`, recomputed FRESH (never cached) every
- *     time it considers starting a fill -- so "the producer must not
- *     refill a buffer until the consumer has atomically released it" is
- *     satisfied structurally, not by a wait/poll loop: the producer can
- *     never even compute the wrong target, because the buffer the
- *     consumer is using can never be misidentified once consumer_slot is
- *     read. The consumer updates consumer_slot to the NEW slot the
- *     instant it adopts a freshly-published buffer (inside try_acquire,
- *     see below) -- which is exactly the same instant the OLD slot
- *     becomes safe for the producer to reuse, because a sequential
- *     single-position stream never needs to re-read a sector once it
- *     has moved past it (st_stream_advance_frame() freezes song_frame
- *     while the needed sector isn't ready, so the consumer can never
- *     race ahead of what the producer has actually published).
+ *   - `slot_sector[i]` (producer writes, consumer reads): which sector
+ *     index slot i currently holds, or ST_STEM_MBOX_NO_SECTOR. Because
+ *     the sector index IS the published value (not a separate flag), a
+ *     consumer that observes `needed` in the slot it computed for
+ *     `needed` has, by construction, observed the right buffer -- there
+ *     is no index/flag pair that could be seen half-updated.
+ *   - `requested_sector` (consumer writes, producer reads): the sector
+ *     the consumer currently needs. Only the consumer knows this (it owns
+ *     song position), so it must publish it; it is the producer's
+ *     starting point for deciding what to fetch.
+ *   - `held_sector` (consumer writes, producer reads): the sector the
+ *     consumer most recently ACQUIRED and is therefore reading bytes out
+ *     of right now, or ST_STEM_MBOX_NO_SECTOR before the first acquire.
+ *     This is the release signal: the producer must never write the slot
+ *     that maps to held_sector, and it recomputes that forbidden slot
+ *     FRESH (never cached) every time it picks a target. "Do not refill a
+ *     buffer the consumer has not released" is therefore satisfied
+ *     structurally rather than by any wait or poll -- and a STALE read of
+ *     held_sector is always safe, because held_sector only ever moves
+ *     forward, so an older value can only make the producer more
+ *     conservative, never less.
  *
- * VISIBILITY GUARANTEE ("buffer bytes and their metadata must become
- * visible before the ready flag is published"): the producer writes the
- * plain (non-atomic) buffer bytes and header fields BEFORE calling
- * st_stem_mbox_publish_ready(), which performs a RELEASE store of
- * `ready_word`. The consumer's st_stem_mbox_try_acquire() performs an
- * ACQUIRE load of the SAME `ready_word`. A release store
- * synchronizes-with an acquire load of the same atomic object that
- * observes the stored value (C11 5.1.2.4/Zephyr's own stronger SC
- * guarantee), which means every plain write the producer made before
- * its release store is guaranteed visible to the consumer after its
- * acquire load succeeds -- this is the formal mechanism, not merely a
- * convention, and it is exactly what the adversarial host tests in
- * tests/test_stem_bufmbox.c exercise under real concurrent pthreads
- * (writing a deterministic, per-sector byte pattern into the buffer and
- * verifying the consumer never observes anything other than the exact
- * pattern for the sector index it just acquired).
+ * WHY `held` AND `requested` ARE SEPARATE: they differ at exactly the
+ * moment that matters. Immediately after a seek the consumer needs sector
+ * R but holds nothing, and the producer must be free to fill R itself. If
+ * one field served both roles the producer would treat R as forbidden and
+ * deadlock, each side waiting for the other.
  *
- * NON-BLOCKING: every function here is wait-free (bounded number of
- * atomic operations, no loops that can spin on another thread, no
- * mutex, no allocation) -- the consumer side in particular must never
- * lock, block, or allocate, since it runs on the real-time audio thread.
+ * VISIBILITY GUARANTEE ("buffer bytes must become visible before the slot
+ * is published"): the producer writes the plain (non-atomic) buffer bytes
+ * BEFORE calling st_stem_mbox_publish_ready(), which performs a RELEASE
+ * store of that slot. The consumer's st_stem_mbox_try_acquire() performs
+ * an ACQUIRE load of the SAME slot. A release store synchronizes-with an
+ * acquire load of the same atomic object that observes the stored value
+ * (C11 5.1.2.4 / Zephyr's own stronger SC guarantee), so every plain
+ * write the producer made before its release store is visible to the
+ * consumer once its acquire load succeeds. This is the formal mechanism,
+ * not a convention, and it is exactly what the adversarial concurrent-
+ * pthread host tests in tests/test_stem_bufmbox.c exercise.
  *
- * BACKEND: st_atomic32_t / st_atomic_get() / st_atomic_set() below map
- * to Zephyr's real atomic_t when ST_STEM_BUFMBOX_ZEPHYR is defined (set
- * by CMakeLists.txt for the real firmware target only), and to C11
- * <stdatomic.h> atomic_int with explicit acquire/release ordering
- * otherwise (the host test build, which has no Zephyr headers
- * available) -- SAME protocol, SAME ordering requirements, two
- * interchangeable backends for the same four primitive operations.
+ * NON-BLOCKING: every function here is wait-free (bounded atomic
+ * operations, no loop that can spin on another thread, no mutex, no
+ * allocation). The consumer side in particular runs on the real-time
+ * audio thread and must never lock, block or allocate.
+ *
+ * BACKEND: st_atomic32_t / st_atomic_get() / st_atomic_set() map to
+ * Zephyr's real atomic_t when ST_STEM_BUFMBOX_ZEPHYR is defined (set by
+ * CMakeLists.txt for the firmware target only), and to C11 <stdatomic.h>
+ * with EXPLICIT acquire/release otherwise (the host test build) -- SAME
+ * protocol, SAME ordering requirements. The host backend deliberately
+ * uses the minimal ordering the protocol actually needs, not seq_cst, so
+ * a test failure reflects a genuine violation rather than an artifact of
+ * an over-strong default.
  */
 
 #ifndef STEMTAPE_PLAYER_STEM_BUFMBOX_H_
@@ -140,69 +144,146 @@ static inline void st_atomic_set(st_atomic32_t *a, int32_t v)
 }
 #endif
 
-/* ready_word's value when no sector has ever been published (mailbox
- * freshly initialized only -- st_stem_mbox_init() always publishes an
- * initial ready sector, so in practice this sentinel is only ever
- * observed by tests exercising the primitive directly). */
+/*
+ * How many physical sector buffers the ring owns, and therefore how many
+ * sectors of read-ahead exist: (SLOTS - 1), because the slot mapping to
+ * the sector the consumer currently holds is never a legal fill target.
+ *
+ * MUST be the length of the buffer array the caller passes around (see
+ * main.c's g_stem_bufs[]) -- a BUILD_ASSERT there ties the two together
+ * so they cannot drift.
+ *
+ * The budget that sets this: one sector is 7.08 ms of audio and the
+ * measured worst-case eMMC read is 16.1 ms, so read-ahead must exceed
+ * ~2.3 sectors merely to survive ONE bad read, with margin on top for
+ * consecutive bad reads and for the streamer being preempted. Two slots
+ * (one sector, 7.08 ms) was structurally unable to meet that; see this
+ * header's own "WHY N SLOTS AND NOT TWO".
+ *
+ * FOUR is the first value with positive margin: 3 sectors = 21.2 ms
+ * against that 16.1 ms worst case. It is not the value this ultimately
+ * wants -- deeper is strictly better for absorbing consecutive slow reads
+ * -- but depth is bought with RAM (8 KB per slot) and the RAM is not free
+ * yet. Sixteen slots would need 114 KB more than currently exists unused.
+ * The classic Tape Looper engine holds ~149 KB of provably-silent
+ * buffers (docs/stem-tape-capability-gap-analysis.md); reclaiming those
+ * is what raises this number, and is deliberately a separate change so
+ * this protocol lands and is proven on its own first.
+ */
+#ifndef ST_STEM_MBOX_SLOTS
+#define ST_STEM_MBOX_SLOTS 4u
+#endif
+
+/* Value of a slot that holds no valid sector, and of held_sector before
+ * the consumer's first successful acquire. Negative so it can never
+ * collide with a real (unsigned) sector index. */
 #define ST_STEM_MBOX_NO_SECTOR (-1)
 
 typedef struct {
-	st_atomic32_t ready_word;        /* producer publishes: (sector_index << 1) | buf_idx */
-	st_atomic32_t requested_sector;  /* consumer publishes: sector index it currently needs */
-	st_atomic32_t consumer_slot;     /* consumer publishes: buf idx (0/1) it currently reads from */
+	/* producer publishes: sector index resident in each slot */
+	st_atomic32_t slot_sector[ST_STEM_MBOX_SLOTS];
+	/* consumer publishes: sector index it currently needs */
+	st_atomic32_t requested_sector;
+	/* consumer publishes: sector index it is currently reading bytes
+	 * from (its slot is the producer's forbidden target), or
+	 * ST_STEM_MBOX_NO_SECTOR before the first acquire */
+	st_atomic32_t held_sector;
 } st_stem_mbox_t;
 
+/* The slot a given sector index always maps to. Exposed because both
+ * sides and the tests must agree on it, and because it is the whole
+ * reason the consumer never has to search. */
+static inline uint32_t st_stem_mbox_slot_of(uint32_t sector_index)
+{
+	return sector_index % ST_STEM_MBOX_SLOTS;
+}
+
 /*
- * Initializes the mailbox with an already-resident, already-adopted
- * initial sector -- matches a real boot sequence where the first
- * sector is read synchronously, before either thread's steady-state
- * loop starts, so there is no concurrent access to guard against here.
+ * Initializes the ring with one already-resident, already-adopted sector
+ * (matching a real boot/reload sequence, where the first sector is read
+ * synchronously before either thread's steady-state loop starts, so there
+ * is no concurrent access to guard against here). Every other slot is
+ * marked empty, so the producer will fill them in order.
+ *
+ * `initial_sector` is placed in ITS OWN mapped slot -- the caller does
+ * not choose a slot, because the mapping is not a free parameter.
  */
-void st_stem_mbox_init(st_stem_mbox_t *mb, uint32_t initial_sector, uint8_t initial_buf_idx);
+void st_stem_mbox_init(st_stem_mbox_t *mb, uint32_t initial_sector);
 
 /* ---- PRODUCER-side API (streamer_thread only) ---- */
 
 /*
- * The ONLY buffer slot index (0 or 1) the producer may write into right
- * now. Always the complement of the consumer's own current slot,
- * recomputed fresh from a single acquire load -- see this header's own
- * doc comment for why this alone is sufficient to guarantee the
- * producer never refills a buffer the consumer has not yet released.
+ * Chooses the next sector to fetch, if any.
+ *
+ * Scans forward from the consumer's currently requested sector over the
+ * whole read-ahead window, and returns the FIRST sector in that window
+ * whose mapped slot does not already hold it -- i.e. the nearest gap the
+ * consumer will reach soonest, so a fill is always spent on the most
+ * urgent missing sector rather than on speculative depth.
+ *
+ * `sector_count` is the song's own length, used to wrap the window at the
+ * loop point so read-ahead continues across the seam instead of stalling
+ * there. Pass the real count; 0 is treated as "no song" and returns false.
+ *
+ * The slot mapping to the consumer's held sector is skipped -- that
+ * buffer is being read right now.
+ *
+ * Returns false when the window is already full (nothing to do). On true,
+ * *out_sector is the sector to read and *out_slot is where to put it;
+ * the caller MUST fill that slot and then call publish_ready() with the
+ * SAME pair.
  */
-uint8_t st_stem_mbox_producer_target_slot(const st_stem_mbox_t *mb);
+bool st_stem_mbox_producer_next_fill(const st_stem_mbox_t *mb, uint32_t sector_count,
+				      uint32_t *out_sector, uint32_t *out_slot);
 
-/* Which sector index the consumer currently needs (its own last
- * published requested_sector). */
+/* Which sector index the consumer currently needs. */
 uint32_t st_stem_mbox_producer_requested_sector(const st_stem_mbox_t *mb);
 
 /*
- * Publishes `buf_idx` (which MUST be st_stem_mbox_producer_target_
- * slot()'s own return value at the time the producer started filling
- * it -- see this header's own doc comment for why that remains valid
- * for the whole duration of one fill) as holding `sector_index`, fully
- * written and validated. Callers MUST perform every buffer-byte and
- * metadata write BEFORE calling this -- see this header's own
- * "VISIBILITY GUARANTEE" section for exactly what that buys.
+ * Publishes `slot` as holding `sector_index`, fully written and validated.
+ * Callers MUST perform every buffer-byte write BEFORE calling this -- see
+ * this header's own "VISIBILITY GUARANTEE" for exactly what that buys.
  */
-void st_stem_mbox_publish_ready(st_stem_mbox_t *mb, uint32_t sector_index, uint8_t buf_idx);
+void st_stem_mbox_publish_ready(st_stem_mbox_t *mb, uint32_t sector_index, uint32_t slot);
 
 /* ---- CONSUMER-side API (audio_thread only) ---- */
 
 /*
- * If the mailbox's currently published ready_word names exactly
- * `needed_sector`, writes its buffer slot index to *out_buf_idx,
- * atomically publishes THIS as the consumer's new current slot
- * (releasing whatever slot it previously held), and returns true.
- * Otherwise returns false and touches nothing. Wait-free: a single
- * acquire load, and (only on success) a single release store -- never
- * blocks, never loops.
+ * If `needed_sector`'s own mapped slot currently holds exactly that
+ * sector, writes the slot index to *out_slot, atomically publishes this
+ * as the consumer's newly held sector (releasing whatever it held
+ * before), and returns true. Otherwise returns false and touches nothing.
+ *
+ * Wait-free: one acquire load, and on success one release store -- never
+ * blocks, never loops, never searches.
  */
-bool st_stem_mbox_try_acquire(st_stem_mbox_t *mb, uint32_t needed_sector, uint8_t *out_buf_idx);
+bool st_stem_mbox_try_acquire(st_stem_mbox_t *mb, uint32_t needed_sector, uint32_t *out_slot);
+
+/*
+ * Publishes "I am not reading any buffer right now" (held_sector becomes
+ * ST_STEM_MBOX_NO_SECTOR), freeing every slot for the producer.
+ *
+ * WHY THIS IS REQUIRED, not an optimization. The producer skips the slot
+ * mapping to held_sector, which is what stops it overwriting the buffer
+ * being decoded. At a loop wrap the consumer's held sector is the song's
+ * LAST sector while the sector it now needs is 0 -- and if the song's
+ * length happens to satisfy (sector_count % SLOTS) == 1, those two map to
+ * the SAME slot. The producer would then refuse forever to fill the one
+ * sector the consumer is waiting for, and the consumer would never
+ * acquire anything and so never update held_sector: a permanent stall,
+ * for particular song lengths only.
+ *
+ * Calling this whenever the needed sector is genuinely not resident
+ * removes that class of stall entirely, and is simply true: a consumer
+ * that has nothing to read is holding nothing. Idempotent and cheap --
+ * it stores only on the pass that actually changes the value.
+ */
+void st_stem_mbox_release(st_stem_mbox_t *mb);
 
 /* Publishes a new "sector I currently need" for the producer to read.
- * Cheap to call every time the consumer's own need changes; callers
- * should avoid calling it when the value has not changed (not required
- * for correctness, just avoids a redundant atomic store). */
+ * Cheap to call whenever the consumer's need changes; callers should
+ * avoid calling it when the value has not changed (not required for
+ * correctness, just avoids a redundant atomic store). */
 void st_stem_mbox_set_requested_sector(st_stem_mbox_t *mb, uint32_t sector_index);
 
 #endif /* STEMTAPE_PLAYER_STEM_BUFMBOX_H_ */

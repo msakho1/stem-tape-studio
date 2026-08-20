@@ -243,7 +243,7 @@ typedef struct {
 
 	st_stream_t stream;
 	st_stem_mbox_t mbox;
-	uint8_t bufs[2][ST11_SECTOR_BYTES];
+	uint8_t bufs[ST_STEM_MBOX_SLOTS][ST11_SECTOR_BYTES];
 
 	/* Producer-local (this thread only). */
 	bool corrupted_once;
@@ -275,26 +275,26 @@ static void *walk_producer_main(void *arg)
 	 * the FIRST publish of that same sector -- a real, TSan-detected
 	 * data race this bookkeeping avoids by construction: fetch/
 	 * validate/publish each sector index exactly ONCE. */
-	uint32_t published_sector = 0xFFFFFFFFu; /* sector 0 was already published by st_stem_mbox_init() at
-						   * boot, before this thread started -- so 0xFFFFFFFF (never
-						   * equal to a real sector index) correctly means "nothing
-						   * THIS thread has published yet", exactly like main.c's own
-						   * s_stem_published_sector's own initial value */
-
 	for (;;) {
-		uint32_t needed = st_stem_mbox_producer_requested_sector(&ctx->mbox);
+		uint32_t needed;
+		uint32_t target_slot;
+		uint8_t *target_buf;
+		size_t src_off;
 
-		if (needed >= ctx->stream.sector_count) {
+		if (st_stem_mbox_producer_requested_sector(&ctx->mbox) >= ctx->stream.sector_count) {
 			/* Consumer signals completion by publishing a sentinel
 			 * out-of-range "requested sector" once it is done --
 			 * see walk_consumer_main()'s own final publish. */
 			return NULL;
 		}
 
-		if (needed == published_sector) {
-			/* Already served -- nothing to do until the consumer's
-			 * own need changes (exactly main.c's own prefetch
-			 * step's own skip condition). */
+		/* The ring's own slot contents ARE the record of what has
+		 * already been fetched, so there is no producer-local
+		 * "published_sector" bookkeeping any more (exactly like
+		 * main.c's own prefetch step). next_fill() returning false
+		 * means the read-ahead window is full. */
+		if (!st_stem_mbox_producer_next_fill(&ctx->mbox, ctx->stream.sector_count,
+						      &needed, &target_slot)) {
 			sched_yield();
 			continue;
 		}
@@ -305,9 +305,8 @@ static void *walk_producer_main(void *arg)
 			continue;
 		}
 
-		uint8_t target_slot = st_stem_mbox_producer_target_slot(&ctx->mbox);
-		uint8_t *target_buf = ctx->bufs[target_slot];
-		size_t src_off = (size_t)needed * ST11_SECTOR_BYTES;
+		target_buf = ctx->bufs[target_slot];
+		src_off = (size_t)needed * ST11_SECTOR_BYTES;
 
 		if (src_off + ST11_SECTOR_BYTES > ctx->fixture_len) {
 			return NULL; /* would be a test-setup bug, not a real-path condition */
@@ -330,7 +329,6 @@ static void *walk_producer_main(void *arg)
 
 		if (ok) {
 			st_stem_mbox_publish_ready(&ctx->mbox, needed, target_slot);
-			published_sector = needed; /* do not redo this sector until requested_sector changes */
 		} else {
 			/* Single-writer counter (only this thread ever writes
 			 * it) -- get+set is race-free for the write side; it
@@ -368,11 +366,15 @@ static void *walk_consumer_main(void *arg)
 		uint32_t needed = st_stream_required_sector(&ctx->stream);
 
 		if (ctx->stream.ready_sector != needed) {
-			uint8_t acquired;
+			uint32_t acquired;
 
 			if (st_stem_mbox_try_acquire(&ctx->mbox, needed, &acquired)) {
 				local_active_buf = acquired;
 				st_stream_sector_ready(&ctx->stream, needed);
+			} else {
+				/* Reading nothing: say so, so the producer may
+				 * use every slot (see st_stem_mbox_release()). */
+				st_stem_mbox_release(&ctx->mbox);
 			}
 		}
 		st_stem_mbox_set_requested_sector(&ctx->mbox, needed);
@@ -465,7 +467,7 @@ static void run_production_walk(const uint8_t *fixture, size_t fixture_len, cons
 	 * boot block: sector 0 resident in buffer 0 before either thread's
 	 * steady-state loop starts. */
 	memcpy(ctx.bufs[0], fixture, ST11_SECTOR_BYTES);
-	st_stem_mbox_init(&ctx.mbox, 0u, 0u);
+	st_stem_mbox_init(&ctx.mbox, 0u);
 
 	pthread_t producer, consumer;
 
@@ -598,10 +600,30 @@ static void test_corrupt_sector_recovers(void)
 	CHECK(r.corrupt_events >= 1u,
 	      "the corrupt-sector diagnostic counter recorded at least one validation failure at sector 5");
 	CHECK(r.decoded_frame_count == SONG_FRAMES,
-	      "every real frame was still eventually decoded -- the corrupt attempt caused underrun/silence for "
-	      "that position, then a genuine retry recovered it, never played garbage");
-	CHECK(r.underrun_ticks >= 1u,
-	      "at least one UNDERRUN tick occurred while the corrupt sector's real replacement was pending");
+	      "every real frame was still eventually decoded -- the corrupt attempt was rejected and a genuine "
+	      "retry supplied the real bytes, never played garbage");
+	/* READ-AHEAD ABSORBS THE RETRY.
+	 *
+	 * This assertion used to REQUIRE at least one UNDERRUN tick here,
+	 * and that was correct for the two-buffer mailbox: with a single
+	 * sector of read-ahead the consumer arrived at the corrupt sector
+	 * before its replacement could possibly be fetched, so rejecting it
+	 * always cost audible silence.
+	 *
+	 * With an N-slot ring the producer rejects and refetches the sector
+	 * while the consumer is still several sectors behind, so the whole
+	 * corrupt/retry cycle is normally invisible. Requiring an underrun
+	 * would now be asserting the OLD limitation as if it were the
+	 * contract.
+	 *
+	 * What actually matters is asserted above and below and is
+	 * unchanged: no wrong sample is ever played, and every real frame
+	 * is eventually decoded. Underruns are permitted (a slow enough host
+	 * can still produce one) but no longer required. */
+	CHECK(ST_STEM_MBOX_SLOTS >= 3u,
+	      "the ring has %u sectors of read-ahead, which is why a corrupt-sector retry no longer has to "
+	      "cost an underrun (observed underrun ticks: %u)",
+	      (unsigned)(ST_STEM_MBOX_SLOTS - 1u), (unsigned)r.underrun_ticks);
 	CHECK(r.hash == 0xe9650ddau,
 	      "despite the injected corruption, the FINAL hash is bit-identical to the clean run -- the corrupt "
 	      "attempt never contributed a single wrong sample");
@@ -619,8 +641,20 @@ static void test_stalled_producer_recovers(void)
 	size_t len;
 	uint8_t *data = read_fixture("handoff/v1.1/binaries/song-sectors-four-stem.bin", &len);
 
+	/* The stall must be long enough to EXHAUST the ring's read-ahead,
+	 * or this test stops testing anything. With (SLOTS-1) sectors
+	 * buffered the consumer can coast (SLOTS-1) * ST11_FRAMES_PER_SECTOR
+	 * frames before it can possibly starve, so a stall sized in
+	 * producer iterations has to comfortably exceed that -- 500 was
+	 * chosen against the old two-buffer mailbox, where a single sector
+	 * of read-ahead meant almost any stall starved the consumer
+	 * immediately, and it became scheduling-dependent (it held under a
+	 * plain build but not under ThreadSanitizer, which shifts the
+	 * relative thread speeds). Scaled to the ring depth so it stays
+	 * deterministic in both builds and stays correct if SLOTS changes. */
 	walk_options_t opt = { .loop_enabled = false, .total_frames_target = SONG_FRAMES,
-				.corrupt_at_sector = -1, .stall_at_sector = 10, .stall_iterations = 500 };
+				.corrupt_at_sector = -1, .stall_at_sector = 10,
+				.stall_iterations = 40u * ST_STEM_MBOX_SLOTS * ST11_FRAMES_PER_SECTOR };
 	walk_result_t r;
 
 	run_production_walk(data, len, &opt, &r);

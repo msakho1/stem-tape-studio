@@ -38,8 +38,8 @@ find_call_sites() in stemtape_player_safety_gate.py already does):
      boot) and st_stream_validate_sector() (validating EVERY sector
      read, not just the first -- read-only geometry access, safe from
      the producer thread) plus st_stem_mbox_init()/st_stem_mbox_
-     producer_target_slot()/st_stem_mbox_publish_ready() (the atomic
-     mailbox's producer-side API) -- proving both the boot-time first
+     producer_next_fill()/st_stem_mbox_publish_ready() (the atomic
+     ring's producer-side API) -- proving both the boot-time first
      sector AND the continuous per-pass prefetch that streams the rest
      of the song go through the real state machine and the real atomic
      handoff, never a shared struct touched directly by both threads.
@@ -150,7 +150,7 @@ REQUIRED_CALLS = {
         "st_stream_init",
         "st_stream_validate_sector",
         "st_stem_mbox_init",
-        "st_stem_mbox_producer_target_slot",
+        "st_stem_mbox_producer_next_fill",
         "st_stem_mbox_publish_ready",
         "st_beat_timing_init",
     ],

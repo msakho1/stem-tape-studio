@@ -1228,9 +1228,29 @@ static uint8_t s_v11_verify_scratch[ST11_SECTOR_BYTES];
  * ST_STEM_BUFMBOX_ZEPHYR in CMakeLists.txt), not `volatile` fields and a
  * documented write order.
  */
-static uint8_t g_stem_sector_buf[ST11_SECTOR_BYTES];
-static uint8_t g_stem_sector_buf_b[ST11_SECTOR_BYTES]; /* the ONE new buffer slice 3B added */
-static uint8_t *const g_stem_bufs[2] = { g_stem_sector_buf, g_stem_sector_buf_b };
+/* The sector ring itself. ST_STEM_MBOX_SLOTS buffers, one per mailbox
+ * slot, with sector s always living in buffer (s % SLOTS) -- see
+ * st_stem_bufmbox.h. Indexed directly by slot, so the count has exactly
+ * one definition (the mailbox's own) and cannot drift.
+ *
+ * WHY THIS GREW FROM TWO: two buffers is one sector of read-ahead, i.e.
+ * 7.08 ms of audio, against a measured worst-case eMMC read of 16.1 ms --
+ * permanently negative margin, so the consumer could not stay fed even in
+ * principle. And a starved consumer here does not drop audio, it
+ * TIME-STRETCHES it (st_stream_advance_frame() freezes song_frame while
+ * the needed sector is missing), which is why an under-fed stream played
+ * back slow and distorted rather than merely glitching.
+ *
+ * WHY FOUR AND NOT MORE, YET: four slots is three sectors of read-ahead
+ * = 21.2 ms, the first configuration with POSITIVE margin over that
+ * 16.1 ms worst case. Going deeper is purely a RAM question and the RAM
+ * is not free yet: at 8 KB per slot, 16 slots would need 114 KB more than
+ * the 33.5 KB currently unused. The classic Tape Looper engine is sitting
+ * on ~149 KB of provably-silent buffers (see docs/stem-tape-capability-
+ * gap-analysis.md); reclaiming that is what pays for a deeper ring, and
+ * it is deliberately a separate change from this one so the ring protocol
+ * lands and is proven on its own. */
+static uint8_t g_stem_sector_bufs[ST_STEM_MBOX_SLOTS][ST11_SECTOR_BYTES];
 
 /* The lock-free SPSC handoff (st_stem_bufmbox.h) -- see this block's own
  * comment above for the producer/consumer role split. */
@@ -1246,7 +1266,7 @@ static st_stem_mbox_t g_stem_mbox;
 static st_stream_t g_stem_stream;
 
 /* Set at boot, by streamer_thread(), only after g_stem_stream above is
- * validly initialized AND g_stem_bufs[0]/g_stem_mbox both hold a real,
+ * validly initialized AND g_stem_sector_bufs[0]/g_stem_mbox both hold a real,
  * header-validated sector 0 -- the same "one-shot release fence" idiom
  * this file already uses for g_v11_layout_ready/g_meta_loaded, now a
  * real atomic (Slice 3B.1) rather than a `volatile` flag, since it is
@@ -1276,7 +1296,7 @@ static atomic_t g_stem_song_selected;
  * safe specifically because g_playing is already 0 for the WHOLE duration
  * of any transfer session (set the instant the SP1XFER! magic is
  * detected), so stem_active is already false and audio_thread is already
- * not touching g_stem_bufs[]/the mailbox for the entire window a reload
+ * not touching g_stem_sector_bufs[]/the mailbox for the entire window a reload
  * can ever be pending in -- confirmed by inspection, not merely assumed. */
 static st_stix_record_t g_stem_reload_pending;
 static atomic_t g_stem_reload_req;
@@ -2287,7 +2307,7 @@ static void looper_audio_block(int16_t *s)
 		 * protocol and why this is safe: g_playing is already 0 for
 		 * the whole duration of any transfer session, so stem_active
 		 * below is already false and this thread is provably not
-		 * touching g_stem_bufs[]/the mailbox anywhere in the window a
+		 * touching g_stem_sector_bufs[]/the mailbox anywhere in the window a
 		 * reload can ever be pending in). Checked once per audio
 		 * block, before stem_active is computed, so a reload that
 		 * completes here takes effect the SAME block, never one late.
@@ -2296,7 +2316,7 @@ static void looper_audio_block(int16_t *s)
 		 * thread's own stem_song_post_commit_reload() never touches
 		 * them directly, only this published copy of the new STIX
 		 * record (g_stem_reload_pending) and the already-resident,
-		 * already-validated g_stem_bufs[0] it prepared before
+		 * already-validated g_stem_sector_bufs[0] it prepared before
 		 * publishing. Deliberately no printk() here (unlike the
 		 * equivalent boot-time diagnostic in streamer_thread): this
 		 * runs on the real-time audio thread, which never blocks on
@@ -2312,12 +2332,12 @@ static void looper_audio_block(int16_t *s)
 					    g_stem_reload_pending.sector_count, /*loop_enabled=*/true)) {
 				st11_sector_header_t hdr;
 
-				if (st11_sector_read_header(g_stem_bufs[0], &hdr) &&
+				if (st11_sector_read_header(g_stem_sector_bufs[0], &hdr) &&
 				    st_stream_validate_sector(&g_stem_stream, 0u, &hdr)) {
 					(void)st_beat_timing_init(&g_stem_beat_timing, g_stem_reload_pending.bpm_q8,
 								   g_stem_reload_pending.downbeat_frame,
 								   g_stem_reload_pending.sample_rate);
-					st_stem_mbox_init(&g_stem_mbox, 0u, 0u);
+					st_stem_mbox_init(&g_stem_mbox, 0u);
 					reload_ok = true;
 				}
 			}
@@ -2357,11 +2377,20 @@ static void looper_audio_block(int16_t *s)
 					 * checked. Wait-free: a single acquire load,
 					 * and (only on success) a single release
 					 * store -- never blocks, never allocates. */
-					uint8_t acquired_buf_idx;
+					uint32_t acquired_slot;
 
-					if (st_stem_mbox_try_acquire(&g_stem_mbox, needed, &acquired_buf_idx)) {
-						g_stem_active_buf_idx_local = acquired_buf_idx;
+					if (st_stem_mbox_try_acquire(&g_stem_mbox, needed, &acquired_slot)) {
+						g_stem_active_buf_idx_local = (uint8_t)acquired_slot;
 						st_stream_sector_ready(&g_stem_stream, needed);
+					} else {
+						/* Genuinely reading nothing this frame.
+						 * Say so, so the producer is free to
+						 * fill every slot -- including the one
+						 * the previously-held sector maps to.
+						 * See st_stem_mbox_release()'s own doc
+						 * comment for the loop-wrap stall this
+						 * specifically prevents. */
+						st_stem_mbox_release(&g_stem_mbox);
 					}
 				}
 				/* Publish what we need NEXT (only actually stores
@@ -2418,7 +2447,7 @@ static void looper_audio_block(int16_t *s)
 					 * buf_idx_local (audio-thread-exclusive) names
 					 * -- never touches flash from this real-time
 					 * thread. */
-					const uint8_t *buf = g_stem_bufs[g_stem_active_buf_idx_local];
+					const uint8_t *buf = g_stem_sector_bufs[g_stem_active_buf_idx_local];
 					uint32_t frame_in_sector =
 						g_stem_stream.song_frame - needed * ST11_FRAMES_PER_SECTOR;
 					st11_audio_frame_t frame;
@@ -3029,7 +3058,7 @@ static int xfer_v11_write(uint32_t block, const uint8_t data[ST11_PHYSICAL_BLOCK
  * trusting the write that was just performed.
  *
  * If the newly selected record names a song, reads its real sector 0 into
- * g_stem_bufs[0] (this thread's own job -- the only thread that ever
+ * g_stem_sector_bufs[0] (this thread's own job -- the only thread that ever
  * touches flash) and validates it through a LOCAL, throwaway st_stream_t
  * instance -- never g_stem_stream itself, which stays audio-thread-
  * exclusive at every moment (see that struct's own doc comment) -- before
@@ -3040,7 +3069,7 @@ static int xfer_v11_write(uint32_t block, const uint8_t data[ST11_PHYSICAL_BLOCK
  * construct the real g_stem_stream (see g_stem_reload_req's own doc
  * comment for the full handoff and why it is safe: g_playing is already 0
  * for the whole duration of any transfer session, so audio_thread is
- * provably not touching g_stem_bufs[]/the mailbox anywhere in the window
+ * provably not touching g_stem_sector_bufs[]/the mailbox anywhere in the window
  * this function can ever run).
  *
  * Only on successful validation does this fill g_stem_reload_pending and
@@ -3088,13 +3117,13 @@ static void stem_song_post_commit_reload(void)
 			     lib.active.frames, lib.active.sector_count, /*loop_enabled=*/true)) {
 		return;
 	}
-	if (!emmc_read_blocks(lib.active.song_start_block, g_stem_bufs[0], ST11_BLOCKS_PER_SECTOR)) {
+	if (!emmc_read_blocks(lib.active.song_start_block, g_stem_sector_bufs[0], ST11_BLOCKS_PER_SECTOR)) {
 		return;
 	}
 
 	st11_sector_header_t hdr;
 
-	if (!st11_sector_read_header(g_stem_bufs[0], &hdr) || !st_stream_validate_sector(&local_check, 0u, &hdr)) {
+	if (!st11_sector_read_header(g_stem_sector_bufs[0], &hdr) || !st_stream_validate_sector(&local_check, 0u, &hdr)) {
 		return;
 	}
 
@@ -3991,7 +4020,7 @@ static void streamer_thread(void *a, void *b, void *c)
 	 * at cold boot and logs the result. As of Phase 2 slice 3B, this IS
 	 * consumed downstream: if a song is present, its geometry seeds the
 	 * pure streaming state machine and its own sector 0 is read here
-	 * (see the block below) into g_stem_bufs[0], which looper_audio_
+	 * (see the block below) into g_stem_sector_bufs[0], which looper_audio_
 	 * block()'s own PASS C plays back; streamer_thread's own per-pass
 	 * prefetch step (below the main while(1) loop's top) keeps the
 	 * OTHER buffer filled ahead of the playhead for the rest of the
@@ -4027,7 +4056,7 @@ static void streamer_thread(void *a, void *b, void *c)
 				 * one bounded, one-time flash read, here in
 				 * streamer_thread (the only thread that ever touches
 				 * flash; audio_thread only ever reads the resulting
-				 * g_stem_bufs[] from RAM, see looper_audio_block()'s
+				 * g_stem_sector_bufs[] from RAM, see looper_audio_block()'s
 				 * own PASS C). Real geometry + header validation
 				 * (st_stream_init()/st_stream_validate_sector()) --
 				 * both read-only-geometry-safe to call here, see
@@ -4049,11 +4078,11 @@ static void streamer_thread(void *a, void *b, void *c)
 					if (st_stream_init(&g_stem_stream, lib.active.song_start_block,
 							    lib.active.song_block_count, lib.active.frames,
 							    lib.active.sector_count, /*loop_enabled=*/true)) {
-						if (emmc_read_blocks(lib.active.song_start_block, g_stem_bufs[0],
+						if (emmc_read_blocks(lib.active.song_start_block, g_stem_sector_bufs[0],
 								      ST11_BLOCKS_PER_SECTOR)) {
 							st11_sector_header_t hdr;
 
-							if (st11_sector_read_header(g_stem_bufs[0], &hdr) &&
+							if (st11_sector_read_header(g_stem_sector_bufs[0], &hdr) &&
 							    st_stream_validate_sector(&g_stem_stream, 0u, &hdr)) {
 								/* STEM TAPE Phase 3 (beat-sync LED
 								 * slice): the STIX record is the
@@ -4164,60 +4193,41 @@ static void streamer_thread(void *a, void *b, void *c)
 		}
 
 #if SP1_XFER_ENABLE
-		/* STEM TAPE Phase 2 slice 3B (continuous streaming) / 3B.1
-		 * (concurrency correction): stored-song streaming PREFETCH,
-		 * the mailbox PRODUCER side (see st_stem_bufmbox.h's own full
-		 * protocol spec). Runs first, ahead of the classic PASS 2
-		 * sweep below, because stem playback is this firmware's real,
-		 * active audio source today (PASS 2's own classic per-track
-		 * reads are structurally unreachable -- see the classic-
-		 * source-absence CI gate -- so this ordering costs the
-		 * classic engine nothing and gives the real audio path first
-		 * call on the bus every pass; a future slice reintroducing
-		 * classic playback would revisit fairness between the two,
-		 * not this comment).
+		/* PREFETCH. st_stem_mbox_producer_next_fill() decides what to
+		 * fetch: it scans forward from the sector the consumer says it
+		 * needs, over the whole read-ahead window, and names the
+		 * nearest sector whose slot does not already hold it -- so a
+		 * fill is always spent on the gap the consumer will reach
+		 * soonest, and the slot the consumer is currently reading from
+		 * is structurally excluded. There is no producer-side memory of
+		 * "what I last published" any more: the ring's own slot
+		 * contents ARE that record, and reading them back is what makes
+		 * a seek or a loop wrap self-correcting without anything having
+		 * to detect it.
 		 *
-		 * s_stem_published_sector is THIS THREAD'S OWN local memory of
-		 * the last sector it successfully published -- not shared,
-		 * needs no atomics: the producer always knows what it itself
-		 * last published, so there is no need to read that back from
-		 * the mailbox. Skips redoing work for a sector already
-		 * published and not yet superseded by a new consumer need.
-		 * One bounded read per pass, at most, so this never dominates
-		 * a single streamer_thread iteration.
+		 * One bounded read per pass, at most, so this never dominates a
+		 * single streamer_thread iteration.
 		 *
-		 * A read that fails outright (short/failed physical read) does
-		 * NOT advance s_stem_published_sector -- retried next pass,
-		 * matching the classic engine's own g_p2rfail "read failed:
-		 * retry in a few ms" convention below, since a single
-		 * transient bus hiccup is not itself proof the sector's DATA
-		 * is bad. A read that succeeds but fails validation (corrupt
-		 * header, wrong sector_index/first_frame/frame_count, or out-
-		 * of-range) is counted on the corrupt diagnostic counter and
-		 * ALSO does not advance s_stem_published_sector -- retried
-		 * next pass too (this is an intentional, behavior-preserving
-		 * simplification from Slice 3B's own distinct "corrupt stops
-		 * playback until an explicit restart" path -- see st_stem_
-		 * stream.h's own note on why that distinction never actually
-		 * changed observable behavior). Neither failure ever publishes
-		 * to the mailbox, so the consumer simply stays in UNDERRUN
-		 * (silence) until a read genuinely succeeds and validates. */
+		 * A read that fails outright (short/failed physical read) simply
+		 * does not publish -- so the slot stays stale and the very next
+		 * pass picks the same sector again, matching the classic
+		 * engine's own g_p2rfail "read failed: retry in a few ms"
+		 * convention below, since a single transient bus hiccup is not
+		 * proof the sector's DATA is bad. A read that succeeds but
+		 * fails validation (corrupt header, wrong sector_index/
+		 * first_frame/frame_count, or out-of-range) is counted on the
+		 * corrupt diagnostic counter and likewise does not publish.
+		 * Neither failure ever reaches the mailbox, so the consumer
+		 * stays in UNDERRUN (silence) until a read genuinely succeeds
+		 * and validates. */
 		if (atomic_get(&g_stem_song_selected)) {
-			static uint32_t s_stem_published_sector = 0xFFFFFFFFu; /* "none yet" -- sector 0 was
-										  * already published by
-										  * st_stem_mbox_init() at boot,
-										  * so this thread's very first
-										  * pass correctly sees sector 0
-										  * as "not yet MY doing" and
-										  * simply finds nothing to do
-										  * once it reads requested_
-										  * sector == 0 and compares --
-										  * see below */
-			uint32_t needed = st_stem_mbox_producer_requested_sector(&g_stem_mbox);
+			uint32_t needed;
+			uint32_t target_slot;
 
-			if (needed != s_stem_published_sector) {
-				uint8_t target_slot = st_stem_mbox_producer_target_slot(&g_stem_mbox);
-				uint8_t *target_buf = g_stem_bufs[target_slot];
+			if (st_stem_mbox_producer_next_fill(&g_stem_mbox,
+							     g_stem_stream.sector_count,
+							     &needed, &target_slot)) {
+				uint8_t *target_buf = g_stem_sector_bufs[target_slot];
 				uint32_t start_block =
 					g_stem_stream.song_start_block + needed * ST11_BLOCKS_PER_SECTOR;
 
@@ -4247,14 +4257,14 @@ static void streamer_thread(void *a, void *b, void *c)
 						(void)atomic_add(&g_stem_diag_bytes_total, (atomic_val_t)ST11_SECTOR_BYTES);
 						(void)atomic_add(&g_stem_diag_read_us_total, (atomic_val_t)read_us);
 						st_stem_mbox_publish_ready(&g_stem_mbox, needed, target_slot);
-						s_stem_published_sector = needed;
 					} else {
 						(void)atomic_add(&g_stem_corrupt_count, 1);
 					}
 					work = true;
 				}
-				/* else: short/failed read -- s_stem_published_sector
-				 * unchanged, retried next pass (see this block's own
+				/* else: short/failed read -- nothing published, so
+				 * the slot stays stale and next_fill() names this
+				 * same sector again next pass (see this block's own
 				 * comment); `work` stays whatever PASS 2 below
 				 * decides, so a stuck stem prefetch alone does not
 				 * suppress the idle-window cache flush forever. */
