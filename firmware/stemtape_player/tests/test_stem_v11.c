@@ -1134,6 +1134,53 @@ static void test_ab_session_open_and_negative_writes(void)
 	      "verify_song_before_commit: a candidate with one declared stem checksum tampered "
 	      "does NOT verify against the real device bytes -- false");
 
+	/* ---- incremental accumulation must agree with the full re-read ----
+	 *
+	 * The bulk upload path reads every sector back off the media as it
+	 * writes it, so it can fold the commit checksums in as it goes and make
+	 * the commit itself instant. That is only legitimate if it produces
+	 * BYTE-IDENTICAL results to the full re-read above -- these checks are
+	 * what prove it, against the same real mock-device bytes the full path
+	 * just used. (Before this existed, a real 248.5 MiB commit re-read
+	 * 509,024 blocks inside one wire command, overrunning both the host's
+	 * acknowledgement timeout and the 4000ms hardware watchdog.) */
+	uint8_t acc_sector[ST11_SECTOR_BYTES];
+	uint32_t acc_k;
+
+	for (acc_k = 0; acc_k < ST11_BLOCKS_PER_SECTOR; acc_k++) {
+		mock_read_block(FIXTURE_SONG_A_START + acc_k,
+				 acc_sector + (size_t)acc_k * ST11_PHYSICAL_BLOCK_BYTES, NULL);
+	}
+
+	CHECK(!st_ab_session_verify_accumulated(&s, &candidate),
+	      "verify_accumulated: with nothing accumulated yet, refuses (never passes vacuously) -- false");
+
+	st_ab_session_accumulate_sector(&s, 0u, acc_sector);
+	CHECK(st_ab_session_verify_accumulated(&s, &candidate),
+	      "verify_accumulated: the SAME real device bytes, folded in one sector at a time during the "
+	      "upload, reproduce the full re-read's verdict exactly -- true");
+
+	CHECK(!st_ab_session_verify_accumulated(&s, &corrupted_candidate),
+	      "verify_accumulated: the tampered-checksum candidate is rejected here too, so the fast path "
+	      "is not a weaker check than the full re-read -- false");
+
+	/* A duplicate sector (an idempotent bulk retry re-sending one already
+	 * accumulated) must be ignored, not double-counted: double-counting
+	 * would silently corrupt the running hashes. */
+	st_ab_session_accumulate_sector(&s, 0u, acc_sector);
+	CHECK(st_ab_session_verify_accumulated(&s, &candidate),
+	      "verify_accumulated: re-accumulating an already-accumulated sector (a retry) is ignored, "
+	      "not double-counted -- still true");
+
+	/* A gap must permanently invalidate rather than silently verify a song
+	 * that was never fully read back. */
+	st_ab_session_t gap_s = s;
+
+	st_ab_session_accumulate_sector(&gap_s, 7u, acc_sector); /* skips 1..6 */
+	CHECK(!st_ab_session_verify_accumulated(&gap_s, &candidate),
+	      "verify_accumulated: a sector arriving out of order leaves a gap, permanently invalidating "
+	      "the accumulation so the caller must fall back to the full re-read -- false");
+
 	st_ab_session_mark_song_verified(&s);
 	CHECK(st_ab_session_check_write(&s, 1u, commit_block) == ST_AB_WRITE_OK,
 	      "ACCEPT: the SAME magic-committing write, now AFTER verify_song_before_commit() + "

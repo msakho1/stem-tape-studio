@@ -30,6 +30,30 @@ static uint32_t region_blocks_of_slot(const st11_region_layout_t *layout, uint32
 	return (slot == ST11_SLOT_A) ? layout->song_a_blocks : layout->song_b_blocks;
 }
 
+/* Defined below; used by st_ab_session_verify_song_before_commit() above them
+ * so both verification paths share one derivation. */
+static bool stem_hashes_match_candidate(const uint32_t stem_hash[ST11_STEM_COUNT],
+					 const st_stix_record_t *candidate);
+static bool accumulate_one_sector(uint32_t stem_hash[ST11_STEM_COUNT], uint32_t sector_index,
+				   const uint8_t sector[ST11_SECTOR_BYTES]);
+
+/* The incremental accumulator's real starting state. Both open_*() paths
+ * memset the session to zero first, but zero is NOT a valid FNV-1a seed --
+ * the running hashes must start at ST_CHECKSUM32_INIT exactly as the full
+ * re-read path seeds its own locals, or an accumulated hash could never
+ * equal a re-read one. acc_valid likewise starts true and only ever goes
+ * false. */
+static void accumulator_reset(st_ab_session_t *s)
+{
+	uint32_t si;
+
+	s->acc_valid = true;
+	s->acc_sectors = 0;
+	for (si = 0; si < ST11_STEM_COUNT; si++) {
+		s->acc_stem_hash[si] = ST_CHECKSUM32_INIT;
+	}
+}
+
 st_ab_open_result_t st_ab_session_open_replace(st_ab_session_t *s,
 						const uint8_t block_a[ST11_PHYSICAL_BLOCK_BYTES],
 						const uint8_t block_b[ST11_PHYSICAL_BLOCK_BYTES],
@@ -64,6 +88,7 @@ st_ab_open_result_t st_ab_session_open_replace(st_ab_session_t *s,
 	s->inactive_index_slot = lib.inactive_index_slot;
 	s->active_generation = lib.generation;
 	s->needed_song_blocks = needed_song_blocks;
+	accumulator_reset(s);
 	return ST_AB_OPEN_OK;
 }
 
@@ -96,6 +121,7 @@ st_ab_open_result_t st_ab_session_open_init(st_ab_session_t *s, const uint8_t bl
 	s->inactive_index_slot = lib.inactive_index_slot; /* ST11_SLOT_A */
 	s->active_generation = 0;
 	s->needed_song_blocks = 0;
+	accumulator_reset(s);
 	return ST_AB_OPEN_OK;
 }
 
@@ -258,33 +284,29 @@ bool st_ab_session_verify_song_before_commit(const st_ab_session_t *s, const st_
 			}
 		}
 
-		st11_sector_header_t h;
-
-		if (!st11_sector_read_header(scratch_sector, &h) || h.sector_index != sector) {
+		/* Same per-sector step the incremental path uses, so a fully
+		 * re-read hash and an accumulated one are equal by
+		 * construction rather than by two copies of this logic
+		 * happening to agree. */
+		if (!accumulate_one_sector(stem_hash, sector, scratch_sector)) {
 			return false;
 		}
-
-		uint32_t f;
-
-		for (f = 0; f < h.frame_count; f++) {
-			st11_audio_frame_t frame;
-
-			st11_sector_decode_frame(scratch_sector, f, &frame);
-			for (si = 0; si < ST11_STEM_COUNT; si++) {
-				uint8_t sample_bytes[6];
-				int32_t l = frame.stem_l[si];
-				int32_t r = frame.stem_r[si];
-
-				sample_bytes[0] = (uint8_t)(l & 0xff);
-				sample_bytes[1] = (uint8_t)((l >> 8) & 0xff);
-				sample_bytes[2] = (uint8_t)((l >> 16) & 0xff);
-				sample_bytes[3] = (uint8_t)(r & 0xff);
-				sample_bytes[4] = (uint8_t)((r >> 8) & 0xff);
-				sample_bytes[5] = (uint8_t)((r >> 16) & 0xff);
-				stem_hash[si] = st_checksum32_update(stem_hash[si], sample_bytes, sizeof(sample_bytes));
-			}
-		}
 	}
+
+	return stem_hashes_match_candidate(stem_hash, candidate);
+}
+
+void st_ab_session_mark_song_verified(st_ab_session_t *s)
+{
+	s->song_verified = true;
+}
+
+/* The ONE derivation of "these four stem hashes imply this song checksum",
+ * shared by both verification paths so they can never drift apart. */
+static bool stem_hashes_match_candidate(const uint32_t stem_hash[ST11_STEM_COUNT],
+					 const st_stix_record_t *candidate)
+{
+	uint32_t si;
 
 	for (si = 0; si < ST11_STEM_COUNT; si++) {
 		if (stem_hash[si] != candidate->stem_checksums[si]) {
@@ -301,12 +323,80 @@ bool st_ab_session_verify_song_before_commit(const st_ab_session_t *s, const st_
 		digest[si * 4 + 3] = (uint8_t)((stem_hash[si] >> 24) & 0xff);
 	}
 
-	uint32_t song_hash = st_checksum32_compute(digest, sizeof(digest));
-
-	return song_hash == candidate->song_checksum;
+	return st_checksum32_compute(digest, sizeof(digest)) == candidate->song_checksum;
 }
 
-void st_ab_session_mark_song_verified(st_ab_session_t *s)
+/* The ONE per-sector accumulation step, shared by both verification paths
+ * so an incrementally accumulated hash and a fully re-read one are the
+ * same value by construction rather than by two parallel implementations
+ * agreeing today and drifting tomorrow. */
+static bool accumulate_one_sector(uint32_t stem_hash[ST11_STEM_COUNT], uint32_t sector_index,
+				   const uint8_t sector[ST11_SECTOR_BYTES])
 {
-	s->song_verified = true;
+	st11_sector_header_t h;
+
+	if (!st11_sector_read_header(sector, &h) || h.sector_index != sector_index) {
+		return false;
+	}
+
+	uint32_t f;
+
+	for (f = 0; f < h.frame_count; f++) {
+		st11_audio_frame_t frame;
+		uint32_t si;
+
+		st11_sector_decode_frame(sector, f, &frame);
+		for (si = 0; si < ST11_STEM_COUNT; si++) {
+			uint8_t sample_bytes[6];
+			int32_t l = frame.stem_l[si];
+			int32_t r = frame.stem_r[si];
+
+			sample_bytes[0] = (uint8_t)(l & 0xff);
+			sample_bytes[1] = (uint8_t)((l >> 8) & 0xff);
+			sample_bytes[2] = (uint8_t)((l >> 16) & 0xff);
+			sample_bytes[3] = (uint8_t)(r & 0xff);
+			sample_bytes[4] = (uint8_t)((r >> 8) & 0xff);
+			sample_bytes[5] = (uint8_t)((r >> 16) & 0xff);
+			stem_hash[si] = st_checksum32_update(stem_hash[si], sample_bytes, sizeof(sample_bytes));
+		}
+	}
+
+	return true;
+}
+
+void st_ab_session_accumulate_sector(st_ab_session_t *s, uint32_t sector_index,
+				      const uint8_t sector[ST11_SECTOR_BYTES])
+{
+	if (!s->open || s->closed || s->kind != ST_AB_SESSION_REPLACE) {
+		return;
+	}
+	if (!s->acc_valid) {
+		return; /* already invalidated: stays that way for this session */
+	}
+	if (sector_index < s->acc_sectors) {
+		return; /* duplicate of an already-accumulated sector (idempotent retry) */
+	}
+	if (sector_index != s->acc_sectors) {
+		s->acc_valid = false; /* a gap: the accumulation can no longer be complete */
+		return;
+	}
+	if (!accumulate_one_sector(s->acc_stem_hash, sector_index, sector)) {
+		s->acc_valid = false;
+		return;
+	}
+	s->acc_sectors++;
+}
+
+bool st_ab_session_verify_accumulated(const st_ab_session_t *s, const st_stix_record_t *candidate)
+{
+	if (s->kind != ST_AB_SESSION_REPLACE || !s->acc_valid) {
+		return false;
+	}
+	/* Exactly the declared song: a shortfall means part of it was never
+	 * read back at all, and an overshoot means the accumulation does not
+	 * describe THIS record. Neither may pass. */
+	if (candidate->sector_count == 0u || s->acc_sectors != candidate->sector_count) {
+		return false;
+	}
+	return stem_hashes_match_candidate(s->acc_stem_hash, candidate);
 }

@@ -75,6 +75,12 @@ typedef struct {
 					* protocol has no verb to declare that before writes
 					* begin (docs section 1), so a real caller can only
 					* ever know the region's own capacity in advance */
+	/* Incremental commit-verification state (REPLACE only). See
+	 * st_ab_session_accumulate_sector() for what these mean and why they
+	 * exist; all three are reset by both open_*() entry points. */
+	bool acc_valid;       /* false once anything broke the strict, gapless order */
+	uint32_t acc_sectors; /* how many sectors have been accumulated, from 0 upward */
+	uint32_t acc_stem_hash[ST11_STEM_COUNT];
 } st_ab_session_t;
 
 typedef enum {
@@ -187,6 +193,57 @@ bool st_ab_session_verify_song_before_commit(const st_ab_session_t *s, const st_
  * calls it for you.
  */
 void st_ab_session_mark_song_verified(st_ab_session_t *s);
+
+/*
+ * INCREMENTAL alternative to st_ab_session_verify_song_before_commit(),
+ * for callers that already read every sector back off the media as they
+ * wrote it (the bulk verified-sector upload path does exactly that: it
+ * writes a sector, reads the SAME blocks back, and CRCs the read-back
+ * bytes before acknowledging).
+ *
+ * Why this exists: the full verify above re-reads the ENTIRE song region
+ * a second time, inside the single wire command that carries the commit
+ * record. For a real 248.5 MiB song that is over half a million block
+ * reads plus a full decode of every audio frame -- minutes of work, with
+ * the host waiting on one acknowledgement, and (before this was fixed)
+ * with nothing feeding the hardware watchdog. It is also entirely
+ * redundant work: the bytes it re-reads are the same bytes the bulk path
+ * already read back off the media moments earlier.
+ *
+ * This accumulates the identical per-stem checksums from the read-back
+ * bytes the caller ALREADY has in hand, one sector at a time, so the
+ * commit itself costs nothing. The safety claim is unchanged and is NOT
+ * weakened: the checksums are still computed from bytes genuinely read
+ * back off the media, never from anything the companion merely claimed.
+ * The only difference is when the reading happened.
+ *
+ * `sector` must be the READ-BACK bytes for `sector_index` (what storage
+ * returned), never the bytes as received from the host. Sectors must
+ * arrive strictly in order with no gaps, starting at 0: a sector_index
+ * that skips ahead, or a sector whose own STSC header disagrees with
+ * sector_index, permanently invalidates the accumulation (acc_valid
+ * false) so st_ab_session_verify_accumulated() then refuses and the
+ * caller must fall back to the full re-read. A sector_index BELOW the
+ * running count is treated as a harmless duplicate (an idempotent retry
+ * of an already-accumulated sector) and is ignored rather than
+ * invalidating. No-op unless this is an open, unclosed REPLACE session.
+ */
+void st_ab_session_accumulate_sector(st_ab_session_t *s, uint32_t sector_index,
+				      const uint8_t sector[ST11_SECTOR_BYTES]);
+
+/*
+ * REPLACE only. Returns true only if st_ab_session_accumulate_sector()
+ * covered EXACTLY `candidate`'s whole declared song -- gaplessly, in
+ * order, from sector 0 through sector_count-1 -- and every resulting
+ * checksum (4 stems + the song checksum derived from them) matches what
+ * `candidate` declares, using byte-for-byte the same derivation as
+ * st_ab_session_verify_song_before_commit(). Any shortfall, overshoot or
+ * invalidation returns false, in which case the caller must fall back to
+ * the full re-read rather than treating this as a verification failure.
+ * Like the full verify, it does not mutate `s`; call
+ * st_ab_session_mark_song_verified() yourself once this returns true.
+ */
+bool st_ab_session_verify_accumulated(const st_ab_session_t *s, const st_stix_record_t *candidate);
 
 /* Explicitly ends a session (idempotent). Every subsequent
  * st_ab_session_check_write() call on it returns ST_AB_WRITE_ERR_SESSION_CLOSED.

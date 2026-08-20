@@ -2783,6 +2783,18 @@ static void xfer_v11_send_caps(void)
 static int xfer_v11_block_read(uint32_t block, uint8_t out[ST11_PHYSICAL_BLOCK_BYTES], void *ctx)
 {
 	ARG_UNUSED(ctx);
+	/* Feeds the watchdog on EVERY block. This callback's only caller is
+	 * st_ab_session_verify_song_before_commit(), whose loop re-reads the
+	 * entire song region -- for a real 248.5 MiB song, 509,024 calls that
+	 * run for minutes without ever returning to any other code. Nothing in
+	 * that pure library loop feeds the WDT (it has no business knowing
+	 * about one), and the WDT window is 4000ms, so before this the device
+	 * hard-reset a few seconds into every real commit: the host saw its
+	 * acknowledgement never arrive and reported a timeout, when in fact the
+	 * SP-1 had reset out from under it. feed_wdt() is a single NRF_WDT->RR[]
+	 * register write, so doing it per block costs nothing measurable next
+	 * to the eMMC read it accompanies. */
+	feed_wdt();
 	return emmc_read_blocks(block, out, 1) ? 0 : -1;
 }
 
@@ -2831,7 +2843,23 @@ static int xfer_v11_write(uint32_t block, const uint8_t data[ST11_PHYSICAL_BLOCK
 			st_stix_record_t candidate;
 
 			st_stix_deserialize(data, &candidate);
-			if (st_ab_session_verify_song_before_commit(&g_v11_session, &candidate, xfer_v11_block_read,
+			/* Fast path FIRST: if every sector of this exact record
+			 * was already read back off the media and folded into the
+			 * session's running checksums during a bulk upload, the
+			 * verification is already complete and costs nothing here.
+			 * Only when that is unavailable -- a classic 'W' upload,
+			 * which never accumulates, or an accumulation invalidated
+			 * by a gap -- does the full re-read run. That fallback
+			 * re-reads the WHOLE song inside this one wire command:
+			 * for a real 248.5 MiB song that is over half a million
+			 * block reads taking minutes, which is why
+			 * xfer_v11_block_read() must feed the watchdog (it now
+			 * does) and why the host may still time out waiting for
+			 * this acknowledgement. Both paths derive the checksums
+			 * from bytes genuinely read back off the media; neither
+			 * ever trusts what the companion claimed it sent. */
+			if (st_ab_session_verify_accumulated(&g_v11_session, &candidate) ||
+			    st_ab_session_verify_song_before_commit(&g_v11_session, &candidate, xfer_v11_block_read,
 								     NULL, s_v11_verify_scratch)) {
 				st_ab_session_mark_song_verified(&g_v11_session);
 			}
@@ -3307,6 +3335,17 @@ static int xfer_bulk_write_sector(void)
 	 * advance it again (see st_bulk_seq_advance()'s own doc). */
 	if (seqchk == ST_BULK_SEQ_NEW) {
 		st_bulk_seq_advance(&g_v11_bulk_seq, hdr.seq);
+		/* Fold THIS sector's read-back bytes into the session's running
+		 * commit-verification checksums while they are already in RAM and
+		 * already proven (above) to be exactly what storage returned. This
+		 * is what lets the eventual magic write commit instantly instead of
+		 * re-reading the entire song a second time inside that one command
+		 * -- for a real 248.5 MiB song that second pass is over half a
+		 * million block reads, which overran both the host's acknowledgement
+		 * timeout and the hardware watchdog. Same safety claim, same bytes,
+		 * same derivation; only the timing differs. See
+		 * st_ab_session_accumulate_sector()'s own doc comment. */
+		st_ab_session_accumulate_sector(&g_v11_session, hdr.seq, s_v11_verify_scratch);
 	}
 
 	uint8_t resp[ST_BULK_RESP_BYTES];
