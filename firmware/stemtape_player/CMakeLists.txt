@@ -120,6 +120,18 @@ include(${ZEPHYR_BASE}/samples/subsys/usb/common/common.cmake)
 # unlinked, host-test-only, in Slice C1 (see git log); this slice gave it
 # its real caller, per this file's own established policy (see
 # st_stem_stream.c's own identical slice-3A/3B split above).
+# Phase 4 beat pulse (per-stem): src/st_stem_meter.c -- the pure, host-tested
+# per-stem envelope follower and its logarithmic LED brightness curve (see
+# st_stem_meter.h) -- is linked and genuinely called: looper_audio_block()
+# computes each stem's own per-block peak magnitude from the SAME decoded
+# st11_audio_frame_t it mixes, gated by the SAME st_stem_mix_channel_audible()
+# rule the mixer applies, and led_service() runs st_stem_meter_update()/
+# st_stem_meter_brightness() on those peaks to drive a per-LED sigma-delta
+# duty in the existing TIMER3 soft-PWM ISR. This REPLACES the earlier
+# st_beat_phase_on_beat()/st_beat_led_decide() track-row display, which gave
+# all four LEDs one shared tempo boolean and so flashed them uniformly; see
+# .github/scripts/stemtape_player_stem_playback_wiring_check.py's own note for
+# what that leaves without a caller.
 target_sources(app PRIVATE
 	src/main.c
 	src/sp1_emmc.c
@@ -132,6 +144,7 @@ target_sources(app PRIVATE
 	src/st_ab_session.c
 	src/st_bulk_xfer.c
 	src/st_stem_mix.c
+	src/st_stem_meter.c
 	src/st_stem_stream.c
 	src/st_stem_bufmbox.c
 	src/st_track_hold.c

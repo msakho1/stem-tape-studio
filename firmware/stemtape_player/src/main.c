@@ -104,6 +104,7 @@
 #include "st_beat_phase.h"
 #include "st_stem_bufmbox.h"
 #include "st_stem_mix.h"
+#include "st_stem_meter.h"
 #include "st_stem_stream.h"
 #include "st_track_hold.h"
 #include "st_stix.h"
@@ -1329,6 +1330,13 @@ static atomic_t g_stem_reload_fail_count;  /* Slice C3: post-commit runtime relo
  * g_stem_underrun_count above already uses. */
 static st_beat_timing_t g_stem_beat_timing;
 static atomic_t g_stem_song_frame_pub;
+/* BEAT PULSE: per-stem peak magnitude of the most recent audio block, in
+ * the stored 24-bit domain. Written once per stem per block by the audio
+ * thread (single producer), read by led_service() on the control thread
+ * (single consumer). Purely observational -- nothing in the audio path
+ * ever reads these back, so a torn or stale read could at worst make one
+ * LED frame slightly wrong, and atomic_t already rules even that out. */
+static atomic_t g_stem_peak_pub[ST11_STEM_COUNT];
 
 /* Sustained read throughput, bytes/sec, computed from the two CUMULATIVE
  * counters above (successful-read bytes and successful-read time only --
@@ -2327,6 +2335,12 @@ static void looper_audio_block(int16_t *s)
 		} else {
 			st_stream_stop(&g_stem_stream);
 		}
+		/* BEAT PULSE (per-stem): largest absolute sample magnitude each
+		 * stem produced during THIS block, in the stored 24-bit domain,
+		 * published once per block for led_service() to envelope (see
+		 * st_stem_meter.h). Block-local, audio-thread-private until the
+		 * single atomic store below -- no per-frame atomics. */
+		uint32_t stem_peak[ST11_STEM_COUNT] = { 0u, 0u, 0u, 0u };
 #endif
 		for (uint32_t f = 0; f < BLK_FRAMES; f++) {
 #if SP1_XFER_ENABLE
@@ -2411,6 +2425,34 @@ static void looper_audio_block(int16_t *s)
 
 					st11_sector_decode_frame(buf, frame_in_sector, &frame);
 					st_stem_mix_frame(&frame, stem_channels, &stem_l, &stem_r);
+
+					/* BEAT PULSE: per-stem peak magnitude for
+					 * this block. Only stems that are actually
+					 * AUDIBLE contribute -- st_stem_mix_channel_
+					 * audible() is the SAME shared rule the mixer
+					 * itself applied a line above, so a muted or
+					 * solo-silenced stem meters 0 and its light
+					 * goes dark with no separate rule to keep in
+					 * sync. Absolute value taken on the int32
+					 * 24-bit sample; INT32_MIN cannot occur in a
+					 * sign-extended 24-bit value, so plain
+					 * negation is safe here. */
+					for (uint32_t sp = 0; sp < ST11_STEM_COUNT; sp++) {
+						int32_t l, r;
+						uint32_t mag;
+
+						if (!st_stem_mix_channel_audible(stem_channels, sp)) {
+							continue;
+						}
+						l = frame.stem_l[sp];
+						r = frame.stem_r[sp];
+						if (l < 0) l = -l;
+						if (r < 0) r = -r;
+						mag = (uint32_t)((l > r) ? l : r);
+						if (mag > stem_peak[sp]) {
+							stem_peak[sp] = mag;
+						}
+					}
 				}
 				/* Advances song_frame (or records the underrun --
 				 * see st_stem_stream.h's own doc comment) exactly
@@ -2475,6 +2517,16 @@ static void looper_audio_block(int16_t *s)
 				s[2 * f + 1] = classic;
 			}
 		}
+#if SP1_XFER_ENABLE
+		/* Publish this block's per-stem peaks for led_service(). One
+		 * atomic store per stem per BLOCK (~5.3 ms), never per frame.
+		 * When no stem song is active every peak is still 0 here, so
+		 * the meters decay to dark on their own rather than freezing
+		 * at whatever the last playing block left behind. */
+		for (uint32_t sp = 0; sp < ST11_STEM_COUNT; sp++) {
+			atomic_set(&g_stem_peak_pub[sp], (atomic_val_t)stem_peak[sp]);
+		}
+#endif
 	}
 	g_sample_clock += BLK_FRAMES;
 	/* TAPPED GRID: MIDI clock in wall (I2S) time, produced block-wise, even
@@ -5159,6 +5211,40 @@ static volatile uint32_t g_led_p1_ghost; /* P1 pins lit at GHOST duty */
 static uint32_t g_led_sta_p0, g_led_sta_p1;   /* status-row pins (init-computed) */
 static uint32_t g_led_trk_p0, g_led_trk_p1;   /* track-row pins  (init-computed) */
 
+/* ---- PER-STEM BRIGHTNESS (beat pulse) ------------------------------------
+ * The track row can show a CONTINUOUS per-LED brightness, not just the
+ * on/ghost/off vocabulary above. Used by led_service() to render each
+ * stem's own output level (see st_stem_meter.h) so the lights pulse with
+ * the actual audio -- the kick punches its own lane, a silent stem stays
+ * dark -- instead of all four flashing together on a tempo tick.
+ *
+ * HOW, given the hardware: TIMER3 has only three compare channels and
+ * they are already spent (period wrap, track-row off, status-row off), so
+ * there is no way to give four LEDs four independent hardware duty
+ * cycles. Instead each LED keeps a SIGMA-DELTA accumulator and is lit for
+ * a fraction of the 1 kHz FRAMES equal to its level -- reusing the exact
+ * same proven 52 us window for the frames it is on, adding no new edge
+ * timing whatsoever (the same reason the GHOST class was built as a frame
+ * divider rather than a second, narrower compare window; see
+ * LED_GHOST_FRAME_DIV's own note about why a narrow second window
+ * flickered and an in-ISR spin failed to boot).
+ *
+ * Sigma-delta rather than a plain frame counter because it spreads the
+ * on-frames as evenly as the level allows: at level 128 that is a clean
+ * 500 Hz alternation, where a block divider would bunch 128 frames on and
+ * 128 off = 3.9 Hz of visible flicker.
+ *
+ * g_trk_level_active gates the whole mechanism: when it is 0 (no stem song
+ * playing) the track row renders exactly as it always did, byte for byte,
+ * through g_led_p0_on/g_led_p0_ghost. */
+static volatile uint8_t  g_trk_level[NUM_TRACK_LEDS];   /* 0..255, control thread writes */
+static volatile uint8_t  g_trk_level_active;            /* 1 = level path owns the track row */
+/* Per-track pin masks, split by port and precomputed at init so the ISR
+ * needs no port comparison and no branch: exactly one of the two is
+ * nonzero for any given track, so both can be OR-ed unconditionally. */
+static uint32_t g_trk_bit_p0[NUM_TRACK_LEDS];
+static uint32_t g_trk_bit_p1[NUM_TRACK_LEDS];
+
 /* DIRECT ISR (required for IRQ_ZERO_LATENCY): pure register IO, no kernel
  * calls, returns 0 = never asks for a reschedule. */
 ISR_DIRECT_DECLARE(led_pwm_isr)
@@ -5170,6 +5256,24 @@ ISR_DIRECT_DECLARE(led_pwm_isr)
 		uint32_t gon = ((++gframe % LED_GHOST_FRAME_DIV) == 0u);
 		uint32_t s0 = g_led_p0_on | (gon ? (g_led_p0_ghost & ~g_led_p0_on) : 0u);
 		uint32_t s1 = g_led_p1_on | (gon ? (g_led_p1_ghost & ~g_led_p1_on) : 0u);
+
+		if (g_trk_level_active) {
+			/* The level path OWNS the track row this frame: drop
+			 * whatever the on/ghost masks said about those pins and
+			 * decide each one purely from its own accumulator. */
+			static uint16_t acc[NUM_TRACK_LEDS];
+
+			s0 &= ~g_led_trk_p0;
+			s1 &= ~g_led_trk_p1;
+			for (uint32_t t = 0; t < NUM_TRACK_LEDS; t++) {
+				acc[t] = (uint16_t)(acc[t] + g_trk_level[t]);
+				if (acc[t] >= 256u) {
+					acc[t] = (uint16_t)(acc[t] - 256u);
+					s0 |= g_trk_bit_p0[t];
+					s1 |= g_trk_bit_p1[t];
+				}
+			}
+		}
 		NRF_P0->OUTSET = s0;
 		NRF_P0->OUTCLR = LED_ALL_P0 & ~s0;
 		NRF_P1->OUTSET = s1;
@@ -5219,6 +5323,11 @@ static void led_pwm_init(void)
 	for (int li = 0; li < NUM_TRACK_LEDS; li++) {
 		if (track_leds[li].port == NRF_P0) g_led_trk_p0 |= (1u << track_leds[li].pin);
 		else                               g_led_trk_p1 |= (1u << track_leds[li].pin);
+		/* Per-track split masks for the ISR's branch-free level path
+		 * (see g_trk_bit_p0's own note): exactly one of the pair is
+		 * nonzero for any track, the other stays 0. */
+		g_trk_bit_p0[li] = (track_leds[li].port == NRF_P0) ? (1u << track_leds[li].pin) : 0u;
+		g_trk_bit_p1[li] = (track_leds[li].port == NRF_P0) ? 0u : (1u << track_leds[li].pin);
 	}
 	IRQ_DIRECT_CONNECT(LED_PWM_TIMER_IRQn, 0, led_pwm_isr, IRQ_ZERO_LATENCY);
 	irq_enable(LED_PWM_TIMER_IRQn);
@@ -5384,29 +5493,95 @@ static void led_service(void)
 			channels[i].solo = trk[i].solo != 0;
 		}
 
-		uint32_t song_frame = (uint32_t)atomic_get(&g_stem_song_frame_pub);
 		bool playing = g_playing != 0;
-		bool on_beat = st_beat_phase_on_beat(&g_stem_beat_timing, song_frame,
-						      g_stem_beat_timing.frames_per_beat / 8u);
 
+		if (playing) {
+			/* BEAT PULSE, per stem. Each light renders THAT stem's
+			 * own output level (st_stem_meter.h) through the ISR's
+			 * per-LED sigma-delta dither (see g_trk_level's own
+			 * note), so the four lanes move independently with the
+			 * music -- a kick punches its own light, a pad glows,
+			 * a silent or muted stem stays dark.
+			 *
+			 * This REPLACES the previous st_beat_phase_on_beat() /
+			 * st_beat_led_decide() display, which derived one
+			 * boolean from the STIX tempo and gave the SAME value
+			 * to all four LEDs -- so every audible stem lit and
+			 * darkened together. That was uniform by construction
+			 * and carried no per-stem information; a tempo number
+			 * is not what the lights are supposed to be showing.
+			 * (st_beat_phase.c stays linked and unchanged: its
+			 * song-position/tempo derivation is still the shared
+			 * clock other features will read -- only this LED
+			 * display stopped being driven by a beat boolean.) */
+			static uint32_t last_ms;
+			static st_stem_meter_t meters[ST11_STEM_COUNT];
+			static bool meters_init;
+
+			uint32_t now_ms = (uint32_t)k_uptime_get_32();
+			uint32_t dt_ms;
+
+			if (!meters_init) {
+				for (int i = 0; i < ST11_STEM_COUNT; i++) {
+					st_stem_meter_reset(&meters[i]);
+				}
+				meters_init = true;
+				last_ms = now_ms;
+			}
+			dt_ms = now_ms - last_ms;   /* wrap-safe: unsigned difference */
+			last_ms = now_ms;
+
+			for (int i = 0; i < NUM_TRACK_LEDS && i < ST11_STEM_COUNT; i++) {
+				uint32_t peak = (uint32_t)atomic_get(&g_stem_peak_pub[i]);
+				uint8_t level;
+
+				/* Belt and braces: the audio thread already
+				 * publishes 0 for an inaudible stem, but the
+				 * control thread owns the authoritative mute/
+				 * solo surface and can see a change a block
+				 * before the audio thread reflects it. Reading
+				 * the SAME shared rule here keeps the light from
+				 * lagging the gesture by a block. */
+				if (!st_stem_mix_channel_audible(channels, (uint32_t)i)) {
+					peak = 0u;
+				}
+				st_stem_meter_update(&meters[i], peak, dt_ms);
+				level = st_stem_meter_brightness(&meters[i]);
+
+				/* Anything visible is held at or above 1/16 duty.
+				 * Below that the sigma-delta's on-frames fall
+				 * under ~60 Hz and a very dim LED would shimmer
+				 * rather than glow; 0 stays exactly 0 so silence
+				 * is still fully dark. */
+				if (level > 0u && level < 16u) {
+					level = 16u;
+				}
+				g_trk_level[i] = level;
+			}
+			g_trk_level_active = 1u;
+			return;
+		}
+
+		/* STOPPED: hand the track row back to the plain on/ghost/off
+		 * vocabulary so a loaded-but-paused song still shows which
+		 * stems are armed, and clear the level path so the ISR renders
+		 * those masks exactly as it always did. */
+		g_trk_level_active = 0u;
 		for (int i = 0; i < NUM_TRACK_LEDS && i < ST11_STEM_COUNT; i++) {
-			bool audible = st_stem_mix_channel_audible(channels, (uint32_t)i);
-
-			switch (st_beat_led_decide(audible, playing, on_beat)) {
-			case ST_TRACK_LED_ON:
-				track_led_on(i);
-				break;
-			case ST_TRACK_LED_GHOST:
+			if (st_stem_mix_channel_audible(channels, (uint32_t)i)) {
 				track_led_ghost(i);
-				break;
-			default:
+			} else {
 				track_led_off(i);
-				break;
 			}
 		}
 		return;
 	}
 #endif
+
+	/* No stem song selected: the level path must not keep owning the
+	 * track row, or the ISR would go on dithering the last levels it was
+	 * given while the classic display below thinks it is in control. */
+	g_trk_level_active = 0u;
 
 	int active = g_loop_active;
 	for (int i = 0; i < NTRK; i++)

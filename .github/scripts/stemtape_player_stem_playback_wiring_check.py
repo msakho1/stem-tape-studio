@@ -92,11 +92,31 @@ find_call_sites() in stemtape_player_safety_gate.py already does):
      &g_stem_song_frame_pub, ...) once per block (REQUIRED_SUBSTRINGS --
      an atomic-write call whose OWN argument is what proves it is the
      right one, not just any atomic_set); led_service() genuinely reads
-     both g_stem_beat_timing and atomic_get(&g_stem_song_frame_pub) and
-     calls the real st_beat_phase_on_beat()/st_beat_led_decide()
-     (REQUIRED_CALLS) -- proving the whole chain from the selected
-     song's own tempo metadata through to the physical LED pulse is
-     real, not merely linked.
+     atomic_get(&g_stem_peak_pub[i]) and calls the real
+     st_stem_meter_update()/st_stem_meter_brightness() (REQUIRED_CALLS)
+     -- proving the whole chain from the decoded stem samples through
+     to the physical per-LED brightness is real, not merely linked.
+
+     BEAT PULSE, CORRECTED: this gate previously required led_service()
+     to call st_beat_phase_on_beat()/st_beat_led_decide(). That display
+     derived ONE boolean from the STIX tempo and handed the SAME value
+     to all four track LEDs, so every audible stem lit and darkened
+     together -- uniform by construction, carrying no per-stem
+     information. It is replaced by per-stem output-level metering
+     (src/st_stem_meter.c), so those two calls are gone from
+     led_service() and this gate now requires the calls that actually
+     drive the lights.
+
+     st_beat_timing_init() is still called and still required above (the
+     selected song's tempo is still parsed and held): what changed is
+     only that the LED row stopped being driven by a beat boolean.
+     st_beat_phase_on_beat()/st_beat_led_decide() therefore currently
+     have no caller -- stated here rather than left to be discovered,
+     since this repo's rule is that unwired code must not be presented
+     as part of the real runtime. They are retained, with their host
+     tests, for the loop-quantization work (CTL-04/CTL-12/CTL-22) that
+     consumes the same bar/beat derivation; if that work does not land,
+     they should be deleted rather than kept indefinitely.
 
 Fails closed: main.c missing, either function's body not found, or any
 required call site/substring absent.
@@ -143,8 +163,8 @@ REQUIRED_CALLS = {
     ],
     "led_service": [
         "st_stem_mix_channel_audible",
-        "st_beat_phase_on_beat",
-        "st_beat_led_decide",
+        "st_stem_meter_update",
+        "st_stem_meter_brightness",
     ],
 }
 
@@ -172,8 +192,13 @@ REQUIRED_SUBSTRINGS = {
         "track_led_on(i)",
         "track_led_ghost(i)",
         "track_led_off(i)",
-        "atomic_get(&g_stem_song_frame_pub)",
-        "g_stem_beat_timing",
+        # Beat pulse is now per-stem: led_service() reads each stem's own
+        # published peak instead of the song-position mirror and the shared
+        # tempo record. See this file's own "BEAT PULSE, CORRECTED" note.
+        # The [i] subscript is part of the required string on purpose -- it
+        # proves the PER-STEM array is being read, not some single scalar.
+        "atomic_get(&g_stem_peak_pub[i])",
+        "g_trk_level[i]",
     ],
     "streamer_thread": [
         "lib.active.bpm_q8",

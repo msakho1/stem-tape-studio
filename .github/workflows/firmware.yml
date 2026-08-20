@@ -1097,6 +1097,37 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Stem Tape Phase 4 per-stem beat-pulse meter host tests
+        # Phase 4 beat pulse: src/st_stem_meter.c's own pure per-stem
+        # envelope follower and logarithmic LED brightness curve (see
+        # st_stem_meter.h). Linked into the real firmware target
+        # (CMakeLists.txt) and genuinely called -- looper_audio_block()
+        # publishes each stem's own per-block peak and led_service() runs
+        # the meter on it -- proven by the "stored four-stem playback
+        # wiring check" step below, not by this step, which re-proves the
+        # pure envelope and curve in isolation. The magnitudes here are
+        # fabricated PEAK VALUES, not fabricated audio content (this
+        # module has no audio concept); see test_stem_meter.c's own doc
+        # comment. Includes the two regressions that motivated the
+        # module: a proportional decay leaving a light faintly stuck on
+        # forever without a floor, and a linear curve rendering all real
+        # programme material near-full -- which is what made the previous
+        # tempo-boolean display look uniform.
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          cc -std=c11 -Wall -Wextra -Ifirmware/stemtape_player/src \
+            firmware/stemtape_player/src/st_stem_meter.c \
+            firmware/stemtape_player/tests/test_stem_meter.c \
+            -o audit/test_stem_meter
+          ./audit/test_stem_meter | tee audit/stem-meter-selftest.txt
+          {
+            echo '### Stem Tape Phase 4 per-stem beat-pulse meter host tests'
+            echo '```text'
+            cat audit/stem-meter-selftest.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Stem Tape v1.1 continuous streaming state machine host tests (Slice 3A)
         # Phase 2 continuous streaming: src/st_stem_stream.c's own pure
         # stored-song streaming state machine (see that file's own doc
