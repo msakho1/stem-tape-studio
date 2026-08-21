@@ -208,9 +208,15 @@ REQUIRED_CALLS = {
         "st_track_hold_tick",
     ],
     "led_service": [
+        # THE SINGLE SEMANTIC LED OWNER. led_service() must gather live state
+        # and hand it to the pure decision -- it must not decide anything
+        # itself. st_stem_mix_channel_audible() is the mixer's OWN audibility
+        # rule read back, so mute/solo/solo-suppression cannot drift between
+        # what is heard and what is lit.
         "st_stem_mix_channel_audible",
-        "st_stem_meter_update",
-        "st_stem_meter_brightness",
+        "st_led_batt_classify",
+        "st_led_mvp_decide",
+        "led_apply_frame",
     ],
 }
 
@@ -233,6 +239,38 @@ CLASSIC_SYMBOLS = ["mix32", "posb", "fracb", "vol_s", "pring", "soft_limit",
                    "g_loop_active", "g_pphase", "g_consume_pos", "g_cur_speed_q16"]
 # First classic statement markers, searched in looper_audio_block()'s body.
 CLASSIC_MARKERS = ["mix32[", "posb[", "fracb[", "vol_s[", "g_rec_track", "g_pphase"]
+
+# ---------------------------------------------------------------------------
+# LED OWNERSHIP PROOF.
+#
+# The whole point of the LED repair is that exactly ONE thing decides what the
+# eight LEDs show. Two fail-closed checks make that structural rather than a
+# convention someone has to remember:
+#
+#   A. These names must not exist ANYWHERE in main.c -- not as a definition,
+#      not as a call. show_song_leds() painted the side row as a 16-song
+#      bank/position display, which on a one-song device blinked a side LED
+#      forever to announce "song 1 of 16"; that is the physical symptom this
+#      work exists to remove. Requiring its ABSENCE, rather than requiring
+#      that the Stem Tape path avoids calling it, is what makes "it cannot
+#      control the side LEDs in Stem Tape mode" a property of the source
+#      instead of a promise.
+#
+#   B. led_service() must not write the physical LED masks directly. Every
+#      pin write belongs to led_apply_frame(), which renders a frame the
+#      pure decision produced. If led_service() could still call
+#      track_led_on()/led_on()/etc. it would be a second owner again, which
+#      is exactly the state this replaced.
+LED_FORBIDDEN_ANYWHERE = [
+    "show_song_leds",     # the inherited 16-song bank/position side display
+    "st_stem_meter_update",     # the ad-hoc peak meter that owned the track row
+    "st_stem_meter_brightness",
+]
+LED_FORBIDDEN_IN_LED_SERVICE = [
+    "track_led_on(", "track_led_off(", "track_led_ghost(",
+    "led_on(", "led_off(", "track_all_off(",
+    "g_trk_level[", "g_led_p0_on", "g_led_p1_on",
+]
 
 # Substring checks (see REQUIRED_CALLS's doc comment, check 4): these are
 # array-field reads/assignments, not call expressions, so they cannot be
@@ -257,11 +295,6 @@ REQUIRED_SUBSTRINGS = {
         "atomic_get(&g_stem_song_selected)",
         "trk[i].solo",
         "trk[i].muted",
-        "track_led_on(i)",
-        "track_led_ghost(i)",
-        "track_led_off(i)",
-        "atomic_get(&g_stem_peak_pub[i])",
-        "g_trk_level[i]",
     ],
     "stem_render_run": [
         # Meters fed from the SAME prepared gain the mixer multiplies by --
@@ -410,6 +443,58 @@ def main() -> int:
                            f"first classic-engine statement ({where}) -- classic transport, "
                            "recording, resampling, PASS A and PASS B never execute for a "
                            "stem-rendered block")
+    report.append("")
+
+    # ---- LED OWNERSHIP PROOF (see LED_FORBIDDEN_* above) ----
+    report.append("### Exactly one semantic owner of the eight LEDs")
+
+    # A. the legacy displays must not exist in the source at all
+    code_lines = []
+    for i, l in enumerate(lines, 1):
+        stripped = l.strip()
+        if stripped.startswith(("*", "//", "/*")):
+            continue          # comments may DISCUSS them; code may not use them
+        code_lines.append((i, l))
+    for name in LED_FORBIDDEN_ANYWHERE:
+        hits = [i for i, l in code_lines if re.search(r"\b" + re.escape(name) + r"\b", l)]
+        if hits:
+            report.append(f"- **MISSING/BAD**: `{name}` still present in main.c at line(s) "
+                           + ", ".join(str(h) for h in hits[:5])
+                           + " -- the legacy song-bank display and the ad-hoc peak meter must be "
+                             "GONE, not merely unreferenced from the Stem Tape path")
+            fail = True
+        else:
+            report.append(f"- present: `{name}` does not exist anywhere in main.c's code -- it "
+                           "cannot drive any LED in any state")
+
+    # A2. the standby chase must be gone with it
+    chase_hits = [i for i, l in code_lines if "STANDBY" in l or "standby chase" in l]
+    if chase_hits:
+        report.append("- **MISSING/BAD**: a standby chase remains at line(s) "
+                       + ", ".join(str(h) for h in chase_hits[:5])
+                       + " -- it must not be able to run while a valid Stem Tape song is selected")
+        fail = True
+    else:
+        report.append("- present: no standby chase remains in main.c's code -- the track row "
+                       "cannot animate an empty-device pattern over a selected song")
+
+    # B. led_service() must not touch pins directly
+    led_body = substrings_in_function(lines, func_of_line, "led_service")
+    if not led_body:
+        report.append("- **MISSING**: led_service() not found")
+        fail = True
+    else:
+        direct = [n for n in LED_FORBIDDEN_IN_LED_SERVICE if n in led_body]
+        if direct:
+            report.append("- **MISSING/BAD**: led_service() writes LED state directly: "
+                           + ", ".join("`" + n + "`" for n in direct)
+                           + " -- every pin write belongs to led_apply_frame(), rendering a frame "
+                             "st_led_mvp_decide() produced")
+            fail = True
+        else:
+            report.append("- present: led_service() writes no LED mask directly -- it gathers "
+                           "state, calls st_led_mvp_decide(), and renders through "
+                           "led_apply_frame() alone")
     report.append("")
 
     report.append("## Result")

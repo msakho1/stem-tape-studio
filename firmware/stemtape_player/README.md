@@ -31,12 +31,24 @@ to break.
 bootloader … do not remove those" — still holds, satisfied twice over: the
 boot-time combo above, and FUNCTION held 2.5 s → `power_off()` →
 `SYSTEM_OFF`, which is unchanged.
-- **The eight-LED PWM renderer** (`led_duty.c`, `led_render.c`,
-  `led_render_policy.c`) — byte-for-byte the same hardware driver already
-  proven and CI-built for the M0 target — now driving a NEW **local
-  semantic pattern engine** (`src/st_led_pattern.h`/`.c`) instead of M0's
-  MIDI-channel-16 protocol. No host connection of any kind is needed to
-  animate it.
+- **The eight-LED semantic owner** (`src/st_led_mvp.h`/`.c`) — one pure,
+  host-tested function that turns real runtime state into one complete
+  eight-LED frame, rendered through main.c's **existing TIMER3/GPIO
+  soft-PWM driver** inherited from the Tape Looper. `led_service()` gathers
+  live transport/mixer/charger state and does nothing else; every decision
+  lives in `st_led_mvp_decide()`.
+
+  **Correction.** This section previously claimed the eight-LED PWM
+  renderer (`led_duty.c`, `led_render.c`, `led_render_policy.c`) was
+  driving a semantic pattern engine (`src/st_led_pattern.c`) on this
+  device. That was false, and it was false in a way that mattered: none of
+  those four files are in this target's `CMakeLists.txt`, so none of them
+  ever executed here. The LEDs were actually driven by inherited Tape
+  Looper code — a 16-song bank/position display on the side row that made
+  a side LED blink permanently on a one-song device, plus a standby chase
+  and an ad-hoc peak meter on the track row. `st_led_mvp.c` replaces all
+  three with a single owner; the M0 modules remain M0's, still host-tested,
+  still not compiled into this firmware.
 - **The versioned companion transfer protocol**
   (`src/st_transfer_protocol.h`, `src/st_storage_layout.h`,
   `src/st_transfer.c`) — the full transactional begin/stage/verify/commit/

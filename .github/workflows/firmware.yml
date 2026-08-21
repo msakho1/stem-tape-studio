@@ -1039,8 +1039,12 @@ jobs:
         # selected STIX record's own bpm_q8/downbeat_frame (cross-checked
         # against the first sector's own header for consistency),
         # looper_audio_block() publishes the master song-position mirror
-        # once per block, and led_service() calls st_beat_phase_on_beat()/
-        # st_beat_led_decide() every control pass -- proven by the "stored
+        # once per block. NOTE: led_service() no longer calls
+        # st_beat_phase_on_beat()/st_beat_led_decide(); the LED repair gave
+        # the eight LEDs a single semantic owner (src/st_led_mvp.c) whose
+        # track row uses the contract's own solid/faint vocabulary. The
+        # beat-phase module stays linked as the shared song-position/tempo
+        # derivation other features read -- proven by the "stored
         # four-stem playback wiring check" step below, not merely by this
         # host-test step, which only re-proves the pure timing/decision
         # arithmetic itself in isolation (no Zephyr/nRF toolchain, no real
@@ -1097,7 +1101,7 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Stem Tape Phase 4 per-stem beat-pulse meter host tests
+      - name: st_stem_meter host tests (module NOT linked into the firmware -- reference only)
         # Phase 4 beat pulse: src/st_stem_meter.c's own pure per-stem
         # envelope follower and logarithmic LED brightness curve (see
         # st_stem_meter.h). Linked into the real firmware target
@@ -1122,7 +1126,7 @@ jobs:
             -o audit/test_stem_meter
           ./audit/test_stem_meter | tee audit/stem-meter-selftest.txt
           {
-            echo '### Stem Tape Phase 4 per-stem beat-pulse meter host tests'
+            echo '### st_stem_meter host tests (NOT in the firmware -- reference only)'
             echo '```text'
             cat audit/stem-meter-selftest.txt
             echo '```'
@@ -1219,6 +1223,43 @@ jobs:
             echo '### Stem Tape v1.1 SPSC mailbox ThreadSanitizer run (supplemental evidence)'
             echo '```text'
             cat audit/stem-bufmbox-tsan.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Stem Tape MVP LED acceptance matrix (production decision, all ten states)
+        # Drives the REAL production LED decision -- src/st_led_mvp.c's
+        # st_led_mvp_decide(), the same object file linked into the firmware
+        # and the same function main.c's led_service() calls -- across all ten
+        # required acceptance states: song selected/stopped, playing, mute and
+        # unmute, momentary solo and release, transfer begin and complete,
+        # stop and restart, USB disconnect, no song selected, battery
+        # unavailable/faulted, and charging/charge-complete.
+        #
+        # Audibility comes from the REAL st_stem_mix_channel_audible() in
+        # src/st_stem_mix.c -- the SAME rule the audio thread applies -- so a
+        # mute/solo row passes because the mixer agrees the stem is silent,
+        # not because the test asserted it should be. That is what makes this
+        # coverage of the shipping behaviour rather than of a reference model:
+        # the previous LED tests exercised st_led_pattern.c/led_render.c,
+        # which CMakeLists.txt does not compile into this firmware at all.
+        #
+        # TRUTHFUL WORDING: this proves the production DECISION assigns those
+        # eight modes. It does NOT prove the physical device lights up that
+        # way -- no GPIO, no TIMER3, no human eye. Physical LED verification
+        # remains a human check on real hardware.
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          cc -std=c11 -Wall -Wextra -Werror -Ifirmware/stemtape_player/src \
+            firmware/stemtape_player/src/st_led_mvp.c \
+            firmware/stemtape_player/src/st_stem_mix.c \
+            firmware/stemtape_player/tests/test_st_led_mvp.c \
+            -o audit/test_st_led_mvp
+          ./audit/test_st_led_mvp | tee audit/led-acceptance-matrix.txt
+          {
+            echo '### Stem Tape MVP LED acceptance matrix'
+            echo '```text'
+            cat audit/led-acceptance-matrix.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -1647,6 +1688,24 @@ jobs:
           check st_stem_mbox_producer_next_fill
           check st_stem_mbox_release
           check st_stem_mbox_publish_ready
+          # THE SEMANTIC LED OWNER, at link level. st_led_mvp_decide() is the
+          # ONE function that decides what the eight LEDs show, and
+          # st_led_batt_classify() is the trustworthy-battery rule that keeps
+          # an unavailable or faulted reading from ever being rendered as a
+          # charge level. Both are cross-TU (src/st_led_mvp.c), so unlike a
+          # single-call-site static they cannot be inlined away.
+          #
+          # led_service()/led_apply_frame() are deliberately NOT checked: both
+          # are `static` in main.c with one call site each, exactly the shape
+          # that made looper_audio_block() vanish from the ELF once it shrank.
+          # Their wiring is proven at the source level instead, by the stored
+          # four-stem playback wiring check's own "Exactly one semantic owner
+          # of the eight LEDs" section, which is strictly stronger: it proves
+          # led_service() writes no LED mask directly and that
+          # show_song_leds()/the peak meter/the standby chase are absent from
+          # the source outright.
+          check st_led_mvp_decide
+          check st_led_batt_classify
 
           # REQUIRED-ABSENT: any of these appearing in the final ELF (any nm
           # symbol type -- function OR data/bss) means recording, overdub,
