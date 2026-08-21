@@ -1030,41 +1030,52 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Stem Tape v1.1 beat-sync LED host tests (Phase 3)
-        # Phase 3 control-matrix, beat-sync LED slice: src/st_beat_phase.c's
-        # own pure, RAM-only beat-phase computation (see that file's own
-        # doc comment). Linked into the real firmware target
-        # (CMakeLists.txt) and genuinely called: main.c's own streamer_
-        # thread() boot code publishes the timing snapshot from the
-        # selected STIX record's own bpm_q8/downbeat_frame (cross-checked
-        # against the first sector's own header for consistency),
-        # looper_audio_block() publishes the master song-position mirror
-        # once per block. NOTE: led_service() no longer calls
-        # st_beat_phase_on_beat()/st_beat_led_decide(); the LED repair gave
-        # the eight LEDs a single semantic owner (src/st_led_mvp.c) whose
-        # track row uses the contract's own solid/faint vocabulary. The
-        # beat-phase module stays linked as the shared song-position/tempo
-        # derivation other features read -- proven by the "stored
-        # four-stem playback wiring check" step below, not merely by this
-        # host-test step, which only re-proves the pure timing/decision
-        # arithmetic itself in isolation (no Zephyr/nRF toolchain, no real
-        # time source needed for that part -- every bpm_q8/song_frame
-        # value here is fabricated TIMING, not fabricated audio content;
-        # see test_beat_phase.c's own doc comment on why that is not the
-        # fabrication this suite's rule forbids). Covers BPM/rounding,
-        # downbeat offset, frames-before-downbeat, loop-wrap boundaries,
-        # mute, momentary solo, and multiple simultaneously audible stems.
+      - name: Stem Tape v1.1 beat-phase host tests (Phase 3)
+        # src/st_beat_phase.c's own pure, RAM-only beat-phase computation
+        # (see that file's own doc comment). Linked into the real firmware
+        # target (CMakeLists.txt) and genuinely called: main.c's own
+        # streamer_thread() boot code publishes the timing snapshot from
+        # the selected STIX record's own bpm_q8/downbeat_frame
+        # (cross-checked against the first sector's own header for
+        # consistency), looper_audio_block() publishes the master
+        # song-position mirror once per block, and led_service() calls
+        # st_beat_pulse() on that mirror every control pass -- proven by
+        # the "stored four-stem playback wiring check" step below, not
+        # merely by this host-test step, which only re-proves the pure
+        # timing arithmetic itself in isolation.
+        #
+        # SCOPE, and why it shrank: this module exports timing only. It
+        # once also exported a track-LED on/off/ghost decision
+        # (st_beat_led_decide()) driven by a bare "is a beat happening"
+        # boolean (st_beat_phase_on_beat()). Both are now DELETED, not
+        # merely unwired -- the boolean gave all four Track LEDs the same
+        # value, so they flashed uniformly with no bar position, and the
+        # ghost/solid vocabulary went away entirely when the track row
+        # moved to real 0..255 brightness under one semantic owner
+        # (src/st_led_mvp.c). st_beat_pulse() supersedes both; the mute/
+        # solo and display cases those tests covered are covered against
+        # the real functions by the st_stem_mix and LED acceptance-matrix
+        # steps instead. The downbeat/pre-downbeat/loop-wrap cases were
+        # re-expressed against st_beat_pulse() rather than dropped.
+        #
+        # No Zephyr/nRF toolchain and no real time source are needed here:
+        # every bpm_q8/song_frame value is fabricated TIMING, not
+        # fabricated audio content -- see test_beat_phase.c's own doc
+        # comment on why that is not the fabrication this suite's rule
+        # forbids. Covers BPM/rounding, invalid-tempo fail-closed, downbeat
+        # anchoring, frames-before-downbeat, loop-wrap boundaries, the
+        # pulse envelope's rise/peak/fall, and the 0..3 bar cycle the
+        # chase indexes.
         working-directory: ${{ github.workspace }}/project
         run: |
           set -euo pipefail
           cc -std=c11 -Wall -Wextra -Ifirmware/stemtape_player/src \
             firmware/stemtape_player/src/st_beat_phase.c \
-            firmware/stemtape_player/src/st_stem_mix.c \
             firmware/stemtape_player/tests/test_beat_phase.c \
             -o audit/test_beat_phase -lm
           ./audit/test_beat_phase | tee audit/beat-phase-selftest.txt
           {
-            echo '### Stem Tape v1.1 beat-sync LED host tests (Phase 3)'
+            echo '### Stem Tape v1.1 beat-phase host tests (Phase 3)'
             echo '```text'
             cat audit/beat-phase-selftest.txt
             echo '```'

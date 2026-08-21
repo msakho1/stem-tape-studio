@@ -14,7 +14,7 @@
  * concept of either source beyond the plain bpm_q8/downbeat_frame/
  * sample_rate values st_beat_timing_init() is given.
  *
- * ONE CLOCK, NOT TWO: st_beat_phase_on_beat() takes the CURRENT master
+ * ONE CLOCK, NOT TWO: st_beat_pulse() takes the CURRENT master
  * song_frame (st_stream_t's own "the ONE authoritative absolute song
  * frame") fresh on every call — there is no second, independently-
  * ticking clock anywhere in this module. A loop wrap (song_frame resets
@@ -34,21 +34,28 @@
  *
  * FAIL CLOSED, NEVER FABRICATED: bpm_q8 == 0 or sample_rate == 0 (tempo
  * absent or invalid) leaves the timing snapshot invalid
- * (frames_per_beat == 0); st_beat_phase_on_beat() always returns false
- * for an invalid snapshot — the caller's existing steady audible/ghost
- * display is the correct fallback, never an invented tempo or pattern.
- * song_frame < downbeat_frame (the song has not yet reached its first
- * downbeat — true briefly after boot on a song with a pickup/lead-in,
- * and again briefly after every loop wrap if downbeat_frame > 0) uses
- * the SAME fallback: false, steady display, not a fabricated pre-roll
- * pattern.
+ * (frames_per_beat == 0); st_beat_pulse() reports valid=false for an
+ * invalid snapshot — the caller's dark fallback is the correct answer,
+ * never an invented tempo or pattern. song_frame < downbeat_frame (the
+ * song has not yet reached its first downbeat — true briefly after boot
+ * on a song with a pickup/lead-in, and again briefly after every loop
+ * wrap if downbeat_frame > 0) uses the SAME fallback, not a fabricated
+ * pre-roll pattern.
  *
- * DISPLAY DECISION REUSES THE ESTABLISHED VOCABULARY, ADDS NOTHING NEW:
- * st_beat_led_decide() is the exact same on/off/ghost split the classic
- * engine's own TS_PLAY track-LED logic already used (stopped-but-loaded
- * = solid; playing + on-beat = solid; playing + off-beat = off; muted
- * (here: not audible, which already folds in solo per st_stem_mix.h's
- * own rule) = ghost) — no fourth state, no new pattern.
+ * NO DISPLAY DECISION LIVES HERE. This module answers timing questions
+ * only. Every LED decision — which lights, how bright, in what priority
+ * order — belongs to st_led_mvp.c, the single semantic owner of all
+ * eight LEDs. An earlier revision of this header exported a track-LED
+ * on/off/ghost decision (st_beat_led_decide()) alongside a bare
+ * "is a beat happening" boolean (st_beat_phase_on_beat()). Both are
+ * DELETED, deliberately and not merely unwired: the boolean handed the
+ * same value to all four track LEDs, so they flashed uniformly and
+ * carried no bar position, and the ghost/solid vocabulary it fed was
+ * retired outright when the track row moved to real 0..255 brightness.
+ * st_beat_pulse() below supersedes both — it returns bar position and an
+ * envelope, which is what a chase and a fade actually need. Do not
+ * reintroduce either function; wiring a tempo boolean back into the LED
+ * path is the exact regression this deletion exists to prevent.
  *
  * PURE: no I/O, no Zephyr, no dynamic allocation.
  */
@@ -75,39 +82,11 @@ typedef struct {
  */
 bool st_beat_timing_init(st_beat_timing_t *out, uint32_t bpm_q8, uint32_t downbeat_frame, uint32_t sample_rate);
 
-/*
- * True iff `song_frame` (the master absolute song position, fresh every
- * call — see this header's own doc comment) falls within the first
- * `window_frames` frames of its current beat, given a VALID `timing`
- * snapshot and song_frame >= timing->downbeat_frame. Returns false in
- * every other case (invalid timing, or song_frame still before the
- * first downbeat) — never crashes, never fabricates a beat.
- */
-bool st_beat_phase_on_beat(const st_beat_timing_t *timing, uint32_t song_frame, uint32_t window_frames);
-
-typedef enum {
-	ST_TRACK_LED_OFF = 0,
-	ST_TRACK_LED_ON,
-	ST_TRACK_LED_GHOST,
-} st_track_led_state_t;
-
-/*
- * The one place the per-stem LED display decision is made, given
- * `audible` (st_stem_mix_channel_audible()'s own mute/solo rule),
- * `playing` (transport state), and `on_beat` (st_beat_phase_on_beat()'s
- * own result, ignored if !playing). See this header's own doc comment
- * for why this is exactly the classic engine's established on/off/ghost
- * vocabulary, not a new one.
- */
-st_track_led_state_t st_beat_led_decide(bool audible, bool playing, bool on_beat);
-
 /* ---- BEAT PULSE: envelope + bar position (Option C) ---------------------
  *
- * st_beat_phase_on_beat() answers only "is a beat happening", which is a
- * tempo boolean and nothing more -- give it to four LEDs and they flash
- * uniformly, carrying no bar position and no dynamics. The playing display
- * needs three things at once, all derived from the SAME song_frame so no
- * second clock can exist:
+ * This is the module's ONLY per-call query, and the only thing the LED
+ * layer ever asks it. The playing display needs three things at once, all
+ * derived from the SAME song_frame so no second clock can exist:
  *
  *   in_pulse   -- the LEDs are lit at all only inside a short window at the
  *                 start of each beat; between pulses everything is dark.
@@ -132,10 +111,10 @@ typedef struct {
 
 /*
  * Fills *out from a VALID timing snapshot and the current master song_frame.
- * Fails closed exactly as st_beat_phase_on_beat() does: an invalid snapshot
- * (frames_per_beat == 0) or a song_frame still before the first downbeat
- * yields valid=false, in_pulse=false, envelope=0, beat_index=0 -- never a
- * fabricated tempo and never a fabricated bar position.
+ * Fails closed: an invalid snapshot (frames_per_beat == 0) or a song_frame
+ * still before the first downbeat yields valid=false, in_pulse=false,
+ * envelope=0, beat_index=0 -- never a fabricated tempo and never a
+ * fabricated bar position.
  *
  * The envelope is a symmetric triangle across the window: it rises to 255 at
  * the window's midpoint and falls back, which gives the visible rise/fall a

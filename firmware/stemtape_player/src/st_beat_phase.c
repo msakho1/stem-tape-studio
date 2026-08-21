@@ -29,42 +29,18 @@ bool st_beat_timing_init(st_beat_timing_t *out, uint32_t bpm_q8, uint32_t downbe
 	return true;
 }
 
-bool st_beat_phase_on_beat(const st_beat_timing_t *timing, uint32_t song_frame, uint32_t window_frames)
-{
-	if (timing->frames_per_beat == 0u || song_frame < timing->downbeat_frame) {
-		return false;
-	}
-
-	uint32_t since_downbeat = song_frame - timing->downbeat_frame;
-	uint32_t phase = since_downbeat % timing->frames_per_beat;
-
-	return phase < window_frames;
-}
-
-st_track_led_state_t st_beat_led_decide(bool audible, bool playing, bool on_beat)
-{
-	if (!audible) {
-		return ST_TRACK_LED_GHOST;
-	}
-	if (!playing) {
-		return ST_TRACK_LED_ON; /* stopped but loaded: solid, same as the classic engine's own precedent */
-	}
-	return on_beat ? ST_TRACK_LED_ON : ST_TRACK_LED_OFF;
-}
-
 void st_beat_pulse(const st_beat_timing_t *timing, uint32_t song_frame,
 		    st_beat_pulse_t *out)
 {
-	uint32_t since, into_beat, window, half, rise;
+	uint32_t since, into_beat, window, last, half, rise;
 
 	out->valid = false;
 	out->in_pulse = false;
 	out->envelope = 0u;
 	out->beat_index = 0u;
 
-	/* Same fail-closed contract as st_beat_phase_on_beat(): no tempo, or
-	 * not yet at the first downbeat, means no pulse and no bar position --
-	 * not an invented one. */
+	/* Fail closed: no tempo, or not yet at the first downbeat, means no
+	 * pulse and no bar position -- not an invented one. */
 	if (timing->frames_per_beat == 0u) {
 		return;
 	}
@@ -87,15 +63,17 @@ void st_beat_pulse(const st_beat_timing_t *timing, uint32_t song_frame,
 
 	out->in_pulse = true;
 
-	/* Symmetric triangle: 0 -> 255 -> 0 across the window. */
-	half = window / 2u;
+	/* Symmetric triangle: 0 at both edges of the window, exactly 255 at its
+	 * centre. Measured as the distance to the NEARER edge, which is
+	 * symmetric by construction -- an earlier version scaled a rising/
+	 * falling branch by window/2 and so peaked at 254, never at the 255 this
+	 * module documents, and left a flat plateau on odd-length windows. */
+	last = window - 1u;
+	rise = (into_beat <= (last - into_beat)) ? into_beat : (last - into_beat);
+	half = last / 2u;    /* the centre's own distance to the nearer edge */
 	if (half == 0u) {
-		out->envelope = 255u;
+		out->envelope = 255u;   /* window of 1-2 frames: no room for a ramp */
 		return;
-	}
-	rise = (into_beat < half) ? into_beat : (window - 1u - into_beat);
-	if (rise >= half) {
-		rise = half - 1u;
 	}
 	out->envelope = (uint8_t)((rise * 255u) / half);
 }

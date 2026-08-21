@@ -88,51 +88,55 @@ find_call_sites() in stemtape_player_safety_gate.py already does):
      to suppress its own tap-to-mute action -- both ends of the
      corrected wire proven present in source, not just one.
 
-  5. Phase 3 control-matrix, LED slice: led_service() (the single real
-     owner of the physical LEDs -- see its own doc comment) reads the
-     SAME trk[].muted/trk[].solo state as check 4, gated on the SAME
-     g_stem_song_selected flag PASS C itself gates on, calls the real
-     st_stem_mix_channel_audible() (REQUIRED_CALLS -- the SAME shared
-     audibility formula looper_audio_block()'s own mixer uses
-     internally, so LED feedback can never drift from what the mixer
-     actually plays), and drives the real track_led_on()/track_led_
-     ghost()/track_led_off() primitives -- proving stem mute/solo status
-     reaches the physical LEDs, not just the mixer.
+  5. LED slice: led_service() is the SINGLE semantic owner of all eight
+     LEDs -- it gathers live state and hands it to one pure decision,
+     and it must not decide anything itself. This gate requires it to
+     call st_led_batt_classify(), st_led_mvp_decide() and
+     led_apply_frame() (REQUIRED_CALLS), and to read
+     atomic_get(&g_stem_song_selected) and trk[i].solo
+     (REQUIRED_SUBSTRINGS) -- proving the live transport/mixer state
+     really reaches the pure decision, and that the decision's output
+     really reaches the physical renderer. The forbidden lists below are
+     the other half of that proof: no second renderer, no competing
+     legacy mask, and no persistent per-track mute concept (Stem Tape's
+     Track button is an immediate momentary solo, never a mute).
 
-  6. Phase 3 control-matrix, beat-sync LED slice: streamer_thread()'s
-     boot code genuinely reads lib.active.bpm_q8/downbeat_frame (the
-     selected STIX record's own authoritative song-level timing) AND
-     cross-checks them against hdr.bpm_q8/hdr.downbeat_frame (the first
-     sector's own header) before calling the real st_beat_timing_init()
-     (REQUIRED_CALLS); looper_audio_block() genuinely calls atomic_set(
-     &g_stem_song_frame_pub, ...) once per block (REQUIRED_SUBSTRINGS --
-     an atomic-write call whose OWN argument is what proves it is the
-     right one, not just any atomic_set); led_service() genuinely reads
-     atomic_get(&g_stem_peak_pub[i]) and calls the real
-     st_stem_meter_update()/st_stem_meter_brightness() (REQUIRED_CALLS)
-     -- proving the whole chain from the decoded stem samples through
-     to the physical per-LED brightness is real, not merely linked.
+  6. Beat/chase from real STIX timing: streamer_thread()'s boot code
+     genuinely reads lib.active.bpm_q8/downbeat_frame (the selected STIX
+     record's own authoritative song-level timing) AND cross-checks them
+     against hdr.bpm_q8/hdr.downbeat_frame (the first sector's own
+     header) before calling the real st_beat_timing_init()
+     (REQUIRED_CALLS); audio_block_epilogue() genuinely calls
+     atomic_set(&g_stem_song_frame_pub, ...) once per block
+     (REQUIRED_SUBSTRINGS -- an atomic-write call whose OWN argument is
+     what proves it is the right one, not just any atomic_set); and
+     led_service() calls st_beat_pulse() (REQUIRED_CALLS) on BOTH
+     &g_stem_beat_timing and atomic_get(&g_stem_song_frame_pub)
+     (REQUIRED_SUBSTRINGS). Requiring both arguments by name is what
+     stops a second, free-running LED clock from reappearing: the pulse
+     can only be derived from the same song position the audio path
+     publishes.
 
-     BEAT PULSE, CORRECTED: this gate previously required led_service()
-     to call st_beat_phase_on_beat()/st_beat_led_decide(). That display
-     derived ONE boolean from the STIX tempo and handed the SAME value
-     to all four track LEDs, so every audible stem lit and darkened
-     together -- uniform by construction, carrying no per-stem
-     information. It is replaced by per-stem output-level metering
-     (src/st_stem_meter.c), so those two calls are gone from
-     led_service() and this gate now requires the calls that actually
-     drive the lights.
+     WHAT USED TO BE HERE, and why it is gone rather than dormant: this
+     gate once required led_service() to call st_beat_phase_on_beat()/
+     st_beat_led_decide(). That pair derived ONE boolean from the STIX
+     tempo and handed the SAME value to all four Track LEDs, so they
+     flashed uniformly, carrying no bar position and no dynamics. A
+     later revision replaced it with per-stem output-level metering
+     (src/st_stem_meter.c), which was also wrong -- a level meter dimmed
+     a stem that was plainly audible during a quiet passage. Both are
+     now superseded by st_beat_pulse() feeding st_led_mvp_decide(): a
+     shared beat envelope, scaled per stem by activity, with a
+     1->2->3->4 bar chase. st_beat_phase_on_beat()/st_beat_led_decide()
+     have been DELETED from src/st_beat_phase.c (they were compiled into
+     the firmware with no caller, and their ghost/solid vocabulary was
+     retired when the track row moved to real 0..255 brightness);
+     st_stem_meter.c is no longer compiled into this target at all. Both
+     appear in the forbidden lists below so neither can quietly return.
 
-     st_beat_timing_init() is still called and still required above (the
-     selected song's tempo is still parsed and held): what changed is
-     only that the LED row stopped being driven by a beat boolean.
-     st_beat_phase_on_beat()/st_beat_led_decide() therefore currently
-     have no caller -- stated here rather than left to be discovered,
-     since this repo's rule is that unwired code must not be presented
-     as part of the real runtime. They are retained, with their host
-     tests, for the loop-quantization work (CTL-04/CTL-12/CTL-22) that
-     consumes the same bar/beat derivation; if that work does not land,
-     they should be deleted rather than kept indefinitely.
+     st_beat_timing_init() is still called and still required above --
+     the selected song's tempo is still parsed and held. What changed is
+     only what consumes it.
 
 Fails closed: main.c missing, either function's body not found, or any
 required call site/substring absent.
@@ -210,9 +214,7 @@ REQUIRED_CALLS = {
     "led_service": [
         # THE SINGLE SEMANTIC LED OWNER. led_service() must gather live state
         # and hand it to the pure decision -- it must not decide anything
-        # itself. st_stem_mix_channel_audible() is the mixer's OWN audibility
-        # rule read back, so mute/solo/solo-suppression cannot drift between
-        # what is heard and what is lit.
+        # itself.
         "st_led_batt_classify",
         "st_led_mvp_decide",
         "led_apply_frame",
@@ -270,6 +272,15 @@ LED_FORBIDDEN_ANYWHERE = [
     "st_stem_meter_brightness",
     "g_trk_level_active",       # the meter's renderer gate
     "led_apply_mode",           # the superseded three-state applier
+    # The retired tempo boolean and the on/off/ghost track decision it fed.
+    # Deleted outright from src/st_beat_phase.c (see this file's own docstring,
+    # check 6): one boolean handed to all four Track LEDs makes them flash
+    # uniformly with no bar position, which is the exact display this firmware
+    # was corrected away from. st_beat_pulse() is the replacement. Naming them
+    # here means re-wiring either one fails with this explanation rather than
+    # an unexplained link error.
+    "st_beat_phase_on_beat",
+    "st_beat_led_decide",
 ]
 
 # led_service() must not read trk[].muted at all: Stem Tape has no persistent
@@ -311,8 +322,9 @@ REQUIRED_SUBSTRINGS = {
         "trk[i].solo",
     ],
     "stem_render_run": [
-        # Meters fed from the SAME prepared gain the mixer multiplies by --
-        # one audibility rule, not two.
+        # Per-stem activity published from the SAME prepared gain the mixer
+        # multiplies by -- one audibility rule, not two, so a stem that is
+        # silenced in the mix can never scale a lit Track LED.
         "prep->gain_q8[sp] == 0",
     ],
     "streamer_thread": [
@@ -474,8 +486,10 @@ def main() -> int:
         if hits:
             report.append(f"- **MISSING/BAD**: `{name}` still present in main.c at line(s) "
                            + ", ".join(str(h) for h in hits[:5])
-                           + " -- the legacy song-bank display and the ad-hoc peak meter must be "
-                             "GONE, not merely unreferenced from the Stem Tape path")
+                           + " -- every superseded LED mechanism (the legacy song-bank display, "
+                             "the ad-hoc peak meter, the retired tempo boolean and its on/off/"
+                             "ghost decision) must be GONE, not merely unreferenced from the "
+                             "Stem Tape path")
             fail = True
         else:
             report.append(f"- present: `{name}` does not exist anywhere in main.c's code -- it "

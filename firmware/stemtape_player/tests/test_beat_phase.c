@@ -8,9 +8,22 @@
  * test a pure timing/arithmetic state machine, not the fabrication this
  * suite's own non-fabrication rule forbids.
  *
+ * SCOPE: timing only. This module no longer exports any LED decision --
+ * st_beat_phase_on_beat()/st_beat_led_decide() and their on/off/ghost
+ * vocabulary were deleted when the eight LEDs got a single semantic
+ * owner (see st_beat_phase.h's own doc comment for why). The display
+ * decisions those two functions used to make are covered by
+ * tests/test_st_led_mvp.c against the real st_led_mvp_decide(), and the
+ * mute/solo audibility rule they consumed is covered by
+ * tests/test_stem_mix.c against the real st_stem_mix_channel_audible().
+ * The downbeat-anchoring, pre-downbeat and loop-wrap cases below were
+ * NOT dropped with those functions: they are re-expressed against
+ * st_beat_pulse(), which is what the firmware actually calls, so the
+ * coverage now follows the live code path instead of a retired one.
+ *
  *     cc -std=c11 -Wall -Wextra -I../src \
- *        ../src/st_beat_phase.c ../src/st_stem_mix.c ../src/st_sector_v11.c \
- *        test_beat_phase.c -o test_beat_phase -lm && ./test_beat_phase
+ *        ../src/st_beat_phase.c test_beat_phase.c -o test_beat_phase -lm \
+ *        && ./test_beat_phase
  *
  * Does not need the repository-root working directory (no fixture
  * files).
@@ -19,7 +32,6 @@
 #include <stdio.h>
 
 #include "st_beat_phase.h"
-#include "st_stem_mix.h"
 
 static int g_checks;
 static int g_failures;
@@ -89,14 +101,33 @@ static void test_sample_rate_zero_is_invalid(void)
 	CHECK(t.frames_per_beat == 0u, "sample_rate 0: frames_per_beat left at 0");
 }
 
-static void test_invalid_timing_never_reports_on_beat(void)
+/* At 120 BPM / 48 kHz the beat is 24000 frames and the pulse window is
+ * ST_BEAT_PULSE_NUM/ST_BEAT_PULSE_DEN of it. Derived here from the header's
+ * own constants rather than hardcoded, so retuning the window retunes these
+ * expectations instead of breaking them. */
+#define FPB_120  24000u
+#define WIN_120  ((FPB_120 * ST_BEAT_PULSE_NUM) / ST_BEAT_PULSE_DEN)
+
+static st_beat_pulse_t pulse_at(const st_beat_timing_t *t, uint32_t song_frame)
+{
+	st_beat_pulse_t p;
+
+	st_beat_pulse(t, song_frame, &p);
+	return p;
+}
+
+static void test_invalid_timing_never_reports_a_pulse(void)
 {
 	st_beat_timing_t t;
+	st_beat_pulse_t p;
 
 	(void)st_beat_timing_init(&t, 0u, 0u, SR_48K); /* invalid */
+	p = pulse_at(&t, 0u);
 
-	CHECK(!st_beat_phase_on_beat(&t, 0u, 100000u), "invalid timing: on_beat is always false, even with "
-							 "a huge window and song_frame 0 -- never fabricates a beat");
+	CHECK(!p.valid, "invalid timing: pulse reports valid=false -- never fabricates a tempo");
+	CHECK(!p.in_pulse && p.envelope == 0u && p.beat_index == 0u,
+	      "invalid timing: every output field is the fail-closed value (dark, no bar position), "
+	      "not a stale or invented one");
 }
 
 /* ---- DOWNBEAT OFFSET: phase is anchored to downbeat_frame, not frame 0. ---- */
@@ -105,31 +136,38 @@ static void test_downbeat_offset_anchors_phase(void)
 	st_beat_timing_t t;
 
 	(void)st_beat_timing_init(&t, 120u * 256u, 1000u, SR_48K); /* frames_per_beat=24000, downbeat=1000 */
+	CHECK(t.frames_per_beat == FPB_120, "downbeat offset: setup check, frames_per_beat == %u", FPB_120);
 
-	CHECK(st_beat_phase_on_beat(&t, 1000u, 500u), "downbeat offset: song_frame exactly AT downbeat_frame "
-						       "is on-beat (phase 0)");
-	CHECK(st_beat_phase_on_beat(&t, 1499u, 500u), "downbeat offset: song_frame 499 frames past downbeat, "
-						       "window 500 -- still on-beat");
-	CHECK(!st_beat_phase_on_beat(&t, 1500u, 500u), "downbeat offset: song_frame 500 frames past downbeat, "
-							"window 500 -- just off-beat");
-	CHECK(st_beat_phase_on_beat(&t, 1000u + 24000u, 500u), "downbeat offset: exactly one full beat later "
-								 "(frame 25000) is on-beat again");
+	CHECK(pulse_at(&t, 1000u).in_pulse, "downbeat offset: song_frame exactly AT downbeat_frame is inside "
+					     "the pulse window (phase 0)");
+	CHECK(pulse_at(&t, 1000u).beat_index == 0u, "downbeat offset: the frame at downbeat_frame is beat 0 "
+						     "(the downbeat), not an arbitrary bar position");
+	CHECK(pulse_at(&t, 1000u + WIN_120 - 1u).in_pulse, "downbeat offset: the last frame of the window is "
+							    "still inside the pulse");
+	CHECK(!pulse_at(&t, 1000u + WIN_120).in_pulse, "downbeat offset: one frame past the window is dark -- "
+							"the window is half-open, exactly WIN frames wide");
+	CHECK(pulse_at(&t, 1000u + WIN_120).valid, "downbeat offset: between pulses is still VALID timing -- "
+						    "dark is an answer, not an absence of one");
+	CHECK(pulse_at(&t, 1000u + FPB_120).in_pulse, "downbeat offset: exactly one full beat later, the pulse "
+						       "returns");
+	CHECK(pulse_at(&t, 1000u + FPB_120).beat_index == 1u, "downbeat offset: one beat past the downbeat is "
+							       "beat 1 -- the bar position advances with the beat");
 }
 
-/* ---- FRAMES BEFORE DOWNBEAT: no pulse yet -- caller's steady display,
- * not a fabricated pre-roll pattern. ---- */
-static void test_frames_before_downbeat_never_on_beat(void)
+/* ---- FRAMES BEFORE DOWNBEAT: no pulse yet -- dark, not a fabricated
+ * pre-roll pattern. ---- */
+static void test_frames_before_downbeat_never_pulse(void)
 {
 	st_beat_timing_t t;
 
 	(void)st_beat_timing_init(&t, 120u * 256u, 5000u, SR_48K);
 
-	CHECK(!st_beat_phase_on_beat(&t, 0u, 24000u), "before downbeat: song_frame 0, downbeat_frame 5000 -- "
-						       "never on-beat even with a window covering the whole beat");
-	CHECK(!st_beat_phase_on_beat(&t, 4999u, 24000u), "before downbeat: one frame before downbeat_frame -- "
-							  "still never on-beat");
-	CHECK(st_beat_phase_on_beat(&t, 5000u, 500u), "before downbeat: exactly AT downbeat_frame -- on-beat "
-						       "begins here, not one frame later or earlier");
+	CHECK(!pulse_at(&t, 0u).valid, "before downbeat: song_frame 0, downbeat_frame 5000 -- invalid, so no "
+					"pulse and no bar position");
+	CHECK(!pulse_at(&t, 4999u).valid, "before downbeat: one frame before downbeat_frame -- still nothing");
+	CHECK(pulse_at(&t, 5000u).valid && pulse_at(&t, 5000u).in_pulse,
+	      "before downbeat: exactly AT downbeat_frame -- the pulse begins here, not one frame later or "
+	      "earlier");
 }
 
 /* ---- LOOP BOUNDARIES: song_frame wraps to 0 (st_stream_t's own LOOPED
@@ -141,118 +179,73 @@ static void test_loop_wrap_resumes_correctly(void)
 
 	(void)st_beat_timing_init(&t, 120u * 256u, 1000u, SR_48K); /* frames_per_beat=24000, downbeat=1000 */
 
-	/* Just before a loop wrap: deep into a late beat, on-beat. */
-	CHECK(st_beat_phase_on_beat(&t, 1000u + 24000u * 3u, 500u), "loop boundary: on-beat late in the song, "
-								      "just before a hypothetical wrap");
+	/* Just before a loop wrap: the fourth beat of a bar, pulsing. */
+	CHECK(pulse_at(&t, 1000u + FPB_120 * 3u).in_pulse, "loop boundary: pulsing late in the song, just "
+							    "before a hypothetical wrap");
+	CHECK(pulse_at(&t, 1000u + FPB_120 * 3u).beat_index == 3u, "loop boundary: that late beat is bar "
+								    "position 3, the last of the four");
 
 	/* The instant song_frame wraps to 0 (st_stream_t resets it there):
 	 * 0 < downbeat_frame (1000), so this is the "before downbeat" case
-	 * again, briefly -- steady display, not a fabricated pattern. */
-	CHECK(!st_beat_phase_on_beat(&t, 0u, 500u), "loop boundary: the instant of wrap (song_frame 0) is "
-						     "before this song's own downbeat_frame -- no pulse yet, "
-						     "same fallback as any other pre-downbeat moment");
+	 * again, briefly -- dark, not a fabricated pattern. */
+	CHECK(!pulse_at(&t, 0u).valid, "loop boundary: the instant of wrap (song_frame 0) is before this "
+					"song's own downbeat_frame -- no pulse yet, same fallback as any "
+					"other pre-downbeat moment");
 
 	/* Once song_frame reaches downbeat_frame again post-wrap, pulsing
 	 * resumes exactly as it did the first time -- same formula, same
-	 * clock, no drift introduced by the wrap. */
-	CHECK(st_beat_phase_on_beat(&t, 1000u, 500u), "loop boundary: post-wrap, once song_frame reaches "
-						       "downbeat_frame again, on-beat resumes identically");
+	 * clock, no drift introduced by the wrap, and the bar restarts at 0
+	 * rather than continuing from wherever it was. */
+	CHECK(pulse_at(&t, 1000u).in_pulse && pulse_at(&t, 1000u).beat_index == 0u,
+	      "loop boundary: post-wrap, once song_frame reaches downbeat_frame again, the pulse resumes "
+	      "identically AND the bar restarts at beat 0");
 }
 
-/* ---- MUTE: a muted (not audible) stem is always ST_TRACK_LED_GHOST,
- * regardless of transport state or beat phase. ---- */
-static void test_muted_stem_is_always_ghost(void)
+/* ---- ENVELOPE: the window is a symmetric rise and fall, not a square
+ * gate -- this is what makes the pulse read as a pulse. ---- */
+static void test_envelope_rises_and_falls_within_the_window(void)
 {
-	CHECK(st_beat_led_decide(false, true, true) == ST_TRACK_LED_GHOST,
-	      "mute: not audible, playing, on-beat -- still ghost");
-	CHECK(st_beat_led_decide(false, true, false) == ST_TRACK_LED_GHOST,
-	      "mute: not audible, playing, off-beat -- still ghost");
-	CHECK(st_beat_led_decide(false, false, false) == ST_TRACK_LED_GHOST,
-	      "mute: not audible, stopped -- still ghost");
+	st_beat_timing_t t;
+	uint32_t mid;
+
+	(void)st_beat_timing_init(&t, 120u * 256u, 0u, SR_48K);
+	mid = WIN_120 / 2u;
+
+	CHECK(pulse_at(&t, 0u).envelope == 0u, "envelope: the first frame of the window is 0 -- the pulse "
+					        "rises INTO the beat rather than snapping on");
+	CHECK(pulse_at(&t, mid).envelope == 255u, "envelope: the window's midpoint is full scale (got %u)",
+	      pulse_at(&t, mid).envelope);
+	CHECK(pulse_at(&t, mid / 2u).envelope < 255u && pulse_at(&t, mid / 2u).envelope > 0u,
+	      "envelope: a quarter of the way in is partway up, neither dark nor full");
+	CHECK(pulse_at(&t, mid + (mid / 2u)).envelope < 255u && pulse_at(&t, mid + (mid / 2u)).envelope > 0u,
+	      "envelope: three quarters of the way in is partway back DOWN -- symmetric, not a sawtooth");
+	CHECK(pulse_at(&t, WIN_120).envelope == 0u, "envelope: past the window it is 0, matching in_pulse");
 }
 
-/* ---- MOMENTARY SOLO: an audible stem (soloed, or the only one left
- * after another's momentary solo cleared) pulses exactly like any other
- * audible stem -- the display decision only ever sees the already-
- * computed `audible` boolean, so solo's own momentary/latched distinction
- * is entirely handled upstream (st_track_hold.c/st_stem_mix_channel_
- * audible()) and has no separate code path here. */
-static void test_momentary_solo_audible_pulses_like_any_audible_stem(void)
+/* ---- BAR POSITION CYCLES 0..3 and only 0..3, which is what makes the
+ * 1->2->3->4 chase possible at all. ---- */
+static void test_beat_index_cycles_through_the_bar(void)
 {
-	st_stem_mix_channel_t channels[ST11_STEM_COUNT];
+	st_beat_timing_t t;
+	bool all_in_range = true;
+	uint32_t b;
 
-	for (uint32_t s = 0; s < ST11_STEM_COUNT; s++) {
-		channels[s].gain_q8 = ST_STEM_MIX_GAIN_UNITY_Q8;
-		channels[s].mute = false;
-		channels[s].solo = false;
+	(void)st_beat_timing_init(&t, 120u * 256u, 0u, SR_48K);
+
+	CHECK(pulse_at(&t, FPB_120 * 0u).beat_index == 0u, "bar: beat 0");
+	CHECK(pulse_at(&t, FPB_120 * 1u).beat_index == 1u, "bar: beat 1");
+	CHECK(pulse_at(&t, FPB_120 * 2u).beat_index == 2u, "bar: beat 2");
+	CHECK(pulse_at(&t, FPB_120 * 3u).beat_index == 3u, "bar: beat 3");
+	CHECK(pulse_at(&t, FPB_120 * 4u).beat_index == 0u, "bar: the fifth beat wraps back to 0 -- a four-beat "
+							    "bar, not a free-running counter");
+
+	for (b = 0u; b < 64u; b++) {
+		if (pulse_at(&t, FPB_120 * b).beat_index > 3u) {
+			all_in_range = false;
+		}
 	}
-	channels[1].solo = true; /* momentary solo currently active on stem 1 */
-
-	bool stem1_audible = st_stem_mix_channel_audible(channels, 1u);
-	bool stem0_audible = st_stem_mix_channel_audible(channels, 0u);
-
-	CHECK(stem1_audible && !stem0_audible, "momentary solo: stem 1 (soloed) audible, stem 0 silenced -- "
-						"setup check");
-	CHECK(st_beat_led_decide(stem1_audible, true, true) == ST_TRACK_LED_ON,
-	      "momentary solo: the soloed, audible stem is ON on-beat, exactly like unsoloed audible content");
-	CHECK(st_beat_led_decide(stem0_audible, true, true) == ST_TRACK_LED_GHOST,
-	      "momentary solo: the silenced-by-solo stem is ghost even though this same tick is on-beat");
-
-	/* Solo releases (momentary -- st_track_hold.c's own behavior,
-	 * exercised there): channels[1].solo now false, nothing soloed. */
-	channels[1].solo = false;
-	bool stem0_after_release = st_stem_mix_channel_audible(channels, 0u);
-
-	CHECK(stem0_after_release, "momentary solo: after release, stem 0 is audible again (no solo pending)");
-	CHECK(st_beat_led_decide(stem0_after_release, true, false) == ST_TRACK_LED_OFF,
-	      "momentary solo: after release, stem 0 follows the normal audible+off-beat -> OFF rule");
-}
-
-/* ---- MULTIPLE AUDIBLE STEMS: two stems soloed together are BOTH
- * audible and BOTH pulse together on the same on_beat tick. ---- */
-static void test_multiple_audible_stems_pulse_together(void)
-{
-	st_stem_mix_channel_t channels[ST11_STEM_COUNT];
-
-	for (uint32_t s = 0; s < ST11_STEM_COUNT; s++) {
-		channels[s].gain_q8 = ST_STEM_MIX_GAIN_UNITY_Q8;
-		channels[s].mute = false;
-		channels[s].solo = false;
-	}
-	channels[0].solo = true;
-	channels[2].solo = true;
-
-	bool a0 = st_stem_mix_channel_audible(channels, 0u);
-	bool a1 = st_stem_mix_channel_audible(channels, 1u);
-	bool a2 = st_stem_mix_channel_audible(channels, 2u);
-	bool a3 = st_stem_mix_channel_audible(channels, 3u);
-
-	CHECK(a0 && a2 && !a1 && !a3, "multiple audible: stems 0 and 2 audible, 1 and 3 silenced -- setup check");
-
-	bool on_beat = true;
-
-	CHECK(st_beat_led_decide(a0, true, on_beat) == ST_TRACK_LED_ON &&
-		      st_beat_led_decide(a2, true, on_beat) == ST_TRACK_LED_ON,
-	      "multiple audible: both soloed stems (0 and 2) are ON together on the SAME on-beat tick");
-	CHECK(st_beat_led_decide(a1, true, on_beat) == ST_TRACK_LED_GHOST &&
-		      st_beat_led_decide(a3, true, on_beat) == ST_TRACK_LED_GHOST,
-	      "multiple audible: the two non-soloed stems (1 and 3) stay ghost on that same tick");
-
-	on_beat = false;
-	CHECK(st_beat_led_decide(a0, true, on_beat) == ST_TRACK_LED_OFF &&
-		      st_beat_led_decide(a2, true, on_beat) == ST_TRACK_LED_OFF,
-	      "multiple audible: both audible stems go OFF together on the same off-beat tick");
-}
-
-/* ---- Stopped transport: audible content is solid, never pulsed, even
- * with a valid on_beat computation available -- matches the classic
- * engine's own "stopped: content reads solid" precedent. ---- */
-static void test_stopped_transport_is_solid_not_pulsed(void)
-{
-	CHECK(st_beat_led_decide(true, false, true) == ST_TRACK_LED_ON,
-	      "stopped: audible + not playing + (would-be) on-beat -- solid ON");
-	CHECK(st_beat_led_decide(true, false, false) == ST_TRACK_LED_ON,
-	      "stopped: audible + not playing + (would-be) off-beat -- STILL solid ON, not OFF");
+	CHECK(all_in_range, "bar: across 64 consecutive beats every beat_index stays within 0..3 -- the chase "
+			     "can never index past the four Track LEDs");
 }
 
 int main(void)
@@ -261,14 +254,12 @@ int main(void)
 	RUN(test_bpm_non_integer_divisor_rounds_not_truncates);
 	RUN(test_bpm_zero_is_invalid);
 	RUN(test_sample_rate_zero_is_invalid);
-	RUN(test_invalid_timing_never_reports_on_beat);
+	RUN(test_invalid_timing_never_reports_a_pulse);
 	RUN(test_downbeat_offset_anchors_phase);
-	RUN(test_frames_before_downbeat_never_on_beat);
+	RUN(test_frames_before_downbeat_never_pulse);
 	RUN(test_loop_wrap_resumes_correctly);
-	RUN(test_muted_stem_is_always_ghost);
-	RUN(test_momentary_solo_audible_pulses_like_any_audible_stem);
-	RUN(test_multiple_audible_stems_pulse_together);
-	RUN(test_stopped_transport_is_solid_not_pulsed);
+	RUN(test_envelope_rises_and_falls_within_the_window);
+	RUN(test_beat_index_cycles_through_the_bar);
 
 	printf("\n%d distinct test cases, %d assertion checks\n", g_test_cases, g_checks);
 	if (g_failures) {

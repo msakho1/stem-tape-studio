@@ -80,9 +80,12 @@ include(${ZEPHYR_BASE}/samples/subsys/usb/common/common.cmake)
 # independently-ticking clock) -- is linked and genuinely called: main.c's
 # own streamer_thread() boot code publishes the timing snapshot once (from
 # the SAME already-read STIX record slice 3B/3B.1 already consume for
-# geometry), looper_audio_block() publishes the song-position mirror once
-# per block, and led_service() calls st_beat_phase_on_beat()/st_beat_led_
-# decide() every control pass.
+# geometry), audio_block_epilogue() publishes the song-position mirror once
+# per block, and led_service() calls st_beat_pulse() on both of those every
+# control pass. EVERY function in this file has a real caller: the module
+# once also exported st_beat_phase_on_beat()/st_beat_led_decide(), which
+# lost their caller when the eight LEDs got a single semantic owner, and
+# have since been DELETED rather than left compiled in and unreachable.
 #
 # The OLD, now-retired v1.0 Gate 2 contract's own engine -- src/
 # st_storage_layout.c, src/st_sector_codec.c, src/st_transfer.c, src/
