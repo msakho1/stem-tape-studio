@@ -10,7 +10,7 @@
  * records. Physical mutation remains gated by the same capability verdict as
  * before; this pass changed presentation and preparation, not the protocol.
  */
-import stemTapeLogo from "@/assets/stemtape-logo.png.asset.json";
+import stemTapeLogo from "@/assets/stemtape-logo-bench.png.asset.json";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { SupportButton } from "@/components/SupportButton";
