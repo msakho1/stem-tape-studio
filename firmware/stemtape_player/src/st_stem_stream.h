@@ -239,6 +239,29 @@ void st_stream_sector_ready(st_stream_t *st, uint32_t sector_index);
 void st_stream_play(st_stream_t *st);
 void st_stream_stop(st_stream_t *st);
 
+/*
+ * Moves the playhead to an ARBITRARY frame inside the song, forward or
+ * backward, without stopping and without restarting. This is what a global
+ * loop's wrap and its exit both need: "play from exactly here, now."
+ *
+ * Returns false and changes nothing for a frame outside the song, so no
+ * caller can seek beyond the committed region.
+ *
+ * Residency is INVALIDATED (ready_sector -> ST_STREAM_NO_SECTOR), because
+ * the sector that was ready is almost certainly not the one this frame
+ * lives in; decoding the old buffer at the new position is precisely the
+ * stale-data failure a seek must never cause. The consumer re-acquires
+ * from the mailbox on its next pass -- the same handling a loop wrap
+ * already gets via ST_STREAM_TICK_LOOPED.
+ *
+ * A STOPPED stream stays stopped: seeking is a position change, not a
+ * transport command. UNDERRUN and END_OF_SONG become PLAYING again, since
+ * the position that could not be served is no longer where we are.
+ *
+ * Audio-thread-only, like every other mutator of this struct.
+ */
+bool st_stream_seek(st_stream_t *st, uint32_t frame);
+
 typedef enum {
 	ST_STREAM_TICK_NOT_PLAYING = 0,  /* state was STOPPED or END_OF_SONG already; no-op */
 	ST_STREAM_TICK_OK,               /* advanced by one frame, same sector as before */

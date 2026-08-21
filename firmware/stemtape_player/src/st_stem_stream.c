@@ -104,6 +104,36 @@ void st_stream_stop(st_stream_t *st)
 	st->state = ST_STREAM_STOPPED;
 }
 
+bool st_stream_seek(st_stream_t *st, uint32_t frame)
+{
+	if (frame >= st->frames) {
+		return false;   /* never address a frame outside the song */
+	}
+
+	st->song_frame = frame;
+
+	/* INVALIDATE RESIDENCY. The sector that was ready is almost certainly
+	 * not the one this frame needs, and claiming otherwise would make the
+	 * caller decode the wrong sector's bytes as if they were this frame's
+	 * -- exactly the "stale sector data" failure a seek must not cause.
+	 * The consumer re-acquires from the mailbox on its next pass, the same
+	 * way it does after a loop wrap (ST_STREAM_TICK_LOOPED invalidates
+	 * this same field for this same reason).
+	 *
+	 * ST_STREAM_NO_SECTOR is deliberately used rather than "the sector
+	 * this frame needs": residency is a fact about the buffer, and only a
+	 * real, validated mailbox acquire may assert it. */
+	st->ready_sector = ST_STREAM_NO_SECTOR;
+
+	/* A seek out of END_OF_SONG or UNDERRUN resumes playing: the position
+	 * that could not be served is no longer the position we are at. A
+	 * STOPPED stream stays stopped -- seeking is not a transport command. */
+	if (st->state != ST_STREAM_STOPPED) {
+		st->state = ST_STREAM_PLAYING;
+	}
+	return true;
+}
+
 /* -O2, same reason as st_stream_required_sector() above: this is the other
  * per-output-frame call on the 48 kHz path. */
 __attribute__((optimize("O2")))

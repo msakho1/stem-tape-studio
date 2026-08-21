@@ -262,10 +262,25 @@ static void decide_playing(const st_led_inputs_t *in, st_led_frame_t *out)
 
 	all_dark(out);
 
+	/* THE LOOP MARKER, on S1 and nowhere else. A LATCHED loop is solid, so
+	 * it is visible even between beats -- which is the point: a latched
+	 * loop is still running when the player's hands are off the device. A
+	 * MOMENTARY loop only ever shows inside the pulse, below, so it reads
+	 * as "live" rather than "held". */
+	if (in->loop_state == ST_LED_LOOP_LATCHED) {
+		out->level[ST_LED_S1] = ST_LED_MAX;
+	}
+
 	if (!in->beat.valid || !in->beat.in_pulse) {
 		return;   /* between pulses, or no trustworthy tempo: dark */
 	}
 	env = in->beat.envelope;
+
+	if (in->loop_state == ST_LED_LOOP_MOMENTARY) {
+		/* The SAME envelope value the Track row and S4 carry -- one
+		 * shared beat, not a third animation with its own timing. */
+		out->level[ST_LED_S1] = env;
+	}
 
 	for (i = 0; i < ST_LED_TRACK_COUNT; i++) {
 		uint8_t lv = scale8(env, in->stem_activity[i]);

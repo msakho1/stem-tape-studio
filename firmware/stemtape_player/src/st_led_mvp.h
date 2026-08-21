@@ -114,6 +114,13 @@ typedef enum {
 	ST_LED_SEQ_SHUTDOWN,   /* power-off, before SYSTEM_OFF */
 } st_led_seq_t;
 
+/* ---- global loop display state (see st_led_inputs_t::loop_state) -------- */
+typedef enum {
+	ST_LED_LOOP_NONE = 0,
+	ST_LED_LOOP_MOMENTARY,   /* PLAY still held */
+	ST_LED_LOOP_LATCHED,     /* survives the release */
+} st_led_loop_t;
+
 /* ---- inputs -------------------------------------------------------------
  * Every field is real runtime state. Nothing here is a mode flag the LED
  * layer chose for its own convenience. */
@@ -141,6 +148,20 @@ typedef struct {
 	/* Beat phase, envelope and bar position, all from one st_beat_pulse()
 	 * call on the authoritative song_frame. */
 	st_beat_pulse_t beat;
+
+	/* GLOBAL LOOP. Shown on S1 only, and only while playing, so the beat
+	 * indication the player actually performs to is never disturbed: the
+	 * Track row keeps its pulse and chase, and S4 keeps the tempo, exactly
+	 * as they are without a loop.
+	 *
+	 *   NONE       S1 dark      (ordinary playback)
+	 *   MOMENTARY  S1 pulses    with the same beat envelope -- "this is
+	 *                           live and will end when you let go"
+	 *   LATCHED    S1 SOLID     -- "this is holding on its own now"
+	 *
+	 * Pulsing vs solid is the distinction, which reads at a glance and
+	 * costs no extra animation, no extra timer and no second clock. */
+	st_led_loop_t loop_state;
 
 	/* Per-stem output activity, 0..255. SCALES the shared beat pulse; it
 	 * never gates or times anything. */

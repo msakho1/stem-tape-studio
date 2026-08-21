@@ -179,6 +179,11 @@ REQUIRED_CALLS = {
         "st_stream_stop",
     ],
     "stem_audio_block": [
+        # THE LOOP'S WRAP AND EXIT BOTH GO THROUGH THE REAL SEEK. Requiring
+        # the call here is what stops either one regressing to a bare
+        # song_frame assignment that would leave residency claiming a sector
+        # this frame does not live in -- the stale-data failure.
+        "st_stream_seek",
         "st_stem_mix_prepare",
         "stem_render_run",
         "st_stream_required_sector",
@@ -215,6 +220,9 @@ REQUIRED_CALLS = {
         # stops the chord feature regressing to decode_tracks()' single
         # identity, which cannot express "two pressed" at all.
         "st_track_chord_update",
+        # GLOBAL LOOP. The grammar must run through the real pure engine, not
+        # be re-implemented inline in the control loop.
+        "st_loop_tick",
     ],
     "led_service": [
         # THE SINGLE SEMANTIC LED OWNER. led_service() must gather live state
@@ -307,6 +315,11 @@ LED_FORBIDDEN_IN_LED_SERVICE = [
 # comment) statement other than the one it is meant to prove.
 REQUIRED_SUBSTRINGS = {
     "stem_audio_block": [
+        # The window bounds the run, so the wrap lands on a frame boundary
+        # instead of inside a rendered run; the exit is a ONE-SHOT consumed
+        # with an atomic CAS so one gesture can only cause one seek.
+        "atomic_cas(&g_stem_loop_exit_req, 1, 0)",
+        "run > left_in_loop",
         "trk[s].vol_q8",
         "trk[s].muted",
         "trk[s].solo",

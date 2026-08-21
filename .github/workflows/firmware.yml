@@ -1286,6 +1286,73 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Stem Tape LOOP playback gate -- contiguous wrap, exit, zero silence
+        # The production-equivalent gate for global looping. Drives the REAL
+        # st_loop_*/st_stream_* functions through the SAME sequence of
+        # operations stem_audio_block() performs -- the same window clamp, the
+        # same st_stream_seek() wrap, the same one-shot exit -- over a real
+        # 4000-sector song geometry, and checks the emitted FRAME SEQUENCE
+        # rather than any internal flag.
+        #
+        # What it establishes:
+        #   - every frame-to-frame step is +1 or the exact wrap from end-1 to
+        #     start: no frame skipped, none repeated, none duplicated;
+        #   - the exit resumes at exactly loop_start_frame going forward, and
+        #     is checked against each wrong answer individually (not zero, not
+        #     end_frame, not a sector boundary, not the current position);
+        #   - ZERO silent frames, across every one of the eight lengths.
+        #     stem_audio_block() writes silence when the needed sector is
+        #     missing, so "no silence" is the real no-dropout property here,
+        #     not a proxy for it.
+        #
+        # THE NEGATIVE CONTROL IS THE POINT of the third case: the identical
+        # exit with the pinned sectors removed DOES emit silence. The three
+        # pinned buffers are justified by that demonstration rather than by
+        # assertion. The arithmetic behind their depth: the ring maps sector s
+        # to slot (s % 12) so it holds a sliding 11-sector window, while the
+        # SHORTEST musical loop (1/4 beat at 120 BPM) already spans 17.6
+        # sectors -- so loop_start's sector is always evicted, and reserving
+        # its slot instead would collide with sectors s+12, s+24 ... which are
+        # inside the loop too.
+        #
+        # This gate also caught a real defect during development. An earlier
+        # version pointed the read-ahead at the loop's start sector as the
+        # window end approached, so the wrap would arrive resident. On this
+        # ring that is wrong: sector s and s+12 share a slot, and both are live
+        # inside a loop, so prefetching the post-wrap region EVICTED the
+        # pre-wrap region the playhead had not reached. The gate reported it
+        # exactly -- "needs sector 18, slot 6 holds sector 6" -- and the
+        # read-ahead now stays in song order, with the pin covering the seam.
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          # The pin depth is defined in main.c and mirrored in the gate; they
+          # must agree or the gate would be proving a different design.
+          PROD="$(grep -oE '^#define ST_LOOP_PIN_SECTORS [0-9]+' \
+            firmware/stemtape_player/src/main.c | grep -oE '[0-9]+')"
+          TEST="$(grep -oE '^#define ST_LOOP_PIN_TEST_SECTORS [0-9]+u' \
+            firmware/stemtape_player/tests/test_loop_playback_gate.c | grep -oE '[0-9]+')"
+          echo "pinned sectors: production=$PROD gate=$TEST"
+          if [ "$PROD" != "$TEST" ]; then
+            echo "MISMATCH: the loop playback gate models $TEST pinned sectors but the"
+            echo "firmware allocates $PROD -- the gate would be proving a design that is"
+            echo "not the one being shipped."
+            exit 1
+          fi
+          cc -std=c11 -Wall -Wextra -Werror -Ifirmware/stemtape_player/src \
+            firmware/stemtape_player/src/st_loop.c \
+            firmware/stemtape_player/src/st_stem_stream.c \
+            firmware/stemtape_player/src/st_beat_phase.c \
+            firmware/stemtape_player/tests/test_loop_playback_gate.c \
+            -o audit/test_loop_playback_gate
+          ./audit/test_loop_playback_gate | tee audit/loop-playback-gate.txt
+          {
+            echo '### Stem Tape LOOP playback gate'
+            echo '```text'
+            cat audit/loop-playback-gate.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Stem Tape Track-chord ADC decoder host tests
         # src/st_track_chord.c turns ONE shared-ladder voltage into a 4-bit
         # held-Track mask. Linked into the real firmware target

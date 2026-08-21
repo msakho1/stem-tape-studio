@@ -124,9 +124,10 @@
  * about the change -- stop and re-flash before reading another number out
  * of it.
  */
-#define ST_BUILD_TAG "st14"
+#define ST_BUILD_TAG "st15"
 #include "st_track_hold.h"
 #include "st_track_chord.h"
+#include "st_loop.h"
 #include "st_stix.h"
 #include "st_v11_format.h"
 
@@ -1276,6 +1277,108 @@ static uint8_t g_stem_sector_bufs[ST_STEM_MBOX_SLOTS][ST11_SECTOR_BYTES];
  * comment above for the producer/consumer role split. */
 static st_stem_mbox_t g_stem_mbox;
 
+/* ===================================================================
+ * THE LOOP EXIT KIT: three PINNED sectors starting at loop_start_frame's.
+ * ===================================================================
+ * A global loop must be able to exit to loop_start_frame with no inserted
+ * silence, at an arbitrary instant. The ring cannot supply that, and the
+ * reason is arithmetic rather than opinion:
+ *
+ *   - The ring maps sector s to slot (s % ST_STEM_MBOX_SLOTS), 12 slots,
+ *     so it holds a SLIDING window of 11 sectors of read-ahead.
+ *   - The SHORTEST musical loop this firmware offers is 1/4 beat, which at
+ *     120 BPM is 6000 frames == 17.6 sectors. Every other length is longer.
+ *   - So the loop always spans more sectors than the ring holds, and the
+ *     sector containing loop_start_frame is ALWAYS evicted while the
+ *     playhead is away from it. Reserving its slot instead of pinning a
+ *     buffer does not work either: sectors S+12, S+24 ... map to that same
+ *     slot and are inside the loop, so forbidding it would guarantee an
+ *     underrun at the playhead.
+ *   - And an underrun here is not a small blemish. stem_audio_block()
+ *     writes SILENCE for the remainder of the block when the needed sector
+ *     is missing, which is exactly the inserted silence a loop exit must
+ *     never produce.
+ *
+ * SIZING, from the measured numbers rather than a guess. One sector is
+ * 7.083 ms of audio; an uncontended eMMC sector read is 5.073 ms (slice
+ * T0's benchmark). At an exit the streamer may already be mid-read, so the
+ * worst-case wait for a NEW sector is 5.073 (finish that one) + 5.073 (read
+ * ours) = 10.15 ms. The pin has to cover that, and the worst case is
+ * loop_start_frame sitting on the LAST frame of its sector, which yields
+ * only (n-1)*340 + 1 frames of runway:
+ *
+ *      1 sector   8192 B ->  0.02 ms   CAN MISS
+ *      2 sectors 16384 B ->  7.10 ms   CAN MISS
+ *      3 sectors 24576 B -> 14.19 ms   SAFE, 4.04 ms of margin
+ *
+ * Three it is: 24576 bytes, the smallest depth that cannot miss.
+ *
+ * CONCURRENCY. Far simpler than the ring, deliberately. The producer fills
+ * the pin ONCE per loop entry while it is invalid, publishes the base with
+ * one release store, and never rewrites it while valid; the consumer only
+ * ever reads a published pin. There is no refill-while-reading hazard to
+ * guard against, so this needs no slot protocol of its own.
+ */
+#define ST_LOOP_PIN_SECTORS 3u
+static uint8_t g_stem_loop_pin_bufs[ST_LOOP_PIN_SECTORS][ST11_SECTOR_BYTES];
+/* First pinned sector index, or negative when the pin holds nothing. */
+static atomic_t g_stem_loop_pin_base = ATOMIC_INIT(-1);
+/* How many of the three are filled and validated (published after the
+ * bytes, read before them -- the same ordering rule the ring documents). */
+static atomic_t g_stem_loop_pin_count = ATOMIC_INIT(0);
+/* Set by the control thread at loop entry; the streamer picks it up. */
+static atomic_t g_stem_loop_pin_want = ATOMIC_INIT(-1);
+
+/* True and *idx set when `sector` is one of the pinned three. Consumer-side,
+ * wait-free: two acquire loads and no branching into the ring. */
+static bool stem_loop_pin_lookup(uint32_t sector, uint32_t *idx)
+{
+	int32_t base = (int32_t)atomic_get(&g_stem_loop_pin_base);
+	int32_t cnt  = (int32_t)atomic_get(&g_stem_loop_pin_count);
+
+	if (base < 0 || cnt <= 0) {
+		return false;
+	}
+	if (sector < (uint32_t)base || sector >= (uint32_t)base + (uint32_t)cnt) {
+		return false;
+	}
+	*idx = sector - (uint32_t)base;
+	return true;
+}
+
+/* ===================================================================
+ * LOOP WINDOW, published control thread -> audio thread.
+ * ===================================================================
+ * The control thread owns st_loop_t and decides the grammar; the audio
+ * thread owns the playhead. These three atomics are the whole handoff.
+ *
+ * PUBLICATION ORDER MATTERS and is the same discipline the mailbox uses:
+ * the bounds are written FIRST and `active` LAST, so the audio thread can
+ * never observe an active loop whose window is half-written. Clearing goes
+ * the other way -- `active` first -- for the same reason.
+ *
+ * g_stem_loop_exit_req is a one-shot request, not a level: the audio thread
+ * consumes it with an atomic clear so one PLAY gesture can only ever cause
+ * one seek, however many blocks it takes to notice.
+ */
+static atomic_t g_stem_loop_active   = ATOMIC_INIT(0);
+static atomic_t g_stem_loop_start_fr = ATOMIC_INIT(0);
+static atomic_t g_stem_loop_end_fr   = ATOMIC_INIT(0);
+static atomic_t g_stem_loop_exit_req = ATOMIC_INIT(0);
+/* Latched vs momentary, for the LED marker only -- never a decision input. */
+static atomic_t g_stem_loop_latched  = ATOMIC_INIT(0);
+/* Diagnostics only: how many wraps and exits the audio path actually
+ * performed. Never read by any decision. */
+static atomic_t g_stem_loop_wraps    = ATOMIC_INIT(0);
+static atomic_t g_stem_loop_exits    = ATOMIC_INIT(0);
+
+/* Volume press EDGES, raised by the volume block and consumed by the loop
+ * block one control pass later. Control-thread-only, both ends, so plain
+ * bools are correct here -- no atomic is needed for a value one thread
+ * writes and the same thread reads. */
+static bool g_stem_loop_vol_minus_edge;
+static bool g_stem_loop_vol_plus_edge;
+
 /* The pure streaming state machine (st_stem_stream.h) -- the ONE
  * authoritative song position, local sector-readiness, and underrun/
  * end-of-song/loop bookkeeping for the whole song. Slice 3B.1: now
@@ -1903,10 +2006,54 @@ st_stem_mix_prepare(stem_channels, &stem_prepared);
 	uint32_t f = 0;
 
 	while (f < BLK_FRAMES) {
-		uint32_t needed = st_stream_required_sector(&g_stem_stream);
+		uint32_t needed;
 		uint32_t fis, run, left_in_song, want;
+		uint32_t pin_idx;
+		bool from_pin = false;
+		/* The loop window, sampled ONCE per iteration. `active` is read
+		 * first and the bounds after it, which is the read side of the
+		 * publication order described where these atomics are declared:
+		 * an active loop is only ever observed with a complete window. */
+		bool     lp_on  = atomic_get(&g_stem_loop_active) != 0;
+		uint32_t lp_lo  = lp_on ? (uint32_t)atomic_get(&g_stem_loop_start_fr) : 0u;
+		uint32_t lp_hi  = lp_on ? (uint32_t)atomic_get(&g_stem_loop_end_fr)   : 0u;
 
-		if (g_stem_stream.ready_sector != needed) {
+		if (lp_on && lp_hi <= lp_lo) {
+			lp_on = false;   /* degenerate window: ignore it entirely */
+		}
+
+		/* ---- LOOP EXIT, taken before anything else in the block ----
+		 * A one-shot request from the control thread. Consumed with an
+		 * atomic clear so a single PLAY gesture causes exactly one seek
+		 * no matter how many blocks pass before it is noticed.
+		 *
+		 * The seek lands on the CAPTURED frame, and st_stream_seek()
+		 * invalidates residency so the very next statement re-acquires
+		 * -- from the pin, which is exactly why the pin exists. No
+		 * pause, no stop/start, no silent block: the remainder of THIS
+		 * block is filled with forward playback from loop_start_frame.
+		 */
+		if (atomic_cas(&g_stem_loop_exit_req, 1, 0)) {
+			uint32_t resume = (uint32_t)atomic_get(&g_stem_loop_start_fr);
+
+			if (st_stream_seek(&g_stem_stream, resume)) {
+				atomic_inc(&g_stem_loop_exits);
+			}
+			lp_on = false;   /* the window is no longer in force */
+		}
+
+		needed = st_stream_required_sector(&g_stem_stream);
+
+		/* ---- RESIDENCY: the pin is consulted FIRST ----------------
+		 * The pinned sectors are the loop's exit kit; right after a
+		 * seek back to loop_start_frame they are the only place those
+		 * bytes exist. Checking the pin before the ring also keeps the
+		 * ring's own acquire from being spent on a sector the pin
+		 * already holds. */
+		if (stem_loop_pin_lookup(needed, &pin_idx)) {
+			from_pin = true;
+			st_stream_sector_ready(&g_stem_stream, needed);
+		} else if (g_stem_stream.ready_sector != needed) {
 			/* Ask the mailbox (st_stem_bufmbox.h) whether
 			 * the producer has published it since we last
 			 * looked. Wait-free: one acquire load, and on
@@ -1948,6 +2095,31 @@ st_stem_mix_prepare(stem_channels, &stem_prepared);
 				 * and re-publishing `needed` is a no-op. */
 				ahead = g_stem_stream.loop_enabled ? 0u : needed;
 			}
+			/* READ-AHEAD STAYS IN SONG ORDER, EVEN INSIDE A LOOP,
+			 * and that is deliberate.
+			 *
+			 * The obvious-looking optimisation -- point the producer
+			 * at the loop's start sector as the window end
+			 * approaches, so the wrap arrives resident -- is WRONG
+			 * on this ring, for the same reason st_stem_bufmbox.c's
+			 * scan refuses to wrap at the song seam: sector s and
+			 * sector s+SLOTS map to the SAME slot. Inside a loop
+			 * both of those are live sectors, so prefetching the
+			 * post-wrap region evicts the pre-wrap region the
+			 * playhead has not reached yet.
+			 *
+			 * That is not hypothetical. With a 1/4-beat loop
+			 * (sectors 3..20) an earlier version of this code did
+			 * exactly that, and tests/test_loop_playback_gate.c
+			 * caught the consequence directly: "needs sector 18,
+			 * slot 6 holds sector 6" -- 18 % 12 == 6, the producer
+			 * had filled the post-wrap sector into the slot the
+			 * playhead was about to read. The loop starved and
+			 * emitted silence.
+			 *
+			 * The wrap is covered by the PINNED sectors instead,
+			 * exactly as the exit is; the pin lives outside the
+			 * ring and so cannot collide with anything. */
 			want = ahead;
 		}
 		st_stem_mbox_set_requested_sector(&g_stem_mbox, want);
@@ -1980,6 +2152,20 @@ st_stem_mix_prepare(stem_channels, &stem_prepared);
 		if (run > BLK_FRAMES - f) {
 			run = BLK_FRAMES - f;
 		}
+		/* ---- A FOURTH BOUND WHILE LOOPING: the window's end -------
+		 * The run must stop exactly at loop_end_frame so the wrap lands
+		 * on a frame boundary rather than somewhere inside a rendered
+		 * run. With that clamp the wrap below is exact: the last frame
+		 * rendered is end-1 and the next one rendered is start, so no
+		 * frame is skipped and none is played twice. */
+		if (lp_on && g_stem_stream.song_frame >= lp_lo &&
+		    g_stem_stream.song_frame < lp_hi) {
+			uint32_t left_in_loop = lp_hi - g_stem_stream.song_frame;
+
+			if (run > left_in_loop) {
+				run = left_in_loop;
+			}
+		}
 		if (run == 0u) {
 			/* Defensive: cannot happen while the stream is
 			 * PLAYING (song_frame < frames is the invariant
@@ -1996,11 +2182,29 @@ st_stem_mix_prepare(stem_channels, &stem_prepared);
 		/* RAM-ONLY: decodes out of whichever resident buffer
 		 * g_stem_active_buf_idx_local (audio-thread-exclusive)
 		 * names -- this real-time thread never touches flash. */
-		stem_render_run(g_stem_sector_bufs[g_stem_active_buf_idx_local],
+		stem_render_run(from_pin ? g_stem_loop_pin_bufs[pin_idx]
+					  : g_stem_sector_bufs[g_stem_active_buf_idx_local],
 				 fis, &stem_prepared, m0, md, mv,
 				 f, run, s, stem_peak);
 		f += run;
 		(void)st_stream_advance_frames(&g_stem_stream, run);
+
+		/* ---- THE WRAP ---------------------------------------------
+		 * Having rendered up to exactly loop_end_frame (the clamp above
+		 * guarantees it), jump straight back to loop_start_frame and
+		 * keep filling THIS SAME BLOCK. The loop therefore turns over
+		 * inside one output block, with no gap: the frame after end-1
+		 * is start, contiguously.
+		 *
+		 * st_stream_seek() invalidates residency, so the next iteration
+		 * re-acquires -- from the pin, which holds precisely the
+		 * sectors at loop_start_frame. That is the second reason the
+		 * pin exists: without it every wrap would race the streamer. */
+		if (lp_on && g_stem_stream.song_frame >= lp_hi && lp_hi > lp_lo) {
+			if (st_stream_seek(&g_stem_stream, lp_lo)) {
+				atomic_inc(&g_stem_loop_wraps);
+			}
+		}
 
 		/* Mirror the (audio-thread-exclusive) underrun episode
 		 * counter into its atomic diagnostic twin, but only on
@@ -4322,6 +4526,66 @@ static void streamer_thread(void *a, void *b, void *c)
 		 * Neither failure ever reaches the mailbox, so the consumer
 		 * stays in UNDERRUN (silence) until a read genuinely succeeds
 		 * and validates. */
+		/* ---- THE LOOP EXIT KIT ------------------------------------
+		 * Fill the three pinned sectors that start at loop_start_frame,
+		 * once per loop entry, BEFORE the ordinary prefetch below --
+		 * the ring can recover from a late fill, the exit cannot.
+		 *
+		 * The control thread publishes the wanted base sector in
+		 * g_stem_loop_pin_want at loop entry; the loop has been running for
+		 * at least the 450 ms hold by then, and the earliest possible
+		 * exit is the PLAY release after it, so there is ample time to
+		 * complete these reads before anything can need them.
+		 *
+		 * Publication order is bytes-then-count-then-base, and the
+		 * consumer reads base-then-count, so a partially filled pin can
+		 * never be observed as valid. Nothing rewrites a pin while it
+		 * is valid, so there is no refill-while-reading hazard here at
+		 * all -- see the pin's own declaration comment. */
+		if (atomic_get(&g_stem_song_selected)) {
+			int32_t want_base = (int32_t)atomic_get(&g_stem_loop_pin_want);
+
+			if (want_base >= 0 &&
+			    (int32_t)atomic_get(&g_stem_loop_pin_base) != want_base) {
+				uint32_t filled = 0u;
+				uint32_t k;
+
+				atomic_set(&g_stem_loop_pin_count, 0);   /* invalidate first */
+				atomic_set(&g_stem_loop_pin_base, -1);
+				for (k = 0; k < ST_LOOP_PIN_SECTORS; k++) {
+					uint32_t sec = (uint32_t)want_base + k;
+					st11_sector_header_t hdr;
+					uint32_t blk;
+
+					if (sec >= g_stem_stream.sector_count) {
+						break;   /* past the song: fewer pins, still safe */
+					}
+					blk = g_stem_stream.song_start_block +
+					      sec * ST11_BLOCKS_PER_SECTOR;
+					if (!emmc_read_blocks(blk, g_stem_loop_pin_bufs[k],
+							       ST11_BLOCKS_PER_SECTOR)) {
+						break;
+					}
+					if (!st11_sector_read_header(g_stem_loop_pin_bufs[k], &hdr) ||
+					    !st_stream_validate_sector(&g_stem_stream, sec, &hdr)) {
+						break;   /* never pin unvalidated bytes */
+					}
+					filled++;
+				}
+				if (filled > 0u) {
+					atomic_set(&g_stem_loop_pin_count, (atomic_val_t)filled);
+					atomic_set(&g_stem_loop_pin_base, (atomic_val_t)want_base);
+				}
+			} else if (want_base < 0 &&
+				   (int32_t)atomic_get(&g_stem_loop_pin_base) >= 0) {
+				/* Loop over: drop the pin so the ring alone feeds
+				 * playback again and no stale sector can ever be
+				 * preferred over a fresh one. */
+				atomic_set(&g_stem_loop_pin_count, 0);
+				atomic_set(&g_stem_loop_pin_base, -1);
+			}
+		}
+
 		if (atomic_get(&g_stem_song_selected)) {
 			uint32_t needed;
 			uint32_t target_slot;
@@ -5530,6 +5794,15 @@ static void led_service(void)
 		uint32_t song_frame = (uint32_t)atomic_get(&g_stem_song_frame_pub);
 
 		st_beat_pulse(&g_stem_beat_timing, song_frame, &in.beat);
+	}
+
+	/* GLOBAL LOOP marker. Read from the SAME published window the audio
+	 * thread loops on, so the light cannot claim a loop the audio path is
+	 * not actually running. g_stem_loop_latched is set by the control block
+	 * beside st_loop_tick(). */
+	if (atomic_get(&g_stem_loop_active) != 0) {
+		in.loop_state = (atomic_get(&g_stem_loop_latched) != 0)
+				? ST_LED_LOOP_LATCHED : ST_LED_LOOP_MOMENTARY;
 	}
 
 	/* ---- per-stem activity, and the immediate momentary solo ---------- */
@@ -6934,6 +7207,112 @@ int main(void)
 			/* PLAY/STOP button: a short TAP toggles play/stop in place (tape ramp);
 			 * a HOLD (>=400 ms) jumps to the START of the song and plays — a reliable
 			 * "play the whole thing from the top" that never depends on current state. */
+			/* ---- STEM TAPE: THE GLOBAL LOOP ------------------------
+			 * Runs BEFORE the classic PLAY handling below and takes
+			 * the button away from it whenever a stem song is
+			 * selected. The classic "hold PLAY -> restart from the
+			 * top" is a different instrument's gesture and would
+			 * fight the loop for the same hold; here the hold means
+			 * "loop from where I am".
+			 *
+			 * A short PLAY TAP still falls through untouched -- the
+			 * loop engine emits nothing below its 450 ms threshold --
+			 * so play/pause is exactly as it was.
+			 *
+			 * st_loop_tick() owns the whole grammar (see st_loop.h);
+			 * this block only gathers real edges and publishes the
+			 * result. */
+			{
+				static st_loop_t   s_loop;
+				static bool        s_loop_seeded;
+				static int64_t     s_loop_play_t = -1;
+				bool               stem_loop_mode = false;
+
+#if SP1_XFER_ENABLE
+				stem_loop_mode = atomic_get(&g_stem_song_selected) != 0;
+#endif
+				if (!s_loop_seeded) {
+					st_loop_reset(&s_loop);
+					s_loop_seeded = true;
+				}
+				if (stem_loop_mode) {
+					st_loop_in_t li;
+					st_loop_action_t la;
+					bool pd = (committed == TRK_PLAY);
+
+					if (pd && s_loop_play_t < 0) {
+						s_loop_play_t = k_uptime_get();
+					} else if (!pd) {
+						s_loop_play_t = -1;
+					}
+
+					memset(&li, 0, sizeof(li));
+					li.play_down     = pd;
+					li.play_held_ms  = pd
+						? (uint32_t)(k_uptime_get() - s_loop_play_t) : 0u;
+					li.function_down = pwr_pressed();
+					li.playing       = (g_playing != 0);
+					/* THE authoritative master frame -- the same
+					 * atomic mirror the LED beat pulse reads, so
+					 * the captured loop point is the frame the
+					 * audio path is actually playing. */
+					li.song_frame    = (uint32_t)atomic_get(&g_stem_song_frame_pub);
+					li.song_frames   = g_stem_stream.frames;
+					li.frames_per_beat = g_stem_beat_timing.frames_per_beat;
+					li.vol_minus_edge = g_stem_loop_vol_minus_edge;
+					li.vol_plus_edge  = g_stem_loop_vol_plus_edge;
+					g_stem_loop_vol_minus_edge = false;
+					g_stem_loop_vol_plus_edge  = false;
+
+					la = st_loop_tick(&s_loop, &li);
+
+					if (la == ST_LOOP_ACT_ENTER || la == ST_LOOP_ACT_RESIZE) {
+						/* Bounds FIRST, `active` LAST: the
+						 * audio thread must never see an
+						 * active loop with a half-written
+						 * window. */
+						atomic_set(&g_stem_loop_start_fr,
+							   (atomic_val_t)s_loop.start_frame);
+						atomic_set(&g_stem_loop_end_fr,
+							   (atomic_val_t)s_loop.end_frame);
+						atomic_set(&g_stem_loop_active, 1);
+						if (la == ST_LOOP_ACT_ENTER) {
+							/* Ask the streamer for the exit
+							 * kit now, while there is time:
+							 * the earliest possible exit is
+							 * the PLAY release still to come. */
+							atomic_set(&g_stem_loop_pin_want,
+								   (atomic_val_t)(s_loop.start_frame /
+										   ST11_FRAMES_PER_SECTOR));
+						}
+						atomic_set(&g_stem_loop_latched,
+							   s_loop.state == ST_LOOP_LATCHED ? 1 : 0);
+					} else if (la == ST_LOOP_ACT_LATCH) {
+						atomic_set(&g_stem_loop_latched, 1);
+					} else if (la == ST_LOOP_ACT_EXIT) {
+						/* `active` cleared FIRST (mirror of
+						 * entry), then the one-shot seek
+						 * request the audio thread consumes. */
+						atomic_set(&g_stem_loop_active, 0);
+						atomic_set(&g_stem_loop_latched, 0);
+						atomic_set(&g_stem_loop_exit_req, 1);
+					}
+					if (!st_loop_active(&s_loop) &&
+					    la != ST_LOOP_ACT_EXIT) {
+						atomic_set(&g_stem_loop_pin_want, -1);
+					}
+					/* The loop owns PLAY for this press whenever
+					 * it is running or just consumed one, so the
+					 * classic hold-to-restart below never fires. */
+					if (st_loop_active(&s_loop) || la == ST_LOOP_ACT_EXIT ||
+					    s_loop.play_consumed) {
+						ep_play_held = 1;   /* also swallows the tap */
+						play_t = -1;
+						goto loop_owns_play;
+					}
+				}
+			}
+
 			if (committed == TRK_PLAY) {
 				if (play_t < 0) { play_t = k_uptime_get(); play_held = 0; }
 				else if (!play_held && (k_uptime_get() - play_t) >= 400) {
@@ -6948,6 +7327,7 @@ int main(void)
 			} else {
 				play_t = -1;
 			}
+loop_owns_play:
 
 #if HP_TIM_TEST
 			/* HEADPHONE AUTO-MUTE: poll the codec jack-detect ~5x/s and mute the
@@ -7009,6 +7389,29 @@ int main(void)
 						vstep = 1; vrep_last = tnow;
 					}
 				} else { vrep_t = -1; }
+				/* ---- LOOP LENGTH vs MASTER VOLUME ------------------
+				 * While a loop owns the transport, Volume -/+ selects
+				 * the loop length instead of changing volume. Outside a
+				 * loop the buttons keep their normal behaviour exactly.
+				 *
+				 * ONE PRESS, ONE STEP. Only a FRESH press
+				 * (vcommit != vbefore) raises the edge -- never the
+				 * hold-repeat above, which exists to sweep volume and
+				 * would otherwise run the length ladder end to end
+				 * while a finger rested on the button. The edge is
+				 * consumed by the loop block on the next control pass
+				 * (~8 ms later), which is below the threshold of
+				 * perception and keeps the two blocks independent. */
+				if (atomic_get(&g_stem_loop_active) != 0) {
+					if (vdir != 0 && vcommit != vbefore) {
+						if (vdir > 0) {
+							g_stem_loop_vol_plus_edge = true;
+						} else {
+							g_stem_loop_vol_minus_edge = true;
+						}
+					}
+					vstep = 0;   /* the loop owns these buttons now */
+				}
 				if (vstep) {
 					g_vol_idx += vdir;
 					if (g_vol_idx < 0) g_vol_idx = 0;
