@@ -5799,6 +5799,15 @@ static void led_seq_begin(st_led_seq_t seq)
 #define CAL_HEARTBEAT_MS 1000
 #define CAL_STABLE_READS  3
 
+/* FUNCTION's GPIO read is defined further down the file (it lives with the
+ * power/shutdown code). Forward-declared here rather than moved, so this
+ * temporary calibration block stays self-contained and deleting it later
+ * leaves nothing behind. Must match that definition exactly -- an implicit
+ * declaration would be assumed to return int and then conflict with the real
+ * bool, which is precisely how the first version of this build failed to
+ * compile. */
+static bool pwr_pressed(void);
+
 static void cal_mask_str(uint8_t m, char out[5])
 {
 	out[0] = (m & ST_CHORD_T1) ? '1' : '0';
