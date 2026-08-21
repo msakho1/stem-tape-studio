@@ -1,5 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import stemTapeLogo from "@/assets/stemtape-logo.png.asset.json";
+import stemTapeLogo from "@/assets/stemtape-logo-bench.png.asset.json";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { DeviceSurface } from "@/device/DeviceSurface";
 import { KeyboardPanel } from "@/device/KeyboardPanel";
