@@ -2031,3 +2031,57 @@ jobs:
           fi
 
 
+
+  # ==========================================================================
+  # RELEASE REPORT -- a deliberately tiny job that exists for one reason: to
+  # make the candidate binary's identity READABLE.
+  #
+  # The stemtape-player job already computes all of it, and printing it there
+  # does not work. Only a job's log TAIL is reachable when artifact downloads
+  # are blocked by egress policy (GitHub serves artifacts from
+  # *.blob.core.windows.net, which the gateway refuses with 403 -- a policy
+  # denial, not a transient), and that job's tail is consumed entirely by its
+  # own post-job cleanup: saving the ccache cache alone outweighs the whole
+  # readable budget, and it grows or shrinks run to run, so the release line
+  # survived one run and was pushed out of reach on the next two.
+  #
+  # This job sets up nothing and caches nothing, so it has almost no cleanup
+  # to emit. It pulls the artifact the build already uploaded (over GitHub's
+  # own internal network, not through the proxy) and prints the identity as
+  # the last thing in a nearly empty log. Nothing here is recomputed or
+  # re-derived: same artifact, same bytes, same numbers -- just somewhere they
+  # can actually be read.
+  release-report:
+    runs-on: ubuntu-latest
+    needs: stemtape-player
+    if: ${{ always() }}
+    steps:
+      - name: Download the stemtape-player audit artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        continue-on-error: true
+        with:
+          name: stemtape-player-audit
+          path: audit-dl
+
+      - name: Release identity
+        run: |
+          BIN=audit-dl/stemtape_player.bin
+          LOG=audit-dl/build.log
+          if [ -f "$BIN" ]; then
+            SIZE="$(stat -c '%s' "$BIN")"
+            SHA="$(sha256sum "$BIN" | cut -d' ' -f1)"
+          else
+            SIZE="NOT-PRODUCED"; SHA="NOT-PRODUCED"
+          fi
+          USED=""
+          if [ -f "$LOG" ]; then
+            grep -E '^ *(FLASH|RAM):' "$LOG" | tail -n 4 || true
+            USED="$(grep -E '^ *RAM:' "$LOG" | tail -n1 | grep -oE '[0-9]+' | head -n1 || true)"
+          fi
+          echo "commit:   ${{ github.event.pull_request.head.sha || github.sha }}"
+          echo "bin size: ${SIZE} bytes"
+          echo "bin sha256: ${SHA}"
+          if [ -n "$USED" ]; then
+            echo "ram used: ${USED} bytes; ram free: $((262144 - USED)) bytes of 262144"
+          fi
+          echo "RELEASE commit=${{ github.event.pull_request.head.sha || github.sha }} bin=${SIZE}B sha256=${SHA} ram_used=${USED:-?} ram_free=$((262144 - ${USED:-0}))"
