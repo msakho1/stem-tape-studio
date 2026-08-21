@@ -215,14 +215,18 @@ REQUIRED_CALLS = {
     ],
     "main": [
         "st_track_hold_tick",
-        # MULTI-STEM SOLO CHORDS. main() must run the real settled-mask
-        # decoder on the real ladder reading. Requiring the CALL is what
-        # stops the chord feature regressing to decode_tracks()' single
-        # identity, which cannot express "two pressed" at all.
-        "st_track_chord_update",
-        # GLOBAL LOOP. The grammar must run through the real pure engine, not
-        # be re-implemented inline in the control loop.
-        "st_loop_tick",
+        # THE ONE DISPATCHER. Every Stem Tape control decision -- the ladder
+        # classification, the Track mask, the PLAY gesture, the loop grammar
+        # -- runs through st_ctl_service(), called once per control pass.
+        # Requiring the CALL is what stops any of it regressing to an inline
+        # re-implementation, or to decode_tracks()' single identity, which
+        # cannot express "two pressed" at all.
+        "st_ctl_service",
+        # ...and its result must actually be applied to the device.
+        "stem_ctl_apply",
+        # COLD BOOT. The one-bar default and every gesture edge are reset
+        # exactly once, at startup.
+        "st_ctl_reset",
     ],
     "led_service": [
         # THE SINGLE SEMANTIC LED OWNER. led_service() must gather live state
@@ -318,7 +322,13 @@ REQUIRED_SUBSTRINGS = {
         # The window bounds the run, so the wrap lands on a frame boundary
         # instead of inside a rendered run; the exit is a ONE-SHOT consumed
         # with an atomic CAS so one gesture can only cause one seek.
+        "atomic_cas(&g_stem_loop_enter_req, 1, 0)",
         "atomic_cas(&g_stem_loop_exit_req, 1, 0)",
+        # THE EXIT TARGET IS THE PUBLISHED RESUME FRAME (loop_end), not
+        # loop_start. Naming the atomic here is what stops the st15 rule --
+        # which made the looped bar play through a second time on hardware --
+        # from creeping back.
+        "atomic_get(&g_stem_loop_resume_fr)",
         "run > left_in_loop",
         "trk[s].vol_q8",
         "trk[s].muted",
@@ -329,13 +339,37 @@ REQUIRED_SUBSTRINGS = {
     ],
     "main": [
         "track_hold[ti].solo_active",
-        # The chord mask must be fed the SAME raw ladder value the
-        # single-button decode consumes (one ADC read, two readings), and
-        # bit k of it must be what becomes trk[k].solo. Both ends named, so
-        # neither can be quietly replaced by a single-button identity.
-        "st_track_chord_update(&chord_state, trk_raw)",
-        "(chord_mask >> k) & 1u",
-        "trk[k].solo = stem_mode ? (chord_held ? 1u : 0u)",
+        # ONE SAMPLE PER PASS, fed to the ONE classifier. The dispatcher must
+        # be given the pass's own ladder reading, and the inherited decode
+        # must be given that same reading -- never a second conversion.
+        "ci.ladder_raw     = st_trk_raw",
+        "int trk_raw = st_trk_raw",
+        # THE INHERITED DECODE IS BLIND IN STEM MODE. With a stem song
+        # selected it is handed TRK_NONE, so no classic gesture -- including
+        # the 400 ms hold-to-restart -- can fire underneath the dispatcher.
+        "if (stem_ctl) {",
+        # ...and the restart is additionally gated by name.
+        "if (!stem_ctl && committed == TRK_PLAY) {",
+        # FUNCTION ARBITRATION HAPPENS FIRST. The dispatcher runs above the
+        # FUNCTION branch, and a press it consumed never reaches that branch
+        # -- which is what makes the loop latch reachable at all.
+        "if (pwr_pressed() && !g_stem_ctl_out.function_consumed) {",
+    ],
+    "stem_ctl_apply": [
+        # THE PUBLISHED MASK IS WHAT REACHES THE MIXER.
+        "trk[k].solo = ((o->track_mask >> k) & 1u) ? 1u : 0u;",
+        # HALF-OPEN EXIT. Every exit targets the published resume frame,
+        # which is loop_end -- never loop_start.
+        "atomic_set(&g_stem_loop_resume_fr, (atomic_val_t)o->loop_resume);",
+        # THE ENTRY SEEK back to the PLAY-down frame.
+        "atomic_set(&g_stem_loop_enter_req, 1);",
+        # BOTH PINNED REGIONS ARE REQUESTED FROM THE ARM ONWARDS, so the
+        # entry seek and any immediately-following exit both land on
+        # resident bytes.
+        "g_stem_loop_pin_want[ST_LOOP_PIN_ENTRY]",
+        "g_stem_loop_pin_want[ST_LOOP_PIN_EXIT]",
+        # THE ONLY PLACE the transport toggles for a Stem Tape song.
+        "if (o->play_tap) {",
     ],
     "led_service": [
         "atomic_get(&g_stem_song_selected)",
@@ -577,16 +611,21 @@ def main() -> int:
             fail = True
 
     # B. Solo must come from the buttons being DOWN, not from a threshold, and
-    #    it must come from the CHORD MASK rather than a single committed button
-    #    identity. decode_tracks() names exactly one button and has no way to
-    #    express "two pressed", so requiring the mask here is what keeps
-    #    multi-stem solo from silently regressing to one-stem-at-a-time.
-    if ("trk[k].solo = stem_mode ? (chord_held ? 1u : 0u)" in scan_body and
-            "bool chord_held = ((chord_mask >> k) & 1u) != 0u" in scan_body):
+    #    it must come from the DISPATCHER'S PUBLISHED MASK rather than a
+    #    single committed button identity. decode_tracks() names exactly one
+    #    button and has no way to express "two pressed", so requiring the mask
+    #    here is what keeps multi-stem solo from silently regressing to
+    #    one-stem-at-a-time -- and requiring the `if (!stem_ctl)` fence is
+    #    what keeps the inherited 700 ms hold path from running alongside it.
+    apply_body = substrings_in_function(lines, func_of_line, "stem_ctl_apply")
+    if ("trk[k].solo = ((o->track_mask >> k) & 1u) ? 1u : 0u;" in apply_body and
+            "if (!stem_ctl) {" in scan_body):
         report.append("- present: in stem mode `trk[k].solo` is assigned from bit k of "
-                       "the settled chord mask -- solo begins on button-down and ends on "
-                       "release, with no TRACK_HOLD_SOLO_MS threshold in the path, and "
-                       "several stems can be held at once")
+                       "the dispatcher's published Track mask -- solo begins on "
+                       "button-down and ends on release, with no TRACK_HOLD_SOLO_MS "
+                       "threshold in the path, several stems can be held at once, and "
+                       "the inherited hold-to-solo path is fenced off behind "
+                       "`if (!stem_ctl)`")
     else:
         report.append("- **MISSING**: stem-mode solo is not driven directly from the "
                        "chord mask's button-down bits -- either the 700 ms hold threshold "

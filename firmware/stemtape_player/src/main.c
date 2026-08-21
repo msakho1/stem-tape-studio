@@ -124,25 +124,15 @@
  * about the change -- stop and re-flash before reading another number out
  * of it.
  */
-/* CALIBRATION BUILD SWITCH.
- *
- * 1 = the temporary st16-cal image: production behaviour plus a rate-limited
- *     CDC capture of the Track/PLAY ladder while the transport is stopped,
- *     used to replace st15's MODEL-derived chord bands with measurements from
- *     a real SP-1. 0 = production; the capture compiles out entirely.
- *
- * This must return to 0 before the next production tag ships. The CI gate
- * "calibration capture is absent from a production build" enforces exactly
- * that by pairing this switch with the build tag. */
-#define ST_CAL_BUILD 1
-
-#if ST_CAL_BUILD
-#define ST_BUILD_TAG "st16-cal"
-#else
-#define ST_BUILD_TAG "st15"
-#endif
+/* The temporary st16-cal ladder-capture build is GONE, switch and all. Its
+ * one job was measuring the real Track/PLAY ladder on physical hardware; the
+ * measurement is committed in docs/ladder-measured.json and src/st_ladder.c
+ * decodes against it, so the capture has nothing left to do. A CI gate keeps
+ * it from coming back. */
+#define ST_BUILD_TAG "st17"
 #include "st_track_hold.h"
-#include "st_track_chord.h"
+#include "st_ladder.h"
+#include "st_ctl.h"
 #include "st_loop.h"
 #include "st_stix.h"
 #include "st_v11_format.h"
@@ -1327,7 +1317,25 @@ static st_stem_mbox_t g_stem_mbox;
  *      2 sectors 16384 B ->  7.10 ms   CAN MISS
  *      3 sectors 24576 B -> 14.19 ms   SAFE, 4.04 ms of margin
  *
- * Three it is: 24576 bytes, the smallest depth that cannot miss.
+ * Three it is: 24576 bytes per region, the smallest depth that cannot miss.
+ *
+ * TWO REGIONS, not one. A loop has two places the playhead can arrive at
+ * without warning, and neither is reachable from the ring:
+ *
+ *   ENTRY. The window opens at the frame where PLAY went DOWN, which by the
+ *   time the hold expires is ST_LOOP_HOLD_MS of song BEHIND the playhead --
+ *   about 63 sectors. The entry seek jumps back to it. The same region also
+ *   feeds every forward WRAP, which returns to exactly that frame.
+ *
+ *   EXIT. Every exit lands on loop_end, which is a whole window ahead of the
+ *   start -- 361 sectors at one bar. An exit can happen on the pass right
+ *   after entry, so this cannot be left until the release; it is fetched
+ *   while the loop is still being armed.
+ *
+ * Sector s and sector s+ST_STEM_MBOX_SLOTS share a ring slot, so a window
+ * wider than the ring cannot hold both ends resident at once -- which is
+ * exactly why these two are pinned OUTSIDE the ring rather than prefetched
+ * into it. 2 x 24576 = 49152 bytes.
  *
  * CONCURRENCY. Far simpler than the ring, deliberately. The producer fills
  * the pin ONCE per loop entry while it is invalid, publishes the base with
@@ -1335,31 +1343,56 @@ static st_stem_mbox_t g_stem_mbox;
  * ever reads a published pin. There is no refill-while-reading hazard to
  * guard against, so this needs no slot protocol of its own.
  */
-#define ST_LOOP_PIN_SECTORS 3u
-static uint8_t g_stem_loop_pin_bufs[ST_LOOP_PIN_SECTORS][ST11_SECTOR_BYTES];
-/* First pinned sector index, or negative when the pin holds nothing. */
-static atomic_t g_stem_loop_pin_base = ATOMIC_INIT(-1);
+/* FOUR, not three. Three is the minimum that covers the worst-case wait for
+ * a fresh sector (14.19 ms of runway against 10.15 ms of wait), and that is
+ * still the requirement -- but the EXIT region is based on the window's LAST
+ * frame rather than on loop_end, so when loop_end happens to sit exactly on a
+ * sector boundary the first sector of the region is spent below the seek
+ * target. A fourth sector makes the guarantee hold in that case too, instead
+ * of holding "usually". 2 x 4 x 8192 = 65536 bytes. */
+#define ST_LOOP_PIN_SECTORS 4u
+#define ST_LOOP_PIN_REGIONS 2u
+#define ST_LOOP_PIN_ENTRY   0u   /* loop_start: the entry seek and every wrap */
+#define ST_LOOP_PIN_EXIT    1u   /* loop_end:   every exit, in both directions */
+static uint8_t g_stem_loop_pin_bufs[ST_LOOP_PIN_REGIONS][ST_LOOP_PIN_SECTORS]
+			           [ST11_SECTOR_BYTES];
+/* First pinned sector index per region, or negative when it holds nothing. */
+static atomic_t g_stem_loop_pin_base[ST_LOOP_PIN_REGIONS] = {
+	ATOMIC_INIT(-1), ATOMIC_INIT(-1)
+};
 /* How many of the three are filled and validated (published after the
  * bytes, read before them -- the same ordering rule the ring documents). */
-static atomic_t g_stem_loop_pin_count = ATOMIC_INIT(0);
-/* Set by the control thread at loop entry; the streamer picks it up. */
-static atomic_t g_stem_loop_pin_want = ATOMIC_INIT(-1);
+static atomic_t g_stem_loop_pin_count[ST_LOOP_PIN_REGIONS] = {
+	ATOMIC_INIT(0), ATOMIC_INIT(0)
+};
+/* Set by the control thread when the gesture ARMS, long before the loop can
+ * run; the streamer picks them up. -1 means "drop this region". */
+static atomic_t g_stem_loop_pin_want[ST_LOOP_PIN_REGIONS] = {
+	ATOMIC_INIT(-1), ATOMIC_INIT(-1)
+};
 
-/* True and *idx set when `sector` is one of the pinned three. Consumer-side,
- * wait-free: two acquire loads and no branching into the ring. */
-static bool stem_loop_pin_lookup(uint32_t sector, uint32_t *idx)
+/* True, and *region/*idx set, when `sector` is pinned. Consumer-side and
+ * wait-free: at most four acquire loads and no branching into the ring. */
+static bool stem_loop_pin_lookup(uint32_t sector, uint32_t *region, uint32_t *idx)
 {
-	int32_t base = (int32_t)atomic_get(&g_stem_loop_pin_base);
-	int32_t cnt  = (int32_t)atomic_get(&g_stem_loop_pin_count);
+	uint32_t r;
 
-	if (base < 0 || cnt <= 0) {
-		return false;
+	for (r = 0u; r < ST_LOOP_PIN_REGIONS; r++) {
+		int32_t base = (int32_t)atomic_get(&g_stem_loop_pin_base[r]);
+		int32_t cnt  = (int32_t)atomic_get(&g_stem_loop_pin_count[r]);
+
+		if (base < 0 || cnt <= 0) {
+			continue;
+		}
+		if (sector < (uint32_t)base ||
+		    sector >= (uint32_t)base + (uint32_t)cnt) {
+			continue;
+		}
+		*region = r;
+		*idx    = sector - (uint32_t)base;
+		return true;
 	}
-	if (sector < (uint32_t)base || sector >= (uint32_t)base + (uint32_t)cnt) {
-		return false;
-	}
-	*idx = sector - (uint32_t)base;
-	return true;
+	return false;
 }
 
 /* ===================================================================
@@ -1373,14 +1406,27 @@ static bool stem_loop_pin_lookup(uint32_t sector, uint32_t *idx)
  * never observe an active loop whose window is half-written. Clearing goes
  * the other way -- `active` first -- for the same reason.
  *
- * g_stem_loop_exit_req is a one-shot request, not a level: the audio thread
- * consumes it with an atomic clear so one PLAY gesture can only ever cause
- * one seek, however many blocks it takes to notice.
+ * g_stem_loop_enter_req and g_stem_loop_exit_req are one-shot requests, not
+ * levels: the audio thread consumes each with an atomic clear so one PLAY
+ * gesture can only ever cause one seek, however many blocks it takes to
+ * notice. Their frames are written BEFORE the request, and read after it.
+ *
+ * HALF-OPEN, EVERYWHERE. start_fr is inclusive, end_fr is EXCLUSIVE. The last
+ * frame the window contains is end_fr - 1, and resume_fr -- the first frame
+ * of ordinary playback after any exit -- is end_fr itself. The control
+ * thread, this file's audio path, st_loop.c and the tests all use that one
+ * convention; nothing anywhere treats end_fr as inclusive.
  */
-static atomic_t g_stem_loop_active   = ATOMIC_INIT(0);
-static atomic_t g_stem_loop_start_fr = ATOMIC_INIT(0);
-static atomic_t g_stem_loop_end_fr   = ATOMIC_INIT(0);
-static atomic_t g_stem_loop_exit_req = ATOMIC_INIT(0);
+static atomic_t g_stem_loop_active    = ATOMIC_INIT(0);
+static atomic_t g_stem_loop_start_fr  = ATOMIC_INIT(0);
+static atomic_t g_stem_loop_end_fr    = ATOMIC_INIT(0);
+static atomic_t g_stem_loop_reverse   = ATOMIC_INIT(0);
+/* THE entry seek: back to the frame where PLAY went down. */
+static atomic_t g_stem_loop_enter_req = ATOMIC_INIT(0);
+static atomic_t g_stem_loop_enter_fr  = ATOMIC_INIT(0);
+/* THE exit target: loop_end, the first frame after the looped section. */
+static atomic_t g_stem_loop_resume_fr = ATOMIC_INIT(0);
+static atomic_t g_stem_loop_exit_req  = ATOMIC_INIT(0);
 /* Latched vs momentary, for the LED marker only -- never a decision input. */
 static atomic_t g_stem_loop_latched  = ATOMIC_INIT(0);
 /* Diagnostics only: how many wraps and exits the audio path actually
@@ -1388,12 +1434,17 @@ static atomic_t g_stem_loop_latched  = ATOMIC_INIT(0);
 static atomic_t g_stem_loop_wraps    = ATOMIC_INIT(0);
 static atomic_t g_stem_loop_exits    = ATOMIC_INIT(0);
 
-/* Volume press EDGES, raised by the volume block and consumed by the loop
- * block one control pass later. Control-thread-only, both ends, so plain
- * bools are correct here -- no atomic is needed for a value one thread
- * writes and the same thread reads. */
-static bool g_stem_loop_vol_minus_edge;
-static bool g_stem_loop_vol_plus_edge;
+
+/* ===================================================================
+ * THE STEM TAPE CONTROL DISPATCHER (st_ctl.h)
+ * ===================================================================
+ * Control-thread-only state, plus the single output struct everything
+ * downstream reads. Serviced ONCE per control pass, at the top of the loop,
+ * ABOVE the FUNCTION branch -- see st_ctl.h for why that position is
+ * load-bearing rather than stylistic.
+ */
+static st_ctl_t     g_stem_ctl;
+static st_ctl_out_t g_stem_ctl_out;
 
 /* The pure streaming state machine (st_stem_stream.h) -- the ONE
  * authoritative song position, local sector-readiness, and underrun/
@@ -1761,7 +1812,7 @@ __attribute__((optimize("O2"), noinline, noclone))
 static void stem_render_run(const uint8_t *buf, uint32_t frame_in_sector,
 			     const st_stem_mix_prepared_t *prep,
 			     int32_t m0, int32_t md, int32_t mv,
-			     uint32_t f0, uint32_t n, int16_t *s,
+			     uint32_t f0, uint32_t n, int32_t step, int16_t *s,
 			     uint32_t peak[ST11_STEM_COUNT])
 {
 	for (uint32_t k = 0; k < n; k++) {
@@ -1769,7 +1820,19 @@ static void stem_render_run(const uint8_t *buf, uint32_t frame_in_sector,
 		st11_audio_frame_t frame;
 		int16_t stem_l, stem_r;
 
-		st11_sector_decode_frame(buf, frame_in_sector + k, &frame);
+		/* `step` is +1 for ordinary playback and -1 for a REVERSED loop.
+		 * This is the only place direction becomes real: reverse decodes
+		 * the sector's frames in descending order, so the samples the
+		 * codec actually emits run backwards. The output index f always
+		 * ascends -- the block is filled front to back either way.
+		 *
+		 * The caller has already clamped n so that every frame touched
+		 * lies inside this one sector, in whichever direction it asked
+		 * for, so there is still no bounds test in here. */
+		st11_sector_decode_frame(buf,
+					  (uint32_t)((int32_t)frame_in_sector +
+						      (int32_t)k * step),
+					  &frame);
 		st_stem_mix_frame_prepared(&frame, prep, &stem_l, &stem_r);
 
 		/* BEAT PULSE: per-stem peak, sampled one frame in 32. The
@@ -2024,7 +2087,7 @@ st_stem_mix_prepare(stem_channels, &stem_prepared);
 	while (f < BLK_FRAMES) {
 		uint32_t needed;
 		uint32_t fis, run, left_in_song, want;
-		uint32_t pin_idx;
+		uint32_t pin_idx, pin_reg = 0u;
 		bool from_pin = false;
 		/* The loop window, sampled ONCE per iteration. `active` is read
 		 * first and the bounds after it, which is the read side of the
@@ -2033,9 +2096,24 @@ st_stem_mix_prepare(stem_channels, &stem_prepared);
 		bool     lp_on  = atomic_get(&g_stem_loop_active) != 0;
 		uint32_t lp_lo  = lp_on ? (uint32_t)atomic_get(&g_stem_loop_start_fr) : 0u;
 		uint32_t lp_hi  = lp_on ? (uint32_t)atomic_get(&g_stem_loop_end_fr)   : 0u;
+		bool     lp_rev = lp_on && atomic_get(&g_stem_loop_reverse) != 0;
 
 		if (lp_on && lp_hi <= lp_lo) {
-			lp_on = false;   /* degenerate window: ignore it entirely */
+			lp_on  = false;   /* degenerate window: ignore it entirely */
+			lp_rev = false;
+		}
+
+		/* ---- LOOP ENTRY: seek BACK to the captured frame ----------
+		 * The window opens where PLAY went DOWN, which is a whole hold
+		 * behind the playhead by now. One-shot, consumed with an atomic
+		 * clear, and taken before the exit test because a gesture can
+		 * only ever be in one of the two states. The pinned ENTRY
+		 * region already holds those sectors -- the streamer fetched
+		 * them while the hold was still in progress -- so the seek is
+		 * immediately followed by a hit, with no silence and no wait. */
+		if (atomic_cas(&g_stem_loop_enter_req, 1, 0)) {
+			(void)st_stream_seek(&g_stem_stream,
+					      (uint32_t)atomic_get(&g_stem_loop_enter_fr));
 		}
 
 		/* ---- LOOP EXIT, taken before anything else in the block ----
@@ -2050,12 +2128,13 @@ st_stem_mix_prepare(stem_channels, &stem_prepared);
 		 * block is filled with forward playback from loop_start_frame.
 		 */
 		if (atomic_cas(&g_stem_loop_exit_req, 1, 0)) {
-			uint32_t resume = (uint32_t)atomic_get(&g_stem_loop_start_fr);
+			uint32_t resume = (uint32_t)atomic_get(&g_stem_loop_resume_fr);
 
 			if (st_stream_seek(&g_stem_stream, resume)) {
 				atomic_inc(&g_stem_loop_exits);
 			}
-			lp_on = false;   /* the window is no longer in force */
+			lp_on  = false;   /* the window is no longer in force */
+			lp_rev = false;   /* and the song always resumes FORWARD */
 		}
 
 		needed = st_stream_required_sector(&g_stem_stream);
@@ -2066,7 +2145,7 @@ st_stem_mix_prepare(stem_channels, &stem_prepared);
 		 * bytes exist. Checking the pin before the ring also keeps the
 		 * ring's own acquire from being spent on a sector the pin
 		 * already holds. */
-		if (stem_loop_pin_lookup(needed, &pin_idx)) {
+		if (stem_loop_pin_lookup(needed, &pin_reg, &pin_idx)) {
 			from_pin = true;
 			st_stream_sector_ready(&g_stem_stream, needed);
 		} else if (g_stem_stream.ready_sector != needed) {
@@ -2160,13 +2239,32 @@ st_stem_mix_prepare(stem_channels, &stem_prepared);
 		 * block. Every one of those three bounds is required by
 		 * stem_render_run() and st_stream_advance_frames(). */
 		fis = g_stem_stream.song_frame - needed * ST11_FRAMES_PER_SECTOR;
-		run = ST11_FRAMES_PER_SECTOR - fis;
-		left_in_song = g_stem_stream.frames - g_stem_stream.song_frame;
-		if (run > left_in_song) {
-			run = left_in_song;
-		}
-		if (run > BLK_FRAMES - f) {
-			run = BLK_FRAMES - f;
+		if (lp_rev) {
+			/* REVERSE. The run walks DOWN to this sector's first
+			 * frame, so fis + 1 frames are available; the same three
+			 * bounds apply, with the window's START taking the place
+			 * of its end. */
+			run = fis + 1u;
+			if (g_stem_stream.song_frame >= lp_lo) {
+				uint32_t left = g_stem_stream.song_frame - lp_lo + 1u;
+
+				if (run > left) {
+					run = left;
+				}
+			}
+			if (run > BLK_FRAMES - f) {
+				run = BLK_FRAMES - f;
+			}
+		} else {
+			run = ST11_FRAMES_PER_SECTOR - fis;
+			left_in_song = g_stem_stream.frames -
+				       g_stem_stream.song_frame;
+			if (run > left_in_song) {
+				run = left_in_song;
+			}
+			if (run > BLK_FRAMES - f) {
+				run = BLK_FRAMES - f;
+			}
 		}
 		/* ---- A FOURTH BOUND WHILE LOOPING: the window's end -------
 		 * The run must stop exactly at loop_end_frame so the wrap lands
@@ -2174,7 +2272,7 @@ st_stem_mix_prepare(stem_channels, &stem_prepared);
 		 * run. With that clamp the wrap below is exact: the last frame
 		 * rendered is end-1 and the next one rendered is start, so no
 		 * frame is skipped and none is played twice. */
-		if (lp_on && g_stem_stream.song_frame >= lp_lo &&
+		if (lp_on && !lp_rev && g_stem_stream.song_frame >= lp_lo &&
 		    g_stem_stream.song_frame < lp_hi) {
 			uint32_t left_in_loop = lp_hi - g_stem_stream.song_frame;
 
@@ -2198,12 +2296,27 @@ st_stem_mix_prepare(stem_channels, &stem_prepared);
 		/* RAM-ONLY: decodes out of whichever resident buffer
 		 * g_stem_active_buf_idx_local (audio-thread-exclusive)
 		 * names -- this real-time thread never touches flash. */
-		stem_render_run(from_pin ? g_stem_loop_pin_bufs[pin_idx]
+		stem_render_run(from_pin ? g_stem_loop_pin_bufs[pin_reg][pin_idx]
 					  : g_stem_sector_bufs[g_stem_active_buf_idx_local],
 				 fis, &stem_prepared, m0, md, mv,
-				 f, run, s, stem_peak);
+				 f, run, lp_rev ? -1 : 1, s, stem_peak);
 		f += run;
-		(void)st_stream_advance_frames(&g_stem_stream, run);
+		if (lp_rev) {
+			/* Step the playhead DOWN by exactly what was rendered,
+			 * and turn over at the window's start. Half-open: the
+			 * frame after lp_lo, travelling backwards, is lp_hi - 1.
+			 * No frame is skipped and none is played twice. */
+			uint32_t last = g_stem_stream.song_frame - (run - 1u);
+
+			if (last == lp_lo) {
+				if (st_stream_seek(&g_stem_stream, lp_hi - 1u)) {
+					atomic_inc(&g_stem_loop_wraps);
+				}
+			} else {
+				(void)st_stream_seek(&g_stem_stream, last - 1u);
+			}
+		} else {
+			(void)st_stream_advance_frames(&g_stem_stream, run);
 
 		/* ---- THE WRAP ---------------------------------------------
 		 * Having rendered up to exactly loop_end_frame (the clamp above
@@ -2216,9 +2329,11 @@ st_stem_mix_prepare(stem_channels, &stem_prepared);
 		 * re-acquires -- from the pin, which holds precisely the
 		 * sectors at loop_start_frame. That is the second reason the
 		 * pin exists: without it every wrap would race the streamer. */
-		if (lp_on && g_stem_stream.song_frame >= lp_hi && lp_hi > lp_lo) {
-			if (st_stream_seek(&g_stem_stream, lp_lo)) {
-				atomic_inc(&g_stem_loop_wraps);
+			if (lp_on && g_stem_stream.song_frame >= lp_hi &&
+			    lp_hi > lp_lo) {
+				if (st_stream_seek(&g_stem_stream, lp_lo)) {
+					atomic_inc(&g_stem_loop_wraps);
+				}
 			}
 		}
 
@@ -4565,15 +4680,18 @@ static void streamer_thread(void *a, void *b, void *c)
 		 * stays in UNDERRUN (silence) until a read genuinely succeeds
 		 * and validates. */
 		/* ---- THE LOOP EXIT KIT ------------------------------------
-		 * Fill the three pinned sectors that start at loop_start_frame,
-		 * once per loop entry, BEFORE the ordinary prefetch below --
-		 * the ring can recover from a late fill, the exit cannot.
+		 * Fill both pinned regions -- the window's start (the entry seek
+		 * and every forward wrap) and its last frame (every exit, and
+		 * the reverse wrap) -- once per gesture, BEFORE the ordinary
+		 * prefetch below: the ring can recover from a late fill, an
+		 * entry or an exit cannot.
 		 *
-		 * The control thread publishes the wanted base sector in
-		 * g_stem_loop_pin_want at loop entry; the loop has been running for
-		 * at least the 450 ms hold by then, and the earliest possible
-		 * exit is the PLAY release after it, so there is ample time to
-		 * complete these reads before anything can need them.
+		 * The control thread publishes the wanted base sectors in
+		 * g_stem_loop_pin_want[] the instant the gesture ARMS -- on the
+		 * PLAY-DOWN edge, a full ST_LOOP_HOLD_MS before the loop can
+		 * start. Eight sector reads take ~41 ms against a 450 ms hold,
+		 * so BOTH regions are resident before the entry seek needs the
+		 * first and long before any exit can need the second.
 		 *
 		 * Publication order is bytes-then-count-then-base, and the
 		 * consumer reads base-then-count, so a partially filled pin can
@@ -4581,15 +4699,19 @@ static void streamer_thread(void *a, void *b, void *c)
 		 * is valid, so there is no refill-while-reading hazard here at
 		 * all -- see the pin's own declaration comment. */
 		if (atomic_get(&g_stem_song_selected)) {
-			int32_t want_base = (int32_t)atomic_get(&g_stem_loop_pin_want);
+			uint32_t region;
+
+			for (region = 0u; region < ST_LOOP_PIN_REGIONS; region++) {
+			int32_t want_base =
+				(int32_t)atomic_get(&g_stem_loop_pin_want[region]);
 
 			if (want_base >= 0 &&
-			    (int32_t)atomic_get(&g_stem_loop_pin_base) != want_base) {
+			    (int32_t)atomic_get(&g_stem_loop_pin_base[region]) != want_base) {
 				uint32_t filled = 0u;
 				uint32_t k;
 
-				atomic_set(&g_stem_loop_pin_count, 0);   /* invalidate first */
-				atomic_set(&g_stem_loop_pin_base, -1);
+				atomic_set(&g_stem_loop_pin_count[region], 0);   /* invalidate first */
+				atomic_set(&g_stem_loop_pin_base[region], -1);
 				for (k = 0; k < ST_LOOP_PIN_SECTORS; k++) {
 					uint32_t sec = (uint32_t)want_base + k;
 					st11_sector_header_t hdr;
@@ -4600,27 +4722,32 @@ static void streamer_thread(void *a, void *b, void *c)
 					}
 					blk = g_stem_stream.song_start_block +
 					      sec * ST11_BLOCKS_PER_SECTOR;
-					if (!emmc_read_blocks(blk, g_stem_loop_pin_bufs[k],
+					if (!emmc_read_blocks(blk,
+							       g_stem_loop_pin_bufs[region][k],
 							       ST11_BLOCKS_PER_SECTOR)) {
 						break;
 					}
-					if (!st11_sector_read_header(g_stem_loop_pin_bufs[k], &hdr) ||
+					if (!st11_sector_read_header(
+						    g_stem_loop_pin_bufs[region][k], &hdr) ||
 					    !st_stream_validate_sector(&g_stem_stream, sec, &hdr)) {
 						break;   /* never pin unvalidated bytes */
 					}
 					filled++;
 				}
 				if (filled > 0u) {
-					atomic_set(&g_stem_loop_pin_count, (atomic_val_t)filled);
-					atomic_set(&g_stem_loop_pin_base, (atomic_val_t)want_base);
+					atomic_set(&g_stem_loop_pin_count[region],
+						   (atomic_val_t)filled);
+					atomic_set(&g_stem_loop_pin_base[region],
+						   (atomic_val_t)want_base);
 				}
 			} else if (want_base < 0 &&
-				   (int32_t)atomic_get(&g_stem_loop_pin_base) >= 0) {
+				   (int32_t)atomic_get(&g_stem_loop_pin_base[region]) >= 0) {
 				/* Loop over: drop the pin so the ring alone feeds
 				 * playback again and no stale sector can ever be
 				 * preferred over a fresh one. */
-				atomic_set(&g_stem_loop_pin_count, 0);
-				atomic_set(&g_stem_loop_pin_base, -1);
+				atomic_set(&g_stem_loop_pin_count[region], 0);
+				atomic_set(&g_stem_loop_pin_base[region], -1);
+			}
 			}
 		}
 
@@ -5765,139 +5892,6 @@ static void led_seq_begin(st_led_seq_t seq)
 	g_led_seq_started = true;
 }
 
-#if ST_CAL_BUILD
-/* ==========================================================================
- * LADDER CALIBRATION CAPTURE (build st16-cal ONLY -- not production)
- * ==========================================================================
- * st15's chord bands were derived from a resistor MODEL fitted to the five
- * documented single-button centres and validated against exactly one measured
- * chord (Track 1 + Track 4, the DFU failsafe band). The host tests then fed
- * those predicted centres back into the decoder built from the same
- * prediction, which proves internal consistency and nothing about a physical
- * device. On real hardware the chords did not fire. This build exists to
- * replace the model with measurements from THE actual SP-1.
- *
- * WHAT IT DOES NOT DO. It does not touch the audio path, the mixer, the
- * streamer, the transfer protocol or the LED owner. It adds one ADC read and
- * one printk per control pass, and only while the transport is STOPPED.
- *
- * WHY "ONLY WHILE STOPPED" IS LOAD-BEARING, not caution. ladder_read()
- * blocks on the control thread, and the control thread preempts the eMMC
- * streamer; over-sampling this rail is what starved the card once already.
- * With g_playing == 0 there is no stream to starve, so the cost is free. The
- * moment playback starts, this function returns immediately and the build
- * behaves exactly like production.
- *
- * RATE LIMIT. A line is emitted only when the raw value moves by more than
- * CAL_HYST counts AND at least CAL_MIN_GAP_MS has passed, plus one heartbeat
- * every CAL_HEARTBEAT_MS so a steady hold still confirms the reading. That is
- * the same discipline firmware/stemtape's own CDC diagnostic already uses.
- * Nothing here logs at audio rate.
- */
-#define CAL_HYST          3
-#define CAL_MIN_GAP_MS   40
-#define CAL_HEARTBEAT_MS 1000
-#define CAL_STABLE_READS  3
-
-/* FUNCTION's GPIO read is defined further down the file (it lives with the
- * power/shutdown code). Forward-declared here rather than moved, so this
- * temporary calibration block stays self-contained and deleting it later
- * leaves nothing behind. Must match that definition exactly -- an implicit
- * declaration would be assumed to return int and then conflict with the real
- * bool, which is precisely how the first version of this build failed to
- * compile. */
-static bool pwr_pressed(void);
-
-static void cal_mask_str(uint8_t m, char out[5])
-{
-	out[0] = (m & ST_CHORD_T1) ? '1' : '0';
-	out[1] = (m & ST_CHORD_T2) ? '1' : '0';
-	out[2] = (m & ST_CHORD_T3) ? '1' : '0';
-	out[3] = (m & ST_CHORD_T4) ? '1' : '0';
-	out[4] = '\0';
-}
-
-static void cal_service(void)
-{
-	static bool     seeded;
-	static st_track_chord_t cal_chord;
-	static int      last_print = -100000;
-	static int64_t  last_ms;
-	static int      cand = -100000;
-	static int      cand_n;
-	static int      stable = -1;
-	int      raw;
-	int64_t  now;
-	uint8_t  band_mask = 0u, settled;
-	bool     known;
-	char     bs[5], ss[5];
-	const char *cls;
-
-	/* Never while playing -- see this block's own comment. */
-	if (g_playing) {
-		return;
-	}
-	if (!seeded) {
-		st_track_chord_reset(&cal_chord);
-		seeded = true;
-	}
-
-	raw = ladder_read(&adc_ladder[LAD_TRACKS]);
-	now = k_uptime_get();
-	if (raw < 0) {
-		return;   /* failed ADC read: report nothing rather than a fake 0 */
-	}
-
-	/* Debounced/settled value: CAL_STABLE_READS consecutive reads within
-	 * +/-CAL_HYST of each other. This is what you should record as the
-	 * band centre -- the instantaneous `raw` shows you the jitter. */
-	if (cand > -100000 && raw >= cand - CAL_HYST && raw <= cand + CAL_HYST) {
-		if (cand_n < 1000) {
-			cand_n++;
-		}
-	} else {
-		cand = raw;
-		cand_n = 1;
-	}
-	if (cand_n >= CAL_STABLE_READS) {
-		stable = cand;
-	}
-
-	/* What the CURRENT (model-derived) production classifier makes of it,
-	 * so the capture shows directly where the model is wrong. */
-	known   = st_track_chord_lookup(raw, 0u, &band_mask);
-	settled = st_track_chord_update(&cal_chord, raw);
-
-	if (raw <= ST_CHORD_IDLE_MAX) {
-		cls = "IDLE";
-	} else if (raw >= ST_CHORD_PLAY_FLOOR) {
-		cls = "PLAY-OR-ABOVE";
-	} else if (known) {
-		cls = "BAND";
-	} else {
-		cls = "UNKNOWN";
-	}
-
-	{
-		bool moved = (raw > last_print + CAL_HYST) || (raw < last_print - CAL_HYST);
-
-		if (!moved && (now - last_ms) < CAL_HEARTBEAT_MS) {
-			return;
-		}
-		if ((now - last_ms) < CAL_MIN_GAP_MS) {
-			return;
-		}
-	}
-	last_print = raw;
-	last_ms    = now;
-
-	cal_mask_str(band_mask, bs);
-	cal_mask_str(settled, ss);
-	printk("CAL t=%u raw=%4d stable=%4d n=%3d fn=%d cls=%-13s band=%s settled=%s\n",
-	       (unsigned)now, raw, stable, cand_n, pwr_pressed() ? 1 : 0,
-	       cls, known ? bs : "----", ss);
-}
-#endif /* ST_CAL_BUILD */
 
 static void led_service(void)
 {
@@ -6003,6 +5997,100 @@ static void led_service(void)
 	st_led_mvp_decide(&in, &frame);
 	led_apply_frame(&frame);
 }
+
+#if SP1_XFER_ENABLE
+/*
+ * Turn one st_ctl_service() result into the real device: the mixer's solo
+ * bits, the transport, the loop atomics and the two pinned sector regions.
+ *
+ * THE ONLY PLACE any of those are written for Stem Tape. Called immediately
+ * after the dispatcher, so everything downstream in the same pass -- and the
+ * audio thread's very next block -- sees one consistent picture.
+ */
+static void stem_ctl_apply(void)
+{
+	const st_ctl_out_t *o = &g_stem_ctl_out;
+	int k;
+
+	/* ---- THE TRACK MASK, straight through to the channel strip -------
+	 * The same bits the LED path reads back out of trk[].solo, so what is
+	 * lit and what is heard are one value rather than two kept in step. */
+	for (k = 0; k < NTRK; k++) {
+		trk[k].solo = ((o->track_mask >> k) & 1u) ? 1u : 0u;
+	}
+
+	/* ---- the loop window: bounds FIRST, `active` LAST ----------------
+	 * The audio thread must never observe an active loop with a
+	 * half-written window. A RESIZE moves only end_frame -- start_frame is
+	 * never recomputed -- so a block that lands mid-update sees the old
+	 * start with either the old or the new end, both of which are valid
+	 * windows. */
+	if (o->loop_enter || o->loop_resize) {
+		atomic_set(&g_stem_loop_start_fr,  (atomic_val_t)o->loop_start);
+		atomic_set(&g_stem_loop_end_fr,    (atomic_val_t)o->loop_end);
+		atomic_set(&g_stem_loop_resume_fr, (atomic_val_t)o->loop_resume);
+		atomic_set(&g_stem_loop_reverse,   o->loop_reverse ? 1 : 0);
+		atomic_set(&g_stem_loop_active, 1);
+	}
+	if (o->loop_enter) {
+		/* THE ENTRY SEEK. Frame first, request last. */
+		atomic_set(&g_stem_loop_enter_fr, (atomic_val_t)o->loop_start);
+		atomic_set(&g_stem_loop_enter_req, 1);
+	}
+	if (o->loop_direction) {
+		atomic_set(&g_stem_loop_reverse, o->loop_reverse ? 1 : 0);
+	}
+	if (o->loop_latch) {
+		atomic_set(&g_stem_loop_latched, 1);
+	}
+	if (o->loop_exit) {
+		/* Mirror of entry: `active` cleared FIRST, then the one-shot
+		 * seek the audio thread consumes. The resume frame is written
+		 * before the request so it can never be read half-published. */
+		atomic_set(&g_stem_loop_resume_fr, (atomic_val_t)o->loop_resume);
+		atomic_set(&g_stem_loop_active, 0);
+		atomic_set(&g_stem_loop_latched, 0);
+		atomic_set(&g_stem_loop_exit_req, 1);
+	}
+
+	/* ---- THE TWO PINNED REGIONS, requested from the ARM onwards ------
+	 * Sector geometry is main.c's, not the dispatcher's: it publishes
+	 * frames and this is where they become sector indices. Both are asked
+	 * for on the PLAY-DOWN edge, a full hold before the loop can start, so
+	 * the entry seek and any immediately-following exit both land on
+	 * resident data. */
+	if (o->pin_valid) {
+		atomic_set(&g_stem_loop_pin_want[ST_LOOP_PIN_ENTRY],
+			   (atomic_val_t)(o->pin_entry_frame / ST11_FRAMES_PER_SECTOR));
+		atomic_set(&g_stem_loop_pin_want[ST_LOOP_PIN_EXIT],
+			   (atomic_val_t)(o->pin_exit_frame / ST11_FRAMES_PER_SECTOR));
+	} else {
+		atomic_set(&g_stem_loop_pin_want[ST_LOOP_PIN_ENTRY], -1);
+		atomic_set(&g_stem_loop_pin_want[ST_LOOP_PIN_EXIT], -1);
+	}
+
+	/* ---- the transport, from the ONLY PLAY owner --------------------- */
+	if (o->play_tap) {
+		g_playing = !g_playing;
+		if (g_playing) {
+			g_midi_start_pending = 1;
+		} else {
+			g_midi_stop_pending = 1;
+		}
+	}
+
+	/* ---- a hold that produced nothing SAYS SO ------------------------
+	 * Never a silent no-op, and never a false claim that a loop started. */
+	if (o->refused == ST_CTL_REFUSE_NO_TEMPO) {
+		printk("STEMTAPE loop: refused -- this song has no trustworthy "
+		       "tempo (frames_per_beat=0); no loop was started\n");
+	} else if (o->refused == ST_CTL_REFUSE_NO_ROOM) {
+		printk("STEMTAPE loop: refused -- no room left before the song "
+		       "end at frame %u; no loop was started\n",
+		       (unsigned)o->loop_start);
+	}
+}
+#endif /* SP1_XFER_ENABLE */
 
 /* FN+PLAY mode toggle (v1.2.2: fires on PLAY RELEASE, 0.7-5 s of hold —
  * holding through 5 s becomes the brightness toggle instead). M7c two-layer
@@ -6507,6 +6595,12 @@ int main(void)
 	}
 
 	controls_init();                /* power the button ladders + ADC + serial */
+#if SP1_XFER_ENABLE
+	/* COLD BOOT, once and only once. This is where the loop division is
+	 * defaulted to exactly one bar; calling it again mid-session would
+	 * silently discard a division the player had chosen. */
+	st_ctl_reset(&g_stem_ctl);
+#endif
 	codec_init();                   /* release codec resets + scan the I2C bus */
 	audio_init();                   /* osc on, TAS2505 configured, I2S running  */
 	hp_init();                      /* headphone codec on (always-on, TimK's driver) */
@@ -6636,19 +6730,58 @@ int main(void)
 
 		/* (track LEDs are driven by the looper beat clock below) */
 
-#if ST_CAL_BUILD
-		/* LADDER CALIBRATION CAPTURE -- temporary, st16-cal only.
+		/* ================= STEM TAPE CONTROL ARBITRATION =============
+		 * ONE sample of each rail per pass, ONE classifier, and -- with a
+		 * Stem Tape song selected -- sole ownership of the Track buttons
+		 * and of PLAY. Everything downstream (the mixer's solo bits, the
+		 * loop atomics, the pinned sectors, the LEDs) consumes what this
+		 * publishes; nothing re-samples or re-interprets the rails.
 		 *
-		 * Deliberately placed HERE: before the FUNCTION branch below,
-		 * which ends in an unconditional `continue` and therefore hides
-		 * every FUNCTION-modified combination from anything downstream.
-		 * Calibration has to see those, so it runs first. */
-		cal_service();
+		 * PLACED HERE, ABOVE THE FUNCTION BRANCH, DELIBERATELY. That
+		 * branch ends every path in `continue`, so anything below it can
+		 * never see FUNCTION held. In st15 the loop was ticked below it
+		 * and function_down was therefore a structural constant false --
+		 * which is exactly why holding FUNCTION could not latch a loop on
+		 * real hardware. */
+		int  st_trk_raw = ladder_read(&adc_ladder[LAD_TRACKS]);
+		enum vol_btn st_vraw = decode_vol(ladder_read(&adc_ladder[LAD_VOL]));
+		bool stem_ctl = false;
+#if SP1_XFER_ENABLE
+		stem_ctl = atomic_get(&g_stem_song_selected) != 0;
+		{
+			st_ctl_in_t ci;
+
+			memset(&ci, 0, sizeof(ci));
+			ci.ladder_raw     = st_trk_raw;
+			/* Only the master-volume pair maps to a loop division. The
+			 * varispeed rocker (VOL_TEMPO_UP/DOWN) is a different
+			 * control and must never resize a loop. */
+			ci.vol_dir        = (st_vraw == VOL_DOWN) ? -1
+					     : (st_vraw == VOL_UP) ? 1 : 0;
+			ci.function_down  = pwr_pressed();
+			ci.stem_song      = stem_ctl;
+			ci.playing        = (g_playing != 0);
+			/* THE AUDIO THREAD'S OWN playhead, via the atomic mirror
+			 * it refreshes every block -- not a control-thread
+			 * estimate. This is the frame a PLAY-down edge captures. */
+			ci.song_frame     = (uint32_t)atomic_get(&g_stem_song_frame_pub);
+			ci.song_frames    = g_stem_stream.frames;
+			ci.frames_per_beat = g_stem_beat_timing.frames_per_beat;
+			ci.now_ms         = (uint32_t)k_uptime_get();
+
+			st_ctl_service(&g_stem_ctl, &ci, &g_stem_ctl_out);
+		}
+		stem_ctl_apply();
 #endif
 
 		/* FUNCTION button: a SHORT tap changes song; a long HOLD powers off
-		 * (the same button does both, like the original device). */
-		if (pwr_pressed()) {
+		 * (the same button does both, like the original device).
+		 *
+		 * A FUNCTION press the loop has CONSUMED (it latched a loop, or it
+		 * is modifying a division) never reaches this branch: it must not
+		 * also change song, start a power-off countdown, step brightness
+		 * or move a bank. */
+		if (pwr_pressed() && !g_stem_ctl_out.function_consumed) {
 			ctl_flush = 1;
 			if (press_start < 0)
 				press_start = k_uptime_get();
@@ -6662,7 +6795,11 @@ int main(void)
 			 * the ladder voltage. While the combo is engaged the power-off
 			 * countdown/shutdown is suppressed (this gesture must never risk a
 			 * power-off), and the FUNCTION-release song-change is suppressed. */
-			int fraw = ladder_read(&adc_ladder[LAD_TRACKS]);
+			/* The pass already sampled this rail. Reuse it rather than
+			 * blocking on a second conversion -- ladder_read() preempts
+			 * the eMMC streamer, and the value cannot have changed
+			 * meaningfully within one 8 ms pass. */
+			int fraw = st_trk_raw;
 			if (fraw > 1600) {
 				fnp_low = 0;
 				combo_seen = 1;
@@ -6973,39 +7110,32 @@ int main(void)
 			 * the user never made. Reading it as TRK_NONE is the truthful
 			 * answer for an ambiguous ladder voltage: 1+4 now does nothing
 			 * at all, rather than doing something else. */
-			int trk_raw = ladder_read(&adc_ladder[LAD_TRACKS]);
+			/* THE SINGLE LADDER SAMPLE for this pass, taken at the top
+			 * of the control loop and shared by everything that needs it.
+			 * There is no second ladder_read() of AIN0 anywhere in a
+			 * pass: ladder_read() blocks this thread, which preempts the
+			 * eMMC streamer, and a duplicate read is real risk to
+			 * playback for no information. */
+			int trk_raw = st_trk_raw;
 			enum trk_btn raw;
 
-			if (trk_raw >= 1280 && trk_raw <= 1390) {
+			if (stem_ctl) {
+				/* STEM TAPE: st_ctl_service() is the SOLE owner of this
+				 * rail. It has already classified this very sample into
+				 * a Track mask and a PLAY state and published both. The
+				 * inherited single-button decode is therefore given
+				 * nothing at all -- not a track, not PLAY -- so no
+				 * classic gesture can fire underneath the dispatcher and
+				 * the two can never disagree about what is held. */
+				raw = TRK_NONE;
+			} else if (trk_raw >= 1280 && trk_raw <= 1390) {
+				/* Inherited-engine path only: the ambiguous Track1+Track4
+				 * DFU band decodes as nothing rather than as a Track-4
+				 * press the player never made. */
 				raw = TRK_NONE;
 			} else {
 				raw = decode_tracks(trk_raw);
 			}
-
-			/* STEM TAPE: MULTI-TRACK CHORD DECODE, from the SAME raw
-			 * reading the single-button decode above consumes -- one
-			 * ADC read, two interpretations, no extra ladder traffic
-			 * (ladder_read() blocks this thread, which preempts the
-			 * eMMC streamer; a second read here would be real risk to
-			 * playback for no information).
-			 *
-			 * decode_tracks() cannot express "two pressed": it maps
-			 * every voltage onto one identity, so a genuine chord has
-			 * always decoded as some single button the player never
-			 * touched. st_track_chord_update() answers with a settled
-			 * 4-bit mask instead, and answers "hold what you had" for
-			 * any voltage it does not positively recognise. See
-			 * st_track_chord.h for the ladder model, the one measured
-			 * chord band, and why every chord containing both Track 3
-			 * and Track 4 is undecodable on this hardware. */
-			static st_track_chord_t chord_state;
-			static bool             chord_seeded;
-
-			if (!chord_seeded) {
-				st_track_chord_reset(&chord_state);
-				chord_seeded = true;
-			}
-			uint8_t chord_mask = st_track_chord_update(&chord_state, trk_raw);
 			/* trailing-PLAY guard (see the FUNCTION+PLAY combo exit): ignore
 			 * the ladder until the RAW reading goes fully idle once, so a PLAY
 			 * still held after the mode toggle — and its whole release sweep
@@ -7314,51 +7444,35 @@ int main(void)
 			 * which is what makes it read as momentary rather than a
 			 * delayed toggle. */
 			{
-				/* STEM TAPE: IMMEDIATE MOMENTARY SOLO.
+				/* ---- MOMENTARY SOLO, from the ONE published mask
 				 *
-				 * With a stem song selected, solo is simply "the
-				 * button is physically down". No 700 ms threshold,
-				 * no latch, no tap-to-mute: press and only that
-				 * stem is audible, release and all four return.
-				 * `committed` is the chord-committed button and is
-				 * exactly one track at a time, so this also gives
-				 * "only the pressed stem" for free.
+				 * With a stem song selected the Track row belongs to
+				 * st_ctl_service(): it publishes a settled 4-bit mask
+				 * from a single ladder sample, and stem_ctl_apply()
+				 * has already written it into trk[].solo -- the exact
+				 * bits the mixer multiplies by and the exact bits the
+				 * LED path lights. Nothing here re-decides it, and
+				 * there is no second interpretation of the rail to
+				 * disagree with.
 				 *
-				 * FUNCTION-modified gestures are deliberately NOT
-				 * affected: while FUNCTION is down the combo
-				 * handler owns the surface and sets ctl_flush,
-				 * which clears `committed` -- so held_now is false
-				 * for every track and no solo is asserted. Those
-				 * gestures stay reserved.
-				 *
-				 * The classic path keeps st_track_hold_tick() and
-				 * its threshold unchanged: this firmware still
-				 * builds the inherited engine for the no-song case,
-				 * and that behaviour is not ours to redefine. */
-				bool stem_mode = false;
-#if SP1_XFER_ENABLE
-				stem_mode = atomic_get(&g_stem_song_selected) != 0;
-#endif
-				for (int k = 0; k < NTRK; k++) {
-					bool held_now = (committed == (enum trk_btn)k) &&
+				 * The classic path keeps st_track_hold_tick() and its
+				 * threshold unchanged: this firmware still builds the
+				 * inherited engine for the no-song case, and that
+				 * behaviour is not ours to redefine. */
+				if (!stem_ctl) {
+					for (int k = 0; k < NTRK; k++) {
+						bool held_now =
+							(committed == (enum trk_btn)k) &&
 							!pwr_pressed();
-					uint32_t held_ms = held_now
-						? (uint32_t)(k_uptime_get() - press_t[k]) : 0u;
-					bool solo = st_track_hold_tick(&track_hold[k], held_now,
-									held_ms,
-									TRACK_HOLD_SOLO_MS);
-					/* CHORD: bit k of the settled mask, not a single
-					 * committed identity. This is the whole of the
-					 * multi-stem solo -- st_stem_mix.h's own rule
-					 * ("if ANY stem is soloed, every non-soloed stem
-					 * is silent") turns two set bits into exactly two
-					 * audible stems, with their fader gains intact.
-					 * No mixer change was needed, and none was made. */
-					bool chord_held = ((chord_mask >> k) & 1u) != 0u &&
-							  !pwr_pressed();
+						uint32_t held_ms = held_now
+							? (uint32_t)(k_uptime_get() -
+								      press_t[k]) : 0u;
 
-					trk[k].solo = stem_mode ? (chord_held ? 1u : 0u)
-								: (solo ? 1u : 0u);
+						trk[k].solo = st_track_hold_tick(
+							&track_hold[k], held_now,
+							held_ms, TRACK_HOLD_SOLO_MS)
+							? 1u : 0u;
+					}
 				}
 			}
 			/* HOLD-ARM, always LATCHED on release. EMPTY tracks arm after
@@ -7389,127 +7503,46 @@ int main(void)
 			/* PLAY/STOP button: a short TAP toggles play/stop in place (tape ramp);
 			 * a HOLD (>=400 ms) jumps to the START of the song and plays — a reliable
 			 * "play the whole thing from the top" that never depends on current state. */
-			/* ---- STEM TAPE: THE GLOBAL LOOP ------------------------
-			 * Runs BEFORE the classic PLAY handling below and takes
-			 * the button away from it whenever a stem song is
-			 * selected. The classic "hold PLAY -> restart from the
-			 * top" is a different instrument's gesture and would
-			 * fight the loop for the same hold; here the hold means
-			 * "loop from where I am".
+			/* ---- THE GLOBAL LOOP lives in st_ctl_service() -----
+			 * It is called at the TOP of this control loop, above
+			 * the FUNCTION branch, and its result was applied by
+			 * stem_ctl_apply() before this block ran.
 			 *
-			 * A short PLAY TAP still falls through untouched -- the
-			 * loop engine emits nothing below its 450 ms threshold --
-			 * so play/pause is exactly as it was.
+			 * It was here in st15, BELOW the FUNCTION branch, and
+			 * that is why FUNCTION could never latch a loop: every
+			 * path out of that branch is a `continue`, so
+			 * function_down was a structural constant false. Moving
+			 * the arbitration above it is the fix; leaving a second
+			 * copy here would recreate the collision. */
+
+			/* ---- THE INHERITED HOLD-TO-RESTART, FENCED OFF -----
+			 * "hold PLAY >= 400 ms -> jump to the top and play" is
+			 * the Tape Looper's gesture. In Stem Tape a PLAY hold
+			 * means "loop from where I am", and st_ctl_service()
+			 * above owns the whole button -- the tap included.
 			 *
-			 * st_loop_tick() owns the whole grammar (see st_loop.h);
-			 * this block only gathers real edges and publishes the
-			 * result. */
-			{
-				static st_loop_t   s_loop;
-				static bool        s_loop_seeded;
-				static int64_t     s_loop_play_t = -1;
-				bool               stem_loop_mode = false;
-
-#if SP1_XFER_ENABLE
-				stem_loop_mode = atomic_get(&g_stem_song_selected) != 0;
-#endif
-				if (!s_loop_seeded) {
-					st_loop_reset(&s_loop);
-					s_loop_seeded = true;
-				}
-				if (stem_loop_mode) {
-					st_loop_in_t li;
-					st_loop_action_t la;
-					bool pd = (committed == TRK_PLAY);
-
-					if (pd && s_loop_play_t < 0) {
-						s_loop_play_t = k_uptime_get();
-					} else if (!pd) {
-						s_loop_play_t = -1;
-					}
-
-					memset(&li, 0, sizeof(li));
-					li.play_down     = pd;
-					li.play_held_ms  = pd
-						? (uint32_t)(k_uptime_get() - s_loop_play_t) : 0u;
-					li.function_down = pwr_pressed();
-					li.playing       = (g_playing != 0);
-					/* THE authoritative master frame -- the same
-					 * atomic mirror the LED beat pulse reads, so
-					 * the captured loop point is the frame the
-					 * audio path is actually playing. */
-					li.song_frame    = (uint32_t)atomic_get(&g_stem_song_frame_pub);
-					li.song_frames   = g_stem_stream.frames;
-					li.frames_per_beat = g_stem_beat_timing.frames_per_beat;
-					li.vol_minus_edge = g_stem_loop_vol_minus_edge;
-					li.vol_plus_edge  = g_stem_loop_vol_plus_edge;
-					g_stem_loop_vol_minus_edge = false;
-					g_stem_loop_vol_plus_edge  = false;
-
-					la = st_loop_tick(&s_loop, &li);
-
-					if (la == ST_LOOP_ACT_ENTER || la == ST_LOOP_ACT_RESIZE) {
-						/* Bounds FIRST, `active` LAST: the
-						 * audio thread must never see an
-						 * active loop with a half-written
-						 * window. */
-						atomic_set(&g_stem_loop_start_fr,
-							   (atomic_val_t)s_loop.start_frame);
-						atomic_set(&g_stem_loop_end_fr,
-							   (atomic_val_t)s_loop.end_frame);
-						atomic_set(&g_stem_loop_active, 1);
-						if (la == ST_LOOP_ACT_ENTER) {
-							/* Ask the streamer for the exit
-							 * kit now, while there is time:
-							 * the earliest possible exit is
-							 * the PLAY release still to come. */
-							atomic_set(&g_stem_loop_pin_want,
-								   (atomic_val_t)(s_loop.start_frame /
-										   ST11_FRAMES_PER_SECTOR));
-						}
-						atomic_set(&g_stem_loop_latched,
-							   s_loop.state == ST_LOOP_LATCHED ? 1 : 0);
-					} else if (la == ST_LOOP_ACT_LATCH) {
-						atomic_set(&g_stem_loop_latched, 1);
-					} else if (la == ST_LOOP_ACT_EXIT) {
-						/* `active` cleared FIRST (mirror of
-						 * entry), then the one-shot seek
-						 * request the audio thread consumes. */
-						atomic_set(&g_stem_loop_active, 0);
-						atomic_set(&g_stem_loop_latched, 0);
-						atomic_set(&g_stem_loop_exit_req, 1);
-					}
-					if (!st_loop_active(&s_loop) &&
-					    la != ST_LOOP_ACT_EXIT) {
-						atomic_set(&g_stem_loop_pin_want, -1);
-					}
-					/* The loop owns PLAY for this press whenever
-					 * it is running or just consumed one, so the
-					 * classic hold-to-restart below never fires. */
-					if (st_loop_active(&s_loop) || la == ST_LOOP_ACT_EXIT ||
-					    s_loop.play_consumed) {
-						ep_play_held = 1;   /* also swallows the tap */
-						play_t = -1;
-						goto loop_owns_play;
-					}
-				}
-			}
-
-			if (committed == TRK_PLAY) {
+			 * These two used to coexist, and the 400 ms one always
+			 * fired first: it dropped the transport to re-seek and
+			 * re-prime the read-ahead ring, and the loop could not
+			 * enter until playback came back. That is the three to
+			 * four seconds of dead air the player felt.
+			 *
+			 * `committed` can never be TRK_PLAY with a stem song
+			 * selected (the ladder decode above forces TRK_NONE),
+			 * so this body is already unreachable; the explicit
+			 * gate states the rule rather than leaving it implied. */
+			if (!stem_ctl && committed == TRK_PLAY) {
 				if (play_t < 0) { play_t = k_uptime_get(); play_held = 0; }
 				else if (!play_held && (k_uptime_get() - play_t) >= 400) {
-					g_restart_req = 1; play_held = 1;        /* hold -> play from start */
-					/* mark the episode a hold NOW — a clean PLAY->idle
-					 * release dispatches the episode end before this block
-					 * runs again; marking it at release was too late (the
-					 * "tap" toggle fired right after the restart and the
-					 * stale flag then swallowed the next genuine tap). */
+					g_restart_req = 1; play_held = 1;
+					/* mark the episode a hold NOW -- a clean
+					 * PLAY->idle release dispatches the episode
+					 * end before this block runs again. */
 					ep_play_held = 1;
 				}
 			} else {
 				play_t = -1;
 			}
-loop_owns_play:
 
 #if HP_TIM_TEST
 			/* HEADPHONE AUTO-MUTE: poll the codec jack-detect ~5x/s and mute the
@@ -7551,7 +7584,10 @@ loop_owns_play:
 			 * single raw reads were causing spurious volume/tempo jumps. */
 			static enum vol_btn vcommit = VOL_NONE, vcand = VOL_NONE;
 			static int vcnt;
-			enum vol_btn vraw = decode_vol(ladder_read(&adc_ladder[LAD_VOL]));
+			/* The pass's ONE reading of this rail (taken at the top,
+			 * where the dispatcher could also see it). No second
+			 * conversion. */
+			enum vol_btn vraw = st_vraw;
 			enum vol_btn vbefore = vcommit;
 			if (vraw == vcommit)       { vcnt = 0; }
 			else if (vraw == vcand)    { if (++vcnt >= 3) { vcommit = vraw; vcnt = 0; } }
@@ -7563,6 +7599,13 @@ loop_owns_play:
 			{
 				static int64_t vrep_t = -1, vrep_last;
 				int vdir = (vcommit == VOL_UP) ? 1 : (vcommit == VOL_DOWN) ? -1 : 0;
+
+				/* A Volume press the loop is using as a division
+				 * change is NOT also a master-volume change. One
+				 * press does one thing. */
+				if (g_stem_ctl_out.vol_consumed) {
+					vdir = 0;
+				}
 				int vstep = 0;
 				if (vdir != 0) {
 					int64_t tnow = k_uptime_get();
@@ -7571,29 +7614,21 @@ loop_owns_play:
 						vstep = 1; vrep_last = tnow;
 					}
 				} else { vrep_t = -1; }
-				/* ---- LOOP LENGTH vs MASTER VOLUME ------------------
-				 * While a loop owns the transport, Volume -/+ selects
-				 * the loop length instead of changing volume. Outside a
-				 * loop the buttons keep their normal behaviour exactly.
+				/* ---- LOOP DIVISION vs MASTER VOLUME ----------------
+				 * The division change is st_ctl_service()'s: it sees
+				 * the same rail sample this block does, debounces it
+				 * to one edge per press, and reports back through
+				 * vol_consumed (applied to `vdir` above) whether it
+				 * took the press. There is no second edge flag and no
+				 * one-pass hand-off between blocks -- the st15 pair of
+				 * g_stem_loop_vol_*_edge globals is gone.
 				 *
-				 * ONE PRESS, ONE STEP. Only a FRESH press
-				 * (vcommit != vbefore) raises the edge -- never the
-				 * hold-repeat above, which exists to sweep volume and
-				 * would otherwise run the length ladder end to end
-				 * while a finger rested on the button. The edge is
-				 * consumed by the loop block on the next control pass
-				 * (~8 ms later), which is below the threshold of
-				 * perception and keeps the two blocks independent. */
-				if (atomic_get(&g_stem_loop_active) != 0) {
-					if (vdir != 0 && vcommit != vbefore) {
-						if (vdir > 0) {
-							g_stem_loop_vol_plus_edge = true;
-						} else {
-							g_stem_loop_vol_minus_edge = true;
-						}
-					}
-					vstep = 0;   /* the loop owns these buttons now */
-				}
+				 * The rule the dispatcher implements: a Volume press
+				 * resizes the loop only while a modifier is physically
+				 * held -- PLAY during a momentary loop, FUNCTION once
+				 * it is latched. A bare Volume press is always master
+				 * volume, which is the behaviour a player relies on
+				 * constantly. */
 				if (vstep) {
 					g_vol_idx += vdir;
 					if (g_vol_idx < 0) g_vol_idx = 0;

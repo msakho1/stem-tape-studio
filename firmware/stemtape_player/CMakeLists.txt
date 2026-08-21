@@ -155,7 +155,8 @@ target_sources(app PRIVATE
 	src/st_stem_stream.c
 	src/st_stem_bufmbox.c
 	src/st_track_hold.c
-	src/st_track_chord.c
+	src/st_ladder.c
+	src/st_ctl.c
 	src/st_loop.c
 	src/st_beat_phase.c
 	src/st_led_mvp.c

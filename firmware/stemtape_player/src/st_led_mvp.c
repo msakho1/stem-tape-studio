@@ -266,7 +266,11 @@ static void decide_playing(const st_led_inputs_t *in, st_led_frame_t *out)
 	 * it is visible even between beats -- which is the point: a latched
 	 * loop is still running when the player's hands are off the device. A
 	 * MOMENTARY loop only ever shows inside the pulse, below, so it reads
-	 * as "live" rather than "held". */
+	 * as "live" rather than "held".
+	 *
+	 * PHYSICALLY VERIFIED on a real SP-1 and NOT to be redesigned: an
+	 * earlier revision of this checkpoint replaced this with a Track-row
+	 * quarter chase. That is reverted -- the shipped indication works. */
 	if (in->loop_state == ST_LED_LOOP_LATCHED) {
 		out->level[ST_LED_S1] = ST_LED_MAX;
 	}

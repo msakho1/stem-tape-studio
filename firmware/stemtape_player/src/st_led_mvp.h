@@ -49,7 +49,7 @@
 #define ST_LED_MAX 255u
 
 /* All four Track bits of a solo mask. Deliberately the same bit order as
- * st_track_chord.h's ST_CHORD_T1..T4 -- bit k is Track (k+1) -- because the
+ * st_ladder.h's ST_LADDER_T1..T4 -- bit k is Track (k+1) -- because the
  * value that arrives here IS that decoder's mask, unmodified. */
 #define ST_LED_TRACK_MASK_ALL 0xFu
 
@@ -143,7 +143,7 @@ typedef struct {
 	 * exact bits, so what is lit and what is heard cannot disagree: they
 	 * are one value, not two that have to be kept in step. 0 == nothing
 	 * held == normal playback display. */
-	uint8_t solo_mask;          /* bits 0..3; see st_track_chord.h */
+	uint8_t solo_mask;          /* bits 0..3; see st_ladder.h */
 
 	/* Beat phase, envelope and bar position, all from one st_beat_pulse()
 	 * call on the authoritative song_frame. */

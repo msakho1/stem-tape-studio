@@ -1286,60 +1286,40 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Calibration capture is present ONLY in a calibration-tagged build
-        # ST_CAL_BUILD adds a rate-limited CDC capture of the Track/PLAY
-        # ladder while the transport is stopped. It exists to replace st15's
-        # MODEL-derived chord bands with measurements from a real SP-1, and it
-        # must never reach a production image -- both because it is diagnostic
-        # spam and because an extra blocking ladder_read() on the control
-        # thread is exactly what starved the eMMC streamer once before.
+      - name: No calibration capture in the production image
+        # The temporary st16-cal build added a rate-limited CDC capture of the
+        # Track/PLAY ladder so the real bands could be measured on hardware.
+        # That measurement is done and committed
+        # (firmware/stemtape_player/docs/ladder-measured.json); the capture,
+        # its ST_CAL_BUILD switch and its calibration tag are all gone.
         #
-        # This gate pins the switch to the build tag in BOTH directions, so
-        # neither can be changed without the other:
-        #   ST_CAL_BUILD 1  =>  the tag MUST contain "cal"
-        #   ST_CAL_BUILD 0  =>  the tag MUST NOT contain "cal"
-        # Forgetting to flip the switch back therefore fails the build rather
-        # than silently shipping the capture.
+        # It must never come back by accident. Beyond the diagnostic spam, an
+        # extra blocking ladder_read() on the control thread is exactly what
+        # starved the eMMC streamer once before, and the capture could only
+        # ever run with the transport STOPPED -- which is precisely why it
+        # could not observe the playing-state coupling that made chords fail.
         working-directory: ${{ github.workspace }}/project
         run: |
           set -euo pipefail
           M=firmware/stemtape_player/src/main.c
-          CAL="$(grep -oE '^#define ST_CAL_BUILD [01]' "$M" | grep -oE '[01]$')"
           TAG="$(grep -oE '^#define ST_BUILD_TAG "[^"]+"' "$M" | head -1 | sed 's/.*"\(.*\)"/\1/')"
-          echo "ST_CAL_BUILD=$CAL  first ST_BUILD_TAG=$TAG"
-          if [ "$CAL" = "1" ]; then
-            if ! printf '%s' "$TAG" | grep -q 'cal'; then
-              echo "FAIL: ST_CAL_BUILD=1 but the build tag ($TAG) is not a calibration tag."
+          echo "build tag: $TAG"
+          if printf '%s' "$TAG" | grep -qi 'cal'; then
+            echo "FAIL: the build tag ($TAG) is a calibration tag."
+            exit 1
+          fi
+          for sym in ST_CAL_BUILD cal_service cal_mask_str; do
+            if grep -qn "$sym" "$M"; then
+              echo "FAIL: $sym is still present in the production image."
+              grep -n "$sym" "$M"
               exit 1
             fi
-            echo "OK: calibration build, calibration tag, capture compiled in."
-          else
-            if printf '%s' "$TAG" | grep -q 'cal'; then
-              echo "FAIL: ST_CAL_BUILD=0 but the build tag ($TAG) still says calibration."
-              exit 1
-            fi
-            if grep -qE '^\s*cal_service\(\);' "$M"; then
-              : # the call site is inside #if ST_CAL_BUILD, which is fine
-            fi
-            echo "OK: production build, no calibration tag."
+          done
+          if grep -qn 'printk("CAL ' "$M"; then
+            echo "FAIL: calibration logging is still present."
+            exit 1
           fi
-          # The capture must ALWAYS be behind the switch, in either mode.
-          if grep -n 'cal_service' "$M" | grep -qv '#'; then
-            python3 - "$M" <<'PY'
-          import re,sys
-          src=open(sys.argv[1]).read().split('\n')
-          depth=0; bad=[]
-          for i,l in enumerate(src):
-              s=l.strip()
-              if s.startswith('#if'): depth+=1
-              elif s.startswith('#endif') and depth: depth-=1
-              if 'cal_service' in l and depth==0 and not s.startswith('*') and not s.startswith('/*'):
-                  bad.append(i+1)
-          if bad:
-              print("FAIL: cal_service referenced outside any #if at line(s)", bad); sys.exit(1)
-          print("OK: every cal_service reference is inside a preprocessor guard.")
-          PY
-          fi
+          echo "OK: production tag, no calibration switch, no capture, no CAL logging."
 
       - name: Stem Tape LOOP playback gate -- contiguous wrap, exit, zero silence
         # The production-equivalent gate for global looping. Drives the REAL
@@ -1387,7 +1367,16 @@ jobs:
             firmware/stemtape_player/src/main.c | grep -oE '[0-9]+')"
           TEST="$(grep -oE '^#define ST_LOOP_PIN_TEST_SECTORS [0-9]+u' \
             firmware/stemtape_player/tests/test_loop_playback_gate.c | grep -oE '[0-9]+')"
+          PRODR="$(grep -oE '^#define ST_LOOP_PIN_REGIONS [0-9]+' \
+            firmware/stemtape_player/src/main.c | grep -oE '[0-9]+')"
+          TESTR="$(grep -oE '^#define ST_LOOP_PIN_TEST_REGIONS [0-9]+u' \
+            firmware/stemtape_player/tests/test_loop_playback_gate.c | grep -oE '[0-9]+')"
           echo "pinned sectors: production=$PROD gate=$TEST"
+          echo "pinned regions: production=$PRODR gate=$TESTR"
+          if [ "$PRODR" != "$TESTR" ]; then
+            echo "MISMATCH: the gate models $TESTR pinned regions, the firmware has $PRODR."
+            exit 1
+          fi
           if [ "$PROD" != "$TEST" ]; then
             echo "MISMATCH: the loop playback gate models $TEST pinned sectors but the"
             echo "firmware allocates $PROD -- the gate would be proving a design that is"
@@ -1408,57 +1397,93 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Stem Tape Track-chord ADC decoder host tests
-        # src/st_track_chord.c turns ONE shared-ladder voltage into a 4-bit
-        # held-Track mask. Linked into the real firmware target
-        # (CMakeLists.txt) and genuinely called: main.c's control loop feeds
-        # it the SAME raw AIN0 reading decode_tracks() consumes, and bit k of
-        # the settled mask becomes trk[k].solo -- proven by the "stored
-        # four-stem playback wiring check" step below.
+      - name: Stem Tape ladder classifier -- MEASURED bands, all 15 masks, no deadlock
+        # src/st_ladder.c is THE classifier for the shared AIN0 rail: one
+        # sample in, a settled Track mask or PLAY out. Linked into the real
+        # firmware target (CMakeLists.txt) and genuinely called -- st_ctl.c
+        # feeds it main.c's single per-pass ladder_read(), and the mask it
+        # settles on becomes trk[k].solo and the LED solo mask, proven by the
+        # "stored four-stem playback wiring check" step below.
         #
-        # WHY THIS EXISTS. PLAY and Track 1-4 share SAADC AIN0; there is no
-        # per-button digital input, so a chord is one new voltage rather than
-        # two readings. The inherited decode_tracks() maps every voltage onto
-        # exactly one button identity and has no way to say "two pressed", so
-        # a real two-finger chord has always decoded as some single button the
-        # player never touched. Ending that is worth more than the feature:
-        # soloing the wrong stem mid-performance is worse than having no
-        # chords.
+        # PROVENANCE IS A MEASUREMENT, NOT A MODEL. Every band comes from
+        # firmware/stemtape_player/docs/ladder-measured.json -- a capture
+        # taken on a physical SP-1 with the temporary st16-cal build. The test
+        # does not transcribe the band table; it RE-DERIVES it from those
+        # measured centres by the documented rule and fails if a row in the
+        # firmware has been hand-edited away from the hardware.
         #
-        # THE HARDWARE FINDING, which this step asserts rather than merely
-        # documents: on this ladder every chord holding BOTH Track 3 and
-        # Track 4 lands at or above PLAY's floor -- T3+T4 ~1609, T1+T3+T4
-        # ~1691, T2+T3+T4 ~1768 and all-four ~1841 straddle PLAY at ~1823.
-        # PLAY is the transport and cannot be surrendered, so those four
-        # masks are undecodable here. The other eleven (four singles, five of
-        # six pairs, two of four triples) are separated by 73 counts or more.
+        # WHAT THE MEASUREMENT OVERTURNED. st15 claimed every chord holding
+        # both Track 3 and Track 4 collided with PLAY, from a model anchored
+        # on the midpoint of the WIDE 1280..1390 DFU tolerance band instead of
+        # the true T1+T4 centre of 1309. The real ladder resolves ALL FIFTEEN
+        # masks: T3+T4 1559, T1+T3+T4 1628, T2+T3+T4 1695, all four 1755,
+        # PLAY 1813. Tightest clearance on the whole rail is 58 counts against
+        # 6 counts of observed jitter.
         #
-        # PROVENANCE, stated plainly: exactly ONE chord band in this
-        # repository is a hardware measurement -- Track 1 + Track 4, raw
-        # 1280..1390, the bootloader DFU failsafe band, which main.c
-        # previously recognised only in order to REJECT it. Every other
-        # centre is model-derived: solving the five measured single-button
-        # centres for their resistor ratios and combining conductances
-        # predicts T1+T4 at 1329 against a measured band centre of 1335, six
-        # counts out of a ~4200-count full scale. That validates the topology
-        # and the ORDERING; it does not place a band edge to the count, so
-        # the production bands are deliberately narrow (the central ~42% of
-        # each gap) and an unrecognised reading HOLDS the previous settled
-        # mask. The failure mode is therefore a chord that does not trigger,
-        # never one that triggers the wrong stems. Widening a band after
-        # measuring a real device is a one-line table edit.
+        # AND WHY CHORDS DID NOTHING ON HARDWARE. st15's decoder had a slew
+        # guard -- "if |raw - last_raw| > 40, return the settled mask" -- that
+        # made no progress. main.c's own ladder_read() comment records that
+        # audio and USB activity couple into the shared BTN_COM rail while a
+        # song streams, so any sustained coupling past that threshold latched
+        # the mask at zero for as long as the song played. It also bought
+        # nothing: a switched resistor ladder steps in microseconds, so there
+        # was never a sweep to reject. The gate below asserts, on measured
+        # values, that a large step now COMMITS instead of stalling.
         working-directory: ${{ github.workspace }}/project
         run: |
           set -euo pipefail
           cc -std=c11 -Wall -Wextra -Werror -Ifirmware/stemtape_player/src \
-            firmware/stemtape_player/src/st_track_chord.c \
-            firmware/stemtape_player/tests/test_track_chord.c \
-            -o audit/test_track_chord
-          ./audit/test_track_chord | tee audit/track-chord-selftest.txt
+            firmware/stemtape_player/src/st_ladder.c \
+            firmware/stemtape_player/tests/test_ladder.c \
+            -o audit/test_ladder
+          ./audit/test_ladder | tee audit/ladder-selftest.txt
           {
-            echo '### Stem Tape Track-chord ADC decoder'
+            echo '### Stem Tape ladder classifier (measured bands)'
             echo '```text'
-            cat audit/track-chord-selftest.txt
+            cat audit/ladder-selftest.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Stem Tape ASSEMBLED control path -- the real dispatcher, measured ADC inputs
+        # This is the one that matters. It drives st_ctl_service() -- the same
+        # function, in the same arbitration order, that main.c's control loop
+        # calls once per pass -- with timed sequences of REAL MEASURED ADC
+        # values, and asserts on what the dispatcher publishes to the mixer,
+        # the LEDs and the audio thread. Not a state machine in isolation.
+        #
+        # It covers, on physical measurements rather than model centres:
+        #   * PLAY-DOWN captures the loop start; the threshold enters THERE,
+        #     not at the frame the hold expired on
+        #   * a short tap is still play/stop and starts no loop
+        #   * cold boot is exactly one bar of the measured 93.71 BPM tempo
+        #   * PLAY + Volume still changes the division (confirmed working on
+        #     hardware -- it must not regress), and the choice persists for
+        #     later loops in the same session but not across a reset
+        #   * FUNCTION latches exactly once and is CONSUMED, so main.c's own
+        #     FUNCTION branch cannot also act on that press
+        #   * releasing PLAY after latching does not exit; a new PLAY press
+        #     does, without stopping the transport, and its release is spent
+        #   * every exit -- unlatched, latched, forward or reversed -- resumes
+        #     at loop_end, and nothing inside [start, end) is heard again
+        #   * all 15 measured masks decode; a >40-count step commits; a
+        #     transient ADC error does not erase a held chord; one idle
+        #     sample is not a release
+        #   * a song with no tempo REFUSES out loud instead of silently doing
+        #     nothing or faking a loop
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          cc -std=c11 -Wall -Wextra -Werror -Ifirmware/stemtape_player/src \
+            firmware/stemtape_player/src/st_ctl.c \
+            firmware/stemtape_player/src/st_ladder.c \
+            firmware/stemtape_player/src/st_loop.c \
+            firmware/stemtape_player/tests/test_ctl.c \
+            -o audit/test_ctl
+          ./audit/test_ctl | tee audit/ctl-selftest.txt
+          {
+            echo '### Stem Tape assembled control path'
+            echo '```text'
+            cat audit/ctl-selftest.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -1505,7 +1530,7 @@ jobs:
           cc -std=c11 -Wall -Wextra -Werror -Ifirmware/stemtape_player/src \
             firmware/stemtape_player/src/st_led_mvp.c \
             firmware/stemtape_player/src/st_beat_phase.c \
-            firmware/stemtape_player/src/st_track_chord.c \
+            firmware/stemtape_player/src/st_ladder.c \
             firmware/stemtape_player/tests/test_st_led_mvp.c \
             -o audit/test_st_led_mvp
           ./audit/test_st_led_mvp | tee audit/led-acceptance-matrix.txt

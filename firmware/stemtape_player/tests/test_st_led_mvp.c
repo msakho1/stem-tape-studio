@@ -19,7 +19,7 @@
 #include <string.h>
 
 #include "st_led_mvp.h"
-#include "st_track_chord.h"   /* ST_CHORD_T1..T4: the SAME bit order */
+#include "st_ladder.h"   /* ST_LADDER_T1..T4: the SAME bit order */
 
 static int g_checks, g_failures, g_cases;
 
@@ -255,7 +255,7 @@ static void case_stopped_gauge(void)
 	in.song_selected = true;
 	in.batt_state = ST_LED_BATT_FAULT;
 	in.batt_level = 2u;
-	in.solo_mask = ST_CHORD_T2;
+	in.solo_mask = ST_LADDER_T2;
 	st_led_mvp_decide(&in, &f);
 	show("faulted gauge + solo", &f);
 	CHECK(side_all(&f, 0u), "faulted gauge: side row dark");
@@ -356,7 +356,7 @@ static void case_solo(void)
 	st_led_mvp_decide(&in, &before);
 	show("before press", &before);
 
-	in.solo_mask = ST_CHORD_T2;    /* Track 2 */
+	in.solo_mask = ST_LADDER_T2;    /* Track 2 */
 	st_led_mvp_decide(&in, &f);
 	show("Track 2 held", &f);
 	CHECK(f.level[1] == ST_LED_MAX,
@@ -377,7 +377,7 @@ static void case_solo(void)
 	 * row, so the stopped-state battery gauge stays lit underneath it. */
 	memset(&in, 0, sizeof(in));
 	in.song_selected = true;
-	in.solo_mask = ST_CHORD_T4;
+	in.solo_mask = ST_LADDER_T4;
 	in.batt_state = ST_LED_BATT_CHARGER_ABSENT;
 	in.batt_level = 3u;
 	st_led_mvp_decide(&in, &f);
@@ -393,9 +393,10 @@ static void case_solo(void)
  *
  * The LED row is driven by the SAME mask main.c hands the mixer, so a chord
  * is not a special case here -- more bits are set, more LEDs are lit, and
- * every Track that is not held is dark. Only masks the ladder can actually
- * decode are exercised; see st_track_chord.h for why chords holding both
- * Track 3 and Track 4 do not exist on this hardware.
+ * every Track that is not held is dark. ALL FIFTEEN masks are exercised:
+ * physical measurement (docs/ladder-measured.json) shows the ladder resolves
+ * every one of them, including the four containing both Track 3 and Track 4
+ * that st15 wrongly declared undecodable.
  */
 static void case_solo_chords(void)
 {
@@ -403,15 +404,11 @@ static void case_solo_chords(void)
 	uint32_t fpb = 24000u;
 	uint32_t frame = (fpb / ST_BEAT_PULSE_DEN) / 2u;
 	int i;
-	/* Exactly the decodable multi-button masks, in the decoder's bit order. */
+	/* Every multi-button mask the ladder resolves: 2 through 15 with more
+	 * than one bit set. */
 	const uint8_t chords[] = {
-		ST_CHORD_T1 | ST_CHORD_T2,
-		ST_CHORD_T1 | ST_CHORD_T3,
-		ST_CHORD_T2 | ST_CHORD_T3,
-		ST_CHORD_T1 | ST_CHORD_T4,
-		ST_CHORD_T2 | ST_CHORD_T4,
-		ST_CHORD_T1 | ST_CHORD_T2 | ST_CHORD_T3,
-		ST_CHORD_T1 | ST_CHORD_T2 | ST_CHORD_T4,
+		0x3u, 0x5u, 0x6u, 0x7u, 0x9u, 0xAu, 0xBu,
+		0xCu, 0xDu, 0xEu, 0xFu,
 	};
 
 	g_cases++;
@@ -427,8 +424,8 @@ static void case_solo_chords(void)
 		in.solo_mask = m;
 		st_led_mvp_decide(&in, &f);
 		snprintf(lbl, sizeof(lbl), "chord %c%c%c%c",
-			 (m & ST_CHORD_T1) ? '1' : '0', (m & ST_CHORD_T2) ? '1' : '0',
-			 (m & ST_CHORD_T3) ? '1' : '0', (m & ST_CHORD_T4) ? '1' : '0');
+			 (m & ST_LADDER_T1) ? '1' : '0', (m & ST_LADDER_T2) ? '1' : '0',
+			 (m & ST_LADDER_T3) ? '1' : '0', (m & ST_LADDER_T4) ? '1' : '0');
 		show(lbl, &f);
 		for (k = 0; k < (int)ST_LED_TRACK_COUNT; k++) {
 			uint8_t want = ((m >> k) & 1u) ? ST_LED_MAX : 0u;
@@ -451,11 +448,11 @@ static void case_solo_chords(void)
 
 	/* ADD a finger: the existing member must not move. */
 	make_playing(&in, frame, 128u);
-	in.solo_mask = ST_CHORD_T1;
+	in.solo_mask = ST_LADDER_T1;
 	st_led_mvp_decide(&in, &f);
 	CHECK(f.level[0] == ST_LED_MAX && f.level[1] == 0u,
 	      "T1 alone: only T1 lit");
-	in.solo_mask = ST_CHORD_T1 | ST_CHORD_T2;
+	in.solo_mask = ST_LADDER_T1 | ST_LADDER_T2;
 	st_led_mvp_decide(&in, &f);
 	show("added T2 to T1", &f);
 	CHECK(f.level[0] == ST_LED_MAX && f.level[1] == ST_LED_MAX &&
@@ -463,7 +460,7 @@ static void case_solo_chords(void)
 	      "adding Track 2 lights T2 and leaves T1 exactly where it was");
 
 	/* REMOVE one member: the survivor stays lit, the leaver goes dark. */
-	in.solo_mask = ST_CHORD_T2;
+	in.solo_mask = ST_LADDER_T2;
 	st_led_mvp_decide(&in, &f);
 	show("released T1, T2 held", &f);
 	CHECK(f.level[0] == 0u && f.level[1] == ST_LED_MAX,
@@ -477,7 +474,7 @@ static void case_solo_chords(void)
 		make_playing(&in, frame, 128u);
 		in.solo_mask = 0u;
 		st_led_mvp_decide(&in, &normal);
-		in.solo_mask = ST_CHORD_T1 | ST_CHORD_T2 | ST_CHORD_T4;
+		in.solo_mask = ST_LADDER_T1 | ST_LADDER_T2 | ST_LADDER_T4;
 		st_led_mvp_decide(&in, &f);
 		in.solo_mask = 0u;
 		st_led_mvp_decide(&in, &f);
@@ -603,7 +600,7 @@ static void case_shutdown(void)
 	in.playing = true;
 	in.song_selected = true;
 	in.transfer_active = true;
-	in.solo_mask = ST_CHORD_MASK_ALL;
+	in.solo_mask = ST_LADDER_MASK_ALL;
 	in.batt_state = ST_LED_BATT_CHARGING;
 	in.batt_level = 2u;
 
@@ -654,7 +651,7 @@ static void case_priority(void)
 	memset(&in, 0, sizeof(in));
 	in.transfer_active = true;
 	in.transfer_blink_on = false;
-	in.solo_mask = ST_CHORD_T1;
+	in.solo_mask = ST_LADDER_T1;
 	in.playing = true;
 	in.song_selected = true;
 	st_led_mvp_decide(&in, &f);

@@ -63,14 +63,20 @@ static int g_checks, g_failures, g_cases;
 #define SLOTS      12u
 #define PIN_N      ST_LOOP_PIN_TEST_SECTORS
 
-/* Kept in step with main.c's ST_LOOP_PIN_SECTORS by the CI gate, which greps
- * the production value and this one and fails if they differ. */
-#define ST_LOOP_PIN_TEST_SECTORS 3u
+/* Kept in step with main.c's ST_LOOP_PIN_SECTORS/ST_LOOP_PIN_REGIONS by the
+ * CI gate, which greps the production values and these and fails if they
+ * differ. */
+#define ST_LOOP_PIN_TEST_SECTORS 4u
+#define ST_LOOP_PIN_TEST_REGIONS 2u
+#define PIN_ENTRY 0u
+#define PIN_EXIT  1u
 
 typedef struct {
 	uint32_t slot[SLOTS];      /* sector resident in each slot, or NONE */
-	uint32_t pin_base;         /* first pinned sector, or NONE */
-	uint32_t pin_count;
+	/* TWO pinned regions, as production has: the window's start (the entry
+	 * seek and every forward wrap) and its last frame (every exit). */
+	uint32_t pin_base[ST_LOOP_PIN_TEST_REGIONS];
+	uint32_t pin_count[ST_LOOP_PIN_TEST_REGIONS];
 	uint32_t fills;            /* diagnostics */
 } ring_t;
 
@@ -83,22 +89,32 @@ static void ring_init(ring_t *r)
 	for (i = 0; i < SLOTS; i++) {
 		r->slot[i] = NONE;
 	}
-	r->pin_base = NONE;
-	r->pin_count = 0u;
-	r->fills = 0u;
-}
-
-static bool ring_has(const ring_t *r, uint32_t sec)
-{
-	if (r->pin_base != NONE && sec >= r->pin_base && sec < r->pin_base + r->pin_count) {
-		return true;
+	for (i = 0; i < ST_LOOP_PIN_TEST_REGIONS; i++) {
+		r->pin_base[i] = NONE;
+		r->pin_count[i] = 0u;
 	}
-	return r->slot[sec % SLOTS] == sec;
+	r->fills = 0u;
 }
 
 static bool from_pin(const ring_t *r, uint32_t sec)
 {
-	return r->pin_base != NONE && sec >= r->pin_base && sec < r->pin_base + r->pin_count;
+	uint32_t i;
+
+	for (i = 0; i < ST_LOOP_PIN_TEST_REGIONS; i++) {
+		if (r->pin_base[i] != NONE && sec >= r->pin_base[i] &&
+		    sec < r->pin_base[i] + r->pin_count[i]) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool ring_has(const ring_t *r, uint32_t sec)
+{
+	if (from_pin(r, sec)) {
+		return true;
+	}
+	return r->slot[sec % SLOTS] == sec;
 }
 
 /* One producer service: fill the nearest missing sector at or ahead of
@@ -122,15 +138,15 @@ static void ring_service(ring_t *r, uint32_t want)
 	}
 }
 
-static void ring_pin(ring_t *r, uint32_t base)
+static void ring_pin(ring_t *r, uint32_t region, uint32_t base)
 {
 	uint32_t n = 0u;
 
 	while (n < PIN_N && base + n < SECTORS) {
 		n++;
 	}
-	r->pin_base = base;
-	r->pin_count = n;
+	r->pin_base[region] = base;
+	r->pin_count[region] = n;
 }
 
 /* ---- the run: main.c's stem_audio_block(), reproduced ------------------- */
@@ -179,19 +195,32 @@ static uint32_t g_fill_credit_q8;
 
 static void audio_block(st_stream_t *st, ring_t *r, emitted_t *e,
 			 bool lp_on, uint32_t lp_lo, uint32_t lp_hi,
-			 bool *exit_req)
+			 bool *enter_req, uint32_t enter_fr,
+			 bool *exit_req, uint32_t resume_fr)
 {
 	uint32_t f = 0u;
 
 	g_fill_credit_q8 += FILLS_PER_BLOCK_Q8;
 
 	while (f < BLK) {
+		/* THE ENTRY SEEK, taken before anything else in the block, as
+		 * production does: the window opens at the frame where PLAY
+		 * went down, a whole hold behind the playhead. */
+		if (*enter_req) {
+			*enter_req = false;
+			(void)st_stream_seek(st, enter_fr);
+		}
 		uint32_t needed, fis, run, left_song, want;
 		bool pin_hit;
 
 		if (*exit_req) {
+			/* THE EXIT lands on loop_end -- the first frame AFTER
+			 * the half-open section [lo, hi) -- so nothing the
+			 * player already heard is replayed and the return to
+			 * the song is immediate. The pinned EXIT region is what
+			 * makes that seek land on resident bytes. */
 			*exit_req = false;
-			if (st_stream_seek(st, lp_lo)) {
+			if (st_stream_seek(st, resume_fr)) {
 				e->exits++;
 			}
 			lp_on = false;
@@ -229,9 +258,12 @@ static void audio_block(st_stream_t *st, ring_t *r, emitted_t *e,
 			 * pre-wrap one sharing its slot. Keep it. */
 			if (e->silent == 0u) {
 				printf("      starved: frame %u needs sector %u; "
-				       "pin=[%d,+%u) ring slot %u holds %d; %u frames in\n",
-				       st->song_frame, needed, (int)r->pin_base,
-				       r->pin_count, needed % SLOTS,
+				       "pins=[%d,+%u)[%d,+%u) ring slot %u holds "
+				       "%d; %u frames in\n",
+				       st->song_frame, needed,
+				       (int)r->pin_base[PIN_ENTRY], r->pin_count[PIN_ENTRY],
+				       (int)r->pin_base[PIN_EXIT], r->pin_count[PIN_EXIT],
+				       needed % SLOTS,
 				       (int)r->slot[needed % SLOTS], e->n);
 			}
 			for (; f < BLK; f++) {
@@ -315,6 +347,7 @@ static void case_wrap_contiguous(void)
 	static uint32_t buf[200000];
 	uint32_t lo, hi, i, bad = 0u;
 	bool exit_req = false;
+	bool enter_req = false;
 
 	g_cases++;
 	printf("\n-- A running loop emits a contiguous frame sequence\n");
@@ -329,7 +362,8 @@ static void case_wrap_contiguous(void)
 	hi = lo + st_loop_window_frames(ST_LOOP_LEN_DEFAULT, FPB, lo, SONG_FRAMES);
 	l.end_frame = hi;
 	l.state = ST_LOOP_MOMENTARY;
-	ring_pin(&r, lo / ST11_FRAMES_PER_SECTOR);
+	ring_pin(&r, PIN_ENTRY, lo / ST11_FRAMES_PER_SECTOR);
+	ring_pin(&r, PIN_EXIT, (hi - 1u) / ST11_FRAMES_PER_SECTOR);
 
 	memset(&e, 0, sizeof(e));
 	e.frames = buf;
@@ -337,7 +371,8 @@ static void case_wrap_contiguous(void)
 
 	/* Long enough to wrap several times. */
 	for (i = 0; i < 1200u; i++) {
-		audio_block(&st, &r, &e, true, lo, hi, &exit_req);
+		audio_block(&st, &r, &e, true, lo, hi,
+			     &enter_req, lo, &exit_req, hi);
 	}
 	printf("      window [%u,%u) = %u frames; emitted %u frames, %u wraps, "
 	       "%u ring fills\n", lo, hi, hi - lo, e.n, e.wraps, r.fills);
@@ -387,24 +422,27 @@ static void case_exit_no_silence(void)
 	static uint32_t buf[200000];
 	uint32_t lo, hi, i, exit_at = 0u;
 	bool exit_req = false;
+	bool enter_req = false;
 	bool found = false;
 
 	g_cases++;
-	printf("\n-- The exit resumes at loop_start_frame, forward, with no gap\n");
+	printf("\n-- The exit resumes at loop_end, forward, with no gap and no replay\n");
 
 	lo = 9u * ST11_FRAMES_PER_SECTOR + 339u;   /* the LAST frame of its sector:
 						     * the worst case for the pin */
 	prime(&st, &r, lo / ST11_FRAMES_PER_SECTOR);
 	(void)st_stream_seek(&st, lo);
 	hi = lo + st_loop_window_frames(ST_LOOP_LEN_DEFAULT, FPB, lo, SONG_FRAMES);
-	ring_pin(&r, lo / ST11_FRAMES_PER_SECTOR);
+	ring_pin(&r, PIN_ENTRY, lo / ST11_FRAMES_PER_SECTOR);
+	ring_pin(&r, PIN_EXIT, (hi - 1u) / ST11_FRAMES_PER_SECTOR);
 
 	memset(&e, 0, sizeof(e));
 	e.frames = buf;
 	e.cap = (uint32_t)(sizeof(buf) / sizeof(buf[0]));
 
 	for (i = 0; i < 300u; i++) {
-		audio_block(&st, &r, &e, true, lo, hi, &exit_req);
+		audio_block(&st, &r, &e, true, lo, hi,
+			     &enter_req, lo, &exit_req, hi);
 	}
 	CHECK(e.silent == 0u, "the loop ran clean for %u frames first", e.n);
 
@@ -412,7 +450,8 @@ static void case_exit_no_silence(void)
 	exit_at = e.n;
 	exit_req = true;
 	for (i = 0; i < 400u; i++) {
-		audio_block(&st, &r, &e, false, lo, hi, &exit_req);
+		audio_block(&st, &r, &e, false, lo, hi,
+			     &enter_req, lo, &exit_req, hi);
 	}
 
 	CHECK(e.exits == 1u, "exactly one exit was performed");
@@ -420,15 +459,35 @@ static void case_exit_no_silence(void)
 	      "still NOT ONE silent frame after the exit -- %u frames emitted in total",
 	      e.n);
 
-	/* The very first frame after the exit must be loop_start_frame. */
+	/* THE FIRST FRAME AFTER THE EXIT MUST BE loop_end. Not loop_start --
+	 * that is what made the looped bar play through a second time on real
+	 * hardware -- and not the live position inside the window. */
 	for (i = exit_at; i < e.n && i < e.cap; i++) {
-		if (buf[i] == lo) {
+		if (buf[i] == hi) {
 			found = true;
 			exit_at = i;
 			break;
 		}
 	}
-	CHECK(found, "loop_start_frame (%u) is emitted again after the exit request", lo);
+	CHECK(found, "loop_end (%u) is the frame the song resumes on", hi);
+	if (found) {
+		uint32_t j;
+		bool replayed = false;
+
+		/* NOTHING from [lo, hi) may be emitted again, ever. */
+		for (j = exit_at; j < e.n && j < e.cap; j++) {
+			if (buf[j] != NONE && buf[j] >= lo && buf[j] < hi) {
+				replayed = true;
+				break;
+			}
+		}
+		CHECK(!replayed,
+		      "and no frame of the looped section [%u,%u) is heard again",
+		      lo, hi);
+		CHECK(exit_at > 0u && buf[exit_at - 1u] >= lo && buf[exit_at - 1u] < hi,
+		      "the frame immediately before it was still inside the loop -- "
+		      "the transition is one frame wide, with nothing in between");
+	}
 	if (found) {
 		uint32_t j;
 		bool fwd = true;
@@ -443,18 +502,20 @@ static void case_exit_no_silence(void)
 		      "and playback runs FORWARD from there for 2000 consecutive frames, "
 		      "one frame at a time -- straight on through the rest of the song, "
 		      "past where the loop's end used to be");
-		CHECK(buf[exit_at + 1u] == lo + 1u,
-		      "the frame immediately after the resume is start+1, not a jump");
+		CHECK(buf[exit_at + 1u] == hi + 1u,
+		      "the frame immediately after the resume is loop_end+1 -- nothing "
+		      "is skipped either");
 	}
 
 	/* The resume must NOT be any of the wrong answers. */
-	CHECK(buf[exit_at] != 0u || lo == 0u,
+	CHECK(buf[exit_at] != 0u || hi == 0u,
 	      "the resume is not frame zero");
-	CHECK(buf[exit_at] != hi, "the resume is not loop_end_frame");
-	CHECK(buf[exit_at] % ST11_FRAMES_PER_SECTOR != 0u,
-	      "and it is not a sector boundary -- it is the exact captured frame, "
-	      "which in this case sits %u frames into its sector",
-	      lo % ST11_FRAMES_PER_SECTOR);
+	CHECK(buf[exit_at] != lo,
+	      "the resume is not loop_start -- that is the defect the player heard "
+	      "as the looped bar playing through a second time");
+	CHECK(exit_at == 0u || buf[exit_at - 1u] != hi - 1u ||
+	      buf[exit_at] == hi,
+	      "loop_end-1 is not emitted twice at the seam");
 }
 
 /* ==== 3. WITHOUT the pin, the same exit emits silence (why it exists) ==== */
@@ -466,6 +527,7 @@ static void case_pin_is_necessary(void)
 	static uint32_t buf[100000];
 	uint32_t lo, hi, i;
 	bool exit_req = false;
+	bool enter_req = false;
 
 	g_cases++;
 	printf("\n-- Negative control: the same exit WITHOUT the pinned sectors\n");
@@ -481,20 +543,24 @@ static void case_pin_is_necessary(void)
 	e.cap = (uint32_t)(sizeof(buf) / sizeof(buf[0]));
 
 	for (i = 0; i < 300u; i++) {
-		audio_block(&st, &r, &e, true, lo, hi, &exit_req);
+		audio_block(&st, &r, &e, true, lo, hi,
+			     &enter_req, lo, &exit_req, hi);
 	}
 	exit_req = true;
 	for (i = 0; i < 50u; i++) {
-		audio_block(&st, &r, &e, false, lo, hi, &exit_req);
+		audio_block(&st, &r, &e, false, lo, hi,
+			     &enter_req, lo, &exit_req, hi);
 	}
 
 	CHECK(e.silent > 0u,
 	      "without the pin the exit DOES emit silence (%u silent frames) -- this is "
 	      "the failure the three pinned sectors exist to prevent, demonstrated "
 	      "rather than asserted", e.silent);
-	printf("      (the shortest musical loop is 1/4 beat = %u frames = %.1f sectors,\n"
-	       "       and the ring holds %u -- so loop_start's sector is always evicted)\n",
-	       FPB / 4u, (double)(FPB / 4u) / (double)ST11_FRAMES_PER_SECTOR, SLOTS - 1u);
+	printf("      (a one-bar loop is %u frames = %.1f sectors and the ring holds\n"
+	       "       only %u, so loop_end's sector is long gone by the time the\n"
+	       "       player lets go)\n",
+	       FPB * 4u, (double)(FPB * 4u) / (double)ST11_FRAMES_PER_SECTOR,
+	       SLOTS - 1u);
 }
 
 /* ============= 4. every length loops cleanly, and stays in bounds ======== */
@@ -513,20 +579,23 @@ static void case_all_lengths(void)
 		static uint32_t buf[80000];
 		uint32_t lo, len, hi, i;
 		bool exit_req = false;
+		bool enter_req = false;
 
 		lo = 3u * ST11_FRAMES_PER_SECTOR + 71u;
 		prime(&st, &r, lo / ST11_FRAMES_PER_SECTOR);
 		(void)st_stream_seek(&st, lo);
 		len = st_loop_window_frames((uint8_t)idx, FPB, lo, SONG_FRAMES);
 		hi = lo + len;
-		ring_pin(&r, lo / ST11_FRAMES_PER_SECTOR);
+		ring_pin(&r, PIN_ENTRY, lo / ST11_FRAMES_PER_SECTOR);
+		ring_pin(&r, PIN_EXIT, (hi - 1u) / ST11_FRAMES_PER_SECTOR);
 
 		memset(&e, 0, sizeof(e));
 		e.frames = buf;
 		e.cap = (uint32_t)(sizeof(buf) / sizeof(buf[0]));
 
 		for (i = 0; i < 250u; i++) {
-			audio_block(&st, &r, &e, true, lo, hi, &exit_req);
+			audio_block(&st, &r, &e, true, lo, hi,
+				     &enter_req, lo, &exit_req, hi);
 		}
 		printf("      idx %u: %7u frames, %2u wraps, %u silent\n",
 		       idx, len, e.wraps, e.silent);

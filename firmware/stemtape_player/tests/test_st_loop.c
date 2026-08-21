@@ -24,6 +24,14 @@
 
 static int g_checks, g_failures, g_cases;
 
+/* A silent check for the high-volume sweeps: counts, and only speaks on
+ * failure, so 100k assertions do not bury the readable ones. */
+#define CHECK_QUIET(cond) do { \
+		g_checks++; \
+		if (!(cond)) { g_failures++; \
+			printf("[FAIL] %s:%d: %s\n", __FILE__, __LINE__, #cond); } \
+	} while (0)
+
 #define CHECK(cond, ...) do { \
 		g_checks++; \
 		if (cond) { printf("[OK  ] " __VA_ARGS__); printf("\n"); } \
@@ -154,29 +162,48 @@ static void case_entry(void)
 	printf("\n-- Loop entry at the 450 ms threshold\n");
 	st_loop_reset(&l);
 
-	/* Everything strictly before the threshold must do nothing at all --
-	 * this is what leaves a short PLAY tap to main.c's play/pause. */
-	for (t = 0; t < ST_LOOP_HOLD_MS; t += 8u) {
-		in = base_in(at);
-		in.play_down    = true;
-		in.play_held_ms = t;
-		if (st_loop_tick(&l, &in) != ST_LOOP_ACT_NONE) {
-			early = true;
+	/* The PLAY-DOWN EDGE arms the candidate: this is where the loop start
+	 * is captured, and it is the only thing that happens before the
+	 * threshold. Nothing audible changes -- a short tap still falls
+	 * through to main.c's play/pause. */
+	{
+		int arms = 0;
+
+		for (t = 0; t < ST_LOOP_HOLD_MS; t += 8u) {
+			st_loop_action_t e;
+
+			in = base_in(at + t);   /* the song is really advancing */
+			in.play_down    = true;
+			in.play_held_ms = t;
+			e = st_loop_tick(&l, &in);
+			if (e == ST_LOOP_ACT_ARM) {
+				arms++;
+			} else if (e != ST_LOOP_ACT_NONE) {
+				early = true;
+			}
 		}
+		CHECK(arms == 1, "exactly ONE arm action, on the down edge (got %d)", arms);
 	}
-	CHECK(!early, "no action at any hold time below %u ms -- a quick tap is never "
+	CHECK(!early, "nothing but the arm below %u ms -- a quick tap is never "
 		       "consumed by the loop", ST_LOOP_HOLD_MS);
 	CHECK(l.state == ST_LOOP_OFF, "still not looping just before the threshold");
+	CHECK(st_loop_armed(&l), "but the candidate is armed");
+	CHECK(st_loop_cand_start(&l) == at,
+	      "and it is the PLAY-DOWN frame %u -- not the frame the song has "
+	      "advanced to while the finger was held", at);
 
-	in = base_in(at);
+	/* THE THRESHOLD. The song has advanced by ST_LOOP_HOLD_MS worth of
+	 * frames by now -- the window must still open at the ARMED frame. */
+	in = base_in(at + ST_LOOP_HOLD_MS * 48u);
 	in.play_down    = true;
 	in.play_held_ms = ST_LOOP_HOLD_MS;
 	a = st_loop_tick(&l, &in);
 	CHECK(a == ST_LOOP_ACT_ENTER, "the loop starts at exactly %u ms", ST_LOOP_HOLD_MS);
 	CHECK(l.state == ST_LOOP_MOMENTARY, "and it is MOMENTARY, not latched");
 	CHECK(l.start_frame == at,
-	      "loop_start_frame is the real master frame at entry (%u), not zero and "
-	      "not a sector boundary", at);
+	      "loop_start_frame is the PLAY-DOWN frame %u -- NOT the frame the "
+	      "threshold expired on (%u), not zero, not a sector boundary",
+	      at, at + ST_LOOP_HOLD_MS * 48u);
 	CHECK(l.end_frame == at + FPB * 4u,
 	      "the default window is one bar: end = start + %u", FPB * 4u);
 	CHECK(l.length_index == ST_LOOP_LEN_DEFAULT, "at the default length");
@@ -240,9 +267,14 @@ static void case_momentary_release(void)
 	a = release_play(&l, at + 9999u);   /* released deep inside the loop */
 	CHECK(a == ST_LOOP_ACT_EXIT, "releasing PLAY exits immediately");
 	CHECK(l.state == ST_LOOP_OFF, "and the loop is over");
-	CHECK(st_loop_resume_frame(&l) == at,
-	      "resume is the CAPTURED frame %u -- not the current frame inside the "
-	      "loop, not end_frame, not zero", at);
+	CHECK(st_loop_resume_frame(&l) == l.end_frame,
+	      "resume is the frame AFTER the looped section (%u) -- an instant "
+	      "return to the track, replaying nothing", l.end_frame);
+	CHECK(st_loop_resume_frame(&l) != at,
+	      "and NOT the captured frame: that is what made the looped bar play "
+	      "through again on release");
+	CHECK(st_loop_resume_frame(&l) != at + 9999u,
+	      "and NOT the live playhead position inside the loop");
 }
 
 /* ====== 5. THE REQUIRED SEQUENCE: latch, release, press, release ========= */
@@ -317,8 +349,8 @@ static void case_latch_sequence(void)
 	a = st_loop_tick(&l, &in);
 	CHECK(a == ST_LOOP_ACT_EXIT, "5. a new PLAY press exits on the PRESS edge");
 	CHECK(l.state == ST_LOOP_OFF, "   the loop is over");
-	CHECK(st_loop_resume_frame(&l) == at,
-	      "   resuming at the captured frame %u", at);
+	CHECK(st_loop_resume_frame(&l) == l.end_frame,
+	      "   resuming just after the looped section, at %u", l.end_frame);
 	CHECK(l.play_consumed, "   and that press is marked consumed");
 
 	/* 6. holding that same press must not start a new loop */
@@ -361,33 +393,99 @@ static void case_length_selection(void)
 	int i;
 
 	g_cases++;
-	printf("\n-- Volume -/+ length selection\n");
+	printf("\n-- FUNCTION + Volume -/+ sets the loop DIVISION\n");
 	st_loop_reset(&l);
 	(void)hold_play(&l, at, ST_LOOP_HOLD_MS, NULL);
 	CHECK(l.length_index == ST_LOOP_LEN_DEFAULT, "starts at the default (one bar)");
+	CHECK(ST_LOOP_LEN_DEFAULT == ST_LOOP_LEN_COUNT - 1u,
+	      "one bar is the LONGEST division -- the ladder only goes down from here");
+	CHECK(l.end_frame == at + FPB * 4u, "the default window is one bar");
 
-	/* Volume + lengthens. NOTE the deliberate divergence from
-	 * src/machine/surface.ts:939, which steps the other way; see
-	 * st_loop.h. */
-	in = base_in(at);
-	in.play_down     = true;
-	in.play_held_ms  = ST_LOOP_HOLD_MS + 50u;
-	in.vol_plus_edge = true;
-	a = st_loop_tick(&l, &in);
-	CHECK(a == ST_LOOP_ACT_RESIZE && l.length_index == ST_LOOP_LEN_DEFAULT + 1u,
-	      "Volume + moves to the NEXT, LONGER entry");
-	CHECK(l.start_frame == at,
-	      "and loop_start_frame is preserved across the resize");
-	CHECK(l.end_frame == at + FPB * 8u, "only end_frame moved: 2 bars");
-
+	/* A MODIFIER IS REQUIRED, but with PLAY still held PLAY *is* the
+	 * modifier -- this is the gesture confirmed working on hardware and it
+	 * must not regress. The "no modifier held" half cannot be posed here
+	 * (dropping PLAY during a MOMENTARY loop is a release, which exits);
+	 * it is proven in the LATCHED sub-case below, which is the only state
+	 * where a Volume press can arrive with nothing else held.
+	 *
+	 * PLAY-held + Volume - shortens: one bar -> 1/2 bar. NOTE the deliberate
+	 * divergence from src/machine/surface.ts:939, which steps the other
+	 * way; see st_loop.h. */
 	in = base_in(at);
 	in.play_down      = true;
 	in.play_held_ms   = ST_LOOP_HOLD_MS + 60u;
 	in.vol_minus_edge = true;
+	in.function_down  = false;
+	a = st_loop_tick(&l, &in);
+	CHECK(a == ST_LOOP_ACT_RESIZE && l.length_index == ST_LOOP_LEN_DEFAULT - 1u,
+	      "PLAY held + Volume - moves to the previous, SHORTER division");
+	CHECK(l.start_frame == at,
+	      "and loop_start_frame is preserved across the resize");
+	CHECK(l.end_frame == at + FPB * 2u, "only end_frame moved: 1/2 bar");
+
+	in = base_in(at);
+	in.play_down     = true;
+	in.play_held_ms  = ST_LOOP_HOLD_MS + 70u;
+	in.vol_plus_edge = true;
+	in.function_down = false;
 	a = st_loop_tick(&l, &in);
 	CHECK(a == ST_LOOP_ACT_RESIZE && l.length_index == ST_LOOP_LEN_DEFAULT,
-	      "Volume - moves back to the previous, SHORTER entry");
+	      "PLAY held + Volume + moves back to the next, LONGER division");
 	CHECK(l.start_frame == at, "start_frame still preserved");
+
+	/* THE LATCHED CASE: PLAY is no longer held, so FUNCTION is the
+	 * modifier. This is the half that could never work before. */
+	{
+		st_loop_t lt;
+		st_loop_in_t ti;
+
+		st_loop_reset(&lt);
+		(void)hold_play(&lt, at, ST_LOOP_HOLD_MS, NULL);
+		ti = base_in(at);
+		ti.play_down     = true;
+		ti.play_held_ms  = ST_LOOP_HOLD_MS + 20u;
+		ti.function_down = true;
+		(void)st_loop_tick(&lt, &ti);
+		CHECK(lt.state == ST_LOOP_LATCHED, "latched");
+
+		ti = base_in(at);                    /* PLAY released, FN released */
+		(void)st_loop_tick(&lt, &ti);
+		ti = base_in(at);
+		ti.vol_minus_edge = true;            /* bare Volume: master volume */
+		CHECK(st_loop_tick(&lt, &ti) == ST_LOOP_ACT_NONE,
+		      "latched: a bare Volume press is NOT the loop's");
+
+		ti = base_in(at);
+		ti.function_down  = true;
+		ti.vol_minus_edge = true;
+		CHECK(st_loop_tick(&lt, &ti) == ST_LOOP_ACT_RESIZE,
+		      "latched: FUNCTION + Volume - resizes");
+	}
+
+	/* THE FOUR AGREED DIVISIONS, walked from longest to shortest. */
+	{
+		const uint32_t want[ST_LOOP_LEN_COUNT] = {
+			FPB / 2u,   /* 1/8 bar */
+			FPB,        /* 1/4 bar */
+			FPB * 2u,   /* 1/2 bar */
+			FPB * 4u,   /* 1 bar   */
+		};
+
+		for (i = (int)ST_LOOP_LEN_COUNT - 1; i >= 0; i--) {
+			CHECK(l.length_index == (uint8_t)i,
+			      "division index %d", i);
+			CHECK(l.end_frame - l.start_frame == want[i],
+			      "division %d spans %u frames", i, want[i]);
+			if (i == 0) {
+				break;
+			}
+			in = base_in(at);
+			in.play_down      = true;
+			in.play_held_ms   = ST_LOOP_HOLD_MS + 100u;
+			in.vol_minus_edge = true;
+			(void)st_loop_tick(&l, &in);
+		}
+	}
 
 	/* Clamp at the short end, with no wraparound. */
 	for (i = 0; i < 20; i++) {
@@ -399,7 +497,7 @@ static void case_length_selection(void)
 	}
 	CHECK(l.length_index == 0u,
 	      "20 Volume - presses clamp at index 0 -- no wraparound to the longest");
-	CHECK(l.end_frame == at + FPB / 4u, "the shortest window is 1/4 beat");
+	CHECK(l.end_frame == at + FPB / 2u, "the shortest division is 1/8 bar");
 
 	/* Clamp at the long end. */
 	for (i = 0; i < 40; i++) {
@@ -410,7 +508,8 @@ static void case_length_selection(void)
 		(void)st_loop_tick(&l, &in);
 	}
 	CHECK(l.length_index == ST_LOOP_LEN_COUNT - 1u,
-	      "40 Volume + presses clamp at the longest entry -- no wraparound");
+	      "40 Volume + presses clamp at the longest division -- no wraparound");
+	CHECK(l.end_frame == at + FPB * 4u, "the longest division is one bar");
 	CHECK(l.start_frame == at, "start_frame survived every one of those resizes");
 
 	/* One EDGE, one step -- the caller presents one edge per press, so a
@@ -422,28 +521,30 @@ static void case_length_selection(void)
 		(void)hold_play(&l, at, ST_LOOP_HOLD_MS, NULL);
 		before = l.length_index;
 		in = base_in(at);
-		in.play_down     = true;
-		in.play_held_ms  = ST_LOOP_HOLD_MS + 10u;
-		in.vol_plus_edge = true;
+		in.play_down      = true;
+		in.play_held_ms   = ST_LOOP_HOLD_MS + 10u;
+		in.vol_minus_edge = true;
 		(void)st_loop_tick(&l, &in);
-		CHECK(l.length_index == before + 1u, "one edge advances exactly one entry");
+		CHECK(l.length_index == before - 1u, "one edge advances exactly one entry");
 		for (i = 0; i < 50; i++) {
 			in = base_in(at);
-			in.play_down    = true;
-			in.play_held_ms = ST_LOOP_HOLD_MS + 20u;
-			in.vol_plus_edge = false;   /* still physically held, no new edge */
+			in.play_down      = true;
+			in.play_held_ms   = ST_LOOP_HOLD_MS + 20u;
+			in.vol_minus_edge = false;  /* still physically held, no new edge */
+			in.function_down  = true;
 			(void)st_loop_tick(&l, &in);
 		}
-		CHECK(l.length_index == before + 1u,
+		CHECK(l.length_index == before - 1u,
 		      "50 further passes with no new edge do not advance again -- one press, "
 		      "one change");
 	}
 
-	/* Outside a loop, Volume edges are not ours. */
+	/* Outside a loop, Volume edges are not ours -- even with FUNCTION. */
 	{
 		st_loop_reset(&l);
 		in = base_in(at);
 		in.vol_plus_edge = true;
+		in.function_down = true;
 		a = st_loop_tick(&l, &in);
 		CHECK(a == ST_LOOP_ACT_NONE && l.state == ST_LOOP_OFF,
 		      "with no loop active a Volume edge produces no loop action -- normal "
@@ -574,7 +675,8 @@ static void case_exit_position_is_always_start(void)
 			continue;
 		}
 		a = release_play(&l, at + 5000u);
-		if (a != ST_LOOP_ACT_EXIT || st_loop_resume_frame(&l) != at) {
+		if (a != ST_LOOP_ACT_EXIT ||
+		    st_loop_resume_frame(&l) != l.end_frame) {
 			all_ok = false;
 		}
 
@@ -596,14 +698,16 @@ static void case_exit_position_is_always_start(void)
 			in.play_down = true;
 			a = st_loop_tick(&l, &in);
 		}
-		if (a != ST_LOOP_ACT_EXIT || st_loop_resume_frame(&l) != at) {
+		if (a != ST_LOOP_ACT_EXIT ||
+		    st_loop_resume_frame(&l) != l.end_frame) {
 			all_ok = false;
 		}
 	}
 	CHECK(all_ok,
 	      "across 7 capture positions -- including 0, a sector boundary and one frame "
-	      "either side of it -- BOTH exit paths resume at exactly the captured frame, "
-	      "never at the current position, end_frame, zero or a sector edge");
+	      "either side of it -- BOTH exit paths resume at exactly the frame after the "
+	      "looped section, never at the live position, the captured frame, zero or a "
+	      "sector edge");
 }
 
 /* ==================== 10. purity and totality ============================ */
@@ -644,6 +748,153 @@ static void case_purity(void)
 	      "and so does a wildly out-of-range one");
 }
 
+
+/* ====== 11. DIRECTION: the gesture, and REAL reverse frame traversal ===== */
+static void case_direction(void)
+{
+	st_loop_t l;
+	st_loop_in_t in;
+	uint32_t at = 96000u;
+	st_loop_action_t a;
+	uint32_t f;
+	uint32_t i, len;
+
+	g_cases++;
+	printf("\n-- FUNCTION + PLAY toggles direction; reverse really traverses backwards\n");
+
+	st_loop_reset(&l);
+	(void)hold_play(&l, at, ST_LOOP_HOLD_MS, NULL);
+	CHECK(l.state == ST_LOOP_MOMENTARY, "loop running");
+	CHECK(!st_loop_reverse(&l), "every new loop starts FORWARD");
+	len = l.end_frame - l.start_frame;
+
+	/* Forward traversal really steps forward and wraps to start. */
+	f = l.start_frame;
+	for (i = 0; i + 1u < len; i++) {
+		f = st_loop_next_frame(&l, f, SONG_LEN);
+	}
+	CHECK(f == l.end_frame - 1u, "forward reaches the last frame in the window");
+	f = st_loop_next_frame(&l, f, SONG_LEN);
+	CHECK(f == l.start_frame, "forward wraps end-1 -> start, contiguously");
+
+	/* THE GESTURE. FUNCTION held + a PLAY press edge, while looping. */
+	{
+		/* PLAY is already down from the hold, so present a release
+		 * first, then a fresh press with FUNCTION held. Releasing a
+		 * MOMENTARY loop exits it, so latch it first -- which is also
+		 * the realistic case. */
+		in = base_in(at);
+		in.play_down     = true;
+		in.play_held_ms  = ST_LOOP_HOLD_MS + 20u;
+		in.function_down = true;
+		a = st_loop_tick(&l, &in);
+		CHECK(a == ST_LOOP_ACT_LATCH && l.state == ST_LOOP_LATCHED,
+		      "FUNCTION latches it");
+
+		in = base_in(at);
+		in.function_down = true;      /* FUNCTION stays held, PLAY released */
+		a = st_loop_tick(&l, &in);
+		CHECK(a == ST_LOOP_ACT_NONE && l.state == ST_LOOP_LATCHED,
+		      "releasing PLAY while latched does nothing");
+
+		in = base_in(at);
+		in.play_down     = true;      /* fresh PLAY press, FUNCTION still held */
+		in.play_held_ms  = 8u;
+		in.function_down = true;
+		a = st_loop_tick(&l, &in);
+		CHECK(a == ST_LOOP_ACT_DIRECTION, "FUNCTION + PLAY reports DIRECTION");
+		CHECK(st_loop_reverse(&l), "the loop is now REVERSED");
+		CHECK(l.state == ST_LOOP_LATCHED,
+		      "and it did NOT exit -- the press is consumed, not an exit");
+		CHECK(l.start_frame == at && l.end_frame - l.start_frame == len,
+		      "the window is untouched by a direction change");
+
+		/* That press's release must do nothing at all. */
+		in = base_in(at);
+		in.function_down = true;
+		a = st_loop_tick(&l, &in);
+		CHECK(a == ST_LOOP_ACT_NONE && l.state == ST_LOOP_LATCHED,
+		      "the direction press's release is consumed too");
+	}
+
+	/* REVERSE TRAVERSAL. Real frames, stepping down, wrapping to end-1. */
+	f = l.end_frame - 1u;
+	for (i = 0; i + 1u < len; i++) {
+		uint32_t prev = f;
+
+		f = st_loop_next_frame(&l, f, SONG_LEN);
+		CHECK_QUIET(f == prev - 1u);
+	}
+	CHECK(f == l.start_frame, "reverse reaches the first frame in the window");
+	f = st_loop_next_frame(&l, f, SONG_LEN);
+	CHECK(f == l.end_frame - 1u, "reverse wraps start -> end-1, contiguously");
+
+	/* THE SAME FRAME SET, both ways. Nothing is skipped or duplicated. */
+	{
+		static uint8_t seen[FPB * 4u + 8u];
+		uint32_t n;
+
+		memset(seen, 0, sizeof(seen));
+		f = l.end_frame - 1u;
+		for (n = 0; n < len; n++) {
+			CHECK_QUIET(f >= l.start_frame && f < l.end_frame);
+			CHECK_QUIET(seen[f - l.start_frame] == 0u);
+			seen[f - l.start_frame] = 1u;
+			f = st_loop_next_frame(&l, f, SONG_LEN);
+		}
+		CHECK(f == l.end_frame - 1u,
+		      "reverse returns to its start after exactly one lap");
+		for (n = 0; n < len; n++) {
+			CHECK_QUIET(seen[n] == 1u);
+		}
+		CHECK(1, "a reverse lap visits every window frame exactly once");
+	}
+
+	/* EXIT IS ALWAYS FORWARD FROM THE CAPTURED FRAME, reversed or not. */
+	{
+		in = base_in(at + 700u);
+		in.play_down     = true;
+		in.play_held_ms  = 8u;
+		in.function_down = false;      /* no FUNCTION: this one EXITS */
+		a = st_loop_tick(&l, &in);
+		CHECK(a == ST_LOOP_ACT_EXIT && l.state == ST_LOOP_OFF,
+		      "a bare PLAY press still exits a reversed latched loop");
+		CHECK(st_loop_resume_frame(&l) == l.end_frame,
+		      "and resumes just after the looped section, forward, even though "
+		      "the loop was running in reverse");
+	}
+
+	/* Toggling back. */
+	{
+		st_loop_reset(&l);
+		(void)hold_play(&l, at, ST_LOOP_HOLD_MS, NULL);
+		for (i = 0; i < 2u; i++) {
+			in = base_in(at);
+			in.function_down = true;
+			in.play_held_ms  = 0u;
+			(void)st_loop_tick(&l, &in);   /* PLAY up */
+			in = base_in(at);
+			in.play_down     = true;
+			in.play_held_ms  = 8u;
+			in.function_down = true;
+			(void)st_loop_tick(&l, &in);   /* PLAY down: toggle */
+		}
+		CHECK(!st_loop_reverse(&l), "two toggles return the loop to FORWARD");
+	}
+
+	/* With no loop running, FUNCTION + PLAY is not ours. */
+	{
+		st_loop_reset(&l);
+		in = base_in(at);
+		in.play_down     = true;
+		in.play_held_ms  = 8u;
+		in.function_down = true;
+		a = st_loop_tick(&l, &in);
+		CHECK(a == ST_LOOP_ACT_NONE && l.state == ST_LOOP_OFF,
+		      "FUNCTION + PLAY with no loop running changes nothing");
+	}
+}
+
 int main(void)
 {
 	printf("STEM TAPE GLOBAL LOOP ENGINE\n");
@@ -659,6 +910,7 @@ int main(void)
 	case_wrap_is_contiguous();
 	case_exit_position_is_always_start();
 	case_purity();
+	case_direction();
 
 	printf("\n%s (%d cases, %d checks, %d failures)\n",
 	       g_failures ? "LOOP ENGINE TEST FAILED" : "LOOP ENGINE TEST PASSED",
