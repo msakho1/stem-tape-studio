@@ -1420,6 +1420,52 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Stem Tape LOOP SEAM gate -- waveform discontinuity in real decoded audio
+        # WHY THIS EXISTS SEPARATELY FROM THE PLAYBACK GATE ABOVE.
+        #
+        # The playback gate reported "zero silent frames" at entry, wrap and
+        # exit for st17, and st17 audibly blipped at all three on the physical
+        # SP-1. It was not wrong about what it measured; it measured the wrong
+        # quantity. It asserted that frame INDICES were contiguous and that no
+        # silence was emitted. Both were true. It never read a sample VALUE.
+        #
+        # A loop seam joins two unrelated points in a waveform: the frame
+        # before the jump and the frame after it are adjacent in the output and
+        # arbitrarily far apart in amplitude. That step edge is the click, and
+        # it exists with every frame present and every sector resident. No
+        # buffer depth can remove it, which is exactly why chasing it with
+        # depth is forbidden.
+        #
+        # So this gate decodes the frozen four-stem fixture and measures the
+        # step, against the material's OWN largest natural step around each
+        # window. The expected samples come from the fixture through
+        # st11_sector_decode_frame() plus a local unity mix -- never by calling
+        # the production mixer and comparing it to itself.
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          # st_seam.h is header-only inline; there is no st_seam.c.
+          cc -std=c11 -Wall -Wextra -Werror -Ifirmware/stemtape_player/src \
+            firmware/stemtape_player/src/st_loop.c \
+            firmware/stemtape_player/src/st_sector_v11.c \
+            firmware/stemtape_player/src/st_checksum32.c \
+            firmware/stemtape_player/src/st_crc32.c \
+            firmware/stemtape_player/tests/test_loop_seam_gate.c \
+            -o audit/test_loop_seam_gate
+          ./audit/test_loop_seam_gate | tee audit/loop-seam-gate.txt
+          # The gate must keep reproducing st17's defect, not just pass. If the
+          # "ducker disengaged" case ever stops showing a real step, the
+          # harness has stopped modelling the thing that failed on hardware.
+          grep -q 'all three transitions produce a real step' \
+            audit/loop-seam-gate.txt
+          {
+            echo '### Stem Tape LOOP SEAM gate (waveform discontinuity)'
+            echo 'Host measurement of sample VALUES. NOT audible verification.'
+            echo '```text'
+            cat audit/loop-seam-gate.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Stem Tape ladder classifier -- MEASURED bands, all 15 masks, no deadlock
         # src/st_ladder.c is THE classifier for the shared AIN0 rail: one
         # sample in, a settled Track mask or PLAY out. Linked into the real
