@@ -124,7 +124,23 @@
  * about the change -- stop and re-flash before reading another number out
  * of it.
  */
+/* CALIBRATION BUILD SWITCH.
+ *
+ * 1 = the temporary st16-cal image: production behaviour plus a rate-limited
+ *     CDC capture of the Track/PLAY ladder while the transport is stopped,
+ *     used to replace st15's MODEL-derived chord bands with measurements from
+ *     a real SP-1. 0 = production; the capture compiles out entirely.
+ *
+ * This must return to 0 before the next production tag ships. The CI gate
+ * "calibration capture is absent from a production build" enforces exactly
+ * that by pairing this switch with the build tag. */
+#define ST_CAL_BUILD 1
+
+#if ST_CAL_BUILD
+#define ST_BUILD_TAG "st16-cal"
+#else
 #define ST_BUILD_TAG "st15"
+#endif
 #include "st_track_hold.h"
 #include "st_track_chord.h"
 #include "st_loop.h"
@@ -4395,15 +4411,37 @@ static void streamer_thread(void *a, void *b, void *c)
 									       (unsigned)lib.active.bpm_q8,
 									       (unsigned)lib.active.downbeat_frame);
 								}
+								/* TEMPO REPORT, always -- success as well as
+								 * failure. The global loop quantises every
+								 * window to this beat and REFUSES to start
+								 * without it, so "no loop happened" and "no
+								 * tempo" are the same fact and must not be
+								 * silent. Reporting only the failure left
+								 * the working case unprovable, which is
+								 * what made st15's dead loop hard to
+								 * diagnose from the device. */
 								if (!st_beat_timing_init(&g_stem_beat_timing, lib.active.bpm_q8,
 											  lib.active.downbeat_frame,
 											  lib.active.sample_rate)) {
-									printk("V11 lib: tempo absent or invalid "
-									       "(bpm_q8=%u sample_rate=%u) -- LED "
-									       "beat pulse disabled, steady display "
-									       "only\n",
+									printk("V11 lib: TEMPO INVALID "
+									       "(bpm_q8=%u sample_rate=%u "
+									       "downbeat=%u) -- frames_per_beat=0. "
+									       "LED beat pulse disabled AND the "
+									       "global loop will refuse to start. "
+									       "Fix the STIX record's timing.\n",
 									       (unsigned)lib.active.bpm_q8,
-									       (unsigned)lib.active.sample_rate);
+									       (unsigned)lib.active.sample_rate,
+									       (unsigned)lib.active.downbeat_frame);
+								} else {
+									printk("V11 lib: TEMPO OK bpm_q8=%u "
+									       "(%u.%02u BPM) sample_rate=%u "
+									       "downbeat=%u frames_per_beat=%u\n",
+									       (unsigned)lib.active.bpm_q8,
+									       (unsigned)(lib.active.bpm_q8 >> 8),
+									       (unsigned)(((lib.active.bpm_q8 & 0xFFu) * 100u) >> 8),
+									       (unsigned)lib.active.sample_rate,
+									       (unsigned)lib.active.downbeat_frame,
+									       (unsigned)g_stem_beat_timing.frames_per_beat);
 								}
 								st_stem_mbox_init(&g_stem_mbox, 0u);
 								{
@@ -5727,6 +5765,131 @@ static void led_seq_begin(st_led_seq_t seq)
 	g_led_seq_started = true;
 }
 
+#if ST_CAL_BUILD
+/* ==========================================================================
+ * LADDER CALIBRATION CAPTURE (build st16-cal ONLY -- not production)
+ * ==========================================================================
+ * st15's chord bands were derived from a resistor MODEL fitted to the five
+ * documented single-button centres and validated against exactly one measured
+ * chord (Track 1 + Track 4, the DFU failsafe band). The host tests then fed
+ * those predicted centres back into the decoder built from the same
+ * prediction, which proves internal consistency and nothing about a physical
+ * device. On real hardware the chords did not fire. This build exists to
+ * replace the model with measurements from THE actual SP-1.
+ *
+ * WHAT IT DOES NOT DO. It does not touch the audio path, the mixer, the
+ * streamer, the transfer protocol or the LED owner. It adds one ADC read and
+ * one printk per control pass, and only while the transport is STOPPED.
+ *
+ * WHY "ONLY WHILE STOPPED" IS LOAD-BEARING, not caution. ladder_read()
+ * blocks on the control thread, and the control thread preempts the eMMC
+ * streamer; over-sampling this rail is what starved the card once already.
+ * With g_playing == 0 there is no stream to starve, so the cost is free. The
+ * moment playback starts, this function returns immediately and the build
+ * behaves exactly like production.
+ *
+ * RATE LIMIT. A line is emitted only when the raw value moves by more than
+ * CAL_HYST counts AND at least CAL_MIN_GAP_MS has passed, plus one heartbeat
+ * every CAL_HEARTBEAT_MS so a steady hold still confirms the reading. That is
+ * the same discipline firmware/stemtape's own CDC diagnostic already uses.
+ * Nothing here logs at audio rate.
+ */
+#define CAL_HYST          3
+#define CAL_MIN_GAP_MS   40
+#define CAL_HEARTBEAT_MS 1000
+#define CAL_STABLE_READS  3
+
+static void cal_mask_str(uint8_t m, char out[5])
+{
+	out[0] = (m & ST_CHORD_T1) ? '1' : '0';
+	out[1] = (m & ST_CHORD_T2) ? '1' : '0';
+	out[2] = (m & ST_CHORD_T3) ? '1' : '0';
+	out[3] = (m & ST_CHORD_T4) ? '1' : '0';
+	out[4] = '\0';
+}
+
+static void cal_service(void)
+{
+	static bool     seeded;
+	static st_track_chord_t cal_chord;
+	static int      last_print = -100000;
+	static int64_t  last_ms;
+	static int      cand = -100000;
+	static int      cand_n;
+	static int      stable = -1;
+	int      raw;
+	int64_t  now;
+	uint8_t  band_mask = 0u, settled;
+	bool     known;
+	char     bs[5], ss[5];
+	const char *cls;
+
+	/* Never while playing -- see this block's own comment. */
+	if (g_playing) {
+		return;
+	}
+	if (!seeded) {
+		st_track_chord_reset(&cal_chord);
+		seeded = true;
+	}
+
+	raw = ladder_read(&adc_ladder[LAD_TRACKS]);
+	now = k_uptime_get();
+	if (raw < 0) {
+		return;   /* failed ADC read: report nothing rather than a fake 0 */
+	}
+
+	/* Debounced/settled value: CAL_STABLE_READS consecutive reads within
+	 * +/-CAL_HYST of each other. This is what you should record as the
+	 * band centre -- the instantaneous `raw` shows you the jitter. */
+	if (cand > -100000 && raw >= cand - CAL_HYST && raw <= cand + CAL_HYST) {
+		if (cand_n < 1000) {
+			cand_n++;
+		}
+	} else {
+		cand = raw;
+		cand_n = 1;
+	}
+	if (cand_n >= CAL_STABLE_READS) {
+		stable = cand;
+	}
+
+	/* What the CURRENT (model-derived) production classifier makes of it,
+	 * so the capture shows directly where the model is wrong. */
+	known   = st_track_chord_lookup(raw, 0u, &band_mask);
+	settled = st_track_chord_update(&cal_chord, raw);
+
+	if (raw <= ST_CHORD_IDLE_MAX) {
+		cls = "IDLE";
+	} else if (raw >= ST_CHORD_PLAY_FLOOR) {
+		cls = "PLAY-OR-ABOVE";
+	} else if (known) {
+		cls = "BAND";
+	} else {
+		cls = "UNKNOWN";
+	}
+
+	{
+		bool moved = (raw > last_print + CAL_HYST) || (raw < last_print - CAL_HYST);
+
+		if (!moved && (now - last_ms) < CAL_HEARTBEAT_MS) {
+			return;
+		}
+		if ((now - last_ms) < CAL_MIN_GAP_MS) {
+			return;
+		}
+	}
+	last_print = raw;
+	last_ms    = now;
+
+	cal_mask_str(band_mask, bs);
+	cal_mask_str(settled, ss);
+	printk("CAL t=%u raw=%4d stable=%4d n=%3d fn=%d cls=%-13s band=%s settled=%s\n",
+	       (unsigned)now, raw, stable, cand_n, pwr_pressed() ? 1 : 0,
+	       cls, known ? bs : "----", ss);
+}
+#endif /* ST_CAL_BUILD */
+
 static void led_service(void)
 {
 	st_led_inputs_t in;
@@ -6463,6 +6626,16 @@ int main(void)
 		 * file's own top-of-file comment. */
 
 		/* (track LEDs are driven by the looper beat clock below) */
+
+#if ST_CAL_BUILD
+		/* LADDER CALIBRATION CAPTURE -- temporary, st16-cal only.
+		 *
+		 * Deliberately placed HERE: before the FUNCTION branch below,
+		 * which ends in an unconditional `continue` and therefore hides
+		 * every FUNCTION-modified combination from anything downstream.
+		 * Calibration has to see those, so it runs first. */
+		cal_service();
+#endif
 
 		/* FUNCTION button: a SHORT tap changes song; a long HOLD powers off
 		 * (the same button does both, like the original device). */

@@ -1286,6 +1286,61 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Calibration capture is present ONLY in a calibration-tagged build
+        # ST_CAL_BUILD adds a rate-limited CDC capture of the Track/PLAY
+        # ladder while the transport is stopped. It exists to replace st15's
+        # MODEL-derived chord bands with measurements from a real SP-1, and it
+        # must never reach a production image -- both because it is diagnostic
+        # spam and because an extra blocking ladder_read() on the control
+        # thread is exactly what starved the eMMC streamer once before.
+        #
+        # This gate pins the switch to the build tag in BOTH directions, so
+        # neither can be changed without the other:
+        #   ST_CAL_BUILD 1  =>  the tag MUST contain "cal"
+        #   ST_CAL_BUILD 0  =>  the tag MUST NOT contain "cal"
+        # Forgetting to flip the switch back therefore fails the build rather
+        # than silently shipping the capture.
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          M=firmware/stemtape_player/src/main.c
+          CAL="$(grep -oE '^#define ST_CAL_BUILD [01]' "$M" | grep -oE '[01]$')"
+          TAG="$(grep -oE '^#define ST_BUILD_TAG "[^"]+"' "$M" | head -1 | sed 's/.*"\(.*\)"/\1/')"
+          echo "ST_CAL_BUILD=$CAL  first ST_BUILD_TAG=$TAG"
+          if [ "$CAL" = "1" ]; then
+            if ! printf '%s' "$TAG" | grep -q 'cal'; then
+              echo "FAIL: ST_CAL_BUILD=1 but the build tag ($TAG) is not a calibration tag."
+              exit 1
+            fi
+            echo "OK: calibration build, calibration tag, capture compiled in."
+          else
+            if printf '%s' "$TAG" | grep -q 'cal'; then
+              echo "FAIL: ST_CAL_BUILD=0 but the build tag ($TAG) still says calibration."
+              exit 1
+            fi
+            if grep -qE '^\s*cal_service\(\);' "$M"; then
+              : # the call site is inside #if ST_CAL_BUILD, which is fine
+            fi
+            echo "OK: production build, no calibration tag."
+          fi
+          # The capture must ALWAYS be behind the switch, in either mode.
+          if grep -n 'cal_service' "$M" | grep -qv '#'; then
+            python3 - "$M" <<'PY'
+          import re,sys
+          src=open(sys.argv[1]).read().split('\n')
+          depth=0; bad=[]
+          for i,l in enumerate(src):
+              s=l.strip()
+              if s.startswith('#if'): depth+=1
+              elif s.startswith('#endif') and depth: depth-=1
+              if 'cal_service' in l and depth==0 and not s.startswith('*') and not s.startswith('/*'):
+                  bad.append(i+1)
+          if bad:
+              print("FAIL: cal_service referenced outside any #if at line(s)", bad); sys.exit(1)
+          print("OK: every cal_service reference is inside a preprocessor guard.")
+          PY
+          fi
+
       - name: Stem Tape LOOP playback gate -- contiguous wrap, exit, zero silence
         # The production-equivalent gate for global looping. Drives the REAL
         # st_loop_*/st_stream_* functions through the SAME sequence of
