@@ -1426,6 +1426,14 @@ jobs:
           check() {
             if ! grep -qE " [tT] ${1}\$" audit/nm.txt; then
               echo "MISSING required linked symbol: $1" >&2
+              # Emit a GitHub error ANNOTATION as well as a log line. The log
+              # line is correct but unreachable in practice: this job's tail
+              # is entirely consumed by the runner's own cleanup output, and
+              # artifact/log downloads are blocked by egress policy here. An
+              # annotation is carried by the checks API instead of the log,
+              # so the failure is legible without needing either.
+              echo "::error title=Stem Tape symbol gate::MISSING required linked symbol ${1}"
+              echo "- MISSING required linked symbol \`${1}\`" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
               # Say WHY, right here. A bare "MISSING" forces whoever reads
               # this to guess whether the function was inlined, renamed by
               # an IPA clone, garbage-collected as uncalled, or emitted with
