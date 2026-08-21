@@ -1237,6 +1237,55 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Stem Tape global loop engine host tests (grammar, lengths, exit)
+        # src/st_loop.c is the pure global-loop transport: window capture,
+        # the musical length ladder, the FUNCTION-latch / PLAY-unlatch
+        # grammar and the exact exit position.
+        #
+        # NOT LINKED INTO THE FIRMWARE BY THIS COMMIT, deliberately and
+        # temporarily. This target's established policy (see CMakeLists.txt's
+        # own st_stem_stream.c slice-3A/3B note) is that a module may land
+        # host-tested and unlinked in one slice provided the NEXT slice gives
+        # it its real caller -- and that the unlinked state is stated rather
+        # than left to be discovered. The production wiring commit adds it to
+        # target_sources() together with its call sites; until then it costs
+        # zero flash and zero RAM, and nothing in the firmware can reach it.
+        #
+        # LENGTH PROVENANCE, and one deliberate divergence.
+        # src/machine/surface.ts:939 carries the web app's own authoritative
+        # global-loop table -- `order: (1|2|4|8)[] = [1, 2, 4, 8]`, read as
+        # bar fractions 1/1, 1/2, 1/4, 1/8, defaulting to a whole bar. All
+        # four of those lengths appear in st_loop_lengths[] (1 bar, 2 beats,
+        # 1 beat, 1/2 beat) and the default is the same whole bar, so the
+        # firmware ladder is a SUPERSET of the shipped web model rather than
+        # a competing one. The divergence is direction: surface.ts steps
+        # `dir > 0` toward a larger division, making its Volume + SHORTEN the
+        # loop, where the product instruction for this firmware is that
+        # Volume + LENGTHENS. That is implemented as instructed; anyone
+        # reconciling the two should change surface.ts.
+        #
+        # Every length is an exact multiple/divisor of the song's OWN beat,
+        # derived from the selected STIX record's bpm_q8 through the real
+        # st_beat_timing_init() -- no wall clock, no tempo detection, no
+        # floating point. A song with no trustworthy tempo refuses to loop
+        # rather than inventing a length, and a window that would run past
+        # the committed song end is clamped; both are asserted here.
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          cc -std=c11 -Wall -Wextra -Werror -Ifirmware/stemtape_player/src \
+            firmware/stemtape_player/src/st_loop.c \
+            firmware/stemtape_player/src/st_beat_phase.c \
+            firmware/stemtape_player/tests/test_st_loop.c \
+            -o audit/test_st_loop
+          ./audit/test_st_loop | tee audit/loop-engine-selftest.txt
+          {
+            echo '### Stem Tape global loop engine'
+            echo '```text'
+            cat audit/loop-engine-selftest.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Stem Tape Track-chord ADC decoder host tests
         # src/st_track_chord.c turns ONE shared-ladder voltage into a 4-bit
         # held-Track mask. Linked into the real firmware target
