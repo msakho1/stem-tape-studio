@@ -1237,16 +1237,30 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Stem Tape LED acceptance matrix -- boot, beat/chase, solo, charging, shutdown
+      - name: Stem Tape LED acceptance matrix -- boot, battery gauge, beat/chase, solo, shutdown
         # Drives the REAL production LED decision -- src/st_led_mvp.c's
         # st_led_mvp_decide() -- AND the REAL src/st_beat_phase.c's
         # st_beat_pulse(), the same object files linked into the firmware and
         # the same functions main.c's led_service() calls. Covers the boot
-        # sequence and its fade, every battery preview level, idle, all four
-        # beats of the bar chase, the between-beats darkness, activity
-        # scaling, an absent tempo, immediate solo hold and release, the
-        # charging gauge, transfer, the shutdown sequence, and the full
-        # priority order.
+        # sequence and its fade, every battery gauge level, all four beats of
+        # the bar chase, the between-beats darkness, activity scaling, an
+        # absent tempo, immediate solo hold and release, the charging gauge,
+        # transfer, the shutdown sequence, and the full priority order.
+        #
+        # THE PERSISTENT STOPPED-STATE GAUGE is the rule this matrix now
+        # requires, and an earlier revision required its opposite. Whenever
+        # the SP-1 is powered on and NOT playing, the side row shows the
+        # current trustworthy battery level continuously -- stopped with a
+        # song loaded, with no song selected, on battery, on USB, charging,
+        # full, mid-transfer, and with a Track button held. The matrix asserts
+        # each of those rows against the production decision. Playing is the
+        # one state that takes the side row over (S1-S3 dark, S4 carries the
+        # beat envelope), and the ONLY thing that darkens the row while
+        # stopped is a reading the gauge itself refuses to trust
+        # (unavailable, faulted, or never seeded), which is left dark rather
+        # than rendered as a fabricated level. Every assertion that the side
+        # row goes dark once the boot preview elapses has been deleted; it
+        # proved the wrong product requirement.
         #
         # The beat/chase rows pass only because st_beat_pulse() derives the
         # envelope and bar position from a real STIX-style tempo snapshot and

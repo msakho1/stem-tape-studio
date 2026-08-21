@@ -48,6 +48,21 @@ static bool side_all(const st_led_frame_t *f, uint8_t v)
 	       f->level[ST_LED_S3] == v && f->level[ST_LED_S4] == v;
 }
 
+/* The side row lights exactly S1..S<level>, everything above it dark. */
+static bool side_gauge(const st_led_frame_t *f, int level)
+{
+	int i;
+
+	for (i = 0; i < (int)ST_LED_SIDE_COUNT; i++) {
+		uint8_t want = (i < level) ? ST_LED_MAX : 0u;
+
+		if (f->level[ST_LED_SIDE_FIRST + i] != want) {
+			return false;
+		}
+	}
+	return true;
+}
+
 /* A song, playing, with a valid tempo. 120 BPM at 48 kHz = 24000 frames/beat. */
 static void make_playing(st_led_inputs_t *in, uint32_t song_frame, uint8_t activity)
 {
@@ -146,22 +161,108 @@ static void case_preview_levels(void)
 	CHECK(side_all(&f, 0u), "an unavailable reading previews as darkness, never a level");
 }
 
-/* ======================== 3. stopped / idle ============================== */
-static void case_idle(void)
+/* ============ 3. stopped: the PERSISTENT battery gauge ==================
+ *
+ * The product rule: whenever the SP-1 is powered on and no song is playing,
+ * the side row continuously shows the current trustworthy battery level.
+ * There is no "idle, therefore dark" state. An earlier revision of this
+ * matrix asserted the opposite -- that the side row went dark once the boot
+ * preview elapsed -- and so proved the wrong requirement; every such
+ * assertion is gone.
+ */
+static void case_stopped_gauge(void)
 {
 	st_led_inputs_t in; st_led_frame_t f;
+	int lv;
 
 	g_cases++;
-	printf("\n-- Stopped, not charging\n");
+	printf("\n-- Stopped: persistent battery gauge on the side row\n");
+
+	/* Rows 1-4 of the matrix: stopped with a song loaded, each level. */
+	for (lv = 1; lv <= 4; lv++) {
+		char lbl[48];
+
+		memset(&in, 0, sizeof(in));
+		in.song_selected = true;            /* a song IS loaded, stopped */
+		in.batt_state = ST_LED_BATT_CHARGER_ABSENT;
+		in.batt_level = (uint8_t)lv;
+		st_led_mvp_decide(&in, &f);
+		snprintf(lbl, sizeof(lbl), "stopped, battery level %d", lv);
+		show(lbl, &f);
+		CHECK(side_gauge(&f, lv),
+		      "stopped at level %d lights exactly S1..S%d, continuously -- not for a "
+		      "preview window, and not only while charging", lv, lv);
+		CHECK(tracks_all(&f, 0u),
+		      "level %d: Track LEDs are completely off -- a loaded but stopped song "
+		      "does NOT light them", lv);
+	}
+
+	/* Matrix row: no song selected at all. */
 	memset(&in, 0, sizeof(in));
-	in.song_selected = true;            /* a song IS loaded */
+	in.song_selected = false;
 	in.batt_state = ST_LED_BATT_CHARGER_ABSENT;
 	in.batt_level = 3u;
 	st_led_mvp_decide(&in, &f);
-	show("stopped, song loaded", &f);
-	CHECK(tracks_all(&f, 0u),
-	      "Track LEDs are completely off -- a loaded song does NOT make them solid");
-	CHECK(side_all(&f, 0u), "side LEDs are off when not charging");
+	show("no song selected, level 3", &f);
+	CHECK(side_gauge(&f, 3), "with NO song selected the gauge still shows S1-S3");
+	CHECK(tracks_all(&f, 0u), "no song selected: Track LEDs dark");
+
+	/* Matrix row: low battery renders its measured level continuously, and
+	 * is emphatically not a reason to darken the row. */
+	memset(&in, 0, sizeof(in));
+	in.song_selected = true;
+	in.batt_state = ST_LED_BATT_LOW;
+	in.batt_level = 1u;
+	st_led_mvp_decide(&in, &f);
+	show("stopped, LOW battery", &f);
+	CHECK(side_gauge(&f, 1), "a LOW battery renders S1 solid and continuous");
+	CHECK(tracks_all(&f, 0u), "low battery: Track LEDs dark");
+
+	/* Matrix row: untrustworthy readings darken the side row rather than
+	 * inventing a level. This is the ONLY stopped-state darkness. */
+	memset(&in, 0, sizeof(in));
+	in.song_selected = true;
+	in.batt_state = ST_LED_BATT_UNAVAILABLE;
+	in.batt_level = 0u;
+	st_led_mvp_decide(&in, &f);
+	show("stopped, no reading yet", &f);
+	CHECK(side_all(&f, 0u),
+	      "an UNAVAILABLE reading leaves the side row dark -- never a fabricated level");
+
+	memset(&in, 0, sizeof(in));
+	in.song_selected = true;
+	in.batt_state = ST_LED_BATT_FAULT;
+	in.batt_level = 3u;                 /* a stale level, deliberately nonzero */
+	st_led_mvp_decide(&in, &f);
+	show("stopped, FAULTed reading", &f);
+	CHECK(side_all(&f, 0u),
+	      "a FAULTed reading darkens the row even though a previous level exists -- a "
+	      "distrusted gauge is never shown");
+
+	/* Never-seeded level with an otherwise-plausible state. */
+	memset(&in, 0, sizeof(in));
+	in.song_selected = true;
+	in.batt_state = ST_LED_BATT_CHARGER_ABSENT;
+	in.batt_level = 0u;                 /* never seeded */
+	st_led_mvp_decide(&in, &f);
+	show("stopped, unseeded level", &f);
+	CHECK(side_all(&f, 0u), "an unseeded level (0) is never rendered as a charge");
+
+	/* Matrix row: an untrusted gauge darkens the SIDE row only. The Track
+	 * row keeps whatever it would normally be doing -- here, a held solo. */
+	memset(&in, 0, sizeof(in));
+	in.song_selected = true;
+	in.batt_state = ST_LED_BATT_FAULT;
+	in.batt_level = 2u;
+	in.solo_held = true;
+	in.solo_index = 1u;
+	st_led_mvp_decide(&in, &f);
+	show("faulted gauge + solo", &f);
+	CHECK(side_all(&f, 0u), "faulted gauge: side row dark");
+	CHECK(f.level[1] == ST_LED_MAX && f.level[0] == 0u && f.level[2] == 0u &&
+	      f.level[3] == 0u,
+	      "and the Track row is in its NORMAL state -- the held solo still shows, because "
+	      "a distrusted battery reading is a side-row fact and nothing more");
 }
 
 /* ================= 4. playing: pulse + chase + activity ================== */
@@ -273,15 +374,21 @@ static void case_solo(void)
 	      "release restores the beat/chase at the SAME song position -- the decision "
 	      "holds no state, so nothing restarts");
 
-	/* Solo outranks even a stopped transport. */
+	/* Solo outranks even a stopped transport -- and touches ONLY the track
+	 * row, so the stopped-state battery gauge stays lit underneath it. */
 	memset(&in, 0, sizeof(in));
 	in.song_selected = true;
 	in.solo_held = true;
 	in.solo_index = 3u;
+	in.batt_state = ST_LED_BATT_CHARGER_ABSENT;
+	in.batt_level = 3u;
 	st_led_mvp_decide(&in, &f);
-	show("solo while stopped", &f);
+	show("solo while stopped, lv3", &f);
 	CHECK(f.level[3] == ST_LED_MAX && f.level[0] == 0u,
 	      "solo shows immediately even with the transport stopped");
+	CHECK(side_gauge(&f, 3),
+	      "and the stopped-state battery gauge stays on S1-S3 underneath it -- solo is a "
+	      "Track-row override, never a side-row one");
 }
 
 /* ======================= 6. charging gauge =============================== */
@@ -344,15 +451,45 @@ static void case_transfer(void)
 	in.batt_level = 3u;
 
 	in.transfer_blink_on = true;
+	in.batt_blink_on = true;
 	st_led_mvp_decide(&in, &f);
 	show("transfer, blink on", &f);
 	CHECK(tracks_all(&f, ST_LED_MAX), "all four Track LEDs blink together");
-	CHECK(side_all(&f, 0u), "the side row shows no fabricated status during a transfer");
+	CHECK(f.level[ST_LED_S1] == ST_LED_MAX && f.level[ST_LED_S2] == ST_LED_MAX &&
+	      f.level[ST_LED_S3] == ST_LED_MAX && f.level[ST_LED_S4] == 0u,
+	      "the side row KEEPS the battery gauge through a transfer (S1-S3 at level 3) -- "
+	      "the four blinking Track LEDs are the transfer indication, and a transfer is a "
+	      "powered-on not-playing state like any other");
 
 	in.transfer_blink_on = false;
 	st_led_mvp_decide(&in, &f);
 	show("transfer, blink off", &f);
 	CHECK(tracks_all(&f, 0u), "and go dark together");
+	CHECK(f.level[ST_LED_S1] == ST_LED_MAX && f.level[ST_LED_S3] == ST_LED_MAX,
+	      "the gauge does NOT blink with the Track row -- the two are independent");
+
+	/* Charging through a transfer: the current step keeps blinking. ADC
+	 * sampling is paused during a transfer, so this is the STICKY last
+	 * trustworthy reading being displayed, which is the intent. */
+	in.batt_blink_on = false;
+	st_led_mvp_decide(&in, &f);
+	show("transfer, charging off-phase", &f);
+	CHECK(f.level[ST_LED_S3] == 0u && f.level[ST_LED_S2] == ST_LED_MAX,
+	      "mid-transfer the charging step S3 still blinks while completed steps stay "
+	      "solid -- charge progress is not frozen by the transfer");
+
+	/* Not charging, mid-transfer: a continuous, non-blinking gauge. */
+	in.batt_state = ST_LED_BATT_CHARGER_ABSENT;
+	st_led_mvp_decide(&in, &f);
+	show("transfer, on battery", &f);
+	CHECK(side_gauge(&f, 3), "on battery mid-transfer the gauge is solid S1-S3, no blink");
+
+	/* An untrusted reading is still never fabricated, transfer or not. */
+	in.batt_state = ST_LED_BATT_UNAVAILABLE;
+	in.batt_level = 0u;
+	st_led_mvp_decide(&in, &f);
+	show("transfer, no reading", &f);
+	CHECK(side_all(&f, 0u), "an untrusted gauge stays dark through a transfer too");
 }
 
 /* ======================= 8. power-off sequence =========================== */
@@ -427,12 +564,27 @@ static void case_priority(void)
 	st_led_mvp_decide(&in, &f);
 	CHECK(tracks_all(&f, 0u), "transfer outranks solo (blink-off phase wins over T1)");
 
-	/* No LED left unassigned. */
+	/* No LED left unassigned. A zeroed input is the never-seeded gauge
+	 * (batt_level 0, state UNAVAILABLE), so the correct frame really is
+	 * all-dark -- and every one of the eight must be WRITTEN to get there,
+	 * not merely left holding the 0xEE this pre-fills. */
 	memset(&in, 0, sizeof(in));
 	memset(&f, 0xEE, sizeof(f));
 	st_led_mvp_decide(&in, &f);
 	CHECK(side_all(&f, 0u) && tracks_all(&f, 0u),
-	      "idle assigns all eight explicitly -- no LED carries a previous value");
+	      "an unseeded, stopped device assigns all eight explicitly -- no LED carries a "
+	      "previous value");
+
+	/* Stopped with a TRUSTWORTHY gauge is the common case, and it must not
+	 * be reachable by accident from a stale frame either. */
+	memset(&in, 0, sizeof(in));
+	in.batt_state = ST_LED_BATT_CHARGER_ABSENT;
+	in.batt_level = 2u;
+	memset(&f, 0xEE, sizeof(f));
+	st_led_mvp_decide(&in, &f);
+	CHECK(side_gauge(&f, 2) && tracks_all(&f, 0u),
+	      "stopped at level 2 writes S1-S2 lit, S3-S4 dark and all four Track LEDs dark, "
+	      "overwriting every stale byte");
 
 	/* Purity. */
 	{
@@ -451,13 +603,17 @@ static void case_priority(void)
 
 int main(void)
 {
-	printf("STEM TAPE LED ACCEPTANCE MATRIX (st12 behaviour)\n");
+	printf("STEM TAPE LED ACCEPTANCE MATRIX (st13 behaviour)\n");
 	printf("driving the REAL st_led_mvp_decide() and the REAL st_beat_pulse()\n");
 	printf("T[..] = Track 1-4 levels; S[..] = side S1-S4 levels, 0..255\n");
+	printf("st13: the side row shows the battery gauge CONTINUOUSLY whenever the\n"
+	       "      device is powered on and not playing -- stopped, no song, mid-\n"
+	       "      transfer, soloing, charging or full. Only an untrusted reading\n"
+	       "      darkens it. Playing is the one state that takes the row over.\n");
 
 	case_boot();
 	case_preview_levels();
-	case_idle();
+	case_stopped_gauge();
 	case_playing();
 	case_solo();
 	case_charging();

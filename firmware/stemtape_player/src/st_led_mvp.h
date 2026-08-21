@@ -55,7 +55,11 @@
 #define ST_LED_TRACK_BLINK_MS   100u   /* track blink, boot and shutdown */
 #define ST_LED_SIDE_HOLD_MS     100u   /* side row full before it fades */
 #define ST_LED_SIDE_FADE_MS     300u   /* side row fade to dark */
-#define ST_LED_BATT_PREVIEW_MS  750u   /* battery gauge shown after boot fade */
+#define ST_LED_BATT_PREVIEW_MS  750u   /* boot's own gauge tail; the stopped
+					* state then draws the SAME gauge
+					* continuously, so this is only how long
+					* the BOOT SEQUENCE runs on for, never a
+					* timeout after which the row darkens */
 
 #define ST_LED_BOOT_FADE_END_MS  (ST_LED_SIDE_HOLD_MS + ST_LED_SIDE_FADE_MS)
 #define ST_LED_BOOT_TOTAL_MS     (ST_LED_BOOT_FADE_END_MS + ST_LED_BATT_PREVIEW_MS)
@@ -147,13 +151,20 @@ typedef struct {
  *
  * PRIORITY, highest first -- the order the product owner set:
  *   1. shutdown animation
- *   2. boot animation (including the battery preview)
- *   3. transfer
- *   4. immediate Track-button solo
- *   5. playing beat pulse + bar chase
- *   6. charging gauge
- *   7. (battery preview lives inside the boot sequence, item 2)
- *   8. idle: everything dark
+ *   2. boot animation (whose last phase is the battery gauge, which then
+ *      simply continues into the stopped state below -- the handover is
+ *      seamless because both draw the identical gauge)
+ *   3. transfer: TRACK row blinks; the side row keeps the gauge
+ *   4. immediate Track-button solo: TRACK row only, never the side row
+ *   5. playing: beat pulse + bar chase on the track row, S4 tempo pulse
+ *   6. any powered-on, not-playing state: the persistent battery gauge
+ *   7. an untrusted battery reading: side row dark, never a fabricated level
+ *
+ * THE SIDE ROW IS NEVER DARK MERELY BECAUSE THE DEVICE IS IDLE. A powered-on
+ * SP-1 that is not playing shows its charge level continuously -- with no
+ * song selected, with a song selected but stopped, on battery, on USB,
+ * charging, full, mid-transfer, or with a Track button held. The only thing
+ * that darkens it while stopped is item 7.
  */
 void st_led_mvp_decide(const st_led_inputs_t *in, st_led_frame_t *out);
 

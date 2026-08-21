@@ -124,7 +124,7 @@
  * about the change -- stop and re-flash before reading another number out
  * of it.
  */
-#define ST_BUILD_TAG "st12"
+#define ST_BUILD_TAG "st13"
 #include "st_track_hold.h"
 #include "st_stix.h"
 #include "st_v11_format.h"
@@ -5402,10 +5402,13 @@ static void shutdown_leds(void)
  * st_led_mvp_decide(), which is pure and host-testable; everything below is
  * state-gathering and pin-pushing.
  *
- * The renderer itself is deliberately unchanged: TIMER3, the 52 us dim
- * window, the 1-in-5 ghost frame divider. The product owner directed that
- * proven hardware control be kept, and the semantic vocabulary needed here
- * (off / faint / solid) is exactly what it already expresses.
+ * The renderer's HARDWARE control is deliberately unchanged -- TIMER3, the
+ * 52 us track / 66 us side dim windows, the same GPIO ports. The product
+ * owner directed that proven hardware control be kept. What changed inside
+ * it is only the duty computation: a per-LED sigma-delta over eight
+ * independent 0..255 levels replaced the old whole-mask on/ghost split and
+ * its 1-in-5 frame divider, because a three-name vocabulary cannot express a
+ * beat envelope, a fade, or an activity-scaled brightness.
  * ========================================================================== */
 
 /* Apply one decided frame to the physical shadow masks the TIMER3 ISR

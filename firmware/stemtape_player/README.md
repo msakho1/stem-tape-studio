@@ -46,8 +46,16 @@ what that does and does not include.
   accent marking bar position and a tempo pulse on S4. The beat phase is
   re-derived from the authoritative `song_frame` on every call
   (`st_beat_pulse()`), so there is exactly one clock — the audio path's —
-  and no LED timer that can drift against it. Stopped and idle are all-off;
-  a Track button held is an immediate momentary solo.
+  and no LED timer that can drift against it. A Track button held is an
+  immediate momentary solo.
+
+  The side row has exactly two states, chosen by transport alone: **playing**
+  gives S4 the beat envelope and leaves S1–S3 dark; **not playing** shows the
+  four-step battery gauge, continuously — with no song selected, with a song
+  selected but stopped, on battery, on USB, charging, full, mid-transfer, or
+  with a Track button held. The only thing that darkens it while stopped is a
+  reading the gauge itself refuses to trust (unavailable, faulted, or never
+  seeded), which is left dark rather than rendered as a fabricated level.
 
   **Correction.** This section previously claimed the eight-LED PWM
   renderer (`led_duty.c`, `led_render.c`, `led_render_policy.c`) was

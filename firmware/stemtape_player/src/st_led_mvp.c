@@ -104,9 +104,14 @@ static bool batt_trustworthy(const st_led_inputs_t *in)
 	       in->batt_level != 0u;
 }
 
-/* The four-step gauge on S1..S4, bottom-up. `blink_step` blinks the current
- * (topmost lit) step, which is what the charging display wants; the static
- * preview passes false and shows every step solid. */
+/* The four-step gauge on S1..S4, bottom-up. THE side-row display for every
+ * powered-on, not-playing state -- boot preview, idle, stopped-with-a-song,
+ * transfer, charging and full alike. `blink_step` blinks the current (topmost
+ * lit) step, which only the actively-CHARGING display wants; every other
+ * caller passes false and shows every step solid.
+ *
+ * Untrustworthy readings leave the side row dark and return: an unavailable,
+ * faulted or never-seeded gauge is never rendered as a charge level. */
 static void gauge_on_side(const st_led_inputs_t *in, st_led_frame_t *out, bool blink_step)
 {
 	uint8_t level, i;
@@ -173,7 +178,10 @@ static void decide_shutdown(const st_led_inputs_t *in, st_led_frame_t *out)
 
 /*
  * 2. POWER-ON. Side row on together, track row blinks once, side fades, then
- *    the measured battery gauge appears briefly on S1..S4, then dark.
+ *    the measured battery gauge appears on S1..S4 -- and STAYS. When the boot
+ *    sequence ends, the stopped state draws the identical gauge, so the
+ *    handover is invisible; ST_LED_BATT_PREVIEW_MS is now just the tail of
+ *    the boot animation, not a timed window after which the row goes dark.
  */
 static void decide_boot(const st_led_inputs_t *in, st_led_frame_t *out)
 {
@@ -286,40 +294,55 @@ void st_led_mvp_decide(const st_led_inputs_t *in, st_led_frame_t *out)
 		return;
 	}
 
-	/* 3. TRANSFER: all four Track LEDs blink together. The side row shows
-	 *    no fabricated status -- it stays dark, because a transfer says
-	 *    nothing about tempo and the charging gauge would be misread as
-	 *    transfer progress. */
+	/* 3. TRANSFER: all four Track LEDs blink together. The side row is NOT
+	 *    part of the transfer display -- it keeps showing the battery
+	 *    gauge, because ADC sampling is deliberately paused during a
+	 *    transfer and the gauge is sticky, so what is shown is the last
+	 *    trustworthy reading rather than a stale guess. A charging step
+	 *    keeps blinking through the transfer for the same reason.
+	 *
+	 *    (This is a correction: the side row used to go dark here, on the
+	 *    reasoning that a charge gauge might be misread as transfer
+	 *    progress. The product rule is that a powered-on, not-playing SP-1
+	 *    always shows its battery level, and a transfer is exactly such a
+	 *    state -- the four blinking Track LEDs are the transfer indication
+	 *    and are not ambiguous with a static side-row gauge.) */
 	if (in->transfer_active) {
 		all_dark(out);
 		for (i = 0; i < ST_LED_TRACK_COUNT; i++) {
 			out->level[i] = in->transfer_blink_on ? ST_LED_MAX : 0u;
 		}
+		gauge_on_side(in, out,
+			      /*blink_step=*/(in->batt_state == ST_LED_BATT_CHARGING));
 		return;
 	}
 
-	/* 5/6/8 first, so the side row is decided; solo then overrides only
-	 *    the track row, which is what lets S4 keep pulsing under a solo. */
+	/* THE SIDE ROW HAS EXACTLY TWO STATES, and transport alone picks which:
+	 *
+	 *    playing      -> S1..S3 dark, S4 carries the beat envelope.
+	 *    not playing  -> the four-step battery gauge, continuously.
+	 *
+	 * There is no third "idle, therefore dark" case. A powered-on SP-1 that
+	 * is not playing shows its charge level -- with no song selected, with a
+	 * song selected but stopped, on battery, on USB, charging, full, or with
+	 * a Track button held. The ONLY thing that darkens the side row while
+	 * stopped is a reading the gauge itself refuses to trust, which
+	 * gauge_on_side() handles by leaving it dark rather than inventing a
+	 * level.
+	 *
+	 * Decided BEFORE solo so that solo overrides the track row only, which
+	 * is what lets S4 keep pulsing (playing) or the gauge stay lit
+	 * (stopped) while a stem is soloed. */
 	if (in->playing && in->song_selected) {
 		decide_playing(in, out);
-	} else if (in->batt_state == ST_LED_BATT_CHARGING ||
-		   in->batt_state == ST_LED_BATT_CHARGE_COMPLETE) {
-		/* 6. CHARGING GAUGE, only while not playing. Completed steps
-		 *    solid, the current step blinking, all four solid at full.
-		 *
-		 *    Blink ONLY while actually charging. CHARGE_COMPLETE reaches
-		 *    this branch too, and passing blink unconditionally left its
-		 *    top step dark on the off-phase -- so "fully charged" showed
-		 *    three solid LEDs and a blinking fourth instead of four
-		 *    solid, which reads as "still charging". */
+	} else {
 		all_dark(out);
+		/* Blink ONLY while actually charging. CHARGE_COMPLETE renders
+		 * all four solid (gauge_on_side() forces the level to full);
+		 * blinking its top step would read as "still charging", and
+		 * CHARGER_ABSENT/LOW render their measured level continuously. */
 		gauge_on_side(in, out,
 			      /*blink_step=*/(in->batt_state == ST_LED_BATT_CHARGING));
-	} else {
-		/* 8. IDLE: everything dark. No standby chase, no song-bank
-		 *    display, and a merely-selected song does not light the
-		 *    track row. */
-		all_dark(out);
 	}
 
 	/* 4. IMMEDIATE SOLO overrides the track row, at any transport state. */
