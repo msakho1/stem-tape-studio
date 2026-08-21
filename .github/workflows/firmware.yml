@@ -1865,6 +1865,20 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
+      # Runs ONLY when something above failed, and runs LAST, so its output
+      # is at the very end of the job log. The symbol gate's own failure
+      # message is emitted mid-job, thousands of lines from the end, where
+      # log-tailing tools cannot reach it -- which has already cost more
+      # than one round trip to diagnose a single missing name. This puts the
+      # relevant facts where they can always be read.
+      - name: Failure diagnostics (stem/stream symbols actually linked)
+        if: ${{ failure() }}
+        working-directory: project
+        run: |
+          echo "=== symbols matching st_stream_/st_stem_/stem_render_ in the ELF ==="
+          grep -E " [a-zA-Z] (st_stream_|st_stem_|stem_render_)" audit/nm.txt || echo "(none found)"
+          echo "=== end ==="
+
       - name: Upload stemtape-player-audit
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
