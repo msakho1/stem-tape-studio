@@ -51,8 +51,8 @@
       "writers": "the transfer command path (main thread)",
       "readers": "the same",
       "phases": "transfer only",
-      "overlaps": "MUTUALLY EXCLUSIVE with playback: transfer pauses the transport. Candidate for aliasing onto a sector-pool slot.",
-      "evidence": "one sector, fixed by ST11_SECTOR_BYTES; the question is not its size but whether it needs to be its own allocation"
+      "overlaps": "MUTUALLY EXCLUSIVE with playback: entering transfer mode sets g_xfer_mode (streamer stops prefetching) and g_playing=0 (audio thread stops rendering the stem path).",
+      "evidence": "one sector, fixed by ST11_SECTOR_BYTES; the question is not its size but whether it needs to be its own allocation. ALIASING WAS ATTEMPTED IN THE MEMORY-CLEANUP COMMIT AND WITHDRAWN, deliberately. Overlaying it on the sector pool is sound on the two ends that stop (producer and consumer both quiesce, and a two-block barrier makes the consumer's stop provable rather than probable) but NOT on what is left behind: st_stream_stop() does not clear ready_sector, and the SPSC mailbox may still publish a slot whose bytes the transfer overwrote. Fixing that needs a cross-thread residency invalidation that the modulo ring cannot express -- there is no way to say 'this slot's contents are void' without racing the producer's resume. The unified sector cache makes it a first-class slot state, so the reclamation moves there rather than shipping a subtle stale-sector race for 8192 bytes."
     },
     "g_meta": {
       "category": "classic_inherited",

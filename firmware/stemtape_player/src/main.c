@@ -5602,6 +5602,37 @@ static void controls_diag(void)
 		}
 		l_aud = aud; l_str = str; l_mid = mid; l_mai = mai; l_all = all;
 	}
+	{
+		/* STACK= bytes of each thread stack that have NEVER been touched,
+		 * from the 0xAA fill CONFIG_INIT_STACKS lays down at creation.
+		 *
+		 * THIS IS A MEASUREMENT, NOT A BUDGET, and it exists because the
+		 * RAM audit is not permitted to shrink a stack from a guess.
+		 * 12,672 bytes are allocated across these four threads plus idle
+		 * (128) and the ISR stack (512), and every one of those numbers
+		 * was chosen rather than derived -- the streamer's 4096 says "the
+		 * eMMC driver is -O2 here", the audio thread's 3072 says "+1K
+		 * margin over the historical 2048". None has ever been measured
+		 * against real use, so none may be changed until this line has
+		 * been read off real hardware.
+		 *
+		 * HOW TO READ IT. Run a session that has looped, changed loop
+		 * length, held chords, transferred a song and played one to the
+		 * end; the SMALLEST unused figure seen across all of that is the
+		 * only honest headroom. A value at or near the full size means
+		 * the thread has barely run yet, not that it is safe. */
+		size_t un_aud = 0, un_str = 0, un_mid = 0, un_mai = 0;
+
+		(void)k_thread_stack_space_get(&audio_tcb, &un_aud);
+		(void)k_thread_stack_space_get(&streamer_tcb, &un_str);
+		(void)k_thread_stack_space_get(&midi_tcb, &un_mid);
+		(void)k_thread_stack_space_get(k_current_get(), &un_mai);
+		printk("STACK unused aud=%u/%u str=%u/%u midi=%u/%u main=%u/%u\n",
+		       (unsigned)un_aud, (unsigned)K_THREAD_STACK_SIZEOF(audio_stack),
+		       (unsigned)un_str, (unsigned)K_THREAD_STACK_SIZEOF(streamer_stack),
+		       (unsigned)un_mid, (unsigned)K_THREAD_STACK_SIZEOF(midi_stack),
+		       (unsigned)un_mai, (unsigned)CONFIG_MAIN_STACK_SIZE);
+	}
 	/* The PASS2 line is GONE with PASS 2 itself. Every counter it printed
 	 * (per-track refilled blocks, dead-history snaps, round aborts, read
 	 * failures) belonged to the classic play-ring read-ahead, so on this
