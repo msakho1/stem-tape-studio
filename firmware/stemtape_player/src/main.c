@@ -124,7 +124,7 @@
  * about the change -- stop and re-flash before reading another number out
  * of it.
  */
-#define ST_BUILD_TAG "st8"
+#define ST_BUILD_TAG "st9"
 #include "st_track_hold.h"
 #include "st_stix.h"
 #include "st_v11_format.h"

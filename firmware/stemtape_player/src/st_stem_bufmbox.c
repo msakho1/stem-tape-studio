@@ -66,8 +66,46 @@ bool st_stem_mbox_producer_next_fill(const st_stem_mbox_t *mb, uint32_t sector_c
 		uint32_t sector = requested + k;
 		uint32_t slot;
 
+		/* THE SCAN STOPS AT THE SONG'S LAST SECTOR. It must not wrap
+		 * around to sector 0 and keep going, and this is a correctness
+		 * requirement, not a tidiness one.
+		 *
+		 * The whole no-overwrite guarantee rests on every sector in the
+		 * scan window mapping to a DISTINCT slot -- which holds only
+		 * because the window is at most ST_STEM_MBOX_SLOTS wide, so any
+		 * two positions in it differ by less than SLOTS and cannot be
+		 * congruent modulo SLOTS. Wrapping breaks exactly that: a
+		 * position past the end becomes (requested + k - sector_count),
+		 * and its slot then collides with an earlier window position
+		 * whenever k differs by sector_count modulo SLOTS. The producer
+		 * could therefore pick the very slot the consumer is about to
+		 * acquire, and refill it underneath a reader.
+		 *
+		 * Physically that is a song whose sector count is not a
+		 * multiple of the ring depth -- i.e. almost every song. It went
+		 * unnoticed while the ring was 2 or 4 slots deep and surfaced
+		 * the moment the depth grew; tests/test_stem_playback_gate.c
+		 * fails at depths 3, 5, 6, 8, 10 and 12 without this stop, and
+		 * passes at all of them with it.
+		 *
+		 * WRAPPING IS STILL ALLOWED WHERE IT IS PROVABLY SAFE: when
+		 * sector_count is an exact multiple of SLOTS, sector s and
+		 * sector (s - sector_count) map to the SAME slot, so the wrap
+		 * cannot introduce a collision and read-ahead may cross the
+		 * seam as before. Only the non-multiple case -- the one that
+		 * actually breaks the distinct-slot invariant -- stops early.
+		 *
+		 * The cost there is bounded and tiny: for the last few sectors
+		 * of such a song the read-ahead shrinks to whatever remains,
+		 * and refills to full immediately after the consumer wraps and
+		 * republishes requested_sector as 0. One sector-time of reduced
+		 * margin per loop, in exchange for the guarantee actually
+		 * holding. */
 		if (sector >= sector_count) {
-			sector -= sector_count;    /* wrap at the loop seam */
+			if ((sector_count % ST_STEM_MBOX_SLOTS) != 0u) {
+				break;
+			}
+			sector -= sector_count;    /* provably collision-free wrap */
 		}
 		slot = st_stem_mbox_slot_of(sector);
 
