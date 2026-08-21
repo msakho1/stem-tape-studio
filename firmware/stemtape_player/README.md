@@ -91,8 +91,10 @@ features that have not landed, and nothing in them executes on the device:
   release grammar, STEM/GLOBAL FX scope open/close/cycle, FX Track
   momentary/latch/unlatch, and the full forward/reverse scrub latch
   grammar (task section 7, items 1-10) — as a PURE, host-tested state
-  machine that emits semantic commands. The device's real button/fader
-  scanning is `main.c`'s own inherited ladder decode, not this.
+  machine that emits semantic commands. It is NOT what runs: the shipping
+  control path is `src/st_ctl.c` + `src/st_ladder.c` + `src/st_loop.c`,
+  with `main.c`'s inherited ladder decode still serving the no-stem-song
+  case.
 - **The four persistent scrub speeds and the tape-inertia release ramp**
   (`src/st_scrub.c`) — ported from `src/audio/inertia.ts`'s exact
   documented math (`GLOBAL_SCRUB_SPEEDS`, the finite exponential curve,
@@ -160,12 +162,18 @@ Still NOT implemented, and not claimed to be:
   tape-inertia release ramp as pure math, host-tested — but it is **not
   linked into this target** and nothing calls it, so there is no
   variable-speed playback on the device.
-- **`st_gesture.c` as the control grammar.** The device's buttons and
-  faders are scanned by `main.c`'s own inherited ladder decode, which is
-  what actually runs. `st_gesture.c`'s richer chord/loop/FX-scope state
+- **`st_gesture.c` as the control grammar.** With a Stem Tape song
+  selected the surface is owned by `src/st_ctl.c` — one ladder sample per
+  pass through `src/st_ladder.c`'s measured classifier, then the Track
+  mask, the PLAY gesture and `src/st_loop.c`'s window; `main.c`'s
+  inherited ladder decode still runs the Tape Looper behaviour when no
+  stem song is selected. `st_gesture.c`'s richer chord/loop/FX-scope state
   machine is host-tested but **not linked** — it is reference, not
   runtime. The same is true of `st_scrub.c` and `st_led_pattern.c`; see
   `CMakeLists.txt`, which is the authority on what is compiled in.
+  `docs/stem-tape-control-v1.md` is the one-page description of what
+  actually runs, and `docs/ladder-measured.json` is the hardware capture
+  every band is derived from.
 - **Headphone-insertion speaker muting.**
 - **Recording and overdub.** This is a player. There is no record path.
 - Full verbatim parity with `docs/FIRMWARE_CONTRACT_V1.md`'s mute/solo/

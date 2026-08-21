@@ -1361,28 +1361,31 @@ jobs:
         working-directory: ${{ github.workspace }}/project
         run: |
           set -euo pipefail
-          # The pin depth is defined in main.c and mirrored in the gate; they
-          # must agree or the gate would be proving a different design.
-          PROD="$(grep -oE '^#define ST_LOOP_PIN_SECTORS [0-9]+' \
-            firmware/stemtape_player/src/main.c | grep -oE '[0-9]+')"
-          TEST="$(grep -oE '^#define ST_LOOP_PIN_TEST_SECTORS [0-9]+u' \
-            firmware/stemtape_player/tests/test_loop_playback_gate.c | grep -oE '[0-9]+')"
-          PRODR="$(grep -oE '^#define ST_LOOP_PIN_REGIONS [0-9]+' \
-            firmware/stemtape_player/src/main.c | grep -oE '[0-9]+')"
-          TESTR="$(grep -oE '^#define ST_LOOP_PIN_TEST_REGIONS [0-9]+u' \
-            firmware/stemtape_player/tests/test_loop_playback_gate.c | grep -oE '[0-9]+')"
-          echo "pinned sectors: production=$PROD gate=$TEST"
-          echo "pinned regions: production=$PRODR gate=$TESTR"
-          if [ "$PRODR" != "$TESTR" ]; then
-            echo "MISMATCH: the gate models $TESTR pinned regions, the firmware has $PRODR."
-            exit 1
-          fi
-          if [ "$PROD" != "$TEST" ]; then
-            echo "MISMATCH: the loop playback gate models $TEST pinned sectors but the"
-            echo "firmware allocates $PROD -- the gate would be proving a design that is"
-            echo "not the one being shipped."
-            exit 1
-          fi
+          # The pin geometry is defined in main.c and mirrored in the gate; every
+          # figure must agree or the gate would be proving a different design.
+          # The two regions have DIFFERENT depths, so both are checked.
+          M=firmware/stemtape_player/src/main.c
+          T=firmware/stemtape_player/tests/test_loop_playback_gate.c
+          # Two stages because the value may carry a `u` suffix, so a plain
+          # [0-9]+$ anchor would not match it.
+          num() {
+            grep -oE "^#define $2[[:space:]]+[0-9]+u?" "$1" \
+              | grep -oE '[0-9]+u?$' | grep -oE '^[0-9]+'
+          }
+          for pair in \
+            "ST_LOOP_PIN_REGIONS:ST_LOOP_PIN_TEST_REGIONS" \
+            "ST_LOOP_PIN_ENTRY_SECTORS:ST_LOOP_PIN_TEST_ENTRY_SECTORS" \
+            "ST_LOOP_PIN_EXIT_SECTORS:ST_LOOP_PIN_TEST_EXIT_SECTORS"; do
+            PN="${pair%%:*}"; TN="${pair##*:}"
+            PV="$(num "$M" "$PN")"; TV="$(num "$T" "$TN")"
+            echo "$PN=$PV  $TN=$TV"
+            if [ -z "$PV" ] || [ -z "$TV" ] || [ "$PV" != "$TV" ]; then
+              echo "MISMATCH: the loop playback gate models $TN=$TV but the firmware"
+              echo "defines $PN=$PV -- the gate would be proving a design that is not"
+              echo "the one being shipped."
+              exit 1
+            fi
+          done
           cc -std=c11 -Wall -Wextra -Werror -Ifirmware/stemtape_player/src \
             firmware/stemtape_player/src/st_loop.c \
             firmware/stemtape_player/src/st_stem_stream.c \

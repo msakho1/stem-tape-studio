@@ -61,13 +61,13 @@ static int g_checks, g_failures, g_cases;
  * consumer asked for, one per "service", at a bounded rate.
  */
 #define SLOTS      12u
-#define PIN_N      ST_LOOP_PIN_TEST_SECTORS
 
-/* Kept in step with main.c's ST_LOOP_PIN_SECTORS/ST_LOOP_PIN_REGIONS by the
- * CI gate, which greps the production values and these and fails if they
- * differ. */
-#define ST_LOOP_PIN_TEST_SECTORS 4u
-#define ST_LOOP_PIN_TEST_REGIONS 2u
+/* Kept in step with main.c's ST_LOOP_PIN_* by the CI gate, which greps the
+ * production values and these and fails if any differ. The two regions have
+ * DIFFERENT depths, sized to what each has to cover -- see main.c. */
+#define ST_LOOP_PIN_TEST_REGIONS       2u
+#define ST_LOOP_PIN_TEST_ENTRY_SECTORS 3u
+#define ST_LOOP_PIN_TEST_EXIT_SECTORS  4u
 #define PIN_ENTRY 0u
 #define PIN_EXIT  1u
 
@@ -140,9 +140,11 @@ static void ring_service(ring_t *r, uint32_t want)
 
 static void ring_pin(ring_t *r, uint32_t region, uint32_t base)
 {
+	uint32_t depth = (region == PIN_ENTRY) ? ST_LOOP_PIN_TEST_ENTRY_SECTORS
+					        : ST_LOOP_PIN_TEST_EXIT_SECTORS;
 	uint32_t n = 0u;
 
-	while (n < PIN_N && base + n < SECTORS) {
+	while (n < depth && base + n < SECTORS) {
 		n++;
 	}
 	r->pin_base[region] = base;

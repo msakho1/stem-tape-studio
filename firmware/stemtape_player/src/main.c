@@ -1317,7 +1317,8 @@ static st_stem_mbox_t g_stem_mbox;
  *      2 sectors 16384 B ->  7.10 ms   CAN MISS
  *      3 sectors 24576 B -> 14.19 ms   SAFE, 4.04 ms of margin
  *
- * Three it is: 24576 bytes per region, the smallest depth that cannot miss.
+ * Three is the smallest depth that cannot miss when the region's base IS the
+ * seek target. The exit region needs one more; see the depth table below.
  *
  * TWO REGIONS, not one. A loop has two places the playhead can arrive at
  * without warning, and neither is reachable from the ring:
@@ -1343,19 +1344,40 @@ static st_stem_mbox_t g_stem_mbox;
  * ever reads a published pin. There is no refill-while-reading hazard to
  * guard against, so this needs no slot protocol of its own.
  */
-/* FOUR, not three. Three is the minimum that covers the worst-case wait for
- * a fresh sector (14.19 ms of runway against 10.15 ms of wait), and that is
- * still the requirement -- but the EXIT region is based on the window's LAST
- * frame rather than on loop_end, so when loop_end happens to sit exactly on a
- * sector boundary the first sector of the region is spent below the seek
- * target. A fourth sector makes the guarantee hold in that case too, instead
- * of holding "usually". 2 x 4 x 8192 = 65536 bytes. */
-#define ST_LOOP_PIN_SECTORS 4u
-#define ST_LOOP_PIN_REGIONS 2u
-#define ST_LOOP_PIN_ENTRY   0u   /* loop_start: the entry seek and every wrap */
-#define ST_LOOP_PIN_EXIT    1u   /* loop_end:   every exit, in both directions */
-static uint8_t g_stem_loop_pin_bufs[ST_LOOP_PIN_REGIONS][ST_LOOP_PIN_SECTORS]
-			           [ST11_SECTOR_BYTES];
+/* DEPTHS ARE PER REGION, sized to what each one actually has to cover rather
+ * than to the larger of the two. On a 256 KB part 8192 bytes is real money.
+ *
+ * ENTRY = 3. Its base IS the seek target's sector, so the worst case is
+ * loop_start sitting on the last frame of that sector: (3-1)*340 + 1 = 681
+ * frames = 14.19 ms of runway against the 10.15 ms worst-case wait. Three is
+ * the minimum that cannot miss; a fourth would buy nothing.
+ *
+ * EXIT = 4. Its base is the window's LAST frame, one short of the seek
+ * target, because that one frame of slack lets a single region serve both the
+ * forward exit (at loop_end) and the reverse wrap (at loop_end - 1). When
+ * loop_end sits exactly on a sector boundary the region's first sector is
+ * spent below the target, so a fourth is what makes the guarantee hold in
+ * that case instead of holding "usually": (4-1)*340 = 1020 frames = 21.25 ms
+ * aligned, 14.19 ms otherwise.
+ *
+ * 3 + 4 = 7 sectors = 57344 bytes, in one flat array indexed through
+ * st_loop_pin_off[] so the two regions cost exactly what they need.
+ */
+#define ST_LOOP_PIN_REGIONS       2u
+#define ST_LOOP_PIN_ENTRY         0u   /* loop_start: the entry seek and every wrap */
+#define ST_LOOP_PIN_EXIT          1u   /* loop_end-1: every exit, both directions   */
+#define ST_LOOP_PIN_ENTRY_SECTORS 3u
+#define ST_LOOP_PIN_EXIT_SECTORS  4u
+#define ST_LOOP_PIN_SECTORS       (ST_LOOP_PIN_ENTRY_SECTORS + ST_LOOP_PIN_EXIT_SECTORS)
+
+static const uint8_t st_loop_pin_off[ST_LOOP_PIN_REGIONS] = {
+	0u, ST_LOOP_PIN_ENTRY_SECTORS
+};
+static const uint8_t st_loop_pin_depth[ST_LOOP_PIN_REGIONS] = {
+	ST_LOOP_PIN_ENTRY_SECTORS, ST_LOOP_PIN_EXIT_SECTORS
+};
+
+static uint8_t g_stem_loop_pin_bufs[ST_LOOP_PIN_SECTORS][ST11_SECTOR_BYTES];
 /* First pinned sector index per region, or negative when it holds nothing. */
 static atomic_t g_stem_loop_pin_base[ST_LOOP_PIN_REGIONS] = {
 	ATOMIC_INIT(-1), ATOMIC_INIT(-1)
@@ -1371,9 +1393,10 @@ static atomic_t g_stem_loop_pin_want[ST_LOOP_PIN_REGIONS] = {
 	ATOMIC_INIT(-1), ATOMIC_INIT(-1)
 };
 
-/* True, and *region/*idx set, when `sector` is pinned. Consumer-side and
- * wait-free: at most four acquire loads and no branching into the ring. */
-static bool stem_loop_pin_lookup(uint32_t sector, uint32_t *region, uint32_t *idx)
+/* True, and *idx set to the FLAT buffer index, when `sector` is pinned in
+ * either region. Consumer-side and wait-free: at most four acquire loads and
+ * no branching into the ring. */
+static bool stem_loop_pin_lookup(uint32_t sector, uint32_t *idx)
 {
 	uint32_t r;
 
@@ -1388,8 +1411,7 @@ static bool stem_loop_pin_lookup(uint32_t sector, uint32_t *region, uint32_t *id
 		    sector >= (uint32_t)base + (uint32_t)cnt) {
 			continue;
 		}
-		*region = r;
-		*idx    = sector - (uint32_t)base;
+		*idx = (uint32_t)st_loop_pin_off[r] + (sector - (uint32_t)base);
 		return true;
 	}
 	return false;
@@ -2087,7 +2109,7 @@ st_stem_mix_prepare(stem_channels, &stem_prepared);
 	while (f < BLK_FRAMES) {
 		uint32_t needed;
 		uint32_t fis, run, left_in_song, want;
-		uint32_t pin_idx, pin_reg = 0u;
+		uint32_t pin_idx;
 		bool from_pin = false;
 		/* The loop window, sampled ONCE per iteration. `active` is read
 		 * first and the bounds after it, which is the read side of the
@@ -2145,7 +2167,7 @@ st_stem_mix_prepare(stem_channels, &stem_prepared);
 		 * bytes exist. Checking the pin before the ring also keeps the
 		 * ring's own acquire from being spent on a sector the pin
 		 * already holds. */
-		if (stem_loop_pin_lookup(needed, &pin_reg, &pin_idx)) {
+		if (stem_loop_pin_lookup(needed, &pin_idx)) {
 			from_pin = true;
 			st_stream_sector_ready(&g_stem_stream, needed);
 		} else if (g_stem_stream.ready_sector != needed) {
@@ -2296,7 +2318,7 @@ st_stem_mix_prepare(stem_channels, &stem_prepared);
 		/* RAM-ONLY: decodes out of whichever resident buffer
 		 * g_stem_active_buf_idx_local (audio-thread-exclusive)
 		 * names -- this real-time thread never touches flash. */
-		stem_render_run(from_pin ? g_stem_loop_pin_bufs[pin_reg][pin_idx]
+		stem_render_run(from_pin ? g_stem_loop_pin_bufs[pin_idx]
 					  : g_stem_sector_bufs[g_stem_active_buf_idx_local],
 				 fis, &stem_prepared, m0, md, mv,
 				 f, run, lp_rev ? -1 : 1, s, stem_peak);
@@ -4712,7 +4734,7 @@ static void streamer_thread(void *a, void *b, void *c)
 
 				atomic_set(&g_stem_loop_pin_count[region], 0);   /* invalidate first */
 				atomic_set(&g_stem_loop_pin_base[region], -1);
-				for (k = 0; k < ST_LOOP_PIN_SECTORS; k++) {
+				for (k = 0; k < st_loop_pin_depth[region]; k++) {
 					uint32_t sec = (uint32_t)want_base + k;
 					st11_sector_header_t hdr;
 					uint32_t blk;
@@ -4723,12 +4745,13 @@ static void streamer_thread(void *a, void *b, void *c)
 					blk = g_stem_stream.song_start_block +
 					      sec * ST11_BLOCKS_PER_SECTOR;
 					if (!emmc_read_blocks(blk,
-							       g_stem_loop_pin_bufs[region][k],
+							       g_stem_loop_pin_bufs[st_loop_pin_off[region] + k],
 							       ST11_BLOCKS_PER_SECTOR)) {
 						break;
 					}
 					if (!st11_sector_read_header(
-						    g_stem_loop_pin_bufs[region][k], &hdr) ||
+						    g_stem_loop_pin_bufs[st_loop_pin_off[region] + k],
+						    &hdr) ||
 					    !st_stream_validate_sector(&g_stem_stream, sec, &hdr)) {
 						break;   /* never pin unvalidated bytes */
 					}
@@ -6912,7 +6935,7 @@ int main(void)
 			 * combo_seen so the press can never become a power-off; bare
 			 * rocker/Vol behavior outside FUNCTION holds is untouched. */
 			{
-				enum vol_btn vb = decode_vol(ladder_read(&adc_ladder[LAD_VOL]));
+				enum vol_btn vb = st_vraw;   /* the pass's ONE reading of this rail */
 				if (vb != VOL_NONE) {
 					if (vb == cp_cand) { if (cp_cnt < 1000) cp_cnt++; }
 					else { cp_cand = vb; cp_cnt = 1; }
@@ -7079,6 +7102,12 @@ int main(void)
 			/* If the combo was ended by lifting FUNCTION FIRST while PLAY is
 			 * still down, swallow that trailing PLAY until it is released, so
 			 * it can't leak into the normal decode as a restart / play-stop. */
+			/* A FRESH conversion, deliberately, and the one place in the
+			 * file that reads this rail twice in a pass: the combo above
+			 * can have held for several seconds, so the sample taken at
+			 * the top of the pass says nothing about whether PLAY is
+			 * still down NOW. It runs only on the pass a FUNCTION combo
+			 * ends, never per-pass. */
 			if (combo_seen &&
 			    ladder_read(&adc_ladder[LAD_TRACKS]) >= 110) suppress_play = 1;
 		}
