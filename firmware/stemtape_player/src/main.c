@@ -969,11 +969,10 @@ static volatile uint32_t g_gridrec_beat_samps; /* grid beat in STORED samples at
  * tape + resyncs the loop start to the tapped downbeat at the next bar). */
 static volatile uint64_t g_grid_next_bar;      /* next bar line, sample-clock domain */
 static volatile uint64_t g_grid_resync_at;     /* pending loop-restart at this bar (0 = none) */
-/* PASS 2 forensics (printed + zeroed each diag window): blocks delivered per
- * track, dead-history snaps per track, and round aborts (rec yield / read fail). */
-static volatile uint32_t g_p2blk[4];
-static volatile uint32_t g_p2snap[4];
-static volatile uint32_t g_p2yield, g_p2rfail;
+/* The PASS 2 forensic counters (g_p2blk/g_p2snap/g_p2yield/g_p2rfail) are
+ * REMOVED along with PASS 2 itself -- see streamer_thread's own note where
+ * that pass used to be. They measured the classic play-ring read-ahead, a
+ * loop this firmware can never enter. */
 static volatile int      g_meta_loaded;       /* streamer -> main: g_meta read at boot */
 
 /* STEM TAPE PHASE 1: meta_write_blocks() (the classic looper's MAGIC-LAST
@@ -3958,11 +3957,11 @@ static void streamer_thread(void *a, void *b, void *c)
 	ARG_UNUSED(a); ARG_UNUSED(b); ARG_UNUSED(c);
 	static uint8_t blk[EMMC_BLOCK_SIZE];
 	static uint8_t metabuf[META_BLOCKS * EMMC_BLOCK_SIZE];  /* 2-block song index */
-	/* Flush the rec ring in MULTI-BLOCK (CMD25) bursts: the card pipelines the
-	 * programming across the burst instead of fully programming each block (~30 ms
-	 * single-block), so the sustained write keeps up with live recording. */
-#define FLUSH_BATCH 32u   /* 16KB bursts = 2 whole 8KB pages per CMD25 (reverted from 16: the interleave+16 experiment caused catastrophic rec-ring overflow + flash write errors) */
-	static uint8_t batchbuf[FLUSH_BATCH * EMMC_BLOCK_SIZE];
+	/* batchbuf (16 KB) is GONE along with PASS 2, its only user -- see the
+	 * note where PASS 2 used to be, below. It staged classic play-ring
+	 * refills for tracks that this firmware can never put in TS_PLAY, and
+	 * its 16 KB is now the stored-song ring's third and fourth sector
+	 * buffers instead. */
 
 	(void)emmc_init();
 	/* AFTER init: emmc_init() resets the clock to the slow safe value — the
@@ -4236,8 +4235,9 @@ static void streamer_thread(void *a, void *b, void *c)
 		}
 
 		bool work = false;
-		uint32_t cpos = g_consume_pos;
-		uint32_t slot = g_slot;
+		/* `cpos` (the classic playhead snapshot) and `slot` (the classic
+		 * song slot this sweep was serving) both went with PASS 2 -- they
+		 * existed only to decide which classic loop blocks to refill. */
 
 		/* STEM TAPE PHASE 1: g_meta_save_req / g_grid_save_req are still SET
 		 * by various control-loop actions (mute/speed/grid changes) exactly
@@ -4345,221 +4345,28 @@ static void streamer_thread(void *a, void *b, void *c)
 		 * present[] on song load) and is untouched. Phase 2 reintroduces
 		 * recording behind a real, validated write path. */
 
-		/* PASS 2 — play read-ahead, only after all pending writes are flushed.
-		 * Skip refills entirely while a big rec backlog exists so the recorder
-		 * always wins the bus (the play rings hold ~1.2 s and can coast). */
-		/* PASS 2 — ONE SWEEP PER PASS, ROTATING START, ONE CHUNK PER TRACK.
-		 * Every priority heuristic tried here (emptiest-first, audible-first
-		 * + starved-last, mid-round yields on rec backlog or read failure)
-		 * produced the same measured pathology from a different corner: the
-		 * track that sorted LAST got locked out entirely whenever the round
-		 * kept terminating early, and one track would sit at ZERO delivered
-		 * blocks for whole takes while its siblings stayed fat. Demand is
-		 * ~750 blk/s of a ~1300 blk/s bus — there is no capacity problem,
-		 * only fairness. So: serve every playing track AT MOST one chunk
-		 * per sweep, starting from a rotating index so early-abort cost is
-		 * shared; PASS 1 (writes) runs between sweeps EVERY pass, i.e. at
-		 * least once per ~4 chunks (~15 ms) BY CONSTRUCTION, which bounds
-		 * the rec backlog far below danger without any mid-sweep yield.
-		 * Only the true 7/8 rec-ring emergency may abort a sweep. */
-		{
-			/* ROUNDS: repeat the fair sweep until every ring is topped up —
-			 * one pass can deliver MANY chunks (amortizing the pass's fixed
-			 * cost, which matters because the audio thread owns most of the
-			 * CPU: one-chunk-per-pass measured out at only ~18 passes/s,
-			 * pinning refill throughput to exactly consumption with zero
-			 * surplus to rebuild margins). Fairness is per ROUND, so no
-			 * track can be locked out; writes stay bounded because a round
-			 * breaks out the moment a whole write page is waiting. */
-			static uint32_t rr;
-			bool more = true;
-			while (more && g_slot == slot) {
-				more = false;
-			rr = (rr + 1u) & 3u;
-			cpos = g_consume_pos;    /* fresh playhead for this round */
-			for (int k = 0; k < NTRK; k++) {
-				int i = (int)((rr + (uint32_t)k) & 3u);
-				if (g_slot != slot) break;
-				struct looptrk *t = &trk[i];
-				if (t->state != TS_PLAY) continue;
-				int32_t avail = (int32_t)(t->p_w - cpos);
-				/* DEAD-HISTORY SNAP: a frontier BEHIND the playhead is pure
-				 * waste — the mixer reads exactly pring[cpos], so every
-				 * sample in [p_w, cpos) can never be played, yet the old
-				 * code ground through it sequentially. During an overdub
-				 * the three playing tracks live just below zero (each
-				 * write burst dips them), so nearly the WHOLE read budget
-				 * went on never-played history, which is what actually cut
-				 * the other tracks out while recording the 4th (measured
-				 * live: margins oscillating 0..-350 ms for the entire
-				 * take, full-rate reads, zero audible progress). Snap the
-				 * frontier to the live playhead the moment it falls more
-				 * than a block behind; loop_blk below is fully modular, so
-				 * the loop phase is untouched — the track simply rejoins
-				 * the transport where it is NOW, and every read from here
-				 * on buys audible audio. */
-				if (avail < -(int32_t)SAMP_PER_BLK ||
-				    avail > (int32_t)RING_SAMPLES) {
-					/* Test against the LIVE playhead, not the round's cpos
-					 * snapshot: a restart/slot-switch during an earlier
-					 * CMD18 in this round resets BOTH cpos and p_w to 0,
-					 * and snapping against the stale snapshot would clobber
-					 * that reset (p_w lands far AHEAD -> ring reads as
-					 * pinned-full -> the mixer replays stale ring content).
-					 * The upper bound is impossible in any healthy state
-					 * (refill never runs more than one ring ahead), so it
-					 * uniquely fingerprints such a clobber and self-heals
-					 * it within one streamer pass. */
-					uint32_t cnow = g_consume_pos;
-					int32_t a2 = (int32_t)(t->p_w - cnow);
-					if (a2 < -(int32_t)SAMP_PER_BLK ||
-					    a2 > (int32_t)RING_SAMPLES) {
-						uint32_t anchor = (cnow / SAMP_PER_BLK) * SAMP_PER_BLK;
-						t->p_w = anchor;   /* audio thread sees starved either way */
-						a2 = (int32_t)(anchor - cnow);
-						g_p2snap[i]++;
-					}
-					avail = a2;
-				}
-				if (avail > (int32_t)(RING_SAMPLES - 8u * SAMP_PER_BLK))
-					continue;          /* ring PINNED ~full (<=8 blocks of headroom):
-					                    * the cushion is real at stall onset instead of
-					                    * sawtoothing between half and full. 8 blocks
-					                    * (not 4) so steady-state top-ups are >=7-block
-					                    * bursts, not 3-block CMD18 spam. */
-				/* SEGMENT: this track loops at ITS OWN length (a whole multiple
-				 * of the base), not the shared g_loop_blocks. */
-				uint32_t gb = t->len_blocks ? t->len_blocks
-					    : (g_loop_blocks ? g_loop_blocks : 1u);
-				/* CHOP window (M7b, mode-aware). VARIABLE: slice this
-				 * track's OWN length (M5 behavior). FIXED (base known,
-				 * track a whole multiple of it): slice THE BAR — every
-				 * layer plays the same base/div slice OF EACH OF ITS
-				 * BARS, uniform and phase-locked, multi-bar variation
-				 * preserved. div=1 reduces to the original math. */
-				uint32_t cdiv = g_chop_div, coff = g_chop_off;
-				uint32_t cyc, win, wbase, wper;
-				if (g_fixed_len && g_loop_blocks && gb >= g_loop_blocks &&
-				    (gb % g_loop_blocks) == 0u) {
-					wper = g_loop_blocks;
-					win = wper / cdiv; if (win == 0u) win = 1u;
-					wbase = (coff * wper) / cdiv;
-					if (wbase + win > wper) wbase = wper - win;
-					cyc = (gb / wper) * win;
-				} else {
-					wper = gb;
-					win = gb / cdiv; if (win == 0u) win = 1u;
-					wbase = (coff * gb) / cdiv;
-					if (wbase + win > gb) wbase = gb - win;
-					cyc = win;
-				}
-				/* BOUNDARY BUDGET: a chunk clipped by the loop wrap or the
-				 * content/silence boundary used to consume this track's
-				 * WHOLE turn in the round — so the only track with a
-				 * mid-loop boundary (a fixed-mode silence tail) lost ~85 ms
-				 * of refill every lap and was measurably the only one still
-				 * starving (stv=[2 2 35 0] while its siblings sat at 2).
-				 * The turn now keeps reading until its full 32-block quota
-				 * has moved; a boundary merely splits it into 2-3 shorter
-				 * bursts. Fairness is unchanged (same per-round quota). */
-				bool round_abort = false;
-				for (uint32_t budget = 32u; budget; ) {
-					/* Snapshot the frontier: the (higher-priority) audio
-					 * thread can reset p_w mid-eMMC-read on a song switch /
-					 * restart. Fill from the snapshot, COMMIT only if
-					 * unchanged. */
-					uint32_t pw = t->p_w;
-					/* phase-anchored loop position: (pw_block - start_blk)
-					 * mod gb, safe when pw_block < start_blk (restart). */
-					uint32_t pwb = pw / SAMP_PER_BLK;
-					/* phase-anchored position along the audible chop
-					 * cycle, tiled onto the region (variable mode:
-					 * wper=gb, cyc=win -> identical to M5). */
-					uint32_t c = ((pwb % cyc) + cyc -
-						      (t->start_blk % cyc)) % cyc;
-					uint32_t loop_blk = (c / win) * wper + wbase + (c % win);
-					uint32_t n = budget;
-					if (n > (RING_SAMPLES / SAMP_PER_BLK) - 1u) n = (RING_SAMPLES / SAMP_PER_BLK) - 1u;
-					/* VARIABLE TOP-UP: fill to ~full (keep a 1-block
-					 * producer/consumer gap) so rings park at ~100%. */
-					{
-						int32_t av = (int32_t)(pw - cpos);
-						int32_t _room = (int32_t)(RING_SAMPLES - SAMP_PER_BLK) - av;
-						uint32_t _rb = _room > 0 ? (uint32_t)_room / SAMP_PER_BLK : 0u;
-						if (n > _rb) n = _rb;
-					}
-					if (!n) break;
-					{	/* contiguous run ends at this tile's window edge */
-						uint32_t wend = (c / win) * wper + wbase + win;
-						if (loop_blk + n > wend) n = wend - loop_blk;
-					}
-					/* SILENCE PAD: the loop length can exceed the recorded
-					 * content (fixed mode). [content, gb) was never written
-					 * to flash — read it as synthesised zeros instead of
-					 * stale flash data. NOTE: memset(0) is true silence ONLY
-					 * for PCM. A compressed codec (u-law/ADPCM) would need
-					 * its own encoded-silence bytes here, not zeros (u-law
-					 * 0x00 decodes to a loud tone). */
-					uint32_t content = t->content_blocks ? t->content_blocks : gb;
-					bool _sil = (loop_blk >= content);
-					if (!_sil && loop_blk + n > content) n = content - loop_blk;
-					uint32_t blkno = trk_blk(slot, (uint32_t)i) + loop_blk;
-					bool _rok;
-					if (_sil) { memset(batchbuf, 0, (size_t)n * EMMC_BLOCK_SIZE); _rok = true; }
-					else      { _rok = emmc_read_blocks(blkno, batchbuf, n); }
-					if (!_rok) {
-						work = true;       /* read failed: retry in a few ms */
-						g_p2rfail++;
-						/* Fast command-phase failures must not abort the
-						 * whole round (that lockout was the measured
-						 * cut-out mechanism); only genuine rec-ring
-						 * pressure may. Otherwise skip this track — the
-						 * next round retries a few ms later, after the
-						 * card's busy window has passed. */
-						bool _rec_press = false;
-						for (int j = 0; j < NTRK; j++) {
-							uint8_t sj = trk[j].state;
-							if (sj != TS_REC && sj != TS_DONE) continue;
-							if ((trk[j].r_w - trk[j].r_r) >=
-							    (RRING_SAMPLES - RRING_SAMPLES / 4u))
-								_rec_press = true;
-						}
-						if (_rec_press) round_abort = true;
-						break;
-					}
-					if (t->p_w != pw) { work = true; break; } /* reset raced us */
-					/* DECODE: packed flash bytes (n blocks just read) -> play
-					 * ring (int16, wraps at RING_MASK, pw is block-aligned).
-					 * PCM is memcpy-equivalent. */
-					codec_unpack(t->pring, RING_MASK, pw & RING_MASK,
-					             batchbuf, n);
-					t->p_w = pw + n * SAMP_PER_BLK;
-					g_p2blk[i] += n;
-					work = true;
-					more = true;             /* served: worth another round */
-					budget -= n;
-				}
-				if (round_abort) { more = false; break; }
-				/* WRITE-PAGE BREAK: the recorder fills a whole 16-block
-				 * page every ~85 ms; the moment one is ready, finish the
-				 * round early so PASS 1 can write it — write latency is
-				 * bounded to ~one chunk (~5 ms) without any of the old
-				 * mid-round yield heuristics that locked tracks out. */
-				bool page_ready = false;
-				for (int j = 0; j < NTRK; j++) {
-					uint8_t sj = trk[j].state;
-					if (sj != TS_REC && sj != TS_DONE) continue;
-					if ((trk[j].r_w - trk[j].r_r) >=
-					    16u * SAMP_PER_BLK) page_ready = true;
-				}
-				if (page_ready) {
-					g_p2yield++;
-					more = false;
-					break;
-				}
-			}
-			}
-		}
+		/* PASS 2 (the classic looper's play-ring read-ahead) is REMOVED.
+		 *
+		 * It refilled trk[].pring from the classic per-track flash regions
+		 * for every track in TS_PLAY, staging each chunk through a 16 KB
+		 * batchbuf. In this firmware no track can ever be in TS_PLAY:
+		 * g_meta.slot[].present[] is never assigned a nonzero value anywhere
+		 * in this file, which the classic-source-absence CI gate proves
+		 * fail-closed. So the whole pass was a loop whose body could not
+		 * execute, holding 16 KB of RAM to stage reads it would never make.
+		 *
+		 * That 16 KB is exactly one more stored-song sector buffer, and it
+		 * is spent on one: ST_STEM_MBOX_SLOTS goes from 2 to 4, taking the
+		 * stream's read-ahead from a single sector to three. Buffering is
+		 * what turns a card that is on average fast enough into a card that
+		 * is fast enough EVERY time -- an eMMC read can stall on internal
+		 * housekeeping (this driver's own start-bit hunt allows up to 80 ms
+		 * for it), and with one sector of slack any stall longer than
+		 * 7.08 ms is an audible hole no matter how quick the average read is.
+		 *
+		 * Stored-song prefetch (above) is the only read-ahead this firmware
+		 * has, and it is unaffected -- it never used batchbuf or pring, and
+		 * reads straight into the ring's sector buffers. */
 		if (!work) {
 			/* IDLE WINDOW: drain the card's write cache in the background.
 			 * emmc_cache_flush_try() was built for exactly this (abortable:
@@ -5167,33 +4974,33 @@ static void controls_diag(void)
 		}
 		l_aud = aud; l_str = str; l_mid = mid; l_mai = mai; l_all = all;
 	}
+	/* The PASS2 line is GONE with PASS 2 itself. Every counter it printed
+	 * (per-track refilled blocks, dead-history snaps, round aborts, read
+	 * failures) belonged to the classic play-ring read-ahead, so on this
+	 * firmware it could only ever have printed zeros -- a diagnostic that
+	 * reports nothing but zeros about work that cannot happen is worse than
+	 * no diagnostic, because it reads as evidence. The command-retry count
+	 * it also carried is real and moves to the EMMC48 line below. */
 	extern volatile uint32_t emmc_dbg_cmd_retries;
-	printk("PASS2 p2=[%u %u %u %u] sn=[%u %u %u %u] ab=%u,%u rt=%u cn=[%u %u %u %u]\n",
-	       (unsigned)g_p2blk[0], (unsigned)g_p2blk[1], (unsigned)g_p2blk[2], (unsigned)g_p2blk[3],
-	       (unsigned)g_p2snap[0], (unsigned)g_p2snap[1], (unsigned)g_p2snap[2], (unsigned)g_p2snap[3],
-	       (unsigned)g_p2yield, (unsigned)g_p2rfail,
-	       (unsigned)emmc_dbg_cmd_retries,
-	       (unsigned)trk[0].content_blocks, (unsigned)trk[1].content_blocks,
-	       (unsigned)trk[2].content_blocks, (unsigned)trk[3].content_blocks);
-	for (int _k = 0; _k < 4; _k++) { g_p2blk[_k] = 0; g_p2snap[_k] = 0; }
-	g_p2yield = 0; g_p2rfail = 0;
 	{
 		/* THE stall numbers, finally wall-clock: wus=write-busy window/session
 		 * max (us), rus=read-access wait, sus=CMD6 busy (cache flush / future
 		 * TRIM+BKOPS), bto=busy-poll expiries, low=worst play margin this
 		 * window (ms), hiw=worst rec fill (ms), gl=stored glitches (REPEATING
 		 * artifacts), iwf=i2s failures, aus=worst audio-block exec us,
-		 * ec=EXT_CSD[167,166,231,502,503,198,246,192,175]. */
+		 * rt=command-response retries recovered (moved here from the
+		 * removed PASS2 line), ec=EXT_CSD[167,166,231,502,503,198,246,192,175]. */
 		int32_t _lwv = g_play_lowat;
 		int _lw = (_lwv == 0x7FFFFFFF) ? -1
 			  : (int)(_lwv / (int32_t)(LOOP_RATE / 1000u));
-		printk("EMMC48 wus=%u/%u rus=%u sus=%u bto=%u low=%dms hiw=%ums gl=%u iwf=%u aus=%u rr=%x flt=%x@%x hi=%u,%u ec=%02x,%02x,%02x,%02x,%02x,%02x,%02x,%02x,%02x\n",
+		printk("EMMC48 wus=%u/%u rus=%u sus=%u bto=%u low=%dms hiw=%ums gl=%u iwf=%u aus=%u rt=%u rr=%x flt=%x@%x hi=%u,%u ec=%02x,%02x,%02x,%02x,%02x,%02x,%02x,%02x,%02x\n",
 		       (unsigned)emmc_dbg_wr_busy_us_max, (unsigned)emmc_dbg_wr_busy_us_peak,
 		       (unsigned)emmc_dbg_rd_wait_us_max, (unsigned)emmc_dbg_switch_busy_us_max,
 		       (unsigned)emmc_dbg_busy_timeouts, _lw,
 		       (unsigned)(g_rec_hiwat / (LOOP_RATE / 1000u)),
 		       (unsigned)g_stored_glitch_cnt, (unsigned)g_i2s_wfail_cnt,
 		       (unsigned)g_audio_us_max,
+		       (unsigned)emmc_dbg_cmd_retries,   /* rt=: was on the removed PASS2 line */
 		       (unsigned)g_resetreas,
 		       (unsigned)g_last_fault_reason, (unsigned)g_last_fault_pc,
 		       (unsigned)g_hpi_on, (unsigned)emmc_dbg_hpi_fires,

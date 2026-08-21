@@ -160,29 +160,35 @@ static inline void st_atomic_set(st_atomic32_t *a, int32_t v)
  * (one sector, 7.08 ms) was structurally unable to meet that; see this
  * header's own "WHY N SLOTS AND NOT TWO".
  *
- * TWO, FOR NOW, AND THAT IS THE POINT OF THIS COMMIT, NOT ITS GOAL.
- * Two slots is one sector of read-ahead -- the same depth (and the same
- * 16 KB) as the double-buffer this replaces -- so this change lands the
- * RING PROTOCOL in the shipped firmware at unchanged RAM cost, with the
- * loop-wrap release fix and the whole test suite proving it, while
- * changing nothing about the memory budget.
+ * FOUR. Three sectors of read-ahead = 21.2 ms, the first value with
+ * positive margin over the 16.1 ms measured worst-case read.
  *
- * It is deliberately NOT the depth the product needs. Four slots
- * (3 sectors = 21.2 ms) is the first value with positive margin over the
- * 16.1 ms measured worst-case read, and deeper is better still. But depth
- * costs 8 KB per slot, and this firmware has only ~17 KB genuinely spare:
- * raising this to 4 pushed RAM to 245,086 B and the CI budget gate
+ * This was 2 for exactly one commit, because 2 was what the RAM budget
+ * allowed: raising it to 4 pushed RAM to 245,086 B and the CI budget gate
  * correctly rejected it for leaving under its required 32 KiB free. That
- * gate is right and is not to be relaxed to make a feature fit.
+ * gate was right, and it has NOT been relaxed to make this fit. What paid
+ * for the two extra slots is the 16 KB batchbuf that went away with the
+ * classic play-ring read-ahead (PASS 2) in streamer_thread -- a pass whose
+ * body could never execute, because no track in this firmware can reach
+ * TS_PLAY (the classic-source-absence CI gate proves it fail-closed). The
+ * 16 KB it reserved to stage reads it would never make is now these slots.
  *
- * What pays for depth is the ~149 KB of provably-silent classic Tape
- * Looper buffers (docs/stem-tape-capability-gap-analysis.md). Once that
- * reclaim lands, raising this number is a one-line change on top of a
- * protocol that is already proven in the real image -- which is exactly
- * why the two are separate commits.
+ * WHY DEPTH IS NOT OPTIONAL, even once throughput is fixed: average speed
+ * and reliability are different properties. A read that is on average
+ * comfortably faster than 7.08 ms still stalls occasionally on the card's
+ * own internal housekeeping -- this driver's start-bit hunt allows up to
+ * 80 ms for exactly that. With one sector of slack, ANY stall past 7.08 ms
+ * is an audible hole no matter how quick the average is. Depth is what
+ * converts "fast enough on average" into "fast enough every time".
+ *
+ * Deeper is still better, and the remaining ~131 KB of provably-silent
+ * classic Tape Looper play rings (docs/stem-tape-capability-gap-analysis.md)
+ * would buy 16 more slots. That reclaim is a larger excision of the classic
+ * engine and stays a separate commit, on top of a protocol already proven
+ * in the real image.
  */
 #ifndef ST_STEM_MBOX_SLOTS
-#define ST_STEM_MBOX_SLOTS 2u
+#define ST_STEM_MBOX_SLOTS 4u
 #endif
 
 /* Value of a slot that holds no valid sector, and of held_sector before
