@@ -1631,7 +1631,7 @@ __attribute__((optimize("O2")))
  * produced; the whole-song equivalence is host-tested (see
  * tests/test_stem_stream.c's run-form equivalence case).
  */
-__attribute__((optimize("O2")))
+__attribute__((optimize("O2"), noinline))
 static void stem_render_run(const uint8_t *buf, uint32_t frame_in_sector,
 			     const st_stem_mix_prepared_t *prep,
 			     int32_t m0, int32_t md, int32_t mv,

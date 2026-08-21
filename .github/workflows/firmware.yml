@@ -1437,8 +1437,16 @@ jobs:
           # other than t/T (e.g. b/B/d/D/r/R), so check()'s text-only
           # pattern would never match them even when genuinely linked.
           check_any() {
-            if ! grep -qE " [a-zA-Z] ${1}\$" audit/nm.txt; then
+            # Accept GCC's own IPA clone suffixes (.constprop.N, .isra.N,
+            # .part.N). Those are the SAME function -- the compiler
+            # specialises or splits a body and renames the emitted symbol --
+            # so requiring the bare name would fail the build over a codegen
+            # detail while the code is genuinely linked in. It is not a
+            # loosening of what is proven: a clone only exists if the
+            # original function is really there and really called.
+            if ! grep -qE " [a-zA-Z] ${1}(\.[a-z]+\.[0-9]+)*\$" audit/nm.txt; then
               echo "MISSING required linked symbol: $1" >&2
+              grep -E " [a-zA-Z] ${1}" audit/nm.txt || echo "  (no symbol whose name starts with ${1} exists at all)"
               missing=1
             else
               echo "present: $1"
