@@ -144,11 +144,17 @@ static void spim_data_init(void)
 	s_spim_ok = true;
 }
 
-/* One blocking DMA transfer with the wires temporarily owned by SPIM. While
+/* Kick off a DMA transfer with the wires temporarily owned by SPIM, and
+ * return IMMEDIATELY -- the caller must pair this with spim_wait(). While
  * ENABLED the peripheral drives SCK (+MOSI for TX) / samples MISO; on disable
- * the pins fall back to their GPIO latches (CLK low, DAT0 as configured), so
- * the surrounding bit-bang phases continue seamlessly. ~65 us per 64 bytes. */
-static void spim_xfer(const uint8_t *tx, uint32_t txlen, uint8_t *rx, uint32_t rxlen)
+ * (in spim_wait()) the pins fall back to their GPIO latches (CLK low, DAT0 as
+ * configured), so the surrounding bit-bang phases continue seamlessly.
+ *
+ * Split into start/wait rather than one blocking call because the wait is
+ * long and the CPU is otherwise idle inside it: a full 514-byte block at
+ * 32 MHz takes ~129 us, and the read path now spends that window verifying
+ * the PREVIOUS block's CRC instead of spinning. See read_data_block(). */
+static void spim_start(const uint8_t *tx, uint32_t txlen, uint8_t *rx, uint32_t rxlen)
 {
 	NRF_SPIM3->PSEL.MOSI = tx ? PIN_EMMC_DAT0 : 0xFFFFFFFFu;
 	NRF_SPIM3->PSEL.MISO = rx ? PIN_EMMC_DAT0 : 0xFFFFFFFFu;
@@ -159,10 +165,22 @@ static void spim_xfer(const uint8_t *tx, uint32_t txlen, uint8_t *rx, uint32_t r
 	NRF_SPIM3->RXD.MAXCNT = rx ? rxlen : 0;
 	NRF_SPIM3->EVENTS_END = 0;
 	NRF_SPIM3->TASKS_START = 1;
+}
+
+static void spim_wait(void)
+{
 	while (!NRF_SPIM3->EVENTS_END) {
-		/* ~260 us for a full block at 16 MHz */
+		/* ~129 us for a full block at 32 MHz */
 	}
 	NRF_SPIM3->ENABLE = 0;
+}
+
+/* The original blocking form, kept for the phases that have nothing useful to
+ * do while the transfer runs (the write path). */
+static void spim_xfer(const uint8_t *tx, uint32_t txlen, uint8_t *rx, uint32_t rxlen)
+{
+	spim_start(tx, txlen, rx, rxlen);
+	spim_wait();
 }
 
 static inline void half_delay(uint32_t us)
@@ -389,9 +407,54 @@ static bool send_command_retry(uint8_t cmd, uint32_t arg, uint8_t *r1_out, int t
 	return false;
 }
 
-/* DATA read: per-bit CLK toggle uses the configurable (possibly 0) half-period. */
+/* DEFERRED CRC VERIFY (read path only).
+ *
+ * Verifying a block's CRC16 is ~512 table steps of pure computation, and it
+ * used to run right after that block's DMA finished -- i.e. in series with
+ * everything else, on a CPU the eMMC read is already bound by. But the very
+ * next thing the read does is start ANOTHER 129 us DMA and spin waiting for
+ * it, with the CPU doing nothing at all. So the CRC is moved into that
+ * window: block N-1 is verified while block N is on the wire, and the whole
+ * verify becomes free.
+ *
+ * This is safe because the two touch disjoint memory. The DMA is filling
+ * block N's 512 bytes (plus the two CRC bytes that spill into block N+1's
+ * space, see read_data_block()); the CRC is reading block N-1's 512 bytes,
+ * which the card finished delivering an entire block ago.
+ *
+ * The only behavioural difference is WHEN a corrupt block is noticed: one
+ * block later than before. That costs nothing real -- emmc_read_blocks()
+ * already aborted the whole CMD18 burst with CMD12 and made the caller retry
+ * the entire read on any single block's CRC failure, and it publishes
+ * nothing unless the call returns true. Clocking one extra block into a
+ * buffer that is about to be discarded and re-read changes no outcome.
+ */
+static const uint8_t *s_crc_pend_data;    /* NULL = nothing awaiting verify */
+static uint16_t       s_crc_pend_expect;
+static bool           s_crc_pend_fail;    /* sticky for the whole read call */
+
+__attribute__((optimize("O2")))
+static void crc_verify_pending(void)
+{
+	if (s_crc_pend_data == NULL) {
+		return;
+	}
+	if (crc16(s_crc_pend_data, EMMC_BLOCK_SIZE) != s_crc_pend_expect) {
+		emmc_crc_rd_errs++;               /* corrupt read: caller retries */
+		s_crc_pend_fail = true;
+	}
+	s_crc_pend_data = NULL;
+}
+
+/* DATA read: per-bit CLK toggle uses the configurable (possibly 0) half-period.
+ *
+ * `can_overrun` says the two bytes immediately AFTER buf's 512 are safe to
+ * clobber -- true for every block of a multi-block read except the last,
+ * because the next block's DMA overwrites them anyway. When it holds, the
+ * card's payload is DMA'd straight into its final destination and the
+ * 512-byte memcpy out of the staging buffer disappears entirely. */
 __attribute__((optimize("O2")))   /* read path only: -O2 safe for reads, NOT writes */
-static bool read_data_block(uint8_t *buf)
+static bool read_data_block(uint8_t *buf, bool can_overrun)
 {
 	const uint32_t hd = g_emmc_clk_half_us;
 
@@ -453,25 +516,44 @@ static bool read_data_block(uint8_t *buf)
 	if (s_spim_ok) {
 		/* FAST PATH: the start bit was just consumed by the bit-bang hunt
 		 * above, so the remaining 512 data bytes + CRC16 are exactly byte-
-		 * aligned — one 8 MHz SPIM RX DMA (~515 us vs ~1.7 ms bit-banged). */
-		spim_xfer(NULL, 0, s_dma_rx, sizeof(s_dma_rx));
+		 * aligned — one 32 MHz SPIM RX DMA (~129 us vs ~1.7 ms bit-banged).
+		 *
+		 * DMA STRAIGHT INTO THE DESTINATION whenever the caller says the
+		 * two bytes past it are expendable (every block of a burst but the
+		 * last). The card sends 512 payload + 2 CRC contiguously, so those
+		 * two bytes land in the next block's slot and are read out into a
+		 * scalar below, well before that block's own DMA overwrites them.
+		 * That deletes a 512-byte memcpy per block outright. */
+		uint8_t *rx = can_overrun ? buf : s_dma_rx;
+
+		spim_start(NULL, 0, rx, EMMC_BLOCK_SIZE + 2u);
+		/* THE DMA WINDOW: ~129 us during which the card is clocking bytes
+		 * in by hardware and the CPU has nothing to do. Spend it on the
+		 * previous block's CRC instead of spinning. */
+		crc_verify_pending();
+		{
+			uint32_t now = DWT->CYCCNT;
+
+			s_rd_crc_cyc += now - phase_c0;
+			phase_c0 = now;
+		}
+		spim_wait();
 		{
 			uint32_t now = DWT->CYCCNT;
 
 			s_rd_dma_cyc += now - phase_c0;
 			phase_c0 = now;
 		}
-		memcpy(buf, s_dma_rx, EMMC_BLOCK_SIZE);
-		emmc_dbg_rd_crc = (uint16_t)(((uint16_t)s_dma_rx[EMMC_BLOCK_SIZE] << 8) |
-					     s_dma_rx[EMMC_BLOCK_SIZE + 1]);
-		RCLK_HIGH(); HALF(hd); RCLK_LOW(); HALF(hd);  /* end bit */
-		if (crc16(buf, EMMC_BLOCK_SIZE) != emmc_dbg_rd_crc) {
-			s_rd_crc_cyc += DWT->CYCCNT - phase_c0;
-			emmc_crc_rd_errs++;          /* corrupt read: caller retries */
-			DAT0_OUT();
-			DAT0_HIGH();
-			return false;
+		if (!can_overrun) {
+			memcpy(buf, s_dma_rx, EMMC_BLOCK_SIZE);
 		}
+		emmc_dbg_rd_crc = (uint16_t)(((uint16_t)rx[EMMC_BLOCK_SIZE] << 8) |
+					     rx[EMMC_BLOCK_SIZE + 1]);
+		RCLK_HIGH(); HALF(hd); RCLK_LOW(); HALF(hd);  /* end bit */
+		/* Hand this block to the NEXT block's DMA window (or to
+		 * crc_flush_pending() if this was the last one). */
+		s_crc_pend_data = buf;
+		s_crc_pend_expect = emmc_dbg_rd_crc;
 		s_rd_crc_cyc += DWT->CYCCNT - phase_c0;
 	} else {
 		for (uint32_t i = 0; i < EMMC_BLOCK_SIZE; i++) {
@@ -494,11 +576,26 @@ static bool read_data_block(uint8_t *buf)
 		}
 		emmc_dbg_rd_crc = rdcrc;
 		RCLK_HIGH(); HALF(hd); RCLK_LOW(); HALF(hd);  /* end bit */
+		/* This degraded fallback (SPIM never came up at all) did not
+		 * verify the CRC before and does not now -- changing that on a
+		 * path no shipped device takes, and which cannot be exercised
+		 * here, would be an untested behaviour change smuggled into an
+		 * unrelated fix. What it MUST do is leave nothing stale behind
+		 * for crc_flush_pending() to verify against the wrong block. */
+		s_crc_pend_data = NULL;
 	}
 
 	DAT0_OUT();
 	DAT0_HIGH();
 	return true;
+}
+
+/* Verify whatever the last block left pending. Called once at the end of a
+ * read call, since the final block has no following DMA window to hide in. */
+static bool crc_flush_pending(void)
+{
+	crc_verify_pending();
+	return !s_crc_pend_fail;
 }
 
 bool emmc_cmd13(uint8_t *r1_out)
@@ -770,7 +867,12 @@ bool emmc_read_ext_csd(uint8_t *buf)
 	if (!send_command_retry(8, 0, r1, 8)) {
 		return false;
 	}
-	return read_data_block(buf);
+	/* Boot-time single block into a caller-sized 512-byte buffer: staging
+	 * buffer (no overrun allowed) and verify before returning, since there
+	 * is no following block to hide the CRC behind. */
+	s_crc_pend_data = NULL;
+	s_crc_pend_fail = false;
+	return read_data_block(buf, false) && crc_flush_pending();
 }
 
 /* CMD6 SWITCH (R1b): write one EXT_CSD byte. arg = (0b11<<24)|(index<<8 ... );
@@ -1073,13 +1175,21 @@ bool emmc_read_blocks(uint32_t block_addr, uint8_t *buf, uint32_t count)
 	s_rd_dma_cyc = 0u;
 	s_rd_crc_cyc = 0u;
 	emmc_dbg_rd_hunt_clks = 0u;
+	/* Start every call with an empty verify pipeline: nothing carried over
+	 * from a previous (possibly aborted) read may ever be attributed to
+	 * this one. */
+	s_crc_pend_data = NULL;
+	s_crc_pend_fail = false;
 	if (count == 1) {
 		emmc_dbg_last_cmd_resp = send_command_retry(17, block_addr, r1, 8);
 		if (!emmc_dbg_last_cmd_resp) {
 			rd_phase_publish();
 			return false;
 		}
-		bool ok = read_data_block(buf);
+		/* Single block: nothing follows it, so it cannot overrun into a
+		 * next block's space and there is no later DMA window to hide
+		 * its CRC in. Staging buffer + immediate verify, as before. */
+		bool ok = read_data_block(buf, false) && crc_flush_pending();
 
 		rd_phase_publish();
 		return ok;
@@ -1108,15 +1218,34 @@ bool emmc_read_blocks(uint32_t block_addr, uint8_t *buf, uint32_t count)
 			rd_phase_publish();
 			return false;
 		}
-		if (!read_data_block(buf + i * EMMC_BLOCK_SIZE)) {
+		/* Every block but the last may DMA straight into its final home,
+		 * spilling its 2 CRC bytes into the next block's space -- which
+		 * the next block's own DMA overwrites. The last block has no
+		 * successor inside this buffer, so it goes through the staging
+		 * buffer rather than writing 2 bytes past the caller's array. */
+		if (!read_data_block(buf + i * EMMC_BLOCK_SIZE, i + 1u < count)) {
+			(void)send_command_retry(12, 0, r1, 3);
+			rd_phase_publish();
+			return false;
+		}
+		/* A CRC failure is seen one block late by construction (see
+		 * crc_verify_pending()'s own note). Abort the burst as soon as it
+		 * surfaces -- the caller retries the whole read, exactly as it
+		 * always did. */
+		if (s_crc_pend_fail) {
 			(void)send_command_retry(12, 0, r1, 3);
 			rd_phase_publish();
 			return false;
 		}
 	}
 	(void)send_command_retry(12, 0, r1, 3);
+	/* The final block has no following DMA window, so its CRC is verified
+	 * here -- after CMD12, which costs nothing and keeps the bus handshake
+	 * identical to before. */
+	bool ok = crc_flush_pending();
+
 	rd_phase_publish();
-	return true;
+	return ok;
 }
 
 bool emmc_write_blocks(uint32_t block_addr, const uint8_t *buf, uint32_t count)
