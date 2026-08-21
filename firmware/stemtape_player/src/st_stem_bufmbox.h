@@ -160,18 +160,7 @@ static inline void st_atomic_set(st_atomic32_t *a, int32_t v)
  * (one sector, 7.08 ms) was structurally unable to meet that; see this
  * header's own "WHY N SLOTS AND NOT TWO".
  *
- * FOUR. Three sectors of read-ahead = 21.2 ms, the first value with
- * positive margin over the 16.1 ms measured worst-case read.
- *
- * This was 2 for exactly one commit, because 2 was what the RAM budget
- * allowed: raising it to 4 pushed RAM to 245,086 B and the CI budget gate
- * correctly rejected it for leaving under its required 32 KiB free. That
- * gate was right, and it has NOT been relaxed to make this fit. What paid
- * for the two extra slots is the 16 KB batchbuf that went away with the
- * classic play-ring read-ahead (PASS 2) in streamer_thread -- a pass whose
- * body could never execute, because no track in this firmware can reach
- * TS_PLAY (the classic-source-absence CI gate proves it fail-closed). The
- * 16 KB it reserved to stage reads it would never make is now these slots.
+ * TWELVE. Eleven sectors of read-ahead = 77.9 ms.
  *
  * WHY DEPTH IS NOT OPTIONAL, even once throughput is fixed: average speed
  * and reliability are different properties. A read that is on average
@@ -179,16 +168,25 @@ static inline void st_atomic_set(st_atomic32_t *a, int32_t v)
  * own internal housekeeping -- this driver's start-bit hunt allows up to
  * 80 ms for exactly that. With one sector of slack, ANY stall past 7.08 ms
  * is an audible hole no matter how quick the average is. Depth is what
- * converts "fast enough on average" into "fast enough every time".
+ * converts "fast enough on average" into "fast enough every time", and
+ * 77.9 ms covers the driver's own worst-case allowance with margin.
  *
- * Deeper is still better, and the remaining ~131 KB of provably-silent
- * classic Tape Looper play rings (docs/stem-tape-capability-gap-analysis.md)
- * would buy 16 more slots. That reclaim is a larger excision of the classic
- * engine and stays a separate commit, on top of a protocol already proven
- * in the real image.
+ * WHAT PAID FOR IT, and what did not. The CI RAM budget gate has NOT been
+ * relaxed -- it rejected depth 4 once and was right to. Depth is funded
+ * entirely by classic Tape Looper memory this firmware proved it can never
+ * read: first the 16 KB batchbuf that staged the classic play-ring
+ * read-ahead (PASS 2, a loop whose body could not execute), then the
+ * 131,072 bytes of trk[].pring play rings themselves, which after PASS 2
+ * went were written by nothing and, after PASS B went, read by nothing.
+ * 147 KB reclaimed; 8 slots x 8 KB = 64 KB spent here; the rest stays free.
+ *
+ * The depth is also PRIMED, not merely allocated: streamer_thread fills and
+ * validates the whole window before publishing the song, so playback starts
+ * from a full ring instead of underrunning on its first sector boundary.
+ * See stem_prime_read_ahead() in main.c.
  */
 #ifndef ST_STEM_MBOX_SLOTS
-#define ST_STEM_MBOX_SLOTS 4u
+#define ST_STEM_MBOX_SLOTS 12u
 #endif
 
 /* Value of a slot that holds no valid sector, and of held_sector before

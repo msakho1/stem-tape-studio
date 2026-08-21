@@ -124,7 +124,7 @@
  * about the change -- stop and re-flash before reading another number out
  * of it.
  */
-#define ST_BUILD_TAG "st7"
+#define ST_BUILD_TAG "st8"
 #include "st_track_hold.h"
 #include "st_stix.h"
 #include "st_v11_format.h"
@@ -1005,7 +1005,10 @@ enum trk_state { TS_EMPTY, TS_ARMED, TS_REC, TS_DONE, TS_PLAY };
 struct looptrk {
 	volatile uint8_t  state;
 	volatile uint16_t vol_q8;            /* fader volume, 256 = unity */
-	int16_t  pring[RING_SAMPLES];        /* play ring:  streamer writes, audio reads */
+	/* pring[] (4 x 16384 x 2 = 131,072 bytes) is REMOVED. Nothing wrote it
+	 * once the classic play-ring read-ahead went, and nothing read it once
+	 * PASS B went -- see PASS B's own note in looper_audio_block(). Its RAM
+	 * is now the stored-song ring's read-ahead depth. */
 	volatile uint32_t p_w;               /*   streamer fill frontier (loop samples) */
 	volatile uint32_t r_w;               /*   rec ring: audio produce (into g_rring) */
 	volatile uint32_t r_r;               /*   rec ring: streamer consume */
@@ -2567,133 +2570,26 @@ static void looper_audio_block(int16_t *s)
 		}
 	}
 
-	/* ==== PASS B: accumulate each playing track over the whole block ==== */
-	for (int i = 0; i < NTRK; i++) {
-		if (trk[i].state != TS_PLAY) continue;
-		/* GAIN SMOOTHING + CLICKLESS MUTE: the fader value used to be
-		 * applied as a hard step once per 5 ms block (and mute as an
-		 * instant gate) — fast fader rides audibly zipper-clicked and
-		 * every mute/unmute popped (community: "fast up-and-down fader
-		 * movement sounds a little clicky"). The applied gain now ramps
-		 * linearly across the block toward the target (mute = target 0),
-		 * spreading any change over 256 samples; a muted track is skipped
-		 * entirely once its ramp settles at zero. */
-		const int32_t vtar = trk[i].muted ? 0 : (int32_t)vol_s[i];
-		const int32_t vprev = (int32_t)trk[i].vol_now;
-		int32_t vd = vtar - vprev;                   /* 0 in the common case */
-		/* ADC DEADBAND: the fader ADC jitters +/-1 count between reads, so
-		 * without this vd was nonzero on nearly every block for every
-		 * track — which silently disqualified the mixer's healthy FAST
-		 * PATH (it requires vd==0) and re-cost the CPU that path had
-		 * freed. Measured on hardware as renewed starvation under load
-		 * (stv 59/67 in one session vs ~0 on the release). A 1-count step
-		 * is 0.03 dB — far below audibility and below any zipper — so
-		 * snap it instantly; only real movement (>=2 counts) ramps. */
-		if (vd == 1 || vd == -1) vd = 0;
-		if (vtar == 0 && vd == 0 && vprev == 0) continue;  /* silent and settled */
-		trk[i].vol_now = (uint16_t)vtar;
-		const int16_t *const pr = trk[i].pring;
-		const int32_t vol = vtar;
-		/* STOPPED fast path: the transport is frozen (no phase steps this
-		 * block), so this track contributes ONE constant sample — compute
-		 * it once instead of 256 times. Falls back to the exact per-frame
-		 * loop whenever a starve or fade boundary is in flight so those
-		 * transitions keep their per-frame behavior. */
-		if (step == 0u && !trk[i].starved && trk[i].fade >= 256u && vd == 0) {
-			int32_t avail = (int32_t)(trk[i].p_w - posb[0]);
-			if (avail < 2) {
-				trk[i].starved = 1; g_starve_cnt[i]++;
-				continue;
-			}
-			int16_t a = pr[posb[0] & RING_MASK];
-			int16_t sv;
-			if (fracb[0] == 0u) {
-				sv = a;
-			} else {
-				int16_t bb = pr[(posb[0] + 1) & RING_MASK];
-				sv = (int16_t)((int32_t)a +
-					(int32_t)(((int64_t)(bb - a) * (int32_t)fracb[0]) >> 16));
-			}
-			if (avail < 256) sv = (int16_t)(((int32_t)sv * avail) >> 8);
-			int32_t add = ((int32_t)sv * vol) >> 8;
-			for (uint32_t f = 0; f < BLK_FRAMES; f++) mix32[f] += add;
-			continue;
-		}
-		/* HEALTHY fast path: when no starve or fade boundary can possibly
-		 * occur inside this block — not starved, no fade-in running, and
-		 * the frontier is far enough ahead of the block's LAST frame that
-		 * even with zero refills every frame has avail >= 258 (above both
-		 * the <2 starve gate and the <256 fade-out) — the per-frame
-		 * volatile p_w reload and the starve/fade branches are provably
-		 * dead. Skip them: output is bit-identical (refills only ever
-		 * RAISE avail). This is most of the mixer's remaining cost at
-		 * 3-4 healthy tracks; tracks anywhere near their edge take the
-		 * exact slow path below. Read demand scales with tape speed
-		 * (1.5x = 1125 blk/s for 4 tracks), and the CPU this returns to
-		 * the streamer is what lifts the refill ceiling past that. */
-		if (vd == 0 && !trk[i].starved && trk[i].fade >= 256u &&
-		    (int32_t)(trk[i].p_w - posb[BLK_FRAMES - 1u]) >= 258) {
-			for (uint32_t f = 0; f < BLK_FRAMES; f++) {
-				uint32_t cpos = posb[f];
-				uint32_t frac = fracb[f];
-				int16_t a = pr[cpos & RING_MASK];
-				int16_t sv;
-				if (frac == 0u) {
-					sv = a;
-				} else {
-					int16_t bb = pr[(cpos + 1) & RING_MASK];
-					sv = (int16_t)((int32_t)a +
-						(int32_t)(((int64_t)(bb - a) * (int32_t)frac) >> 16));
-				}
-				mix32[f] += ((int32_t)sv * vol) >> 8;
-			}
-			continue;
-		}
-		for (uint32_t f = 0; f < BLK_FRAMES; f++) {
-			uint32_t cpos = posb[f];
-			/* underrun gate WITH HYSTERESIS (semantics unchanged): once a
-			 * ring runs dry the track stays silent until half-refilled
-			 * (recovering earlier re-dips and chatters — hardware-tested). */
-			int32_t avail = (int32_t)(trk[i].p_w - cpos);
-			if (trk[i].starved) {
-				if (avail >= (int32_t)(RING_SAMPLES / 2u)) {
-					trk[i].starved = 0;
-					trk[i].fade = 0;   /* ramp back in (~5 ms), no click */
-				} else {
-					continue;
-				}
-			} else if (avail < 2) {
-				trk[i].starved = 1; g_starve_cnt[i]++;
-				continue;
-			}
-			uint32_t frac = fracb[f];
-			int16_t a = pr[cpos & RING_MASK];
-			int16_t sv;
-			if (frac == 0u) {
-				sv = a;                /* unity speed: no interpolation */
-			} else {
-				int16_t bb = pr[(cpos + 1) & RING_MASK];
-				/* int64 product: (bb-a)*frac can exceed INT32_MAX = signed-
-				 * overflow UB; the cast keeps it defined (SMULL on M4). */
-				sv = (int16_t)((int32_t)a +
-					(int32_t)(((int64_t)(bb - a) * (int32_t)frac) >> 16));
-			}
-			/* BOUNDARY FADE (unchanged): fade out over the last ~5 ms as
-			 * the ring drains, fade in after recovery — dropouts duck
-			 * instead of clicking. */
-			{
-				int32_t g = 256;
-				if (avail < 256) g = avail;
-				if (trk[i].fade < 256u) {
-					if ((int32_t)trk[i].fade < g) g = (int32_t)trk[i].fade;
-					trk[i].fade++;
-				}
-				if (g < 256) sv = (int16_t)(((int32_t)sv * g) >> 8);
-			}
-			int32_t vf = vd ? (vprev + ((vd * (int32_t)(f + 1)) >> 8)) : vol;
-			mix32[f] += ((int32_t)sv * vf) >> 8;
-		}
-	}
+	/* ==== PASS B is REMOVED ====
+	 *
+	 * It accumulated each PLAYING classic track out of trk[].pring into
+	 * mix32[]. Two independent facts make it unreachable in this firmware:
+	 * no track can be in TS_PLAY (g_meta.slot[].present[] is never assigned
+	 * a nonzero value anywhere in this file -- the classic-source-absence
+	 * CI gate proves that fail-closed), and since the classic play-ring
+	 * read-ahead (PASS 2 in streamer_thread) was deleted, NOTHING writes
+	 * pring at all. It was a loop that could not run, reading a buffer that
+	 * was never filled.
+	 *
+	 * Deleting it retires trk[].pring: 4 tracks x RING_SAMPLES(16384) x 2
+	 * bytes = 131,072 bytes of RAM that no code path could ever read a
+	 * meaningful sample out of. That is what pays for the stored-song
+	 * ring's depth -- see ST_STEM_MBOX_SLOTS in st_stem_bufmbox.h.
+	 *
+	 * mix32[] therefore stays at whatever PASS A wrote (silence), which is
+	 * exactly what it already held: this changes no audio, it removes work
+	 * and memory that could not affect any. */
+
 
 	/* ==== PASS C: master volume + soft limiter -> stereo out, OR the real
 	 * stored-song stereo stem mix (STEM TAPE: architecture correction,
@@ -4006,6 +3902,55 @@ static void codec_unpack(int16_t *ring, uint32_t ring_mask, uint32_t start,
 }
 #endif /* SP1_CODEC */
 
+#if SP1_XFER_ENABLE
+/*
+ * PRIME THE WHOLE READ-AHEAD WINDOW before playback is allowed to start.
+ *
+ * Boot used to read, validate and publish sector 0 and then immediately set
+ * g_stem_song_selected -- so the very first sector boundary the playhead
+ * crossed was, by construction, an underrun: nothing else was resident yet.
+ * The stream then spent the start of every song climbing out of a hole
+ * instead of playing from a full ring.
+ *
+ * This fills every remaining slot (sectors 1..SLOTS-1) through exactly the
+ * same path the running prefetch uses -- real physical read, real STSC
+ * header parse, real geometry validation against the song's own record,
+ * publication through the same atomic mailbox -- so a sector that would be
+ * rejected during playback is rejected here too, before a note is heard.
+ *
+ * Runs on streamer_thread, the only thread that ever touches flash, and only
+ * at boot-time selection, before g_stem_song_selected is published. Stops at
+ * the first failure and returns how many sectors are genuinely resident, so
+ * the caller reports the real depth rather than the intended one; a song
+ * shorter than the ring simply primes fewer.
+ */
+static uint32_t stem_prime_read_ahead(void)
+{
+	uint32_t primed = 1u;   /* sector 0: already read, validated and published */
+
+	for (uint32_t sec = 1u; sec < ST_STEM_MBOX_SLOTS; sec++) {
+		uint32_t slot = st_stem_mbox_slot_of(sec);
+		st11_sector_header_t hdr;
+		uint32_t blk;
+
+		if (sec >= g_stem_stream.sector_count) {
+			break;          /* song shorter than the ring */
+		}
+		blk = g_stem_stream.song_start_block + sec * ST11_BLOCKS_PER_SECTOR;
+		if (!emmc_read_blocks(blk, g_stem_sector_bufs[slot], ST11_BLOCKS_PER_SECTOR)) {
+			break;
+		}
+		if (!st11_sector_read_header(g_stem_sector_bufs[slot], &hdr) ||
+		    !st_stream_validate_sector(&g_stem_stream, sec, &hdr)) {
+			break;
+		}
+		st_stem_mbox_publish_ready(&g_stem_mbox, sec, slot);
+		primed++;
+	}
+	return primed;
+}
+#endif /* SP1_XFER_ENABLE */
+
 static void streamer_thread(void *a, void *b, void *c)
 {
 	ARG_UNUSED(a); ARG_UNUSED(b); ARG_UNUSED(c);
@@ -4246,6 +4191,21 @@ static void streamer_thread(void *a, void *b, void *c)
 									       (unsigned)lib.active.sample_rate);
 								}
 								st_stem_mbox_init(&g_stem_mbox, 0u);
+								{
+									/* Fill the REST of the ring before
+									 * publishing the song, so playback
+									 * starts from a full read-ahead
+									 * window rather than underrunning on
+									 * its first sector boundary. */
+									uint32_t primed = stem_prime_read_ahead();
+
+									printk("V11 lib: read-ahead primed %u/%u sectors "
+									       "(%u ms) before enabling playback\n",
+									       (unsigned)primed,
+									       (unsigned)ST_STEM_MBOX_SLOTS,
+									       (unsigned)((primed * ST11_FRAMES_PER_SECTOR * 1000u)
+											  / ST11_SAMPLE_RATE_HZ));
+								}
 								atomic_set(&g_stem_song_selected, 1); /* release fence */
 							}
 						}
