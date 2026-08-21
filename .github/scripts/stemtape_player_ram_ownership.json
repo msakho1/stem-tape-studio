@@ -97,6 +97,17 @@
       "phases": "all",
       "overlaps": "none",
       "evidence": "partially live: Stem Tape genuinely uses vol_q8/muted/solo. The rest is classic."
+    },
+    "g_stem_fx": {
+      "category": "fx",
+      "owner": "THE one FX rack (st_fx.c)",
+      "declared_in": "src/main.c",
+      "lifetime": "whole session; audio-thread exclusive",
+      "writers": "audio_thread (st_fx_process/st_fx_prepare)",
+      "readers": "audio_thread",
+      "phases": "FX overlay open, and the bounded echo tail after it closes",
+      "overlaps": "none. ONE rack exists: STEM scope points it at a stem, GLOBAL scope inserts it after the mix. Moving the target moves this instance rather than creating another, which is the whole reason there is no per-stem array here.",
+      "evidence": "32,768 B of it is the echo delay line, sized by .github/scripts/stemtape_fx_budget.py: 0.375 beat (banks.ts:460 ratios[2] at the committed default macro 0.5) at the 66 BPM admitted floor, Q15 mono, rounded to a power of two so the 48 kHz loop masks instead of dividing. The remaining ~184 B is filter/distortion/gate/echo state plus four engage ramps. A stereo line would be 65,536 B and was rejected."
     }
   },
   "prefixes": {
