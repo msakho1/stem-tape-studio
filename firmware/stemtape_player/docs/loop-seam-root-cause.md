@@ -1,9 +1,8 @@
 # The loop seam: why st17 blipped, and what the base SP-1 does instead
 
-**Status: root cause and measurement only.** Nothing in this document is
-wired into the audio path yet — that is the next commit. Nothing here is
-physically verified; every number was produced on a host from the frozen
-fixture.
+**Status: wired into the audio path in `st18`. Not physically verified.**
+Every number below was produced on a host from the frozen fixture. Nothing
+here has been heard on an SP-1.
 
 ---
 
@@ -161,16 +160,49 @@ stage anywhere between the decode and the master volume. That is the entire
 defect: **the base SP-1's mixer has a seam multiply and Stem Tape's does
 not.**
 
-### Where the repair goes
+### Stem Tape st18 — the repair
 
-`stem_render_run()` (line 1852) is the only place samples are produced, and
-it already takes the master-volume arguments `m0, md, mv`. The seam gain
-composes with those — one more multiply on a value that is already being
-multiplied. The three seek sites become *requests*; the jump happens on the
-frame `st_seam_jump_due()` reports the gain has reached zero.
+```
+audio_thread()
+  └─ looper_audio_block(blk)
+       └─ stem_audio_block(s, m0, md, mv)
+            cancel a WRAP armed against a window that no longer exists
+            while (f < BLK_FRAMES):
+              ├─ sample loop window atomics
+              ├─ ENTER  atomic_cas → ARM  { to = enter_fr, kind = ENTER }
+              │                            st_seam_begin()
+              ├─ EXIT   atomic_cas → ARM  { to = resume_fr, kind = EXIT }
+              │                            st_seam_begin(); latch the window
+              ├─ while an EXIT is pending, the window stays in force
+              ├─ WRAP   song_frame + 128 >= lp_hi, nothing pending
+              │            └─ ARM { to = lp_lo, kind = WRAP }
+              │               st_seam_begin_in(lp_hi - song_frame)
+              ├─ JUMP   pending && st_seam_jump_due()        ←── THE SEEK,
+              │            └─ st_stream_seek(jump_to)            at zero gain
+              ├─ residency: pin lookup, else mailbox acquire
+              ├─ clamp run to sector / song / block / loop-end
+              │            / the arming frame / st_seam_frames_to_jump()
+              ├─ stem_render_run(..., &s_stem_seam)
+              │      per frame:  v = (stem * master) >> 8
+              │                  v = (v * st_seam_gain(seam)) >> 8   ←── THE SEAM
+              │                  st_seam_tick(seam)
+              └─ backstop wrap, for a length change or a release at loop_end
+  └─ i2s_write(...)                              ← transport still untouched
+```
+
+`stem_render_run()` was already the only place samples are produced and
+already took the master-volume ramp `m0, md, mv`. The seam gain composes with
+it: one more Q8 multiply on a value that is being multiplied anyway. At unity
+(256) that multiply is the identity for every int16, so ordinary
+non-looping playback is bit-identical to what st17 shipped.
+
+Two run clamps are new, and both exist for the same reason: a run is up to a
+whole block long, so without them the playhead steps over the frame the duck
+must start on, or over the frame the jump is due on. Each costs one extra loop
+iteration per transition.
 
 No new buffer. No second playhead. No change to `i2s_configure`,
-`i2s_trigger` or `i2s_write`. That is Commit B.
+`i2s_trigger` or `i2s_write`.
 
 ## 5. What the previous harness failed to model, exactly
 
@@ -278,11 +310,39 @@ Recorded because both are mistakes production must not repeat.
    Fixed by routing all three transitions through one request/`jump_due`
    pump. That is the API `st_seam.h` defines, and the reason it defines it.
 
-## 7. What is not claimed
+## 7. The loop chase
 
-* The seam is **not** wired into the audio path yet.
-* Nothing here has been heard. These are host measurements of sample values.
-* CI passing this gate means the waveform is continuous in the model. It does
-  not mean the loop is seamless on the SP-1, and no CI output in this
-  repository may say that it does until the flashed BIN is physically
-  accepted.
+Requirement: all four Track LEDs as a musical chase, T1 → T2 → T3 → T4 in
+tempo with the loop BPM, T1 the downbeat, derived from the actual loop
+playback frame and the song's `bpm_q8`/downbeat.
+
+`st_led_mvp.c`'s `decide_playing()` already computed a bar chase from
+`in->beat.beat_index`, which comes from the single `st_beat_pulse()` call
+main.c makes on `g_stem_song_frame_pub` — the authoritative song frame, which
+while a loop runs *is* the loop playback frame — against the selected STIX
+record's own `bpm_q8` and `downbeat_frame`. So the timing source the
+requirement names was already there and correct.
+
+What changed is only what the Track row does with it **while a loop is
+running**: the row stops being a beat *pulse* and becomes a *position*
+display. Exactly one LED at `ST_LED_MAX`, held between beats rather than
+pulsed, unaffected by stem activity. A pulse says "a beat happened"; a held
+light says "you are here", and a looping player needs the second.
+
+* No second clock, no new timing state, nothing added to `st_beat_phase.c` —
+  `beat_index` and `valid` are already set independently of `in_pulse`.
+* Without a loop, `decide_playing()` is untouched. The pulse-and-accent
+  display is physically verified and a regression in it fails
+  `case_loop_chase`'s last check.
+* A song with no `bpm_q8` gets no chase, not a fabricated one.
+* A latched loop still shows S1 solid — the shipped, physically verified
+  marker — alongside the chase.
+
+## 8. What is not claimed
+
+* Nothing here has been heard. These are host measurements of sample values
+  and host assertions about LED levels.
+* CI passing these gates means the waveform is continuous in the model and the
+  LED decision assigns those levels. It does not mean the loop is seamless on
+  the SP-1 or that the chase looks right, and no CI output in this repository
+  may say that it does until the flashed BIN is physically accepted.

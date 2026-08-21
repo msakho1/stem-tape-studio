@@ -106,22 +106,40 @@ static inline void st_seam_reset(st_seam_t *s)
 }
 
 /*
- * Arm a seam: begin ducking out. The caller keeps emitting ORDINARY forward
- * audio while st_seam_jump_due() is false, then performs its jump on the
- * frame that returns true, then keeps emitting from the new position.
+ * Arm a seam that reaches zero in EXACTLY `frames` frames (capped at
+ * ST_SEAM_FRAMES -- a duck is never stretched, only shortened).
+ *
+ * The caller keeps emitting ORDINARY forward audio while st_seam_jump_due()
+ * is false, performs its jump on the frame that returns true, then keeps
+ * emitting from the new position.
+ *
+ * Re-arming mid-seam resumes from wherever the gain already is rather than
+ * snapping to unity: two transitions closer together than the seam width -- a
+ * wrap immediately followed by a release -- must not produce a step of their
+ * own. The gain therefore never moves UP as a result of arming, which is what
+ * the max() below enforces for both the DOWN and the UP case.
  */
-static inline void st_seam_begin(st_seam_t *s)
+static inline void st_seam_begin_in(st_seam_t *s, uint16_t frames)
 {
-	/* Re-arming mid-seam restarts the duck from wherever the gain is,
-	 * rather than snapping to unity -- two transitions closer together
-	 * than the seam width (a wrap immediately followed by a release) must
-	 * not produce a step of their own. */
-	if (s->phase == ST_SEAM_UP) {
-		s->step = (uint16_t)(ST_SEAM_FRAMES - s->step);
-	} else if (s->phase == ST_SEAM_IDLE) {
-		s->step = 0u;
+	uint16_t start = (frames >= ST_SEAM_FRAMES)
+			 ? 0u : (uint16_t)(ST_SEAM_FRAMES - frames);
+
+	if (s->phase != ST_SEAM_IDLE) {
+		uint16_t cur = (s->phase == ST_SEAM_UP)
+			       ? (uint16_t)(ST_SEAM_FRAMES - s->step) : s->step;
+
+		if (cur > start) {
+			start = cur;
+		}
 	}
 	s->phase = ST_SEAM_DOWN;
+	s->step  = start;
+}
+
+/* Arm a full-width seam. */
+static inline void st_seam_begin(st_seam_t *s)
+{
+	st_seam_begin_in(s, ST_SEAM_FRAMES);
 }
 
 /* The gain to apply to THIS frame, Q8. */
@@ -168,6 +186,30 @@ static inline void st_seam_tick(st_seam_t *s)
 	default:
 		break;
 	}
+}
+
+/* Advance `n` output frames at once, for a caller that emitted a run (or a
+ * stretch of underrun silence) without consulting the gain per frame. */
+static inline void st_seam_advance(st_seam_t *s, uint32_t n)
+{
+	while (n--) {
+		st_seam_tick(s);
+	}
+}
+
+/*
+ * Frames remaining until st_seam_jump_due() turns true.
+ *
+ * A caller that renders in RUNS rather than one frame at a time uses this to
+ * clamp its run so the jump lands on a run boundary: the alternative is
+ * discovering the zero-crossing in the middle of an already-rendered run and
+ * jumping late, which is the fixed-count mistake this API exists to prevent.
+ * UINT16_MAX when no jump is pending, so it never shortens an ordinary run.
+ */
+static inline uint16_t st_seam_frames_to_jump(const st_seam_t *s)
+{
+	return (s->phase == ST_SEAM_DOWN)
+	       ? (uint16_t)(ST_SEAM_FRAMES - s->step) : UINT16_MAX;
 }
 
 /* True while a seam is in flight, for the caller's own bookkeeping. */

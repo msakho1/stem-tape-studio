@@ -1,4 +1,4 @@
-# Stem Tape control path (build `st17`)
+# Stem Tape control path (build `st18`)
 
 ## The gestures
 

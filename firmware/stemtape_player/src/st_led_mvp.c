@@ -259,6 +259,29 @@ static void decide_playing(const st_led_inputs_t *in, st_led_frame_t *out)
 {
 	uint8_t i;
 	uint8_t env;
+	/*
+	 * THE LOOP CHASE. While a loop is running -- momentary or latched --
+	 * the Track row stops being a beat pulse and becomes a position
+	 * display: exactly one LED at full brightness, advancing
+	 * T1 -> T2 -> T3 -> T4 in tempo, T1 on the downbeat.
+	 *
+	 * It is HELD rather than pulsed, which is the whole difference: a
+	 * pulse says "a beat happened", a held light says "you are here". A
+	 * looping player needs the second, and needs it visible between beats.
+	 *
+	 * NO SECOND CLOCK, and no new timing state anywhere. beat_index comes
+	 * from the same single st_beat_pulse() call every other light here is
+	 * derived from, computed on the authoritative song_frame -- which,
+	 * while a loop is running, IS the loop playback frame -- against the
+	 * selected STIX record's own bpm_q8 and downbeat_frame. beat_index and
+	 * valid are set independently of in_pulse (st_beat_phase.c), which is
+	 * why holding through the gaps needs nothing added to that module.
+	 *
+	 * WITHOUT A LOOP NOTHING HERE APPLIES. The pulse-and-accent display
+	 * below is physically verified and is left exactly as it is.
+	 */
+	const bool loop_chase = (in->loop_state != ST_LED_LOOP_NONE) &&
+				 in->beat.valid;
 
 	all_dark(out);
 
@@ -275,6 +298,15 @@ static void decide_playing(const st_led_inputs_t *in, st_led_frame_t *out)
 		out->level[ST_LED_S1] = ST_LED_MAX;
 	}
 
+	/* Set BEFORE the between-pulses return, because the chase is the one
+	 * thing on this row that stays lit between beats. */
+	if (loop_chase) {
+		for (i = 0; i < ST_LED_TRACK_COUNT; i++) {
+			out->level[i] = (i == in->beat.beat_index)
+					? ST_LED_MAX : 0u;
+		}
+	}
+
 	if (!in->beat.valid || !in->beat.in_pulse) {
 		return;   /* between pulses, or no trustworthy tempo: dark */
 	}
@@ -286,15 +318,18 @@ static void decide_playing(const st_led_inputs_t *in, st_led_frame_t *out)
 		out->level[ST_LED_S1] = env;
 	}
 
-	for (i = 0; i < ST_LED_TRACK_COUNT; i++) {
-		uint8_t lv = scale8(env, in->stem_activity[i]);
+	if (!loop_chase) {
+		for (i = 0; i < ST_LED_TRACK_COUNT; i++) {
+			uint8_t lv = scale8(env, in->stem_activity[i]);
 
-		if (i == in->beat.beat_index) {
-			/* CHASE ACCENT: full envelope, never dimmed by a quiet
-			 * stem -- the bar position has to stay readable. */
-			lv = env;
+			if (i == in->beat.beat_index) {
+				/* CHASE ACCENT: full envelope, never dimmed by
+				 * a quiet stem -- the bar position has to stay
+				 * readable. */
+				lv = env;
+			}
+			out->level[i] = lv;
 		}
-		out->level[i] = lv;
 	}
 
 	/* S4 shares the SAME envelope value: playing is shown on the side row

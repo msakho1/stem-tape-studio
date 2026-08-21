@@ -342,6 +342,127 @@ static void case_playing(void)
 	}
 }
 
+/* ================ 4b. the loop chase, locked to the song BPM ==============
+ *
+ * While a loop runs, the Track row becomes a POSITION display rather than a
+ * beat pulse: exactly one LED at full brightness, advancing T1 -> T2 -> T3 ->
+ * T4 in tempo, T1 on the downbeat, and HELD between beats rather than pulsed.
+ *
+ * The frames below are computed from the real 120 BPM @ 48 kHz timing the
+ * other playing cases use -- 24000 frames per beat -- and fed through the
+ * real st_beat_pulse(), so the chase is proven to derive from bpm_q8 and the
+ * downbeat rather than from a counter of the LED layer's own.
+ */
+static void case_loop_chase(void)
+{
+	st_led_inputs_t in; st_led_frame_t f;
+	const uint32_t fpb = 24000u;   /* 120 BPM @ 48 kHz */
+	const st_led_loop_t states[2] = { ST_LED_LOOP_MOMENTARY,
+					   ST_LED_LOOP_LATCHED };
+	int b, s;
+
+	g_cases++;
+	printf("\n-- Looping: bright T1->T2->T3->T4 chase locked to the song BPM\n");
+
+	for (s = 0; s < 2; s++) {
+		for (b = 0; b < 4; b++) {
+			char lbl[64];
+			int k, lit = 0;
+			/* Deep BETWEEN beats -- three quarters of the way into
+			 * the beat, far outside the pulse window -- which is
+			 * exactly where a pulse display would be dark. */
+			uint32_t frame = (uint32_t)b * fpb + (fpb * 3u) / 4u;
+
+			make_playing(&in, frame, 0u);
+			in.loop_state = states[s];
+			st_led_mvp_decide(&in, &f);
+			snprintf(lbl, sizeof(lbl), "%s loop, beat %d, between pulses",
+				 s ? "latched" : "momentary", b + 1);
+			show(lbl, &f);
+
+			CHECK(!in.beat.in_pulse,
+			      "the frame is outside the pulse window, where a "
+			      "pulse display would be dark");
+			CHECK(in.beat.beat_index == (uint8_t)b,
+			      "beat index %d derives from the STIX bpm_q8/downbeat "
+			      "and the song frame", b);
+			CHECK(f.level[b] == ST_LED_MAX,
+			      "T%d is FULLY bright on beat %d", b + 1, b + 1);
+			for (k = 0; k < (int)ST_LED_TRACK_COUNT; k++) {
+				if (f.level[k]) {
+					lit++;
+				}
+			}
+			CHECK(lit == 1,
+			      "exactly one Track LED is lit -- a position, not a "
+			      "pulse (%d lit)", lit);
+		}
+	}
+
+	/* T1 IS THE DOWNBEAT, at the downbeat frame itself. */
+	make_playing(&in, 0u, 0u);
+	in.loop_state = ST_LED_LOOP_MOMENTARY;
+	st_led_mvp_decide(&in, &f);
+	show("looping, exactly on the downbeat", &f);
+	CHECK(f.level[0] == ST_LED_MAX && f.level[1] == 0u &&
+	      f.level[2] == 0u && f.level[3] == 0u,
+	      "T1 represents the downbeat");
+
+	/* ACTIVITY DOES NOT TOUCH IT. The chase is a position display; a loud
+	 * or silent stem must not change which lane is lit or how brightly. */
+	{
+		st_led_frame_t loud, silent;
+		uint32_t frame = 2u * fpb + (fpb * 3u) / 4u;   /* beat 3 */
+
+		make_playing(&in, frame, 255u);
+		in.loop_state = ST_LED_LOOP_LATCHED;
+		st_led_mvp_decide(&in, &loud);
+		make_playing(&in, frame, 0u);
+		in.loop_state = ST_LED_LOOP_LATCHED;
+		st_led_mvp_decide(&in, &silent);
+		CHECK(memcmp(loud.level, silent.level, ST_LED_TRACK_COUNT) == 0,
+		      "stem activity does not modulate the chase");
+		CHECK(loud.level[2] == ST_LED_MAX, "and beat 3 lights T3");
+	}
+
+	/* THE LATCHED MARKER SURVIVES. S1 solid is the shipped, physically
+	 * verified indication and the chase must not displace it. */
+	make_playing(&in, 1u * fpb + (fpb * 3u) / 4u, 0u);
+	in.loop_state = ST_LED_LOOP_LATCHED;
+	st_led_mvp_decide(&in, &f);
+	CHECK(f.level[ST_LED_S1] == ST_LED_MAX,
+	      "a latched loop still shows S1 solid alongside the chase");
+
+	/* NO TEMPO, NO CHASE. A song with no bpm_q8 must not fabricate one. */
+	{
+		st_beat_timing_t bad;
+
+		memset(&in, 0, sizeof(in));
+		in.song_selected = true;
+		in.playing = true;
+		in.loop_state = ST_LED_LOOP_MOMENTARY;
+		(void)st_beat_timing_init(&bad, 0u, 0u, 48000u);
+		st_beat_pulse(&bad, 99999u, &in.beat);
+		st_led_mvp_decide(&in, &f);
+		show("looping, no tempo", &f);
+		CHECK(tracks_all(&f, 0u),
+		      "an absent tempo yields no chase, not a guessed one");
+	}
+
+	/* AND WITHOUT A LOOP NOTHING CHANGED. The pulse display is physically
+	 * verified; this case exists so a regression in it fails here. */
+	{
+		st_led_frame_t before;
+
+		make_playing(&in, 1u * fpb + (fpb * 3u) / 4u, 200u);
+		st_led_mvp_decide(&in, &before);
+		show("NOT looping, between pulses", &before);
+		CHECK(tracks_all(&before, 0u),
+		      "without a loop the Track row is still dark between pulses -- "
+		      "the chase is scoped to looping and changes nothing else");
+	}
+}
+
 /* ==================== 5. immediate momentary solo ======================== */
 static void case_solo(void)
 {
@@ -708,6 +829,7 @@ int main(void)
 	case_preview_levels();
 	case_stopped_gauge();
 	case_playing();
+	case_loop_chase();
 	case_solo();
 	case_solo_chords();
 	case_charging();
