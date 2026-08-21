@@ -124,7 +124,7 @@
  * about the change -- stop and re-flash before reading another number out
  * of it.
  */
-#define ST_BUILD_TAG "st11"
+#define ST_BUILD_TAG "st12"
 #include "st_track_hold.h"
 #include "st_stix.h"
 #include "st_v11_format.h"
@@ -4216,6 +4216,18 @@ static void streamer_thread(void *a, void *b, void *c)
 									       (unsigned)((primed * ST11_FRAMES_PER_SECTOR * 1000u)
 											  / ST11_SAMPLE_RATE_HZ));
 								}
+								/* STEM TAPE has no persistent mute: a Track
+								 * press is momentary solo only. Clear any
+								 * trk[].muted the classic reload path
+								 * restored from g_meta.song_mode[] --
+								 * inherited state from firmware that DID
+								 * latch mutes, which would otherwise leave
+								 * a stem silently muted with no gesture
+								 * left in this firmware to un-mute it. */
+								for (int mi = 0; mi < NTRK; mi++) {
+									trk[mi].muted = 0u;
+									trk[mi].solo = 0u;
+								}
 								atomic_set(&g_stem_song_selected, 1); /* release fence */
 							}
 						}
@@ -5180,104 +5192,76 @@ static enum vol_btn decode_vol(int v)
                                     * than the track row: slightly brighter
                                     * side lights relative to the tracks. CC2
                                     * mechanism, wide-window = jitter-immune. */
-#define LED_GHOST_FRAME_DIV  5u    /* GHOST class: muted-but-loaded tracks lit
-                                    * ONE frame in five using the SAME proven
-                                    * 60 us window as normal dim -> 1/5 of dim
-                                    * brightness (~1.2% of solid), refresh 200 Hz
-                                    * (still far above flicker perception), ZERO
-                                    * new edge timing. History: an 8 us second
-                                    * CC window flickered (two independent IRQ
-                                    * entry jitters on a narrow width) and a
-                                    * 20 us in-ISR capture-spin failed to boot
-                                    * on hardware — this design reuses only
-                                    * field-proven mechanisms. */
+/* (LED_GHOST_FRAME_DIV is gone: "faint" is now simply a level, 51/255, on
+ * the same per-LED sigma-delta every other brightness uses. The old
+ * one-frame-in-five divider existed only because the renderer had no
+ * per-LED duty; it does now.) */
 #define LED_PWM_TIMER      NRF_TIMER3
 #define LED_PWM_TIMER_IRQn TIMER3_IRQn
 /* every LED pin on each port (leds[]+track_leds[]) — for the OFF phase */
 #define LED_ALL_P0 ((1u<<0)|(1u<<1)|(1u<<29)|(1u<<26))
 #define LED_ALL_P1 ((1u<<13)|(1u<<12)|(1u<<15)|(1u<<14))
-static volatile uint32_t g_led_p0_on;   /* P0 LED pins logically lit */
-static volatile uint32_t g_led_p1_on;   /* P1 LED pins logically lit */
-static volatile uint32_t g_led_p0_ghost; /* P0 pins lit at GHOST duty */
-static volatile uint32_t g_led_p1_ghost; /* P1 pins lit at GHOST duty */
+/* ---- THE PHYSICAL LED STATE: one brightness per LED ---------------------
+ * Eight levels, 0..255. Index 0..3 are the Track LEDs, 4..7 the side row --
+ * the SAME order st_led_mvp.h's frame uses, so led_apply_frame() is a copy
+ * rather than a remapping that could silently transpose a row.
+ *
+ * This replaces the previous on/ghost bitmask pair plus a separate
+ * track-only level array. The semantic owner needs real brightness on every
+ * LED now: the beat envelope, the boot/shutdown fade and per-stem activity
+ * scaling all produce intermediate values, and the side row needs them as
+ * much as the track row does -- a fade on S1..S4 is impossible with an
+ * on/ghost/off vocabulary. One representation for all eight is both simpler
+ * and the only thing that can express it.
+ *
+ * The ISR gives each pin its own sigma-delta accumulator, reusing the exact
+ * proven 52 us / 66 us dim windows for the frames a pin is on -- no new edge
+ * timing whatsoever, the same reason the old GHOST class was built as a
+ * frame divider rather than a second, narrower compare window. Sigma-delta
+ * rather than a block divider because it spreads the on-frames evenly: at
+ * level 128 that is a clean 500 Hz alternation, where a divider would bunch
+ * 128 frames on and 128 off = 3.9 Hz of visible flicker. */
+#define LED_PHYS_COUNT 8u
+#define LED_PHYS_TRACK_FIRST 0u
+#define LED_PHYS_SIDE_FIRST  4u
+/* "Faint" as a level: 1/5 of full, matching the old GHOST class's own
+ * one-frame-in-five duty exactly. */
+#define LED_GHOST_LEVEL 51u
+static volatile uint8_t g_led_level[LED_PHYS_COUNT];
+/* Per-LED pin masks split by port, precomputed at init so the ISR needs no
+ * port comparison and no branch: exactly one of the two is nonzero for any
+ * given LED, so both can be OR-ed unconditionally. */
+static uint32_t g_led_bit_p0[LED_PHYS_COUNT];
+static uint32_t g_led_bit_p1[LED_PHYS_COUNT];
 static uint32_t g_led_sta_p0, g_led_sta_p1;   /* status-row pins (init-computed) */
 static uint32_t g_led_trk_p0, g_led_trk_p1;   /* track-row pins  (init-computed) */
 
-/* ---- PER-STEM BRIGHTNESS (currently unused) ------------------------------
- * The track row CAN show a continuous per-LED brightness, not just the
- * on/ghost/off vocabulary above. Nothing drives it today.
- *
- * It was built for a per-stem peak meter that rendered each stem's output
- * level. That meter is gone from the LED path: it was never approved by any
- * of the three contract documents, it was described as a "beat pulse" when
- * it was a level meter, and a level meter is not a stable, readable
- * indication of which stems are playing -- a quiet passage dimmed a stem
- * that was perfectly audible. st_led_mvp_decide() now owns the track row
- * with the contract's own solid/faint vocabulary, which the masks above
- * already express.
- *
- * The mechanism is left in place rather than ripped out: it is proven
- * hardware code in a zero-latency ISR that the product owner directed be
- * kept, removing it buys no RAM (a handful of bytes) and no CPU (the branch
- * is never taken because led_apply_frame() clears g_trk_level_active every
- * frame), and a future approved per-stem brightness behaviour would want
- * exactly this. It is dead weight only in the sense that nothing calls it
- * today, and that is stated here rather than left to be discovered.
- *
- * HOW, given the hardware: TIMER3 has only three compare channels and
- * they are already spent (period wrap, track-row off, status-row off), so
- * there is no way to give four LEDs four independent hardware duty
- * cycles. Instead each LED keeps a SIGMA-DELTA accumulator and is lit for
- * a fraction of the 1 kHz FRAMES equal to its level -- reusing the exact
- * same proven 52 us window for the frames it is on, adding no new edge
- * timing whatsoever (the same reason the GHOST class was built as a frame
- * divider rather than a second, narrower compare window; see
- * LED_GHOST_FRAME_DIV's own note about why a narrow second window
- * flickered and an in-ISR spin failed to boot).
- *
- * Sigma-delta rather than a plain frame counter because it spreads the
- * on-frames as evenly as the level allows: at level 128 that is a clean
- * 500 Hz alternation, where a block divider would bunch 128 frames on and
- * 128 off = 3.9 Hz of visible flicker.
- *
- * g_trk_level_active gates the whole mechanism: when it is 0 (no stem song
- * playing) the track row renders exactly as it always did, byte for byte,
- * through g_led_p0_on/g_led_p0_ghost. */
-static volatile uint8_t  g_trk_level[NUM_TRACK_LEDS];   /* 0..255, control thread writes */
-static volatile uint8_t  g_trk_level_active;            /* 1 = level path owns the track row */
-/* Per-track pin masks, split by port and precomputed at init so the ISR
- * needs no port comparison and no branch: exactly one of the two is
- * nonzero for any given track, so both can be OR-ed unconditionally. */
-static uint32_t g_trk_bit_p0[NUM_TRACK_LEDS];
-static uint32_t g_trk_bit_p1[NUM_TRACK_LEDS];
+
 
 /* DIRECT ISR (required for IRQ_ZERO_LATENCY): pure register IO, no kernel
  * calls, returns 0 = never asks for a reschedule. */
 ISR_DIRECT_DECLARE(led_pwm_isr)
 {
-	if (LED_PWM_TIMER->EVENTS_COMPARE[1]) {         /* period wrap: render shadow */
+	if (LED_PWM_TIMER->EVENTS_COMPARE[1]) {         /* period wrap: render */
 		LED_PWM_TIMER->EVENTS_COMPARE[1] = 0;
 		(void)LED_PWM_TIMER->EVENTS_COMPARE[1];
-		static uint32_t gframe;
-		uint32_t gon = ((++gframe % LED_GHOST_FRAME_DIV) == 0u);
-		uint32_t s0 = g_led_p0_on | (gon ? (g_led_p0_ghost & ~g_led_p0_on) : 0u);
-		uint32_t s1 = g_led_p1_on | (gon ? (g_led_p1_ghost & ~g_led_p1_on) : 0u);
+		static uint16_t acc[LED_PHYS_COUNT];
+		uint32_t s0 = 0, s1 = 0;
 
-		if (g_trk_level_active) {
-			/* The level path OWNS the track row this frame: drop
-			 * whatever the on/ghost masks said about those pins and
-			 * decide each one purely from its own accumulator. */
-			static uint16_t acc[NUM_TRACK_LEDS];
+		/* One sigma-delta accumulator per LED: each pin is lit for the
+		 * fraction of frames equal to its level. */
+		for (uint32_t li = 0; li < LED_PHYS_COUNT; li++) {
+			uint8_t lv = g_led_level[li];
 
-			s0 &= ~g_led_trk_p0;
-			s1 &= ~g_led_trk_p1;
-			for (uint32_t t = 0; t < NUM_TRACK_LEDS; t++) {
-				acc[t] = (uint16_t)(acc[t] + g_trk_level[t]);
-				if (acc[t] >= 256u) {
-					acc[t] = (uint16_t)(acc[t] - 256u);
-					s0 |= g_trk_bit_p0[t];
-					s1 |= g_trk_bit_p1[t];
-				}
+			if (lv == 0u) {
+				acc[li] = 0u;   /* fully dark: no residue to carry */
+				continue;
+			}
+			acc[li] = (uint16_t)(acc[li] + lv);
+			if (acc[li] >= 256u) {
+				acc[li] = (uint16_t)(acc[li] - 256u);
+				s0 |= g_led_bit_p0[li];
+				s1 |= g_led_bit_p1[li];
 			}
 		}
 		NRF_P0->OUTSET = s0;
@@ -5288,15 +5272,10 @@ ISR_DIRECT_DECLARE(led_pwm_isr)
 	if (LED_PWM_TIMER->EVENTS_COMPARE[0]) {         /* track-row on-time up */
 		LED_PWM_TIMER->EVENTS_COMPARE[0] = 0;
 		(void)LED_PWM_TIMER->EVENTS_COMPARE[0];
-		if (g_led_dim) {                        /* dim: track row goes dark;
-		                                         * the status row stays lit
-		                                         * until CC2. Full mode: only
-		                                         * ghost pins go dark. */
+		if (g_led_dim) {   /* dim: the track row goes dark here; the
+				    * status row stays lit until CC2 */
 			NRF_P0->OUTCLR = g_led_trk_p0;
 			NRF_P1->OUTCLR = g_led_trk_p1;
-		} else {
-			NRF_P0->OUTCLR = g_led_p0_ghost & ~g_led_p0_on;
-			NRF_P1->OUTCLR = g_led_p1_ghost & ~g_led_p1_on;
 		}
 	}
 	if (LED_PWM_TIMER->EVENTS_COMPARE[2]) {         /* status-row on-time up */
@@ -5329,11 +5308,26 @@ static void led_pwm_init(void)
 	for (int li = 0; li < NUM_TRACK_LEDS; li++) {
 		if (track_leds[li].port == NRF_P0) g_led_trk_p0 |= (1u << track_leds[li].pin);
 		else                               g_led_trk_p1 |= (1u << track_leds[li].pin);
-		/* Per-track split masks for the ISR's branch-free level path
-		 * (see g_trk_bit_p0's own note): exactly one of the pair is
-		 * nonzero for any track, the other stays 0. */
-		g_trk_bit_p0[li] = (track_leds[li].port == NRF_P0) ? (1u << track_leds[li].pin) : 0u;
-		g_trk_bit_p1[li] = (track_leds[li].port == NRF_P0) ? 0u : (1u << track_leds[li].pin);
+	}
+	/* Per-LED split masks for the ISR's branch-free sigma-delta (see
+	 * g_led_bit_p0's own note): exactly one of the pair is nonzero for any
+	 * LED, the other stays 0. Index order is track row then side row --
+	 * the SAME order st_led_mvp.h's frame uses. */
+	for (int li = 0; li < NUM_TRACK_LEDS; li++) {
+		uint32_t bit = 1u << track_leds[li].pin;
+
+		g_led_bit_p0[LED_PHYS_TRACK_FIRST + li] =
+			(track_leds[li].port == NRF_P0) ? bit : 0u;
+		g_led_bit_p1[LED_PHYS_TRACK_FIRST + li] =
+			(track_leds[li].port == NRF_P0) ? 0u : bit;
+	}
+	for (int li = 0; li < NUM_LEDS; li++) {
+		uint32_t bit = 1u << leds[li].pin;
+
+		g_led_bit_p0[LED_PHYS_SIDE_FIRST + li] =
+			(leds[li].port == NRF_P0) ? bit : 0u;
+		g_led_bit_p1[LED_PHYS_SIDE_FIRST + li] =
+			(leds[li].port == NRF_P0) ? 0u : bit;
 	}
 	IRQ_DIRECT_CONNECT(LED_PWM_TIMER_IRQn, 0, led_pwm_isr, IRQ_ZERO_LATENCY);
 	irq_enable(LED_PWM_TIMER_IRQn);
@@ -5349,16 +5343,12 @@ static void led_cfg_output(const struct led *l)
 		(GPIO_PIN_CNF_DRIVE_S0S1    << GPIO_PIN_CNF_DRIVE_Pos) |
 		(GPIO_PIN_CNF_INPUT_Connect << GPIO_PIN_CNF_INPUT_Pos);
 }
-static void led_on(int i)
-{
-	if (leds[i].port == NRF_P0) g_led_p0_on |= (1u << leds[i].pin);
-	else                        g_led_p1_on |= (1u << leds[i].pin);
-}
-static void led_off(int i)
-{
-	if (leds[i].port == NRF_P0) g_led_p0_on &= ~(1u << leds[i].pin);
-	else                        g_led_p1_on &= ~(1u << leds[i].pin);
-}
+/* Legacy names, now thin wrappers onto the ONE level array -- the same
+ * renderer, not a competing one. They remain for the CDC diagnostic sweep
+ * and the FUNCTION-menu gauges, which are not part of normal running; the
+ * normal-running display goes through led_apply_frame() alone. */
+static void led_on(int i)  { g_led_level[LED_PHYS_SIDE_FIRST + i] = 255u; }
+static void led_off(int i) { g_led_level[LED_PHYS_SIDE_FIRST + i] = 0u; }
 static void all_off(void)  { for (int i = 0; i < NUM_LEDS; i++) led_off(i); }
 
 /* show_song_leds() IS DELETED, not merely bypassed.
@@ -5380,29 +5370,11 @@ static void all_off(void)  { for (int i = 0; i < NUM_LEDS; i++) led_off(i); }
  * transport on the LED nearest PLAY, battery on the other three.
  */
 
-static void track_led_on(int i)
-{
-	if (track_leds[i].port == NRF_P0) { g_led_p0_on |= (1u << track_leds[i].pin);
-	                                    g_led_p0_ghost &= ~(1u << track_leds[i].pin); }
-	else                              { g_led_p1_on |= (1u << track_leds[i].pin);
-	                                    g_led_p1_ghost &= ~(1u << track_leds[i].pin); }
-}
-static void track_led_off(int i)
-{
-	if (track_leds[i].port == NRF_P0) { g_led_p0_on &= ~(1u << track_leds[i].pin);
-	                                    g_led_p0_ghost &= ~(1u << track_leds[i].pin); }
-	else                              { g_led_p1_on &= ~(1u << track_leds[i].pin);
-	                                    g_led_p1_ghost &= ~(1u << track_leds[i].pin); }
-}
-/* GHOST: barely-lit = this track HAS content but is muted (sleeping). The
- * fix for "muted and empty look identical" — community request. */
-static void track_led_ghost(int i)
-{
-	if (track_leds[i].port == NRF_P0) { g_led_p0_ghost |= (1u << track_leds[i].pin);
-	                                    g_led_p0_on &= ~(1u << track_leds[i].pin); }
-	else                              { g_led_p1_ghost |= (1u << track_leds[i].pin);
-	                                    g_led_p1_on &= ~(1u << track_leds[i].pin); }
-}
+static void track_led_on(int i)    { g_led_level[LED_PHYS_TRACK_FIRST + i] = 255u; }
+static void track_led_off(int i)   { g_led_level[LED_PHYS_TRACK_FIRST + i] = 0u; }
+/* "Faint": the contract's word for a loaded-but-silent lane. Retained for
+ * the FUNCTION-menu gauges; the normal-running display no longer uses it. */
+static void track_led_ghost(int i) { g_led_level[LED_PHYS_TRACK_FIRST + i] = LED_GHOST_LEVEL; }
 static void track_all_off(void)  { for (int i = 0; i < NUM_TRACK_LEDS; i++) track_led_off(i); }
 
 /* Clear BOTH LED rows. Used on power-off so nothing is left lit when SYSTEM_OFF
@@ -5439,55 +5411,53 @@ static void shutdown_leds(void)
 /* Apply one decided frame to the physical shadow masks the TIMER3 ISR
  * renders. Every one of the eight LEDs is written on every call, so no LED
  * can retain a value from a previous frame. */
-static void led_apply_mode(const struct led *l, uint8_t mode)
-{
-	uint32_t bit = 1u << l->pin;
-
-	if (l->port == NRF_P0) {
-		if (mode == ST_LED_SOLID) {
-			g_led_p0_on |= bit;  g_led_p0_ghost &= ~bit;
-		} else if (mode == ST_LED_GHOST) {
-			g_led_p0_ghost |= bit;  g_led_p0_on &= ~bit;
-		} else {
-			g_led_p0_on &= ~bit;  g_led_p0_ghost &= ~bit;
-		}
-	} else {
-		if (mode == ST_LED_SOLID) {
-			g_led_p1_on |= bit;  g_led_p1_ghost &= ~bit;
-		} else if (mode == ST_LED_GHOST) {
-			g_led_p1_ghost |= bit;  g_led_p1_on &= ~bit;
-		} else {
-			g_led_p1_on &= ~bit;  g_led_p1_ghost &= ~bit;
-		}
-	}
-}
-
+/* Apply one decided frame. A straight copy: st_led_mvp.h's frame indices and
+ * g_led_level[]'s indices are deliberately the same order, so nothing here
+ * can silently transpose a row. All eight are written every call, so no LED
+ * can retain a value from a previous frame. */
 static void led_apply_frame(const st_led_frame_t *f)
 {
-	int i;
-
-	/* The per-stem sigma-delta level path is NOT an owner any more. It was
-	 * the peak meter's renderer; with the meter gone from the LED decision
-	 * nothing produces levels, and leaving the flag set would let the ISR
-	 * keep dithering whatever values it last held while these masks think
-	 * they are in control. Cleared unconditionally, every frame. */
-	g_trk_level_active = 0u;
-
-	for (i = 0; i < NUM_TRACK_LEDS; i++) {
-		led_apply_mode(&track_leds[i], f->mode[ST_LED_TRACK_FIRST + i]);
-	}
-	for (i = 0; i < NUM_LEDS; i++) {
-		led_apply_mode(&leds[i], f->mode[ST_LED_SIDE_FIRST + i]);
+	for (uint32_t i = 0; i < LED_PHYS_COUNT; i++) {
+		g_led_level[i] = f->level[i];
 	}
 }
 
-/* The battery gauge's own sticky state. Sampled here, on the control
- * thread, at 1 Hz -- half the rate controls_diag() already reads the same
- * ADC channel at, so this adds strictly less ADC load than the firmware
- * already carries. That rate matters: ladder_read() blocks on the main
- * thread, which preempts the eMMC streamer, and over-sampling it is exactly
- * what once starved the card (see ladder_read()'s own note). */
+/* The battery gauge's own sticky state. Sampled on the control thread at
+ * 1 Hz -- half the rate controls_diag() already reads the same ADC channel,
+ * so this adds strictly less ADC load than the firmware already carries.
+ * That matters: ladder_read() blocks on the main thread, which preempts the
+ * eMMC streamer, and over-sampling it is what once starved the card. */
 static st_led_batt_gauge_t g_led_batt;
+
+/* ---- one-shot sequence state -------------------------------------------
+ * Boot and shutdown are driven from firmware TIME, not from sleep loops:
+ * led_service() converts "ms since the sequence started" into a frame and
+ * the control loop keeps running at its normal 8 ms cadence throughout.
+ * Nothing about audio, USB or the streamer is blocked by an animation. */
+static st_led_seq_t g_led_seq = ST_LED_SEQ_BOOT;
+static uint32_t     g_led_seq_start_ms;
+static bool         g_led_seq_started;
+
+/* True once the running sequence has played out. power_off() uses this to
+ * know the shutdown animation has finished before it latches SYSTEM_OFF. */
+static bool led_seq_finished(uint32_t now)
+{
+	uint32_t total;
+
+	if (g_led_seq == ST_LED_SEQ_NONE) {
+		return true;
+	}
+	total = (g_led_seq == ST_LED_SEQ_BOOT) ? ST_LED_BOOT_TOTAL_MS
+					       : ST_LED_SHUTDOWN_TOTAL_MS;
+	return (uint32_t)(now - g_led_seq_start_ms) >= total;
+}
+
+static void led_seq_begin(st_led_seq_t seq)
+{
+	g_led_seq = seq;
+	g_led_seq_start_ms = k_uptime_get_32();
+	g_led_seq_started = true;
+}
 
 static void led_service(void)
 {
@@ -5497,6 +5467,20 @@ static void led_service(void)
 	int i;
 
 	memset(&in, 0, sizeof(in));
+
+	/* The boot sequence's clock starts the first time this runs, not at
+	 * some earlier init, so its 0 ms really is the first frame shown. */
+	if (!g_led_seq_started) {
+		led_seq_begin(ST_LED_SEQ_BOOT);
+	}
+	if (g_led_seq != ST_LED_SEQ_NONE) {
+		if (g_led_seq == ST_LED_SEQ_BOOT && led_seq_finished(now)) {
+			g_led_seq = ST_LED_SEQ_NONE;   /* shutdown never clears itself */
+		} else {
+			in.sequence = g_led_seq;
+			in.sequence_ms = (uint32_t)(now - g_led_seq_start_ms);
+		}
+	}
 
 	/* ---- battery: real charger pins + real ADC, or nothing ------------ */
 	{
@@ -5520,45 +5504,42 @@ static void led_service(void)
 	}
 	in.batt_state    = st_led_batt_classify(&g_led_batt, usb_present(), charging());
 	in.batt_level    = g_led_batt.level;
-	in.batt_blink_on = ((now / 500u) & 1u) == 0u;    /* ~1 Hz, per the contract */
+	in.batt_blink_on = ((now / 500u) & 1u) == 0u;    /* ~1 Hz charging blink */
 
 	/* ---- transport / selection ---------------------------------------- */
 #if SP1_XFER_ENABLE
 	in.song_selected   = atomic_get(&g_stem_song_selected) != 0;
 	in.transfer_active = (g_xfer_mode != 0u);
 #endif
-	/* Transport light means "this song is playing", so it is gated on a
-	 * song actually being selected -- never lit by a transport flag with
-	 * nothing loaded behind it. */
 	in.playing           = in.song_selected && (g_playing != 0);
 	in.transfer_blink_on = ((now / 160u) & 1u) == 0u;   /* ~3 Hz: clearly busy */
 
-	/* ---- per-stem state ----------------------------------------------- */
 #if SP1_XFER_ENABLE
-	if (in.song_selected) {
-		st_stem_mix_channel_t channels[ST11_STEM_COUNT];
+	/* ---- beat phase, envelope and bar position ------------------------
+	 * ONE call, on the authoritative song position. g_stem_beat_timing
+	 * comes from the selected STIX record's own bpm_q8/downbeat_frame;
+	 * g_stem_song_frame_pub is the master song_frame's atomic mirror,
+	 * refreshed every audio block. There is no second LED clock: phase is
+	 * re-derived from whatever the mirror holds right now, so a loop wrap
+	 * cannot desync anything. */
+	if (in.playing) {
+		uint32_t song_frame = (uint32_t)atomic_get(&g_stem_song_frame_pub);
 
-		_Static_assert(NTRK == ST11_STEM_COUNT, "trk[]/stem lane count must match 1:1");
-		for (i = 0; i < (int)ST11_STEM_COUNT; i++) {
-			channels[i].gain_q8 = (int32_t)trk[i].vol_q8;
-			channels[i].mute    = trk[i].muted != 0;
-			channels[i].solo    = trk[i].solo != 0;
-		}
+		st_beat_pulse(&g_stem_beat_timing, song_frame, &in.beat);
+	}
+
+	/* ---- per-stem activity, and the immediate momentary solo ---------- */
+	if (in.song_selected) {
 		for (i = 0; i < (int)ST_LED_TRACK_COUNT && i < (int)ST11_STEM_COUNT; i++) {
-			/* Every Stem Tape v1.1 song carries all four stems, so a
-			 * selected song means four loaded lanes. This is the
-			 * format's own guarantee, not an assumption about the
-			 * particular file. */
-			in.stem_loaded[i]  = true;
-			/* THE MIXER'S OWN RULE, read back -- the same function the
-			 * audio thread applies to its own channel array. Mute,
-			 * solo and solo-suppression therefore cannot drift
-			 * between what is heard and what is lit, because there is
-			 * only one copy of the rule. */
-			in.stem_audible[i] = st_stem_mix_channel_audible(channels, (uint32_t)i);
-			in.stem_soloed[i]  = trk[i].solo != 0;
+			uint32_t peak = (uint32_t)atomic_get(&g_stem_peak_pub[i]);
+
+			/* 24-bit magnitude -> 0..255. Scales the shared beat
+			 * envelope only; it never gates or times a light. */
+			peak >>= 15;
+			in.stem_activity[i] = (peak > 255u) ? 255u : (uint8_t)peak;
 			if (trk[i].solo) {
-				in.solo_active = true;
+				in.solo_held = true;
+				in.solo_index = (uint8_t)i;
 			}
 		}
 	}
@@ -5716,14 +5697,28 @@ static void power_off(void)
 {
 	stop_and_flush();                    /* never lose an in-progress recording */
 
-	/* shutdown sweep across BOTH rows, then force EVERY LED dark before
-	 * SYSTEM_OFF latches the GPIO levels. Clearing BOTH rows is the fix for the
-	 * track/fader lights staying lit after power-off (the old code cleared only
-	 * the status row, so the track row froze on into sleep). */
-	for (int i = NUM_LEDS - 1; i >= 0; i--) {
-		led_off(i); track_led_off(i);
-		feed_wdt();
-		k_msleep(80);
+	/* SHUTDOWN ANIMATION, through the ONE semantic owner.
+	 *
+	 * Side row flashes together, track row blinks once, side row fades out,
+	 * everything ends dark -- and SYSTEM_OFF is not entered until it has
+	 * played out, so the animation is always complete before the GPIO
+	 * levels latch. st_led_mvp_decide() renders each instant from elapsed
+	 * ms; this loop only advances time and feeds the watchdog.
+	 *
+	 * BOUNDED BY CONSTRUCTION: the loop cannot run longer than the
+	 * sequence's own total (a fixed 400 ms) plus one 8 ms tick, and the
+	 * watchdog is fed every pass. It ends by forcing every LED pin
+	 * physically low regardless of how it exited. */
+	led_seq_begin(ST_LED_SEQ_SHUTDOWN);
+	{
+		uint32_t guard = 0;
+
+		while (!led_seq_finished(k_uptime_get_32()) &&
+		       guard++ < (ST_LED_SHUTDOWN_TOTAL_MS / 8u) + 4u) {
+			led_service();
+			feed_wdt();
+			k_msleep(8);
+		}
 	}
 	shutdown_leds();
 
@@ -6738,8 +6733,29 @@ int main(void)
 						 * window is armed here -- a held gesture was
 						 * never a tap. */
 						trk[ti].solo = 0;
+					} else if (
+#if SP1_XFER_ENABLE
+						   atomic_get(&g_stem_song_selected) != 0
+#else
+						   false
+#endif
+						  ) {
+						/* STEM TAPE: A TAP IS NOT A MUTE.
+						 *
+						 * A Track press is momentary solo and nothing
+						 * else, so a quick tap is simply a very short
+						 * solo -- it must never leave persistent state
+						 * behind. This branch exists precisely to stop
+						 * the classic tap-to-mute below from running:
+						 * mute is neither toggled nor persisted to
+						 * g_meta.song_mode[], and no double-tap window
+						 * is armed. Nothing at all happens on release,
+						 * which is the correct behaviour for a gesture
+						 * whose entire effect lived in the hold. */
+						tap_deadline[ti] = 0;
 					} else {
-						/* tap -> mute, INSTANT on gridded and
+						/* CLASSIC engine only (no stem song selected):
+						 * tap -> mute, INSTANT on gridded and
 						 * ungridded songs alike (v2.0.0: the M8c
 						 * bar-wait was removed after live testing —
 						 * see the bar-service note). */
@@ -6807,12 +6823,44 @@ int main(void)
 			 * takes effect DURING the hold, not only at release,
 			 * which is what makes it read as momentary rather than a
 			 * delayed toggle. */
-			for (int k = 0; k < NTRK; k++) {
-				bool held_now = (committed == (enum trk_btn)k);
-				uint32_t held_ms = held_now ? (uint32_t)(k_uptime_get() - press_t[k]) : 0u;
+			{
+				/* STEM TAPE: IMMEDIATE MOMENTARY SOLO.
+				 *
+				 * With a stem song selected, solo is simply "the
+				 * button is physically down". No 700 ms threshold,
+				 * no latch, no tap-to-mute: press and only that
+				 * stem is audible, release and all four return.
+				 * `committed` is the chord-committed button and is
+				 * exactly one track at a time, so this also gives
+				 * "only the pressed stem" for free.
+				 *
+				 * FUNCTION-modified gestures are deliberately NOT
+				 * affected: while FUNCTION is down the combo
+				 * handler owns the surface and sets ctl_flush,
+				 * which clears `committed` -- so held_now is false
+				 * for every track and no solo is asserted. Those
+				 * gestures stay reserved.
+				 *
+				 * The classic path keeps st_track_hold_tick() and
+				 * its threshold unchanged: this firmware still
+				 * builds the inherited engine for the no-song case,
+				 * and that behaviour is not ours to redefine. */
+				bool stem_mode = false;
+#if SP1_XFER_ENABLE
+				stem_mode = atomic_get(&g_stem_song_selected) != 0;
+#endif
+				for (int k = 0; k < NTRK; k++) {
+					bool held_now = (committed == (enum trk_btn)k) &&
+							!pwr_pressed();
+					uint32_t held_ms = held_now
+						? (uint32_t)(k_uptime_get() - press_t[k]) : 0u;
+					bool solo = st_track_hold_tick(&track_hold[k], held_now,
+									held_ms,
+									TRACK_HOLD_SOLO_MS);
 
-				trk[k].solo = st_track_hold_tick(&track_hold[k], held_now, held_ms,
-								  TRACK_HOLD_SOLO_MS) ? 1u : 0u;
+					trk[k].solo = stem_mode ? (held_now ? 1u : 0u)
+								: (solo ? 1u : 0u);
+				}
 			}
 			/* HOLD-ARM, always LATCHED on release. EMPTY tracks arm after
 			 * just 100 ms: a tap has no meaning there (nothing to mute or

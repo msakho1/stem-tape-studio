@@ -1,7 +1,6 @@
 /*
- * st_led_mvp.c — see st_led_mvp.h for what this owns and why it exists.
- *
- * PURE. No Zephyr, no hardware, no globals, no clock.
+ * st_led_mvp.c — see st_led_mvp.h. PURE: no Zephyr, no hardware, no globals,
+ * no clock.
  */
 
 #include "st_led_mvp.h"
@@ -9,13 +8,11 @@
 /* ==========================================================================
  * BATTERY GAUGE
  *
- * Ported from firmware/stemtape/src/led_battery.c, which ported it from the
- * pinned Tape Looper's own standby gauge. Ported rather than linked because
- * that module includes led_duty.h, which belongs to the M0 target's PWM2/
- * PWM3 renderer and its led_channel_table[] -- neither of which exists in
- * this firmware, whose LEDs are driven by the TIMER3/GPIO soft-PWM driver
- * the product owner directed be kept. The arithmetic below is the same, and
- * is kept line-for-line comparable on purpose so the two can be diffed.
+ * Ported from firmware/stemtape/src/led_battery.c (which ported it from the
+ * pinned Tape Looper's own standby gauge) rather than linked, because that
+ * module includes led_duty.h -- the M0 target's PWM2/PWM3 renderer and its
+ * led_channel_table[], neither of which exists in this firmware. The
+ * arithmetic is kept line-for-line comparable so the two can be diffed.
  * ========================================================================== */
 
 static const int32_t batt_thr[3] = {
@@ -43,9 +40,8 @@ void st_led_batt_update(st_led_batt_gauge_t *g, bool valid, int32_t raw_adc)
 	}
 	g->ever_valid = true;
 
-	/* Integer DIVISION, not a right shift: the shift would truncate toward
-	 * negative infinity on a falling reading, where the source truncates
-	 * toward zero. Matched exactly rather than approximated. */
+	/* Integer DIVISION, not a shift: a shift truncates toward negative
+	 * infinity on a falling reading where the source truncates toward zero. */
 	g->ema = (g->ema < 0) ? raw_adc
 			      : g->ema + (raw_adc - g->ema) / (1 << ST_LED_BATT_EMA_SHIFT);
 
@@ -57,7 +53,7 @@ void st_led_batt_update(st_led_batt_gauge_t *g, bool valid, int32_t raw_adc)
 	}
 
 	if (g->level == 0u) {
-		g->level = nl;   /* first valid sample seeds the sticky level */
+		g->level = nl;
 	} else if (nl > g->level &&
 		   g->ema > batt_thr[g->level - 1u] + (int32_t)ST_LED_BATT_HYSTERESIS_COUNTS) {
 		g->level = nl;
@@ -70,10 +66,9 @@ void st_led_batt_update(st_led_batt_gauge_t *g, bool valid, int32_t raw_adc)
 st_led_batt_state_t st_led_batt_classify(const st_led_batt_gauge_t *g,
 					  bool charger_present, bool charging_now)
 {
-	/* nCHG asserted while nPGOOD is deasserted means "charging with no
-	 * input power", which the BQ24232 cannot legitimately report. Flag it
-	 * distinctly, and never as "low" -- a wiring or driver problem must not
-	 * be shown to the musician as an empty battery. */
+	/* nCHG asserted with nPGOOD deasserted is "charging with no input
+	 * power", which the BQ24232 cannot legitimately report. Distinct, and
+	 * never "low": a wiring fault must not read as an empty battery. */
 	if (charging_now && !charger_present) {
 		return ST_LED_BATT_FAULT;
 	}
@@ -90,176 +85,245 @@ st_led_batt_state_t st_led_batt_classify(const st_led_batt_gauge_t *g,
 						   : ST_LED_BATT_CHARGER_ABSENT;
 }
 
-/* ==========================================================================
- * THE EIGHT-LED DECISION
- * ========================================================================== */
+/* ========================================================================== */
 
-static void decide_side(const st_led_inputs_t *in, st_led_frame_t *out)
+static void all_dark(st_led_frame_t *out)
 {
 	uint8_t i;
 
-	/* ---- TRANSPORT: the side LED nearest PLAY, and nothing else --------
-	 *
-	 * DOCUMENTED CONFLICT. docs/stem-tape-led-feedback-v1.md section 2
-	 * specifies the side row as a FOUR-step charge gauge whose bottom step
-	 * is this very LED (gauge step 1, index 4). The product owner's
-	 * explicit MVP decision reassigns it to transport -- "the side LED
-	 * nearest PLAY is the transport indicator; the remaining three side
-	 * LEDs represent battery/charging state only". The owner's decisions
-	 * override all three contract documents, so transport wins here and
-	 * the gauge below renders on three LEDs instead of four.
-	 *
-	 * Note this also removes the only reason the side row was ever a
-	 * 16-song bank/position display: that was inherited Tape Looper
-	 * behaviour, and on a one-song device it made a side LED blink to
-	 * announce "song 1 of 16". It is gone, not merely outranked. */
-	out->mode[ST_LED_SIDE_TRANSPORT] = in->playing ? ST_LED_SOLID : ST_LED_OFF;
+	for (i = 0; i < ST_LED_COUNT; i++) {
+		out->level[i] = 0u;
+	}
+}
 
-	/* ---- BATTERY: the remaining three ---------------------------------
-	 *
-	 * Off unless the state is both valid and available. UNAVAILABLE and
-	 * FAULT are shown as darkness rather than as a guessed charge, and a
-	 * level that has never been seeded is likewise dark: the product owner
-	 * was explicit that untrustworthy battery information must not be
-	 * invented, and the contract's own safety rule says the same.
-	 *
-	 * THE THREE-LED GAUGE. The classifier keeps the documented FOUR levels
-	 * unchanged -- so the thresholds, the hysteresis and, importantly, the
-	 * LOW decision are all bit-for-bit the approved ones -- and only the
-	 * rendering is adapted to the three LEDs that remain:
-	 *
-	 *     level 1 (lowest)  -> bottom battery LED GHOST
-	 *     level 2           -> bottom SOLID
-	 *     level 3           -> bottom + middle SOLID
-	 *     level 4 (full)    -> all three SOLID
-	 *
-	 * Level 1 uses GHOST rather than going dark so "nearly empty" stays
-	 * distinguishable from "no information", which darkness already means.
-	 * That reuses the contract's existing faint/solid vocabulary rather
-	 * than inventing a fifth state for the adaptation.
-	 *
-	 * CHARGING blinks the topmost lit step, exactly as the documented
-	 * gauge does. CHARGE_COMPLETE lights all three solid, matching the
-	 * document's "all four solid once complete" on the LEDs that remain. */
-	for (i = 0; i < ST_LED_SIDE_BATT_COUNT; i++) {
-		out->mode[ST_LED_SIDE_BATT_FIRST + i] = ST_LED_OFF;
+/* Is the battery reading one we are willing to render at all? */
+static bool batt_trustworthy(const st_led_inputs_t *in)
+{
+	return in->batt_state != ST_LED_BATT_UNAVAILABLE &&
+	       in->batt_state != ST_LED_BATT_FAULT &&
+	       in->batt_level != 0u;
+}
+
+/* The four-step gauge on S1..S4, bottom-up. `blink_step` blinks the current
+ * (topmost lit) step, which is what the charging display wants; the static
+ * preview passes false and shows every step solid. */
+static void gauge_on_side(const st_led_inputs_t *in, st_led_frame_t *out, bool blink_step)
+{
+	uint8_t level, i;
+
+	for (i = 0; i < ST_LED_SIDE_COUNT; i++) {
+		out->level[ST_LED_SIDE_FIRST + i] = 0u;
+	}
+	if (!batt_trustworthy(in)) {
+		return;   /* never fabricate a level */
 	}
 
-	if (in->batt_state == ST_LED_BATT_UNAVAILABLE ||
-	    in->batt_state == ST_LED_BATT_FAULT ||
-	    in->batt_level == 0u) {
-		return;   /* no trustworthy reading: leave them dark */
-	}
+	level = (in->batt_state == ST_LED_BATT_CHARGE_COMPLETE)
+		? ST_LED_BATT_LEVEL_COUNT : in->batt_level;
 
-	{
-		bool charging = (in->batt_state == ST_LED_BATT_CHARGING);
-		/* CHARGE_COMPLETE fills the gauge regardless of the last
-		 * sampled level, matching the documented gauge's own
-		 * "all solid once complete". */
-		uint8_t level = (in->batt_state == ST_LED_BATT_CHARGE_COMPLETE)
-				? ST_LED_BATT_LEVEL_COUNT : in->batt_level;
+	for (i = 0; i < ST_LED_SIDE_COUNT; i++) {
+		uint8_t step = (uint8_t)(i + 1u);   /* S1 == step 1 */
 
-		if (level == 1u) {
-			out->mode[ST_LED_SIDE_BATT_FIRST] =
-				charging ? (in->batt_blink_on ? ST_LED_GHOST : ST_LED_OFF)
-					 : ST_LED_GHOST;
-			return;
-		}
-
-		/* levels 2..4 light (level - 1) LEDs from the bottom up. */
-		for (i = 0; i < ST_LED_SIDE_BATT_COUNT; i++) {
-			uint8_t step = (uint8_t)(i + 2u);   /* this LED represents level `step` */
-
-			if (step < level) {
-				out->mode[ST_LED_SIDE_BATT_FIRST + i] = ST_LED_SOLID;
-			} else if (step == level) {
-				out->mode[ST_LED_SIDE_BATT_FIRST + i] =
-					charging ? (in->batt_blink_on ? ST_LED_SOLID : ST_LED_OFF)
-						 : ST_LED_SOLID;
-			}
+		if (step < level) {
+			out->level[ST_LED_SIDE_FIRST + i] = ST_LED_MAX;   /* completed */
+		} else if (step == level) {
+			out->level[ST_LED_SIDE_FIRST + i] =
+				(blink_step && !in->batt_blink_on) ? 0u : ST_LED_MAX;
 		}
 	}
 }
 
-static void decide_tracks(const st_led_inputs_t *in, st_led_frame_t *out)
+/* Linear fade from full to dark across ST_LED_SIDE_FADE_MS. */
+static uint8_t fade_level(uint32_t into_fade_ms)
+{
+	uint32_t remain;
+
+	if (into_fade_ms >= ST_LED_SIDE_FADE_MS) {
+		return 0u;
+	}
+	remain = ST_LED_SIDE_FADE_MS - into_fade_ms;
+	return (uint8_t)((remain * ST_LED_MAX) / ST_LED_SIDE_FADE_MS);
+}
+
+/*
+ * 1. POWER-OFF. Side row flashes together, track row blinks once, side fades
+ *    out, everything ends dark. main.c holds SYSTEM_OFF until this reports
+ *    finished (sequence_ms >= ST_LED_SHUTDOWN_TOTAL_MS), so the animation is
+ *    always complete before the GPIO levels latch.
+ */
+static void decide_shutdown(const st_led_inputs_t *in, st_led_frame_t *out)
 {
 	uint8_t i;
+	uint32_t t = in->sequence_ms;
 
-	/* ---- NO SONG: every track light dark ------------------------------
-	 * Not a standby chase. The inherited chase existed to prove an empty
-	 * Tape Looper was awake; here it actively lies, because it runs the
-	 * same animation whether or not a song is loaded. The product owner
-	 * excluded it, and with no song there is genuinely nothing to show. */
-	if (!in->song_selected) {
-		for (i = 0; i < ST_LED_TRACK_COUNT; i++) {
-			out->mode[i] = ST_LED_OFF;
+	all_dark(out);
+
+	for (i = 0; i < ST_LED_TRACK_COUNT; i++) {
+		out->level[i] = (t < ST_LED_TRACK_BLINK_MS) ? ST_LED_MAX : 0u;
+	}
+	for (i = 0; i < ST_LED_SIDE_COUNT; i++) {
+		if (t < ST_LED_SIDE_HOLD_MS) {
+			out->level[ST_LED_SIDE_FIRST + i] = ST_LED_MAX;
+		} else {
+			out->level[ST_LED_SIDE_FIRST + i] =
+				fade_level(t - ST_LED_SIDE_HOLD_MS);
+		}
+	}
+}
+
+/*
+ * 2. POWER-ON. Side row on together, track row blinks once, side fades, then
+ *    the measured battery gauge appears briefly on S1..S4, then dark.
+ */
+static void decide_boot(const st_led_inputs_t *in, st_led_frame_t *out)
+{
+	uint8_t i;
+	uint32_t t = in->sequence_ms;
+
+	all_dark(out);
+
+	/* Track row: one blink, then dark for the rest of the sequence. */
+	for (i = 0; i < ST_LED_TRACK_COUNT; i++) {
+		out->level[i] = (t < ST_LED_TRACK_BLINK_MS) ? ST_LED_MAX : 0u;
+	}
+
+	if (t < ST_LED_SIDE_HOLD_MS) {
+		for (i = 0; i < ST_LED_SIDE_COUNT; i++) {
+			out->level[ST_LED_SIDE_FIRST + i] = ST_LED_MAX;
 		}
 		return;
 	}
+	if (t < ST_LED_BOOT_FADE_END_MS) {
+		uint8_t lv = fade_level(t - ST_LED_SIDE_HOLD_MS);
 
-	/* ---- STEM STATE ---------------------------------------------------
-	 * The contract's own two-word vocabulary, nothing more:
-	 *
-	 *   audible          -> SOLID   ("soloed stem solid", "active stem
-	 *                                 LED brightens")
-	 *   loaded, silent   -> GHOST   ("non-solo stems faint", "muted head
-	 *                                 faint")
-	 *   not loaded       -> OFF
-	 *
-	 * That one rule already covers mute, solo and solo-suppression,
-	 * because `stem_audible` is the MIXER'S OWN audibility decision read
-	 * back -- the same function the audio thread applies -- rather than a
-	 * second copy of the rule maintained here. Hold a track button for
-	 * solo and the held stem stays audible (SOLID) while the others fall
-	 * silent (GHOST); release and audibility returns to whatever mute
-	 * state says, so the display follows within one control pass with no
-	 * separate release path to get wrong.
-	 *
-	 * NO VU METER. The previous code drove these four lights from a
-	 * per-stem peak envelope and called it a beat pulse. It was neither
-	 * approved by any of the three contract documents nor a beat: it was a
-	 * level meter, and a level meter is not a stable, readable indication
-	 * of which stems are playing -- a quiet passage dimmed a stem that was
-	 * very much loaded and audible. The product owner ruled it out by
-	 * name. Transport motion lives on the transport LED; these four say
-	 * what each lane IS. */
-	for (i = 0; i < ST_LED_TRACK_COUNT; i++) {
-		if (!in->stem_loaded[i]) {
-			out->mode[i] = ST_LED_OFF;
-		} else if (in->stem_audible[i]) {
-			out->mode[i] = ST_LED_SOLID;
-		} else {
-			out->mode[i] = ST_LED_GHOST;
+		for (i = 0; i < ST_LED_SIDE_COUNT; i++) {
+			out->level[ST_LED_SIDE_FIRST + i] = lv;
 		}
+		return;
 	}
+	/* Battery preview: solid gauge, no blink, and dark if untrustworthy. */
+	gauge_on_side(in, out, /*blink_step=*/false);
+}
+
+/*
+ * 4. IMMEDIATE MOMENTARY SOLO. Only the held stem's Track LED, at maximum --
+ *    never faint, never ghosted -- and every other Track LED completely off.
+ *    This overrides the beat/chase display entirely; it does not blend with
+ *    it. The side row is left to the caller's playing/charging decision so
+ *    S4 can keep showing tempo while a stem is soloed.
+ */
+static void decide_solo_tracks(const st_led_inputs_t *in, st_led_frame_t *out)
+{
+	uint8_t i;
+
+	for (i = 0; i < ST_LED_TRACK_COUNT; i++) {
+		out->level[i] = (i == in->solo_index) ? ST_LED_MAX : 0u;
+	}
+}
+
+/*
+ * 5. PLAYING. One shared beat envelope drives all four Track LEDs and S4, so
+ *    they cannot drift apart -- there is a single st_beat_pulse() result and
+ *    every light here is derived from it.
+ *
+ *    Per stem: envelope scaled by that stem's activity, so a loud stem
+ *    punches and a quiet one is dim -- but ONLY inside the pulse window.
+ *    Activity never gates or times anything; between beats everything is
+ *    dark regardless of how loud the audio is. That is the difference
+ *    between this and the free-running VU display it replaces.
+ *
+ *    Bar position: the beat's own Track LED gets the full envelope
+ *    regardless of activity, so the 1->2->3->4 chase stays readable even
+ *    when that stem is silent.
+ */
+static uint8_t scale8(uint8_t a, uint8_t b)
+{
+	return (uint8_t)(((uint16_t)a * (uint16_t)b) / 255u);
+}
+
+static void decide_playing(const st_led_inputs_t *in, st_led_frame_t *out)
+{
+	uint8_t i;
+	uint8_t env;
+
+	all_dark(out);
+
+	if (!in->beat.valid || !in->beat.in_pulse) {
+		return;   /* between pulses, or no trustworthy tempo: dark */
+	}
+	env = in->beat.envelope;
+
+	for (i = 0; i < ST_LED_TRACK_COUNT; i++) {
+		uint8_t lv = scale8(env, in->stem_activity[i]);
+
+		if (i == in->beat.beat_index) {
+			/* CHASE ACCENT: full envelope, never dimmed by a quiet
+			 * stem -- the bar position has to stay readable. */
+			lv = env;
+		}
+		out->level[i] = lv;
+	}
+
+	/* S4 shares the SAME envelope value: playing is shown on the side row
+	 * with the identical pulse, not a second animation. S1..S3 stay dark
+	 * during playback -- playback outranks the charging gauge. */
+	out->level[ST_LED_S4] = env;
 }
 
 void st_led_mvp_decide(const st_led_inputs_t *in, st_led_frame_t *out)
 {
 	uint8_t i;
 
-	decide_side(in, out);
-	decide_tracks(in, out);
+	/* 1. POWER-OFF outranks everything. */
+	if (in->sequence == ST_LED_SEQ_SHUTDOWN) {
+		decide_shutdown(in, out);
+		return;
+	}
 
-	/* ---- TRANSFER OVERLAY, applied last --------------------------------
-	 * The one temporary animation the product owner allowed: all four
-	 * Track LEDs blink together while a transfer is in progress.
-	 *
-	 * It is an OVERLAY on a frame that was already fully computed from
-	 * live state, and it touches only the track row. That is what makes
-	 * "normal state must restore immediately afterward" true by
-	 * construction rather than by remembering to undo something: there is
-	 * no snapshot taken when the transfer starts and no restore step when
-	 * it ends. The moment transfer_active goes false, the very next call
-	 * returns the frame decide_tracks() had already produced from whatever
-	 * mute/solo/audibility state is live AT THAT MOMENT -- including any
-	 * change the musician made mid-transfer.
-	 *
-	 * The side row is deliberately untouched: transport and battery remain
-	 * readable throughout, and the transfer cannot leave them stale. */
+	/* 2. POWER-ON. */
+	if (in->sequence == ST_LED_SEQ_BOOT) {
+		decide_boot(in, out);
+		return;
+	}
+
+	/* 3. TRANSFER: all four Track LEDs blink together. The side row shows
+	 *    no fabricated status -- it stays dark, because a transfer says
+	 *    nothing about tempo and the charging gauge would be misread as
+	 *    transfer progress. */
 	if (in->transfer_active) {
+		all_dark(out);
 		for (i = 0; i < ST_LED_TRACK_COUNT; i++) {
-			out->mode[i] = in->transfer_blink_on ? ST_LED_SOLID : ST_LED_OFF;
+			out->level[i] = in->transfer_blink_on ? ST_LED_MAX : 0u;
 		}
+		return;
+	}
+
+	/* 5/6/8 first, so the side row is decided; solo then overrides only
+	 *    the track row, which is what lets S4 keep pulsing under a solo. */
+	if (in->playing && in->song_selected) {
+		decide_playing(in, out);
+	} else if (in->batt_state == ST_LED_BATT_CHARGING ||
+		   in->batt_state == ST_LED_BATT_CHARGE_COMPLETE) {
+		/* 6. CHARGING GAUGE, only while not playing. Completed steps
+		 *    solid, the current step blinking, all four solid at full.
+		 *
+		 *    Blink ONLY while actually charging. CHARGE_COMPLETE reaches
+		 *    this branch too, and passing blink unconditionally left its
+		 *    top step dark on the off-phase -- so "fully charged" showed
+		 *    three solid LEDs and a blinking fourth instead of four
+		 *    solid, which reads as "still charging". */
+		all_dark(out);
+		gauge_on_side(in, out,
+			      /*blink_step=*/(in->batt_state == ST_LED_BATT_CHARGING));
+	} else {
+		/* 8. IDLE: everything dark. No standby chase, no song-bank
+		 *    display, and a merely-selected song does not light the
+		 *    track row. */
+		all_dark(out);
+	}
+
+	/* 4. IMMEDIATE SOLO overrides the track row, at any transport state. */
+	if (in->solo_held && in->solo_index < ST_LED_TRACK_COUNT) {
+		decide_solo_tracks(in, out);
 	}
 }

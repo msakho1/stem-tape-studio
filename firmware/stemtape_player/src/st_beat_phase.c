@@ -51,3 +51,51 @@ st_track_led_state_t st_beat_led_decide(bool audible, bool playing, bool on_beat
 	}
 	return on_beat ? ST_TRACK_LED_ON : ST_TRACK_LED_OFF;
 }
+
+void st_beat_pulse(const st_beat_timing_t *timing, uint32_t song_frame,
+		    st_beat_pulse_t *out)
+{
+	uint32_t since, into_beat, window, half, rise;
+
+	out->valid = false;
+	out->in_pulse = false;
+	out->envelope = 0u;
+	out->beat_index = 0u;
+
+	/* Same fail-closed contract as st_beat_phase_on_beat(): no tempo, or
+	 * not yet at the first downbeat, means no pulse and no bar position --
+	 * not an invented one. */
+	if (timing->frames_per_beat == 0u) {
+		return;
+	}
+	if (song_frame < timing->downbeat_frame) {
+		return;
+	}
+
+	since = song_frame - timing->downbeat_frame;
+	out->beat_index = (uint8_t)((since / timing->frames_per_beat) & 3u);
+	out->valid = true;
+
+	into_beat = since % timing->frames_per_beat;
+	window = (timing->frames_per_beat * ST_BEAT_PULSE_NUM) / ST_BEAT_PULSE_DEN;
+	if (window == 0u) {
+		return;   /* absurdly fast tempo: no window to light */
+	}
+	if (into_beat >= window) {
+		return;   /* between pulses: dark, which is the point */
+	}
+
+	out->in_pulse = true;
+
+	/* Symmetric triangle: 0 -> 255 -> 0 across the window. */
+	half = window / 2u;
+	if (half == 0u) {
+		out->envelope = 255u;
+		return;
+	}
+	rise = (into_beat < half) ? into_beat : (window - 1u - into_beat);
+	if (rise >= half) {
+		rise = half - 1u;
+	}
+	out->envelope = (uint8_t)((rise * 255u) / half);
+}

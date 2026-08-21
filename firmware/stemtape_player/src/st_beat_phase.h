@@ -101,4 +101,48 @@ typedef enum {
  */
 st_track_led_state_t st_beat_led_decide(bool audible, bool playing, bool on_beat);
 
+/* ---- BEAT PULSE: envelope + bar position (Option C) ---------------------
+ *
+ * st_beat_phase_on_beat() answers only "is a beat happening", which is a
+ * tempo boolean and nothing more -- give it to four LEDs and they flash
+ * uniformly, carrying no bar position and no dynamics. The playing display
+ * needs three things at once, all derived from the SAME song_frame so no
+ * second clock can exist:
+ *
+ *   in_pulse   -- the LEDs are lit at all only inside a short window at the
+ *                 start of each beat; between pulses everything is dark.
+ *   envelope   -- 0..255 across that window, rising and falling, so the
+ *                 pulse reads as a pulse rather than a square blink.
+ *   beat_index -- 0..3 within the bar, which is what makes a 1->2->3->4
+ *                 chase possible. Beat 0 is the downbeat.
+ *
+ * All three come out of one call so they cannot disagree with each other.
+ */
+typedef struct {
+	bool    valid;       /* timing usable AND song_frame at/after the downbeat */
+	bool    in_pulse;    /* inside this beat's pulse window */
+	uint8_t envelope;    /* 0..255 within the window; 0 when !in_pulse */
+	uint8_t beat_index;  /* 0..3; 0 == downbeat. Meaningless unless valid */
+} st_beat_pulse_t;
+
+/* Pulse window as a fraction of one beat: PULSE_NUM/PULSE_DEN. Centralized
+ * here so the look is tuned in one place. 1/4 of a beat lit, 3/4 dark. */
+#define ST_BEAT_PULSE_NUM 1u
+#define ST_BEAT_PULSE_DEN 4u
+
+/*
+ * Fills *out from a VALID timing snapshot and the current master song_frame.
+ * Fails closed exactly as st_beat_phase_on_beat() does: an invalid snapshot
+ * (frames_per_beat == 0) or a song_frame still before the first downbeat
+ * yields valid=false, in_pulse=false, envelope=0, beat_index=0 -- never a
+ * fabricated tempo and never a fabricated bar position.
+ *
+ * The envelope is a symmetric triangle across the window: it rises to 255 at
+ * the window's midpoint and falls back, which gives the visible rise/fall a
+ * square gate does not. Integer only, no floats -- this is called from the
+ * control loop, but the whole codebase's real-time convention applies.
+ */
+void st_beat_pulse(const st_beat_timing_t *timing, uint32_t song_frame,
+		    st_beat_pulse_t *out);
+
 #endif /* STEMTAPE_PLAYER_BEAT_PHASE_H_ */

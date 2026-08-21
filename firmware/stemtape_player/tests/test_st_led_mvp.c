@@ -1,27 +1,17 @@
 /*
- * test_st_led_mvp.c — the Stem Tape MVP LED acceptance matrix.
+ * test_st_led_mvp.c — the Stem Tape LED acceptance matrix.
  *
- * This drives the REAL production decision, st_led_mvp_decide(), the same
- * function firmware/stemtape_player/src/main.c's led_service() calls on the
- * device. It is not a reference implementation, not a parallel model, and
- * not a mock: the object file linked here is the object file linked into
- * the firmware.
+ * Drives the REAL production decision, st_led_mvp_decide(), and the REAL
+ * st_beat_pulse() -- the same object files linked into the firmware, the
+ * same functions main.c's led_service() calls. Not a reference model.
  *
- * Audibility is likewise the real thing: st_stem_mix_channel_audible() from
- * st_stem_mix.c, the SAME function the audio thread applies to its own
- * channel array. So a mute/solo case that passes here passes because the
- * mixer agrees a stem is silent, not because this test decided it should be.
+ * WHAT THIS PROVES: given a described runtime state, the production decision
+ * assigns the eight LEDs the levels the product behaviour calls for.
  *
- * WHAT THIS PROVES: that given a described runtime state, the production
- * decision assigns the eight LEDs the modes the contract and the product
- * owner's MVP decisions call for.
+ * WHAT IT DOES NOT PROVE: that the physical device looks right. No GPIO, no
+ * TIMER3, no eye. Brightness and fade timing are a human check on hardware.
  *
- * WHAT IT DOES NOT PROVE: that the physical device lights up that way. No
- * GPIO, no TIMER3, no eye. The renderer main.c applies these modes with is
- * proven separately (it is the unchanged, already-working soft-PWM driver),
- * and the physical check remains a human one.
- *
- *   cc -std=c11 -Wall -Wextra -I../src ../src/st_led_mvp.c ../src/st_stem_mix.c \
+ *   cc -std=c11 -Wall -Wextra -I../src ../src/st_led_mvp.c ../src/st_beat_phase.c \
  *      test_st_led_mvp.c -o test_st_led_mvp && ./test_st_led_mvp
  */
 
@@ -29,7 +19,6 @@
 #include <string.h>
 
 #include "st_led_mvp.h"
-#include "st_stem_mix.h"
 
 static int g_checks, g_failures, g_cases;
 
@@ -40,453 +29,447 @@ static int g_checks, g_failures, g_cases;
 		       printf("  (%s:%d: %s)\n", __FILE__, __LINE__, #cond); } \
 	} while (0)
 
-static const char *mode_name(uint8_t m)
-{
-	switch (m) {
-	case ST_LED_OFF:   return "off";
-	case ST_LED_GHOST: return "faint";
-	case ST_LED_SOLID: return "SOLID";
-	default:           return "?";
-	}
-}
-
-/* Print one row of the eight-LED state table exactly as the report quotes it. */
 static void show(const char *label, const st_led_frame_t *f)
 {
-	printf("      %-34s T1=%-5s T2=%-5s T3=%-5s T4=%-5s | PLAY=%-5s B2=%-5s B3=%-5s B4=%-5s\n",
-	       label,
-	       mode_name(f->mode[0]), mode_name(f->mode[1]),
-	       mode_name(f->mode[2]), mode_name(f->mode[3]),
-	       mode_name(f->mode[ST_LED_SIDE_TRANSPORT]),
-	       mode_name(f->mode[ST_LED_SIDE_BATT_FIRST + 0]),
-	       mode_name(f->mode[ST_LED_SIDE_BATT_FIRST + 1]),
-	       mode_name(f->mode[ST_LED_SIDE_BATT_FIRST + 2]));
+	printf("      %-30s T[%3u %3u %3u %3u]  S[%3u %3u %3u %3u]\n", label,
+	       f->level[0], f->level[1], f->level[2], f->level[3],
+	       f->level[ST_LED_S1], f->level[ST_LED_S2],
+	       f->level[ST_LED_S3], f->level[ST_LED_S4]);
 }
 
-/* Build inputs the way main.c's led_service() does: four loaded stems, with
- * audibility taken from the REAL mixer rule rather than restated here. */
-static void make_song(st_led_inputs_t *in, const bool muted[4], const bool solo[4])
+static bool tracks_all(const st_led_frame_t *f, uint8_t v)
 {
-	st_stem_mix_channel_t ch[ST11_STEM_COUNT];
+	return f->level[0] == v && f->level[1] == v &&
+	       f->level[2] == v && f->level[3] == v;
+}
+static bool side_all(const st_led_frame_t *f, uint8_t v)
+{
+	return f->level[ST_LED_S1] == v && f->level[ST_LED_S2] == v &&
+	       f->level[ST_LED_S3] == v && f->level[ST_LED_S4] == v;
+}
+
+/* A song, playing, with a valid tempo. 120 BPM at 48 kHz = 24000 frames/beat. */
+static void make_playing(st_led_inputs_t *in, uint32_t song_frame, uint8_t activity)
+{
+	st_beat_timing_t timing;
 	int i;
 
 	memset(in, 0, sizeof(*in));
 	in->song_selected = true;
-
-	for (i = 0; i < (int)ST11_STEM_COUNT; i++) {
-		ch[i].gain_q8 = ST_STEM_MIX_GAIN_UNITY_Q8;
-		ch[i].mute = muted[i];
-		ch[i].solo = solo[i];
-	}
+	in->playing = true;
+	(void)st_beat_timing_init(&timing, 120u << 8, 0u, 48000u);
+	st_beat_pulse(&timing, song_frame, &in->beat);
 	for (i = 0; i < (int)ST_LED_TRACK_COUNT; i++) {
-		in->stem_loaded[i]  = true;
-		in->stem_audible[i] = st_stem_mix_channel_audible(ch, (uint32_t)i);
-		in->stem_soloed[i]  = solo[i];
-		if (solo[i]) {
-			in->solo_active = true;
-		}
+		in->stem_activity[i] = activity;
 	}
 }
 
-static const bool none[4] = { false, false, false, false };
-
-/* A trustworthy mid-charge battery, so the battery LEDs are not the subject
- * of the transport/track cases. Level 3 of 4 -> two solid, per the gauge. */
-static void batt_ok(st_led_inputs_t *in)
-{
-	in->batt_state = ST_LED_BATT_CHARGER_ABSENT;
-	in->batt_level = 3u;
-}
-
-/* ===================== 1. valid song selected, stopped ==================== */
-static void case_1_stopped(void)
+/* ======================= 1. boot sequence ================================ */
+static void case_boot(void)
 {
 	st_led_inputs_t in; st_led_frame_t f;
 
 	g_cases++;
-	printf("\n-- 1. Valid song selected, STOPPED\n");
-	make_song(&in, none, none);
-	batt_ok(&in);
-	in.playing = false;
-	st_led_mvp_decide(&in, &f);
-	show("song selected, stopped", &f);
+	printf("\n-- Power-on sequence\n");
+	memset(&in, 0, sizeof(in));
+	in.sequence = ST_LED_SEQ_BOOT;
+	in.batt_state = ST_LED_BATT_CHARGER_ABSENT;
+	in.batt_level = 3u;
 
-	CHECK(f.mode[ST_LED_SIDE_TRANSPORT] == ST_LED_OFF,
-	      "transport LED (nearest PLAY) is OFF while stopped");
-	for (int i = 0; i < 4; i++) {
-		CHECK(f.mode[i] == ST_LED_SOLID,
-		      "track %d is SOLID: loaded and audible", i + 1);
+	in.sequence_ms = 0u;
+	st_led_mvp_decide(&in, &f);
+	show("t=0 (blink + side on)", &f);
+	CHECK(tracks_all(&f, ST_LED_MAX), "all four Track LEDs blink together at t=0");
+	CHECK(side_all(&f, ST_LED_MAX), "all four side LEDs illuminate together at t=0");
+
+	in.sequence_ms = ST_LED_TRACK_BLINK_MS;
+	st_led_mvp_decide(&in, &f);
+	show("t=100 (blink done)", &f);
+	CHECK(tracks_all(&f, 0u), "the Track blink finishes and they go completely dark");
+
+	in.sequence_ms = ST_LED_SIDE_HOLD_MS + (ST_LED_SIDE_FADE_MS / 2u);
+	st_led_mvp_decide(&in, &f);
+	show("mid-fade", &f);
+	CHECK(f.level[ST_LED_S1] > 0u && f.level[ST_LED_S1] < ST_LED_MAX,
+	      "the side row is mid-fade: partially lit, which needs real brightness");
+	CHECK(side_all(&f, f.level[ST_LED_S1]), "all four fade together");
+
+	in.sequence_ms = ST_LED_BOOT_FADE_END_MS;
+	st_led_mvp_decide(&in, &f);
+	show("battery preview lv3", &f);
+	CHECK(tracks_all(&f, 0u), "Track LEDs stay dark through the battery preview");
+	CHECK(f.level[ST_LED_S1] == ST_LED_MAX && f.level[ST_LED_S2] == ST_LED_MAX &&
+	      f.level[ST_LED_S3] == ST_LED_MAX && f.level[ST_LED_S4] == 0u,
+	      "battery level 3 of 4 previews as S1-S3");
+}
+
+/* ==================== 2. battery preview levels ========================== */
+static void case_preview_levels(void)
+{
+	st_led_inputs_t in; st_led_frame_t f;
+	const uint8_t expect[5][4] = {
+		{ 0, 0, 0, 0 },                                  /* unused */
+		{ ST_LED_MAX, 0, 0, 0 },                          /* level 1: S1 */
+		{ ST_LED_MAX, ST_LED_MAX, 0, 0 },                 /* level 2: S1-S2 */
+		{ ST_LED_MAX, ST_LED_MAX, ST_LED_MAX, 0 },        /* level 3: S1-S3 */
+		{ ST_LED_MAX, ST_LED_MAX, ST_LED_MAX, ST_LED_MAX },/* full: S1-S4 */
+	};
+	int lv;
+
+	g_cases++;
+	printf("\n-- Battery preview, each level\n");
+	for (lv = 1; lv <= 4; lv++) {
+		char lbl[40];
+
+		memset(&in, 0, sizeof(in));
+		in.sequence = ST_LED_SEQ_BOOT;
+		in.sequence_ms = ST_LED_BOOT_FADE_END_MS + 10u;
+		in.batt_state = ST_LED_BATT_CHARGER_ABSENT;
+		in.batt_level = (uint8_t)lv;
+		st_led_mvp_decide(&in, &f);
+		snprintf(lbl, sizeof(lbl), "preview level %d", lv);
+		show(lbl, &f);
+		CHECK(f.level[ST_LED_S1] == expect[lv][0] && f.level[ST_LED_S2] == expect[lv][1] &&
+		      f.level[ST_LED_S3] == expect[lv][2] && f.level[ST_LED_S4] == expect[lv][3],
+		      "level %d lights exactly S1..S%d", lv, lv);
+		CHECK(tracks_all(&f, 0u), "Track LEDs dark during the preview");
 	}
-	CHECK(f.mode[ST_LED_SIDE_BATT_FIRST] == ST_LED_SOLID &&
-	      f.mode[ST_LED_SIDE_BATT_FIRST + 1] == ST_LED_SOLID &&
-	      f.mode[ST_LED_SIDE_BATT_FIRST + 2] == ST_LED_OFF,
-	      "battery level 3 of 4 lights two of the three battery LEDs");
+
+	/* Untrustworthy data must not fabricate a level. */
+	memset(&in, 0, sizeof(in));
+	in.sequence = ST_LED_SEQ_BOOT;
+	in.sequence_ms = ST_LED_BOOT_FADE_END_MS + 10u;
+	in.batt_state = ST_LED_BATT_UNAVAILABLE;
+	in.batt_level = 0u;
+	st_led_mvp_decide(&in, &f);
+	show("preview, no reading", &f);
+	CHECK(side_all(&f, 0u), "an unavailable reading previews as darkness, never a level");
 }
 
-/* ============================== 2. playing =============================== */
-static void case_2_playing(void)
+/* ======================== 3. stopped / idle ============================== */
+static void case_idle(void)
 {
 	st_led_inputs_t in; st_led_frame_t f;
 
 	g_cases++;
-	printf("\n-- 2. PLAYING\n");
-	make_song(&in, none, none);
-	batt_ok(&in);
-	in.playing = true;
+	printf("\n-- Stopped, not charging\n");
+	memset(&in, 0, sizeof(in));
+	in.song_selected = true;            /* a song IS loaded */
+	in.batt_state = ST_LED_BATT_CHARGER_ABSENT;
+	in.batt_level = 3u;
 	st_led_mvp_decide(&in, &f);
-	show("playing", &f);
+	show("stopped, song loaded", &f);
+	CHECK(tracks_all(&f, 0u),
+	      "Track LEDs are completely off -- a loaded song does NOT make them solid");
+	CHECK(side_all(&f, 0u), "side LEDs are off when not charging");
+}
 
-	CHECK(f.mode[ST_LED_SIDE_TRANSPORT] == ST_LED_SOLID,
-	      "transport LED is steadily illuminated while playing");
-	for (int i = 0; i < 4; i++) {
-		CHECK(f.mode[i] == ST_LED_SOLID,
-		      "track %d stays SOLID while playing -- stable and readable, "
-		      "not a level meter that dims on a quiet passage", i + 1);
+/* ================= 4. playing: pulse + chase + activity ================== */
+static void case_playing(void)
+{
+	st_led_inputs_t in; st_led_frame_t f;
+	uint32_t fpb = 24000u;   /* 120 BPM @ 48 kHz */
+	int b;
+
+	g_cases++;
+	printf("\n-- Playing: shared beat pulse, activity scaling, 1-2-3-4 chase\n");
+
+	for (b = 0; b < 4; b++) {
+		char lbl[40];
+		/* A little way into beat b, near the envelope peak. */
+		uint32_t frame = (uint32_t)b * fpb + (fpb / ST_BEAT_PULSE_DEN) / 2u;
+
+		make_playing(&in, frame, 128u);
+		st_led_mvp_decide(&in, &f);
+		snprintf(lbl, sizeof(lbl), "beat %d accent", b + 1);
+		show(lbl, &f);
+
+		CHECK(in.beat.beat_index == (uint8_t)b,
+		      "beat index %d derives from STIX timing and song_frame", b);
+		CHECK(f.level[b] > f.level[(b + 1) & 3],
+		      "T%d carries the chase accent, brighter than the un-accented lanes", b + 1);
+		CHECK(f.level[b] == in.beat.envelope,
+		      "the accented lane gets the FULL envelope, so the chase stays readable "
+		      "regardless of that stem's level");
+		CHECK(f.level[ST_LED_S4] == in.beat.envelope,
+		      "S4 pulses with the SAME envelope value as the track row -- one shared "
+		      "beat envelope, not a second animation");
+		CHECK(f.level[ST_LED_S1] == 0u && f.level[ST_LED_S2] == 0u &&
+		      f.level[ST_LED_S3] == 0u, "S1-S3 are off during playback");
+	}
+
+	/* Between beats: everything dark. */
+	make_playing(&in, (fpb / ST_BEAT_PULSE_DEN) + (fpb / 2u), 255u);
+	st_led_mvp_decide(&in, &f);
+	show("between beats, loud", &f);
+	CHECK(!in.beat.in_pulse, "the frame is outside the pulse window");
+	CHECK(tracks_all(&f, 0u) && side_all(&f, 0u),
+	      "between beats EVERYTHING is dark even at full activity -- audio modulates "
+	      "brightness only inside the pulse, it never flickers the LEDs on its own");
+
+	/* Activity scales the non-accented lanes. */
+	{
+		st_led_frame_t loud, quiet;
+		uint32_t frame = 1u * fpb + (fpb / ST_BEAT_PULSE_DEN) / 2u;   /* beat 2 */
+
+		make_playing(&in, frame, 255u);
+		st_led_mvp_decide(&in, &loud);
+		make_playing(&in, frame, 40u);
+		st_led_mvp_decide(&in, &quiet);
+		show("beat 2, loud stems", &loud);
+		show("beat 2, quiet stems", &quiet);
+		CHECK(loud.level[0] > quiet.level[0],
+		      "a louder stem pulses brighter than a quiet one (T1, un-accented)");
+		CHECK(loud.level[1] == quiet.level[1],
+		      "the accented lane T2 is identical either way -- activity never dims "
+		      "the bar-position accent");
+	}
+
+	/* No tempo: no fabricated pulse. */
+	{
+		st_beat_timing_t bad;
+
+		memset(&in, 0, sizeof(in));
+		in.song_selected = true;
+		in.playing = true;
+		(void)st_beat_timing_init(&bad, 0u, 0u, 48000u);   /* absent tempo */
+		st_beat_pulse(&bad, 12345u, &in.beat);
+		st_led_mvp_decide(&in, &f);
+		show("playing, no tempo", &f);
+		CHECK(!in.beat.valid, "an absent tempo yields an invalid pulse, not a guess");
+		CHECK(tracks_all(&f, 0u), "and no fabricated animation");
 	}
 }
 
-/* ==================== 3. track 1 muted, then unmuted ===================== */
-static void case_3_mute(void)
+/* ==================== 5. immediate momentary solo ======================== */
+static void case_solo(void)
 {
-	st_led_inputs_t in; st_led_frame_t f;
-	bool muted[4] = { true, false, false, false };
+	st_led_inputs_t in; st_led_frame_t f, before;
+	uint32_t fpb = 24000u;
+	uint32_t frame = 2u * fpb + (fpb / ST_BEAT_PULSE_DEN) / 2u;   /* beat 3 */
 
 	g_cases++;
-	printf("\n-- 3. Track 1 MUTED, then unmuted\n");
-	make_song(&in, muted, none);
-	batt_ok(&in);
-	in.playing = true;
-	st_led_mvp_decide(&in, &f);
-	show("track 1 muted", &f);
+	printf("\n-- Immediate momentary solo (Track 2 held)\n");
 
-	CHECK(f.mode[0] == ST_LED_GHOST,
-	      "muted track 1 is FAINT -- distinguishable from an empty lane, which is off");
-	CHECK(f.mode[1] == ST_LED_SOLID && f.mode[2] == ST_LED_SOLID && f.mode[3] == ST_LED_SOLID,
-	      "the other three stay SOLID");
+	make_playing(&in, frame, 200u);
+	st_led_mvp_decide(&in, &before);
+	show("before press", &before);
 
-	muted[0] = false;
-	make_song(&in, muted, none);
-	batt_ok(&in);
-	in.playing = true;
+	in.solo_held = true;
+	in.solo_index = 1u;    /* Track 2 */
 	st_led_mvp_decide(&in, &f);
-	show("track 1 unmuted", &f);
-	CHECK(f.mode[0] == ST_LED_SOLID, "unmuting restores track 1 to SOLID");
+	show("Track 2 held", &f);
+	CHECK(f.level[1] == ST_LED_MAX,
+	      "the held stem is at MAXIMUM brightness -- never faint, never ghosted");
+	CHECK(f.level[0] == 0u && f.level[2] == 0u && f.level[3] == 0u,
+	      "every other Track LED is completely off");
+	CHECK(f.level[ST_LED_S4] == before.level[ST_LED_S4],
+	      "S4 keeps its tempo pulse under a solo -- solo overrides only the track row");
+
+	in.solo_held = false;
+	st_led_mvp_decide(&in, &f);
+	show("released", &f);
+	CHECK(memcmp(&f, &before, sizeof(f)) == 0,
+	      "release restores the beat/chase at the SAME song position -- the decision "
+	      "holds no state, so nothing restarts");
+
+	/* Solo outranks even a stopped transport. */
+	memset(&in, 0, sizeof(in));
+	in.song_selected = true;
+	in.solo_held = true;
+	in.solo_index = 3u;
+	st_led_mvp_decide(&in, &f);
+	show("solo while stopped", &f);
+	CHECK(f.level[3] == ST_LED_MAX && f.level[0] == 0u,
+	      "solo shows immediately even with the transport stopped");
 }
 
-/* ============= 4. track 2 held for momentary solo, then released ========= */
-static void case_4_solo(void)
+/* ======================= 6. charging gauge =============================== */
+static void case_charging(void)
 {
 	st_led_inputs_t in; st_led_frame_t f;
-	bool solo[4] = { false, true, false, false };
 
 	g_cases++;
-	printf("\n-- 4. Track 2 HELD for momentary solo, then released\n");
-	make_song(&in, none, solo);
-	batt_ok(&in);
-	in.playing = true;
-	st_led_mvp_decide(&in, &f);
-	show("track 2 solo held", &f);
+	printf("\n-- Charging gauge (stopped)\n");
+	memset(&in, 0, sizeof(in));
+	in.song_selected = true;
+	in.batt_state = ST_LED_BATT_CHARGING;
+	in.batt_level = 2u;
 
-	CHECK(f.mode[1] == ST_LED_SOLID, "the soloed stem is SOLID");
-	CHECK(f.mode[0] == ST_LED_GHOST && f.mode[2] == ST_LED_GHOST && f.mode[3] == ST_LED_GHOST,
-	      "stems silenced by the solo are FAINT -- the contract's "
-	      "\"soloed stem solid, non-solo stems faint\"");
-
-	/* Release. */
-	make_song(&in, none, none);
-	batt_ok(&in);
-	in.playing = true;
+	in.batt_blink_on = true;
 	st_led_mvp_decide(&in, &f);
-	show("solo released", &f);
-	for (int i = 0; i < 4; i++) {
-		CHECK(f.mode[i] == ST_LED_SOLID,
-		      "release immediately restores track %d to its underlying audible state",
-		      i + 1);
+	show("charging lv2, blink on", &f);
+	CHECK(f.level[ST_LED_S1] == ST_LED_MAX, "completed step S1 stays solid");
+	CHECK(f.level[ST_LED_S2] == ST_LED_MAX, "the current step S2 is lit on the on-phase");
+
+	in.batt_blink_on = false;
+	st_led_mvp_decide(&in, &f);
+	show("charging lv2, blink off", &f);
+	CHECK(f.level[ST_LED_S1] == ST_LED_MAX, "S1 does NOT blink with it");
+	CHECK(f.level[ST_LED_S2] == 0u, "only the current step blinks");
+	CHECK(tracks_all(&f, 0u), "Track LEDs stay off while charging and stopped");
+
+	in.batt_state = ST_LED_BATT_CHARGE_COMPLETE;
+	st_led_mvp_decide(&in, &f);
+	show("fully charged", &f);
+	CHECK(side_all(&f, ST_LED_MAX), "fully charged leaves all four side LEDs solid");
+
+	/* Playback outranks the charging display. */
+	{
+		uint32_t fpb = 24000u;
+
+		make_playing(&in, (fpb / ST_BEAT_PULSE_DEN) / 2u, 128u);
+		in.batt_state = ST_LED_BATT_CHARGING;
+		in.batt_level = 2u;
+		st_led_mvp_decide(&in, &f);
+		show("playing while charging", &f);
+		CHECK(f.level[ST_LED_S1] == 0u && f.level[ST_LED_S2] == 0u &&
+		      f.level[ST_LED_S3] == 0u,
+		      "playback outranks charging: S1-S3 off");
+		CHECK(f.level[ST_LED_S4] == in.beat.envelope, "only S4 pulses with tempo");
 	}
 }
 
-/* ================== 5. transfer begins, then completes =================== */
-static void case_5_transfer(void)
+/* ========================== 7. transfer ================================== */
+static void case_transfer(void)
 {
 	st_led_inputs_t in; st_led_frame_t f;
-	bool muted[4] = { true, false, false, false };
 
 	g_cases++;
-	printf("\n-- 5. TRANSFER begins, then completes\n");
-
-	/* Mute track 1 BEFORE the transfer, so "restores live state" is a real
-	 * claim: if the overlay restored a snapshot it would have to restore
-	 * this, and if it restored a default it would lose it. */
-	make_song(&in, muted, none);
-	batt_ok(&in);
-	in.playing = false;
+	printf("\n-- Transfer\n");
+	memset(&in, 0, sizeof(in));
+	in.song_selected = true;
 	in.transfer_active = true;
+	in.batt_state = ST_LED_BATT_CHARGING;   /* would otherwise paint the side row */
+	in.batt_level = 3u;
+
 	in.transfer_blink_on = true;
 	st_led_mvp_decide(&in, &f);
 	show("transfer, blink on", &f);
-	CHECK(f.mode[0] == ST_LED_SOLID && f.mode[1] == ST_LED_SOLID &&
-	      f.mode[2] == ST_LED_SOLID && f.mode[3] == ST_LED_SOLID,
-	      "all four track LEDs blink TOGETHER (on phase)");
+	CHECK(tracks_all(&f, ST_LED_MAX), "all four Track LEDs blink together");
+	CHECK(side_all(&f, 0u), "the side row shows no fabricated status during a transfer");
 
 	in.transfer_blink_on = false;
 	st_led_mvp_decide(&in, &f);
 	show("transfer, blink off", &f);
-	CHECK(f.mode[0] == ST_LED_OFF && f.mode[1] == ST_LED_OFF &&
-	      f.mode[2] == ST_LED_OFF && f.mode[3] == ST_LED_OFF,
-	      "all four track LEDs are off together (off phase)");
-	CHECK(f.mode[ST_LED_SIDE_BATT_FIRST] == ST_LED_SOLID,
-	      "the side row is untouched by the transfer overlay -- battery stays readable");
-
-	/* Complete. */
-	in.transfer_active = false;
-	st_led_mvp_decide(&in, &f);
-	show("transfer complete", &f);
-	CHECK(f.mode[0] == ST_LED_GHOST,
-	      "normal state restores IMMEDIATELY, and restores the LIVE mute state "
-	      "(track 1 still muted), not a snapshot and not a default");
-	CHECK(f.mode[1] == ST_LED_SOLID && f.mode[2] == ST_LED_SOLID && f.mode[3] == ST_LED_SOLID,
-	      "the unmuted stems return to SOLID");
+	CHECK(tracks_all(&f, 0u), "and go dark together");
 }
 
-/* =================== 6. playback stops and restarts ====================== */
-static void case_6_stop_restart(void)
-{
-	st_led_inputs_t in; st_led_frame_t f;
-	st_led_frame_t first;
-
-	g_cases++;
-	printf("\n-- 6. Playback STOPS and RESTARTS\n");
-	make_song(&in, none, none);
-	batt_ok(&in);
-	in.playing = true;
-	st_led_mvp_decide(&in, &first);
-	show("playing", &first);
-
-	in.playing = false;
-	st_led_mvp_decide(&in, &f);
-	show("stopped", &f);
-	CHECK(f.mode[ST_LED_SIDE_TRANSPORT] == ST_LED_OFF, "transport LED goes off on stop");
-
-	in.playing = true;
-	st_led_mvp_decide(&in, &f);
-	show("restarted", &f);
-	CHECK(memcmp(&f, &first, sizeof(f)) == 0,
-	      "restarting reproduces the playing frame EXACTLY -- the decision holds no "
-	      "state of its own, so there is no stale meter value to carry over");
-}
-
-/* ================= 7. USB disconnect after the transfer ================== */
-static void case_7_usb_disconnect(void)
+/* ======================= 8. power-off sequence =========================== */
+static void case_shutdown(void)
 {
 	st_led_inputs_t in; st_led_frame_t f;
 
 	g_cases++;
-	printf("\n-- 7. USB DISCONNECT after transfer\n");
-	make_song(&in, none, none);
-	in.playing = false;
-	/* Unplugged: charger gone. The gauge keeps its last sticky level, so the
-	 * classifier reports ordinary battery operation. */
-	in.batt_state = ST_LED_BATT_CHARGER_ABSENT;
-	in.batt_level = 3u;
-	in.transfer_active = false;
-	st_led_mvp_decide(&in, &f);
-	show("usb disconnected", &f);
-
-	CHECK(f.mode[0] == ST_LED_SOLID && f.mode[3] == ST_LED_SOLID,
-	      "the track row returns to normal state -- no transfer residue");
-	CHECK(f.mode[ST_LED_SIDE_BATT_FIRST] == ST_LED_SOLID &&
-	      f.mode[ST_LED_SIDE_BATT_FIRST + 1] == ST_LED_SOLID,
-	      "battery reverts to the local gauge, never to all-off");
-}
-
-/* ====================== 8. no valid song selected ======================== */
-static void case_8_no_song(void)
-{
-	st_led_inputs_t in; st_led_frame_t f;
-
-	g_cases++;
-	printf("\n-- 8. NO valid song selected\n");
+	printf("\n-- Power-off sequence\n");
 	memset(&in, 0, sizeof(in));
-	batt_ok(&in);
-	st_led_mvp_decide(&in, &f);
-	show("no song", &f);
-
-	for (int i = 0; i < 4; i++) {
-		CHECK(f.mode[i] == ST_LED_OFF,
-		      "track %d is OFF -- no standby chase, ever", i + 1);
-	}
-	CHECK(f.mode[ST_LED_SIDE_TRANSPORT] == ST_LED_OFF, "transport LED off with no song");
-	CHECK(f.mode[ST_LED_SIDE_BATT_FIRST] == ST_LED_SOLID,
-	      "battery is still shown -- it does not depend on a song");
-}
-
-/* ==================== 9. battery information unavailable ================= */
-static void case_9_batt_unavailable(void)
-{
-	st_led_inputs_t in; st_led_frame_t f;
-
-	g_cases++;
-	printf("\n-- 9. Battery information UNAVAILABLE / FAULT\n");
-
-	make_song(&in, none, none);
+	in.sequence = ST_LED_SEQ_SHUTDOWN;
+	/* Deliberately assert states that must NOT show through: shutdown is
+	 * the highest priority there is. */
 	in.playing = true;
-	in.batt_state = ST_LED_BATT_UNAVAILABLE;
-	in.batt_level = 0u;
-	st_led_mvp_decide(&in, &f);
-	show("battery unavailable", &f);
-	CHECK(f.mode[ST_LED_SIDE_BATT_FIRST] == ST_LED_OFF &&
-	      f.mode[ST_LED_SIDE_BATT_FIRST + 1] == ST_LED_OFF &&
-	      f.mode[ST_LED_SIDE_BATT_FIRST + 2] == ST_LED_OFF,
-	      "no trustworthy reading -> battery LEDs are DARK, not a guessed level");
-	CHECK(f.mode[ST_LED_SIDE_TRANSPORT] == ST_LED_SOLID,
-	      "transport is unaffected by the battery being unknown");
-
-	in.batt_state = ST_LED_BATT_FAULT;
-	in.batt_level = 3u;   /* a stale level exists, but the state is not trusted */
-	st_led_mvp_decide(&in, &f);
-	show("battery fault", &f);
-	CHECK(f.mode[ST_LED_SIDE_BATT_FIRST] == ST_LED_OFF,
-	      "FAULT is dark too -- a charger fault is never rendered as a charge level, "
-	      "and never as an error code");
-
-	/* The classifier's own safety rule, checked through the real function. */
-	{
-		st_led_batt_gauge_t g;
-
-		st_led_batt_reset(&g);
-		CHECK(st_led_batt_classify(&g, false, false) == ST_LED_BATT_UNAVAILABLE,
-		      "a gauge that has never been seeded classifies UNAVAILABLE, not LOW");
-		CHECK(st_led_batt_classify(&g, false, true) == ST_LED_BATT_FAULT,
-		      "charging asserted with no power present is a FAULT, not LOW");
-
-		st_led_batt_update(&g, true, 1900);   /* below THR_1 -> level 1 */
-		CHECK(g.level == 1u, "a low raw reading seeds gauge level 1");
-		CHECK(st_led_batt_classify(&g, false, false) == ST_LED_BATT_LOW,
-		      "a VALID low reading does classify LOW");
-		st_led_batt_update(&g, false, -1);    /* failed read after a good one */
-		CHECK(st_led_batt_classify(&g, false, false) == ST_LED_BATT_FAULT,
-		      "a failed read after a good one is FAULT, and the level stays sticky");
-		CHECK(g.level == 1u, "the sticky level survives a failed read");
-	}
-}
-
-/* ============================ 10. charging =============================== */
-static void case_10_charging(void)
-{
-	st_led_inputs_t in; st_led_frame_t f;
-
-	g_cases++;
-	printf("\n-- 10. CHARGING, and charge complete\n");
-
-	make_song(&in, none, none);
-	in.playing = false;
+	in.song_selected = true;
+	in.transfer_active = true;
+	in.solo_held = true;
 	in.batt_state = ST_LED_BATT_CHARGING;
-	in.batt_level = 3u;
+	in.batt_level = 2u;
 
-	in.batt_blink_on = true;
+	in.sequence_ms = 0u;
 	st_led_mvp_decide(&in, &f);
-	show("charging, blink on", &f);
-	CHECK(f.mode[ST_LED_SIDE_BATT_FIRST] == ST_LED_SOLID,
-	      "steps below the current level stay solid while charging");
-	CHECK(f.mode[ST_LED_SIDE_BATT_FIRST + 1] == ST_LED_SOLID,
-	      "the current level's LED is lit on the blink-on phase");
+	show("t=0 flash + blink", &f);
+	CHECK(side_all(&f, ST_LED_MAX), "all four side LEDs flash together");
+	CHECK(tracks_all(&f, ST_LED_MAX),
+	      "all four Track LEDs blink once -- outranking playing, transfer AND solo");
 
-	in.batt_blink_on = false;
+	in.sequence_ms = ST_LED_TRACK_BLINK_MS;
 	st_led_mvp_decide(&in, &f);
-	show("charging, blink off", &f);
-	CHECK(f.mode[ST_LED_SIDE_BATT_FIRST + 1] == ST_LED_OFF,
-	      "ONLY the current level's LED blinks -- the approved battery step");
-	CHECK(f.mode[ST_LED_SIDE_BATT_FIRST] == ST_LED_SOLID,
-	      "the step below does not blink with it");
+	CHECK(tracks_all(&f, 0u), "the Track blink ends dark");
 
-	in.batt_state = ST_LED_BATT_CHARGE_COMPLETE;
+	in.sequence_ms = ST_LED_SIDE_HOLD_MS + (ST_LED_SIDE_FADE_MS / 2u);
 	st_led_mvp_decide(&in, &f);
-	show("charge complete", &f);
-	CHECK(f.mode[ST_LED_SIDE_BATT_FIRST] == ST_LED_SOLID &&
-	      f.mode[ST_LED_SIDE_BATT_FIRST + 1] == ST_LED_SOLID &&
-	      f.mode[ST_LED_SIDE_BATT_FIRST + 2] == ST_LED_SOLID,
-	      "charge complete lights every battery LED solid");
+	show("mid-fade", &f);
+	CHECK(f.level[ST_LED_S1] > 0u && f.level[ST_LED_S1] < ST_LED_MAX,
+	      "the side row fades rather than snapping off");
 
-	/* Lowest level still readable. */
-	in.batt_state = ST_LED_BATT_LOW;
-	in.batt_level = 1u;
+	in.sequence_ms = ST_LED_SHUTDOWN_TOTAL_MS;
 	st_led_mvp_decide(&in, &f);
-	show("battery level 1 (low)", &f);
-	CHECK(f.mode[ST_LED_SIDE_BATT_FIRST] == ST_LED_GHOST,
-	      "level 1 shows the bottom battery LED FAINT -- distinguishable from "
-	      "\"no information\", which is dark");
-	CHECK(f.mode[ST_LED_SIDE_BATT_FIRST + 1] == ST_LED_OFF,
-	      "and only that one");
+	show("sequence end", &f);
+	CHECK(tracks_all(&f, 0u) && side_all(&f, 0u),
+	      "the sequence ends with every LED dark, before SYSTEM_OFF may be entered");
 }
 
-/* ============ structural guarantees the whole design rests on =========== */
-static void case_invariants(void)
+/* ====================== 9. priority + invariants ========================= */
+static void case_priority(void)
 {
 	st_led_inputs_t in; st_led_frame_t f;
 
 	g_cases++;
-	printf("\n-- Invariants\n");
+	printf("\n-- Priority order and invariants\n");
 
-	/* Every LED assigned on every call: prefill with a poison value and
-	 * confirm none of it survives. */
+	/* Boot outranks transfer and playing. */
+	memset(&in, 0, sizeof(in));
+	in.sequence = ST_LED_SEQ_BOOT;
+	in.sequence_ms = 0u;
+	in.transfer_active = true;
+	in.playing = true;
+	in.song_selected = true;
+	st_led_mvp_decide(&in, &f);
+	CHECK(side_all(&f, ST_LED_MAX),
+	      "boot outranks transfer and playing (side row full at t=0)");
+
+	/* Transfer outranks solo and playing. */
+	memset(&in, 0, sizeof(in));
+	in.transfer_active = true;
+	in.transfer_blink_on = false;
+	in.solo_held = true;
+	in.solo_index = 0u;
+	in.playing = true;
+	in.song_selected = true;
+	st_led_mvp_decide(&in, &f);
+	CHECK(tracks_all(&f, 0u), "transfer outranks solo (blink-off phase wins over T1)");
+
+	/* No LED left unassigned. */
 	memset(&in, 0, sizeof(in));
 	memset(&f, 0xEE, sizeof(f));
 	st_led_mvp_decide(&in, &f);
-	{
-		int assigned = 1;
-		for (unsigned i = 0; i < ST_LED_COUNT; i++) {
-			if (f.mode[i] > ST_LED_SOLID) {
-				assigned = 0;
-			}
-		}
-		CHECK(assigned,
-		      "all eight LEDs are assigned on every call -- no LED can carry a "
-		      "value over from a previous frame");
-	}
+	CHECK(side_all(&f, 0u) && tracks_all(&f, 0u),
+	      "idle assigns all eight explicitly -- no LED carries a previous value");
 
-	/* Purity: same inputs, same output, no hidden state. */
+	/* Purity. */
 	{
 		st_led_frame_t a, b;
-		bool muted[4] = { false, true, false, true };
+		int n;
 
-		make_song(&in, muted, none);
-		in.playing = true;
-		batt_ok(&in);
+		make_playing(&in, 24000u + 1000u, 90u);
 		st_led_mvp_decide(&in, &a);
-		for (int n = 0; n < 50; n++) {
+		for (n = 0; n < 50; n++) {
 			st_led_mvp_decide(&in, &b);
 		}
 		CHECK(memcmp(&a, &b, sizeof(a)) == 0,
-		      "the decision is pure: 50 further calls with identical inputs "
-		      "produce an identical frame");
+		      "the decision is pure: 50 identical calls give an identical frame");
 	}
 }
 
 int main(void)
 {
-	printf("STEM TAPE MVP LED ACCEPTANCE MATRIX\n");
-	printf("driving the REAL production st_led_mvp_decide(), with audibility from "
-	       "the REAL st_stem_mix_channel_audible()\n");
-	printf("T1..T4 = track LEDs; PLAY = side LED nearest PLAY (transport); "
-	       "B2..B4 = the three battery LEDs\n");
+	printf("STEM TAPE LED ACCEPTANCE MATRIX (st12 behaviour)\n");
+	printf("driving the REAL st_led_mvp_decide() and the REAL st_beat_pulse()\n");
+	printf("T[..] = Track 1-4 levels; S[..] = side S1-S4 levels, 0..255\n");
 
-	case_1_stopped();
-	case_2_playing();
-	case_3_mute();
-	case_4_solo();
-	case_5_transfer();
-	case_6_stop_restart();
-	case_7_usb_disconnect();
-	case_8_no_song();
-	case_9_batt_unavailable();
-	case_10_charging();
-	case_invariants();
+	case_boot();
+	case_preview_levels();
+	case_idle();
+	case_playing();
+	case_solo();
+	case_charging();
+	case_transfer();
+	case_shutdown();
+	case_priority();
 
 	printf("\n%s (%d cases, %d checks, %d failures)\n",
 	       g_failures ? "LED ACCEPTANCE MATRIX FAILED" : "LED ACCEPTANCE MATRIX PASSED",
 	       g_cases, g_checks, g_failures);
-	printf("NOTE: this proves the production DECISION assigns these modes. It does NOT\n"
-	       "      prove the physical device lights up this way -- no GPIO, no TIMER3,\n"
-	       "      no eye. Physical LED verification remains a human check.\n");
+	printf("NOTE: this proves the production DECISION assigns these levels. It does NOT\n"
+	       "      prove the device looks right -- brightness and fade timing must be\n"
+	       "      verified physically on real hardware.\n");
 	return g_failures ? 1 : 0;
 }
