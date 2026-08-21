@@ -31,6 +31,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "st_latency.h"
+#include "st_stem_bufmbox.h"
 #include "st_loop.h"
 #include "st_stem_stream.h"
 #include "st_beat_phase.h"
@@ -60,14 +62,17 @@ static int g_checks, g_failures, g_cases;
  * old sector. The producer fills the nearest missing sector ahead of what the
  * consumer asked for, one per "service", at a bounded rate.
  */
-#define SLOTS      12u
+/* THE RING'S REAL SLOT COUNT, from the same model the firmware uses. The gate
+ * models the shipped geometry or it proves nothing. */
+#define SLOTS      ST_STEM_MBOX_SLOTS
 
 /* Kept in step with main.c's ST_LOOP_PIN_* by the CI gate, which greps the
- * production values and these and fails if any differ. The two regions have
- * DIFFERENT depths, sized to what each has to cover -- see main.c. */
+ * production values and these and fails if any differ. Both take the
+ * residency depth st_latency.h derives from the measured worst-case read --
+ * the test does not get to pick its own number. */
 #define ST_LOOP_PIN_TEST_REGIONS       2u
-#define ST_LOOP_PIN_TEST_ENTRY_SECTORS 3u
-#define ST_LOOP_PIN_TEST_EXIT_SECTORS  3u
+#define ST_LOOP_PIN_TEST_ENTRY_SECTORS ST_LAT_RESIDENCY_SECTORS
+#define ST_LOOP_PIN_TEST_EXIT_SECTORS  ST_LAT_RESIDENCY_SECTORS
 #define PIN_ENTRY 0u
 #define PIN_EXIT  1u
 
@@ -195,15 +200,17 @@ static void emit(emitted_t *e, uint32_t frame, bool silent, bool pin)
 #define FILLS_PER_BLOCK_Q8 269u    /* 1.051 * 256, integer only */
 static uint32_t g_fill_credit_q8;
 
-/* THE WORST-CASE PRODUCER STALL, injectable.
+/* THE WORST-CASE PRODUCER STALL, injectable, and sized from st_latency.h.
  *
- * The pin's depth is sized against a 10.15 ms wait: the streamer may already
- * be mid-sector-read when a seek lands (5.073 ms to finish it, slice T0's
- * measured figure) and then needs 5.073 ms to read ours. A steady-rate
- * producer model never reproduces that, so the sizing argument would be
- * untested. Setting this to N makes the producer deliver nothing for the next
- * N output blocks -- 2 blocks is 10.67 ms, slightly worse than the real worst
- * case -- so the pin has to carry the gap alone. */
+ * A steady-rate producer model never reproduces a bad read, so without this
+ * the whole sizing argument would be untested -- which is exactly how st17
+ * shipped a pin depth that covered 14.19 ms while believing it needed only
+ * 10.15 ms. The stall injected here is ST_LAT_GUARANTEE_US, the real bound:
+ * one worst-case MEASURED read behind one typical in-flight read. Setting
+ * this to N makes the producer deliver nothing for N output blocks. */
+#define BLOCK_US 5333u   /* 256 frames at 48 kHz */
+#define STALL_BLOCKS_FOR_GUARANTEE \
+	((ST_LAT_GUARANTEE_US + BLOCK_US - 1u) / BLOCK_US)
 static uint32_t g_stall_blocks;
 
 static void audio_block(st_stream_t *st, ring_t *r, emitted_t *e,
@@ -688,7 +695,7 @@ static void case_exit_at_sector_end(void)
 		exit_req = true;
 		/* The exit lands with the streamer stalled for the full
 		 * worst-case wait. Only the pin can cover this. */
-		g_stall_blocks = 2u;
+		g_stall_blocks = STALL_BLOCKS_FOR_GUARANTEE;
 		for (i = 0; i < 300u; i++) {
 			audio_block(&st, &r, &e, false, lo, hi,
 				     &enter_req, lo, &exit_req, hi);
@@ -718,8 +725,9 @@ static void case_exit_at_sector_end(void)
 		      ((hi / ST11_FRAMES_PER_SECTOR) + 1u) * ST11_FRAMES_PER_SECTOR);
 		CHECK(e.silent == 0u,
 		      "   zero silent frames across all %u emitted, WITH the "
-		      "streamer stalled for the full 10.15 ms worst case at the "
-		      "moment of the exit", e.n);
+		      "streamer stalled for the full %u us guarantee (%u blocks) "
+		      "at the moment of the exit", e.n,
+		      ST_LAT_GUARANTEE_US, STALL_BLOCKS_FOR_GUARANTEE);
 	}
 
 	/* AND THE NEGATIVE: the same worst case with the exit region one sector
@@ -741,7 +749,7 @@ static void case_exit_at_sector_end(void)
 		(void)st_stream_seek(&st, lo);
 		ring_pin(&r, PIN_ENTRY, lo / ST11_FRAMES_PER_SECTOR);
 		ring_pin(&r, PIN_EXIT, hi / ST11_FRAMES_PER_SECTOR);
-		r.pin_count[PIN_EXIT] = 2u;          /* one sector shallower */
+		r.pin_count[PIN_EXIT] = ST_LAT_RESIDENCY_SECTORS - 1u;
 
 		memset(&e, 0, sizeof(e));
 		e.frames = buf;
@@ -751,18 +759,21 @@ static void case_exit_at_sector_end(void)
 			audio_block(&st, &r, &e, true, lo, hi,
 				     &enter_req, lo, &exit_req, hi);
 		}
-		CHECK(e.silent == 0u, "depth 2: the loop itself still runs clean");
+		CHECK(e.silent == 0u,
+		      "one sector shallower: the loop itself still runs clean");
 		exit_req = true;
-		g_stall_blocks = 2u;
+		g_stall_blocks = STALL_BLOCKS_FOR_GUARANTEE;
 		for (i = 0; i < 20u; i++) {
 			audio_block(&st, &r, &e, false, lo, hi,
 				     &enter_req, lo, &exit_req, hi);
 		}
 		CHECK(e.silent > 0u,
-		      "depth 2 DOES emit silence (%u frames) under the same worst "
-		      "case -- 341 pinned frames is 7.10 ms against a 10.15 ms "
-		      "wait, so 'the exit sector plus one' is 3 ms short",
-		      e.silent);
+		      "one sector shallower DOES emit silence (%u frames) under "
+		      "the same stall -- %u us of cover against a %u us guarantee "
+		      "-- so the derived depth is the minimum, not a preference",
+		      e.silent,
+		      ST_LAT_RESIDENCY_COVER_US(ST_LAT_RESIDENCY_SECTORS - 1u),
+		      ST_LAT_GUARANTEE_US);
 	}
 }
 

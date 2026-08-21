@@ -1,0 +1,32 @@
+{
+  "_comment": [
+    "RAM budgets for stemtape_player, enforced by",
+    "stemtape_player_ram_inventory.py against the linked ELF.",
+    "",
+    "These are RATCHETS, not aspirations: each is set at or just above what",
+    "the image actually uses, so any growth fails the build and has to be",
+    "argued for in a diff. They come DOWN as the audit reclaims memory; they",
+    "do not go up without a stated reason in the commit that raises them.",
+    "",
+    "TARGET, recorded here so it is not lost: 98304 bytes free (96 KiB), which",
+    "the analysis in src/st_latency.h shows is reachable only with a unified",
+    "sector cache at the adopted latency guarantee. min_free_bytes tracks what",
+    "is currently PROVEN, not the target."
+  ],
+  "target_free_bytes": 98304,
+
+  "min_free_bytes": 32768,
+
+  "category_caps": {
+    "sector_pool": 172032,
+    "classic_inherited": 8192,
+    "transfer": 12288,
+    "i2s": 12288,
+    "leds": 2048,
+    "stemtape": 4096
+  },
+
+  "max_unattributed_bytes": 32768,
+
+  "measure_required_at_bytes": 4096
+}

@@ -1,0 +1,175 @@
+{
+  "_comment": [
+    "Ownership metadata for the RAM inventory. This is DATA, deliberately:",
+    "a claim about who owns a buffer, when it is alive and what evidence sets",
+    "its size is reviewable in a diff here, instead of being re-derived from",
+    "prose in a comment every time someone asks.",
+    "",
+    "'evidence' is the field that matters. 'NOT MEASURED' is the honest value",
+    "for anything whose size was chosen rather than derived, and the report",
+    "lists every large allocation still carrying it. Do not write a number",
+    "into this field that is not traceable to a measurement or to",
+    "src/st_latency.h."
+  ],
+  "default": {
+    "category": "unclassified",
+    "owner": "unattributed",
+    "lifetime": "unknown",
+    "writers": "unknown",
+    "readers": "unknown",
+    "phases": "unknown",
+    "evidence": "NOT MEASURED"
+  },
+  "symbols": {
+    "g_stem_sector_bufs": {
+      "category": "sector_pool",
+      "owner": "read-ahead ring (st_stem_bufmbox)",
+      "declared_in": "src/main.c",
+      "lifetime": "whole session; filled by streamer_thread, drained by audio_thread",
+      "writers": "streamer_thread",
+      "readers": "audio_thread",
+      "phases": "playback, looping",
+      "overlaps": "loop pins (both live while a loop runs)",
+      "evidence": "depth 12 predates st_latency.h and was chosen against a since-disproven claim that 11 sectors cover the driver's 80 ms allowance. Required read-ahead per st_latency.h is ST_LAT_READAHEAD_SECTORS. OVERSIZED, pending the unified-cache rework."
+    },
+    "g_stem_loop_pin_bufs": {
+      "category": "sector_pool",
+      "owner": "loop entry/exit residency",
+      "declared_in": "src/main.c",
+      "lifetime": "filled when the PLAY gesture arms; released when the loop ends",
+      "writers": "streamer_thread",
+      "readers": "audio_thread",
+      "phases": "looping only",
+      "overlaps": "read-ahead ring (both live while a loop runs); dead during idle, transfer and non-loop playback",
+      "evidence": "ST_LAT_RESIDENCY_SECTORS per region, derived from st_latency.h's guarantee. st17 shipped 3 per region against a wrong 10.15 ms bound; corrected here."
+    },
+    "s_v11_verify_scratch": {
+      "category": "transfer",
+      "owner": "bulk upload read-back verify",
+      "declared_in": "src/main.c",
+      "lifetime": "one sector verify inside a transfer",
+      "writers": "the transfer command path (main thread)",
+      "readers": "the same",
+      "phases": "transfer only",
+      "overlaps": "MUTUALLY EXCLUSIVE with playback: transfer pauses the transport. Candidate for aliasing onto a sector-pool slot.",
+      "evidence": "one sector, fixed by ST11_SECTOR_BYTES; the question is not its size but whether it needs to be its own allocation"
+    },
+    "g_meta": {
+      "category": "classic_inherited",
+      "owner": "inherited Tape Looper slot metadata",
+      "declared_in": "src/main.c",
+      "lifetime": "whole session",
+      "writers": "main thread",
+      "readers": "main thread",
+      "phases": "loaded at boot, mutated by control paths whose audio effect is unreachable",
+      "overlaps": "none",
+      "evidence": "NOT MEASURED"
+    },
+    "metabuf": {
+      "category": "classic_inherited",
+      "owner": "inherited slot-index staging",
+      "declared_in": "src/main.c (function-local static)",
+      "lifetime": "whole session",
+      "writers": "main thread",
+      "readers": "main thread",
+      "phases": "boot and metadata save",
+      "overlaps": "none",
+      "evidence": "NOT MEASURED"
+    },
+    "mix32": {
+      "category": "classic_inherited",
+      "owner": "inherited classic mixer accumulator",
+      "declared_in": "src/main.c",
+      "lifetime": "whole session",
+      "writers": "audio_thread (classic path only)",
+      "readers": "audio_thread (classic path only)",
+      "phases": "none reachable with a Stem Tape song selected",
+      "overlaps": "none",
+      "evidence": "NOT MEASURED"
+    },
+    "trk": {
+      "category": "classic_inherited",
+      "owner": "inherited per-track state; Stem Tape reads vol/mute/solo from it",
+      "declared_in": "src/main.c",
+      "lifetime": "whole session",
+      "writers": "main thread (controls)",
+      "readers": "audio_thread (mixer)",
+      "phases": "all",
+      "overlaps": "none",
+      "evidence": "partially live: Stem Tape genuinely uses vol_q8/muted/solo. The rest is classic."
+    }
+  },
+  "prefixes": {
+    "g_stem_": {
+      "category": "stemtape",
+      "owner": "Stem Tape runtime state",
+      "declared_in": "src/main.c",
+      "lifetime": "whole session",
+      "writers": "control/audio/streamer threads (per symbol)",
+      "readers": "same",
+      "phases": "playback, looping",
+      "evidence": "scalar state, not a pool"
+    },
+    "g_led": {
+      "category": "leds",
+      "owner": "LED renderer",
+      "declared_in": "src/main.c, src/led_*.c",
+      "lifetime": "whole session",
+      "writers": "control thread, TIMER3 ISR",
+      "readers": "TIMER3 ISR",
+      "phases": "all",
+      "evidence": "fixed by LED_PHYS_COUNT"
+    },
+    "z_": {
+      "category": "zephyr_kernel",
+      "owner": "Zephyr kernel",
+      "lifetime": "whole session",
+      "phases": "all",
+      "evidence": "framework-generated; sized by Kconfig"
+    },
+    "_k_": {
+      "category": "zephyr_kernel",
+      "owner": "Zephyr kernel object",
+      "lifetime": "whole session",
+      "phases": "all",
+      "evidence": "framework-generated; sized by Kconfig"
+    },
+    "_kernel": {
+      "category": "zephyr_kernel",
+      "owner": "Zephyr kernel",
+      "lifetime": "whole session",
+      "phases": "all",
+      "evidence": "framework-generated"
+    },
+    "usb": {
+      "category": "usb",
+      "owner": "USB device stack",
+      "lifetime": "whole session",
+      "phases": "transfer, console",
+      "evidence": "NOT MEASURED"
+    },
+    "udc": {
+      "category": "usb",
+      "owner": "USB device controller driver",
+      "lifetime": "whole session",
+      "phases": "transfer, console",
+      "evidence": "NOT MEASURED"
+    },
+    "cdc": {
+      "category": "usb",
+      "owner": "USB CDC ACM",
+      "lifetime": "whole session",
+      "phases": "transfer, console",
+      "evidence": "NOT MEASURED"
+    },
+    "tx_slab": {
+      "category": "i2s",
+      "owner": "I2S transmit slab",
+      "lifetime": "whole session",
+      "writers": "audio_thread",
+      "readers": "I2S DMA",
+      "phases": "playback",
+      "evidence": "NOT MEASURED"
+    }
+  }
+}

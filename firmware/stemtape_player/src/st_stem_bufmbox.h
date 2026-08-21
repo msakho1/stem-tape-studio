@@ -106,6 +106,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/* THE storage-latency model. This header derives its slot count from it and
+ * from nothing else. */
+#include "st_latency.h"
+
 #ifdef ST_STEM_BUFMBOX_ZEPHYR
 #include <zephyr/sys/atomic.h>
 
@@ -153,23 +157,28 @@ static inline void st_atomic_set(st_atomic32_t *a, int32_t v)
  * main.c's g_stem_bufs[]) -- a BUILD_ASSERT there ties the two together
  * so they cannot drift.
  *
- * The budget that sets this: one sector is 7.08 ms of audio and the
- * measured worst-case eMMC read is 16.1 ms, so read-ahead must exceed
- * ~2.3 sectors merely to survive ONE bad read, with margin on top for
- * consecutive bad reads and for the streamer being preempted. Two slots
- * (one sector, 7.08 ms) was structurally unable to meet that; see this
- * header's own "WHY N SLOTS AND NOT TWO".
- *
- * TWELVE. Eleven sectors of read-ahead = 77.9 ms.
+ * THE DEPTH IS NOW DERIVED, NOT CHOSEN HERE. src/st_latency.h owns the one
+ * storage-latency model this firmware sizes anything from, and
+ * ST_LAT_RING_SLOTS is what it yields for this ring: the slot the consumer
+ * holds, ST_LAT_READAHEAD_SECTORS ahead of it, and one the producer may never
+ * target because the consumer holds it.
  *
  * WHY DEPTH IS NOT OPTIONAL, even once throughput is fixed: average speed
  * and reliability are different properties. A read that is on average
  * comfortably faster than 7.08 ms still stalls occasionally on the card's
- * own internal housekeeping -- this driver's start-bit hunt allows up to
- * 80 ms for exactly that. With one sector of slack, ANY stall past 7.08 ms
- * is an audible hole no matter how quick the average is. Depth is what
- * converts "fast enough on average" into "fast enough every time", and
- * 77.9 ms covers the driver's own worst-case allowance with margin.
+ * own internal housekeeping. With one sector of slack, ANY stall past
+ * 7.08 ms is an audible hole no matter how quick the average is. Depth is
+ * what converts "fast enough on average" into "fast enough every time".
+ *
+ * A CORRECTION THIS HEADER OWES. It used to say twelve slots -- 77.9 ms of
+ * read-ahead -- "covers the driver's own worst-case allowance [80 ms] with
+ * margin". 77.9 is less than 80: it never covered it, and no depth this
+ * device can afford ever will (80 ms of residency at every seek target would
+ * need 319 KB of sector pool on a 256 KB part). The driver's 80 ms is its
+ * start-bit patience, not an observed read duration; a read that really takes
+ * 80 ms is a card fault, and the honest answer to a card fault is an
+ * underrun. What the firmware does guarantee is stated once, in
+ * src/st_latency.h, and every pool is sized from it.
  *
  * WHAT PAID FOR IT, and what did not. The CI RAM budget gate has NOT been
  * relaxed -- it rejected depth 4 once and was right to. Depth is funded
@@ -186,7 +195,7 @@ static inline void st_atomic_set(st_atomic32_t *a, int32_t v)
  * See stem_prime_read_ahead() in main.c.
  */
 #ifndef ST_STEM_MBOX_SLOTS
-#define ST_STEM_MBOX_SLOTS 12u
+#define ST_STEM_MBOX_SLOTS ST_LAT_RING_SLOTS
 #endif
 
 /* Value of a slot that holds no valid sector, and of held_sector before

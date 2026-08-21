@@ -132,6 +132,7 @@
 #define ST_BUILD_TAG "st17"
 #include "st_track_hold.h"
 #include "st_ladder.h"
+#include "st_latency.h"
 #include "st_ctl.h"
 #include "st_loop.h"
 #include "st_stix.h"
@@ -1270,13 +1271,15 @@ static uint8_t s_v11_verify_scratch[ST11_SECTOR_BYTES];
  * the needed sector is missing), which is why an under-fed stream played
  * back slow and distorted rather than merely glitching.
  *
- * DEPTH IS NOT RAISED HERE. ST_STEM_MBOX_SLOTS is 2 in this commit --
- * the same one sector of read-ahead, and the same 16 KB, as the
- * double-buffer being replaced -- so the ring protocol lands in the
- * shipped image at unchanged RAM cost. Raising it is what actually fixes
- * the starvation, and it is blocked on reclaiming the classic engine's
- * ~149 KB of provably-silent buffers; see ST_STEM_MBOX_SLOTS' own note in
- * st_stem_bufmbox.h for the full reasoning and the measured numbers. */
+ * DEPTH IS DERIVED, NOT CHOSEN. ST_STEM_MBOX_SLOTS comes from
+ * ST_LAT_RING_SLOTS in st_latency.h: the slot the consumer holds,
+ * ST_LAT_READAHEAD_SECTORS ahead of it, and one the producer may never
+ * target because the consumer holds it. It was twelve, from a claim that
+ * eleven sectors of read-ahead covered the driver's 80 ms start-bit
+ * allowance -- 77.9 ms does not, and no depth this part can hold ever
+ * would. See st_latency.h for what the firmware does guarantee, and
+ * tests/test_stem_playback_gate.c for the continuous-playback proof at
+ * this depth: bit-identical output hash, zero underruns. */
 static uint8_t g_stem_sector_bufs[ST_STEM_MBOX_SLOTS][ST11_SECTOR_BYTES];
 
 /* The lock-free SPSC handoff (st_stem_bufmbox.h) -- see this block's own
@@ -1284,16 +1287,18 @@ static uint8_t g_stem_sector_bufs[ST_STEM_MBOX_SLOTS][ST11_SECTOR_BYTES];
 static st_stem_mbox_t g_stem_mbox;
 
 /* ===================================================================
- * THE LOOP EXIT KIT: three PINNED sectors starting at loop_start_frame's.
+ * THE LOOP KIT: ST_LAT_RESIDENCY_SECTORS pinned at each of the window's ends.
  * ===================================================================
  * A global loop must be able to exit to loop_start_frame with no inserted
  * silence, at an arbitrary instant. The ring cannot supply that, and the
  * reason is arithmetic rather than opinion:
  *
- *   - The ring maps sector s to slot (s % ST_STEM_MBOX_SLOTS), 12 slots,
- *     so it holds a SLIDING window of 11 sectors of read-ahead.
- *   - The SHORTEST musical loop this firmware offers is 1/4 beat, which at
- *     120 BPM is 6000 frames == 17.6 sectors. Every other length is longer.
+ *   - The ring maps sector s to slot (s % ST_STEM_MBOX_SLOTS), so it holds
+ *     a SLIDING window of ST_LAT_READAHEAD_SECTORS sectors around the live
+ *     playhead and nothing else.
+ *   - The SHORTEST musical division this firmware offers is 1/8 bar, which
+ *     at the measured 93.71 BPM is 15366 frames == 45.2 sectors. Every
+ *     other division is longer.
  *   - So the loop always spans more sectors than the ring holds, and the
  *     sector containing loop_start_frame is ALWAYS evicted while the
  *     playhead is away from it. Reserving its slot instead of pinning a
@@ -1305,20 +1310,25 @@ static st_stem_mbox_t g_stem_mbox;
  *     is missing, which is exactly the inserted silence a loop exit must
  *     never produce.
  *
- * SIZING, from the measured numbers rather than a guess. One sector is
- * 7.083 ms of audio; an uncontended eMMC sector read is 5.073 ms (slice
- * T0's benchmark). At an exit the streamer may already be mid-read, so the
- * worst-case wait for a NEW sector is 5.073 (finish that one) + 5.073 (read
- * ours) = 10.15 ms. The pin has to cover that, and the worst case is
- * loop_start_frame sitting on the LAST frame of its sector, which yields
- * only (n-1)*340 + 1 frames of runway:
+ * SIZING, from st_latency.h. One sector is 7.083 ms of audio. The guarantee
+ * is ST_LAT_GUARANTEE_US -- one worst-case MEASURED read (16.1 ms) behind one
+ * typical in-flight read (5.073 ms) = 21.17 ms -- and the worst target
+ * position is the last frame of its sector, which yields only (n-1)*340 + 1
+ * frames of runway:
  *
  *      1 sector   8192 B ->  0.02 ms   CAN MISS
  *      2 sectors 16384 B ->  7.10 ms   CAN MISS
- *      3 sectors 24576 B -> 14.19 ms   SAFE, 4.04 ms of margin
+ *      3 sectors 24576 B -> 14.19 ms   CAN MISS  (what st17 shipped)
+ *      4 sectors 32768 B -> 21.25 ms   COVERS 21.17 ms
  *
- * Three is the smallest depth that cannot miss; the table below has the
- * arithmetic for one and two, which both do.
+ * The margin at four sectors is 76 us. That is deliberate and it is not where
+ * the safety lives: the conservatism is in the GUARANTEE (the worst read ever
+ * measured, not a typical one), not in sectors piled on top of it. Piling on
+ * sectors to buy visible margin against an already-worst-case figure is how
+ * this pool reached a size the device cannot afford.
+ *
+ * The depth is derived in st_latency.h from the one measured worst-case read
+ * the whole firmware sizes against; see the table below.
  *
  * TWO REGIONS, not one. A loop has two places the playhead can arrive at
  * without warning, and neither is reachable from the ring:
@@ -1349,37 +1359,34 @@ static st_stem_mbox_t g_stem_mbox;
  * ever reads a published pin. There is no refill-while-reading hazard to
  * guard against, so this needs no slot protocol of its own.
  */
-/* WHY THREE PER REGION, AND WHY NOT FEWER.
+/* DEPTH COMES FROM st_latency.h, NOT FROM A CONSTANT CHOSEN HERE.
  *
- * Both regions are based EXACTLY on their seek target's sector, so both size
- * identically. The worst case is the target frame sitting on the LAST frame
- * of its sector, which leaves (n-1)*340 + 1 frames of pinned audio:
+ * Both regions are based EXACTLY on their seek target's sector, so both take
+ * the residency depth: the target frame can sit on the LAST frame of its
+ * sector, so n pinned sectors cover only (n-1) whole sectors of audio.
+ * ST_LAT_RESIDENCY_SECTORS is that arithmetic, applied once, to the one
+ * measured worst-case read the whole firmware now sizes against.
  *
- *      n=1   ->      1 frame  =  0.02 ms   MISSES
- *      n=2   ->    341 frames =  7.10 ms   MISSES
- *      n=3   ->    681 frames = 14.19 ms   SAFE, 4.04 ms of margin
+ * WHAT THIS CORRECTS. st17 hard-coded 3 here against "10.15 ms", built by
+ * doubling slice T0's TYPICAL 5.073 ms read. A depth exists for the atypical
+ * case, so the typical read was the wrong quantity to double: against the
+ * 16.1 ms worst read st_stem_bufmbox.h has recorded since the ring was sized,
+ * three sectors (14.19 ms) do not cover the guarantee. The gate injected
+ * 10.15 ms and therefore never tested the real bound. Both are fixed: the
+ * depth is derived, and the gate injects ST_LAT_GUARANTEE_US.
  *
- * against a 10.15 ms worst-case wait for a fresh sector: the streamer may be
- * mid-read when the seek lands (5.073 ms to finish it, slice T0's measured
- * figure) plus 5.073 ms to read ours. Two sectors is 3 ms short of that, so
- * "the target's sector plus one more" is NOT enough -- it is the depth that
- * emits silence roughly whenever the seek lands late in a sector and the
- * streamer happens to be busy. Three is the smallest depth that cannot miss.
- *
- * Once the producer is aimed past the target it OUTRUNS the consumer
- * (5.073 ms per sector read against 7.083 ms of audio per sector), so the
- * runway is needed only to cover that first handover. Nothing beyond three
- * buys anything.
- *
- * 3 + 3 = 6 sectors = 49152 bytes, in one flat array indexed through
- * st_loop_pin_off[] -- which keeps the depths independent, so a future need
- * on one side cannot silently inflate the other.
+ * These two regions are the LAST separately-allocated sector pool. They exist
+ * only because the read-ahead ring maps sector s to slot s % SLOTS, so a
+ * window wider than the ring cannot hold both of its ends -- an artefact of
+ * the ring's addressing, not a property of the problem. A unified cache with
+ * associative lookup and pinnable slots removes them entirely; see
+ * docs/stem-tape-ram-v1.md.
  */
 #define ST_LOOP_PIN_REGIONS       2u
 #define ST_LOOP_PIN_ENTRY         0u   /* loop_start: the entry seek and every wrap */
 #define ST_LOOP_PIN_EXIT          1u   /* loop_end:   where every exit seek lands   */
-#define ST_LOOP_PIN_ENTRY_SECTORS 3u
-#define ST_LOOP_PIN_EXIT_SECTORS  3u
+#define ST_LOOP_PIN_ENTRY_SECTORS ST_LAT_RESIDENCY_SECTORS
+#define ST_LOOP_PIN_EXIT_SECTORS  ST_LAT_RESIDENCY_SECTORS
 #define ST_LOOP_PIN_SECTORS       (ST_LOOP_PIN_ENTRY_SECTORS + ST_LOOP_PIN_EXIT_SECTORS)
 
 static const uint8_t st_loop_pin_off[ST_LOOP_PIN_REGIONS] = {
