@@ -3,17 +3,14 @@
   "title": "First hardware-confirmed Stem Tape stored-song playback",
   "frozen_at": "2026-08-21",
   "status": "hardware-confirmed",
-
   "confirmation": {
     "confirmed_by": "device owner, on real SP-1 hardware",
     "claim": "stored four-stem song played back correctly from this BIN",
     "note": "This is the FIRST baseline in this repository whose audio behaviour was confirmed by listening on real hardware rather than inferred from host tests. Every earlier Stem Tape build was CI-green only."
   },
-
   "firmware": {
     "commit": "1143cc9b788f53b4c4f6a37adcfa32c7554cdb15",
     "branch": "claude/stemtape-m0-safety-audit-1vg9pq",
-    "tag": "stemtape-audio-baseline-1",
     "build_tag": "st10",
     "build_tag_note": "printed at boot as 'STEMTAPE BUILD st10' and on every diagnostic line as b=st10; if a capture does not show this, it is not this firmware",
     "artifact": "stemtape_player.bin",
@@ -25,23 +22,24 @@
     "ram_free_bytes": 100514,
     "ram_region_bytes": 262144,
     "source_tree": "da4cce94751c1f88a6caaec30f9bd208fc0c6c5a",
-    "source_tree_note": "git tree object of firmware/stemtape_player/src at the tagged commit"
+    "source_tree_note": "git tree object of firmware/stemtape_player/src at the tagged commit",
+    "identified_by": "commit SHA (see 'commit' above) -- NOT a git tag; see baseline_ref below"
   },
-
   "reproducibility": {
     "verified": true,
     "method": "two independent CI runs of the same commit, on different runners, produced byte-identical output",
-    "runs": [32438676107, 32438678221],
+    "runs": [
+      32438676107,
+      32438678221
+    ],
     "note": "The SHA-256 above is therefore an anchor, not a per-run accident. A rebuild of this commit that does NOT produce this hash means the toolchain or environment changed."
   },
-
   "toolchain": {
     "zephyr": "v4.3.1",
     "zephyr_sdk": "0.17.4",
     "target": "arm-zephyr-eabi",
     "board": "stem_player"
   },
-
   "companion": {
     "in_this_repository": false,
     "important": "The companion that uploaded the song is a SEPARATE application and its source is NOT in this repository. Do not mistake this repo's src/ for it -- src/ contains no SP1XFER/bulk-upload implementation at all. What is frozen here is the CONTRACT and the FIXTURES the companion was implemented against, which is what determines wire compatibility.",
@@ -63,7 +61,6 @@
       "uploaded_at": null
     }
   },
-
   "uploaded_song": {
     "recorded": false,
     "known": {
@@ -72,7 +69,6 @@
     },
     "note": "Title, duration and byte-level identity of the specific song used were not captured at test time. Recording them would make this baseline reproducible end to end rather than firmware-only."
   },
-
   "audio_geometry": {
     "sample_rate_hz": 48000,
     "bytes_per_frame": 24,
@@ -87,11 +83,16 @@
     "read_ahead_us": 77916,
     "ring_bytes": 98304
   },
-
   "not_measured_on_hardware": [
     "worst audio-block execution time (aus=) for this build",
     "achieved sustained read margin (margin=) for this build",
     "whether the summed four-stem mix clips on the song used"
   ],
-  "not_measured_note": "Playback was confirmed by listening. The STEMRT diagnostic line reports all three; capturing it during a future run would upgrade this baseline from 'sounds right' to 'sounds right AND here are the numbers'."
+  "not_measured_note": "Playback was confirmed by listening. The STEMRT diagnostic line reports all three; capturing it during a future run would upgrade this baseline from 'sounds right' to 'sounds right AND here are the numbers'.",
+  "baseline_ref": {
+    "tagged": false,
+    "reason": "Tag refs cannot be pushed from the environment this baseline was frozen in: every push of a tag ref, annotated or lightweight, fails in send-pack, and the GitHub API tooling available there has no tag or release creation. This was verified, not assumed.",
+    "durability": "The baseline does not depend on a tag. Commit 1143cc9b788f53b4c4f6a37adcfa32c7554cdb15 is in the pushed history of branch claude/stemtape-m0-safety-audit-1vg9pq, so it is reachable and will not be garbage collected, and this manifest plus docs/stem-tape-hardware-audio-baseline-1.md are committed alongside it.",
+    "to_tag_later": "git tag -a stemtape-audio-baseline-1 1143cc9b788f53b4c4f6a37adcfa32c7554cdb15 -m 'Stem Tape hardware audio baseline 1' && git push origin stemtape-audio-baseline-1"
+  }
 }
