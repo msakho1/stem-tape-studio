@@ -124,7 +124,7 @@
  * about the change -- stop and re-flash before reading another number out
  * of it.
  */
-#define ST_BUILD_TAG "st6"
+#define ST_BUILD_TAG "st7"
 #include "st_track_hold.h"
 #include "st_stix.h"
 #include "st_v11_format.h"
@@ -1689,8 +1689,390 @@ static void stem_render_run(const uint8_t *buf, uint32_t frame_in_sector,
 }
 #endif /* SP1_XFER_ENABLE */
 
+/* Master-volume ramp for ONE audio block, shared by both engines.
+ *
+ * The VOL buttons step ~3 dB at a time; applying that as a hard gain jump at a
+ * block boundary is an audible click, so the gain ramps linearly across the
+ * block. mv_prev lives here, in the single place that computes the ramp,
+ * precisely so the Stem Tape fast path and the classic engine cannot drift:
+ * whichever one renders a block, the ramp advances exactly once, from exactly
+ * where the previous block left it. */
+static void master_vol_ramp(int32_t *m0, int32_t *md, int32_t *mv_out)
+{
+	static int32_t mv_prev;
+	const int32_t mv = (int32_t)g_master_vol_q8;
+
+	*md = mv - mv_prev;
+	*m0 = mv_prev;
+	*mv_out = mv;
+	mv_prev = mv;
+}
+
+/* The per-block tail that belongs to NEITHER engine: the free-running I2S
+ * sample clock, the tapped-grid MIDI tick (wall time, not tape time), the beat
+ * phase the LEDs read, and the stem song-frame mirror. Both paths call it
+ * exactly once per block, so neither can drop a MIDI tick or stall the LED
+ * phase by virtue of being the one that rendered. */
+static void audio_block_epilogue(void)
+{
+g_sample_clock += BLK_FRAMES;
+/* TAPPED GRID: MIDI clock in wall (I2S) time, produced block-wise, even
+ * with the transport stopped — the grid is the decks' clock, not the
+ * tape's. Bounded catch-up: a block is ~5 ms, ticks are >=10 ms. */
+if (g_grid_active && g_grid_beat_frames) {
+	uint32_t gtick = g_grid_beat_frames / 24u;
+	if (!gtick) gtick = 1u;
+	while (g_sample_clock >= g_grid_next_tick) {
+		g_grid_next_tick += gtick;
+		g_midi_clk_produced++;
+	}
+	/* M8c: BAR-LINE service — launch-quantized mutes apply here, and a
+	 * pending beatmatch resync restarts the loops on the tapped "1".
+	 * Bars are ~2 s and blocks ~5 ms: one crossing per block, max.
+	 * (v2.0.0: launch-quantized MUTES were removed after live testing —
+	 * a bar is up to ~5 s of felt lag; mutes are instant everywhere
+	 * now, like 1.x. The bar service keeps only the beatmatch resync;
+	 * recording punch-ins stay bar-quantized via g_grid_punch_at.) */
+	if (g_grid_next_bar && g_sample_clock >= g_grid_next_bar) {
+		if (g_grid_resync_at && g_sample_clock >= g_grid_resync_at) {
+			g_grid_resync_at = 0;
+			g_restart_req = 1;      /* loops from the top, ON the "1" */
+		}
+		g_grid_next_bar += (uint64_t)g_grid_beat_frames * 4u;
+	}
+}
+/* Beat-phase display computed ONCE per block now (was per loop-sample). It
+ * only feeds the LED + MIDI-grid diag, so block granularity (~5 ms) is plenty
+ * -- this lifts three runtime divides off the per-sample hot path. */
+if (g_loop_active) {
+	uint32_t bs = g_beat_samples ? g_beat_samples : BEAT_SAMPLES_L;
+	if (g_loop_len > 0u) {
+		uint32_t lp = g_consume_pos % g_loop_len;
+		g_beat_phase = lp % bs;
+		g_dbg_beat = (int)(lp / bs);
+	} else {
+		g_beat_phase = g_consume_pos % bs;
+		g_dbg_beat = (int)(g_consume_pos / bs);
+	}
+} else {
+	g_beat_phase = (uint32_t)((g_sample_clock % BEAT_SAMPLES_I2S) / DECIM);
+}
+#if SP1_XFER_ENABLE
+/* STEM TAPE Phase 3 control-matrix (beat-sync LED slice): publishes
+ * g_stem_stream.song_frame -- "the ONE authoritative absolute song
+ * frame" (st_stem_stream.h's own words), audio-thread-EXCLUSIVE -- to
+ * its atomic cross-thread mirror ONCE per block, the SAME "computed
+ * once per block, ~5 ms granularity is plenty for an LED" rationale
+ * the classic engine's own g_beat_phase above already uses (see that
+ * block's own comment), not a new convention. led_service() (control
+ * thread, st_beat_phase.c) reads this mirror -- never g_stem_stream
+ * itself -- to derive on-beat phase; this is the ONE clock stem beat-
+ * sync is derived from (see st_beat_phase.h's own doc comment on why
+ * a loop wrap or a future variable-speed change can never desync a
+ * second clock: there is no second clock, only this published copy
+ * of the real one, refreshed every block). Unconditional (not gated
+ * on stem_active): when no stem song is active this mirror simply
+ * holds whatever g_stem_stream.song_frame last was (0 if never
+ * selected) -- harmless, since led_service() only reads it behind
+ * its own g_stem_song_selected gate. */
+atomic_set(&g_stem_song_frame_pub, (atomic_val_t)g_stem_stream.song_frame);
+#endif
+}
+
+#if SP1_XFER_ENABLE
+/*
+ * ============================ THE STEM TAPE FAST PATH ======================
+ *
+ * Renders one whole I2S block of stored four-stem playback, and nothing else.
+ *
+ * WHY IT EXISTS. looper_audio_block() is ~1070 lines of engine inherited from
+ * the Tape Looper, and it did not ask whether a stem song was playing until
+ * roughly 780 lines in. Before reaching the stem output, EVERY 5.33 ms block
+ * unconditionally executed:
+ *
+ *   - the recorder failsafe scan, provisional auto-confirm and double-tap
+ *     delete (three NTRK loops), then ~280 lines of hold-to-record, take
+ *     stop/quantize/trim-back, arm/punch and grid-take machinery -- every bit
+ *     of it gated on trk[].state being ARMED/REC/DONE, states this firmware
+ *     cannot reach because recording is removed;
+ *   - the tape-effect speed smoothing and resampler phase update, whose only
+ *     consumer is the classic playhead;
+ *   - the per-track fader snapshot feeding PASS B;
+ *   - PASS A: a 256-ITERATION LOOP writing mix32[]/posb[]/fracb[] -- 2560
+ *     bytes of array traffic per block, every value of which is discarded;
+ *   - PASS B: per-track accumulation, including a second 256-iteration loop.
+ *
+ * None of that can affect a single stem sample. On this device it is not
+ * merely untidy: the eMMC read path is CPU-bound, so audio-thread cycles
+ * convert one-for-one into lost stream throughput, and a short stream is
+ * exactly what freezes song_frame and turns a storage deficit into
+ * time-stretched, gated audio.
+ *
+ * The dispatch therefore happens FIRST, in looper_audio_block()'s prologue,
+ * and lands here. A bypass -- not another conditional downstream of the
+ * expensive passes.
+ *
+ * ALL this path does: resolve the channel strip once per block, acquire
+ * sectors from the SPSC mailbox, decode STSC frames, mix four stems, apply
+ * the master-volume ramp, publish per-stem meter peaks, write stereo output,
+ * and advance the stem playhead.
+ */
+__attribute__((noinline))
+static void stem_audio_block(int16_t *s, int32_t m0, int32_t md, int32_t mv)
+{
+	/* Audio-thread-EXCLUSIVE, and now genuinely private to this function:
+	 * the ring slot the last successful acquire named, the "I have already
+	 * told the mailbox I hold nothing" latch, and a shadow of
+	 * underrun_count so the atomic mirror is only touched on a real
+	 * change. */
+	static uint8_t g_stem_active_buf_idx_local;
+	static bool s_stem_released;
+	static uint32_t s_stem_underrun_shadow;
+	/* BEAT PULSE: largest absolute sample magnitude each stem produced in
+	 * THIS block, in the stored 24-bit domain. Block-local until the single
+	 * publication at the end. */
+	uint32_t stem_peak[ST11_STEM_COUNT] = { 0u, 0u, 0u, 0u };
+
+_Static_assert(NTRK == ST11_STEM_COUNT, "trk[]/stem lane count must match 1:1");
+st_stem_mix_channel_t stem_channels[ST11_STEM_COUNT];
+st_stem_mix_prepared_t stem_prepared;
+
+for (uint32_t s = 0; s < ST11_STEM_COUNT; s++) {
+	stem_channels[s].gain_q8 = (int32_t)trk[s].vol_q8;
+	stem_channels[s].mute = trk[s].muted != 0;
+	stem_channels[s].solo = trk[s].solo != 0;
+}
+/* ONCE PER BLOCK, never per frame. Fader/mute/solo are
+ * control-rate quantities that cannot change inside a block
+ * (the control path runs at a lower priority than this thread),
+ * so resolving them here collapses the whole channel-strip
+ * decision -- the solo scan, the mute test, the gain ceiling --
+ * into four integers the 48 kHz loop just multiplies by. That
+ * work used to happen inside the mixer on every one of 48000
+ * frames a second; on this device that is not spare capacity,
+ * because the eMMC read path is CPU-bound and every cycle the
+ * audio thread takes is a cycle of read throughput lost. See
+ * st_stem_mix.h's own "GAIN CEILING" note for the measurement. */
+st_stem_mix_prepare(stem_channels, &stem_prepared);
+
+	/* ==== STORED-SONG PLAYBACK, RENDERED IN RUNS ====
+	 *
+	 * This used to be a 256-iteration per-frame loop that,
+	 * on EVERY frame, re-derived the needed sector (a
+	 * division), re-tested residency, published the
+	 * requested sector, and -- whenever the sector was
+	 * missing -- polled the SPSC mailbox with a barriered
+	 * atomic. None of that can change inside a run: a run
+	 * never crosses a sector boundary, by construction.
+	 * So it was ~48000 repetitions a second of work whose
+	 * answer was already known.
+	 *
+	 * Worse, the starved case was self-reinforcing. With
+	 * the stream short, the mailbox said "not ready" on
+	 * most frames, and the thread answered by polling it
+	 * 48000 times a second while emitting silence --
+	 * burning exactly the CPU the streamer needed in order
+	 * to make the sector ready. The read path is CPU-bound,
+	 * so starvation was feeding itself.
+	 *
+	 * Now: decide once per run, render the run in a tight
+	 * -O2 loop (stem_render_run()), and advance the stream
+	 * by the whole run in one call. When the needed sector
+	 * genuinely is not there, emit silence for the rest of
+	 * the block and stop -- ONE mailbox poll per block, not
+	 * one per frame, so a starving stream stops stealing the
+	 * CPU that would end the starvation.
+	 *
+	 * Output is bit-identical to the per-frame form over a
+	 * whole real song, host-tested (tests/test_stem_stream.c,
+	 * run-form equivalence). */
+	uint32_t f = 0;
+
+	while (f < BLK_FRAMES) {
+		uint32_t needed = st_stream_required_sector(&g_stem_stream);
+		uint32_t fis, run, left_in_song, want;
+
+		if (g_stem_stream.ready_sector != needed) {
+			/* Ask the mailbox (st_stem_bufmbox.h) whether
+			 * the producer has published it since we last
+			 * looked. Wait-free: one acquire load, and on
+			 * success one release store. */
+			uint32_t acquired_slot;
+
+			if (st_stem_mbox_try_acquire(&g_stem_mbox, needed, &acquired_slot)) {
+				g_stem_active_buf_idx_local = (uint8_t)acquired_slot;
+				st_stream_sector_ready(&g_stem_stream, needed);
+				s_stem_released = false;   /* holding a buffer again */
+			} else if (!s_stem_released) {
+				/* Genuinely reading nothing: say so, so the
+				 * producer may fill every slot including the
+				 * one the previously-held sector maps to. See
+				 * st_stem_mbox_release()'s own doc comment for
+				 * the loop-wrap stall this prevents. Latched,
+				 * so it happens once per starvation episode. */
+				st_stem_mbox_release(&g_stem_mbox);
+				s_stem_released = true;
+			}
+		}
+
+		/* THE PREFETCH LOOKAHEAD. Once the current sector is
+		 * resident, ask for the one AFTER it, so the producer
+		 * fills an idle slot during the ~7.08 ms this sector
+		 * plays for -- that is what makes the ring actually
+		 * read ahead. While the current sector is NOT resident
+		 * (a real underrun, or the first tick after a seek or
+		 * reload) keep asking for IT: fetching further ahead
+		 * then would strand the consumer waiting on a sector
+		 * nobody is fetching. */
+		want = needed;
+		if (g_stem_stream.ready_sector == needed) {
+			uint32_t ahead = needed + 1u;
+
+			if (ahead >= g_stem_stream.sector_count) {
+				/* End of song: wrap only if this song loops;
+				 * otherwise there is nothing further to fetch
+				 * and re-publishing `needed` is a no-op. */
+				ahead = g_stem_stream.loop_enabled ? 0u : needed;
+			}
+			want = ahead;
+		}
+		st_stem_mbox_set_requested_sector(&g_stem_mbox, want);
+
+		if (g_stem_stream.ready_sector != needed) {
+			/* UNDERRUN: silence for the remainder of the
+			 * block, then stop polling until the next block. */
+			for (; f < BLK_FRAMES; f++) {
+				s[2 * f]     = 0;
+				s[2 * f + 1] = 0;
+			}
+			/* Records the underrun EPISODE (once on the
+			 * transition, not once per stuck frame) and leaves
+			 * song_frame frozen -- the same accounting the
+			 * per-frame form did. */
+			(void)st_stream_advance_frames(&g_stem_stream, 1u);
+			break;
+		}
+
+		/* THE RUN: as many frames as are simultaneously inside
+		 * this sector, inside the song, and inside this output
+		 * block. Every one of those three bounds is required by
+		 * stem_render_run() and st_stream_advance_frames(). */
+		fis = g_stem_stream.song_frame - needed * ST11_FRAMES_PER_SECTOR;
+		run = ST11_FRAMES_PER_SECTOR - fis;
+		left_in_song = g_stem_stream.frames - g_stem_stream.song_frame;
+		if (run > left_in_song) {
+			run = left_in_song;
+		}
+		if (run > BLK_FRAMES - f) {
+			run = BLK_FRAMES - f;
+		}
+		if (run == 0u) {
+			/* Defensive: cannot happen while the stream is
+			 * PLAYING (song_frame < frames is the invariant
+			 * st_stream_advance_frames() maintains), but a
+			 * zero-length run would spin this loop forever, so
+			 * never take that on trust in a real-time thread. */
+			for (; f < BLK_FRAMES; f++) {
+				s[2 * f]     = 0;
+				s[2 * f + 1] = 0;
+			}
+			break;
+		}
+
+		/* RAM-ONLY: decodes out of whichever resident buffer
+		 * g_stem_active_buf_idx_local (audio-thread-exclusive)
+		 * names -- this real-time thread never touches flash. */
+		stem_render_run(g_stem_sector_bufs[g_stem_active_buf_idx_local],
+				 fis, &stem_prepared, m0, md, mv,
+				 f, run, s, stem_peak);
+		f += run;
+		(void)st_stream_advance_frames(&g_stem_stream, run);
+
+		/* Mirror the (audio-thread-exclusive) underrun episode
+		 * counter into its atomic diagnostic twin, but only on
+		 * the rare pass it actually changed -- atomic counters
+		 * are for cross-thread OBSERVABILITY, not a hot-path
+		 * cost. */
+		if (g_stem_stream.underrun_count != s_stem_underrun_shadow) {
+			s_stem_underrun_shadow = g_stem_stream.underrun_count;
+			atomic_set(&g_stem_underrun_count, (atomic_val_t)s_stem_underrun_shadow);
+		}
+	}
+	if (g_stem_stream.underrun_count != s_stem_underrun_shadow) {
+		s_stem_underrun_shadow = g_stem_stream.underrun_count;
+		atomic_set(&g_stem_underrun_count, (atomic_val_t)s_stem_underrun_shadow);
+	}
+
+	/* One atomic store per stem per BLOCK (~5.3 ms), never per frame. */
+	for (uint32_t sp = 0; sp < ST11_STEM_COUNT; sp++) {
+		atomic_set(&g_stem_peak_pub[sp], (atomic_val_t)stem_peak[sp]);
+	}
+}
+#endif /* SP1_XFER_ENABLE */
+
 static void looper_audio_block(int16_t *s)
 {
+#if SP1_XFER_ENABLE
+	/* ==================== STEM TAPE DISPATCH, FIRST =======================
+	 * Before ANY inherited classic work. stem_audio_block()'s own comment
+	 * has the full inventory of what that skips, and why it matters here. */
+	if (atomic_get(&g_stem_reload_req)) {
+		bool reload_ok = false;
+
+		if (st_stream_init(&g_stem_stream, g_stem_reload_pending.song_start_block,
+				    g_stem_reload_pending.song_block_count, g_stem_reload_pending.frames,
+				    g_stem_reload_pending.sector_count, /*loop_enabled=*/true)) {
+			st11_sector_header_t hdr;
+
+			if (st11_sector_read_header(g_stem_sector_bufs[0], &hdr) &&
+			    st_stream_validate_sector(&g_stem_stream, 0u, &hdr)) {
+				(void)st_beat_timing_init(&g_stem_beat_timing, g_stem_reload_pending.bpm_q8,
+							   g_stem_reload_pending.downbeat_frame,
+							   g_stem_reload_pending.sample_rate);
+				st_stem_mbox_init(&g_stem_mbox, 0u);
+				reload_ok = true;
+			}
+		}
+		if (!reload_ok) {
+			(void)atomic_add(&g_stem_reload_fail_count, 1);
+		}
+		atomic_set(&g_stem_song_selected, reload_ok ? 1 : 0);
+		atomic_set(&g_stem_reload_req, 0);
+	}
+
+	if (atomic_get(&g_stem_song_selected) != 0 && g_playing) {
+		int32_t m0, md, mv;
+
+		st_stream_play(&g_stem_stream);   /* idempotent transport sync */
+		/* CONSUME the transport/edit request flags rather than leaving
+		 * them latched. Every handler for them below is classic-only and,
+		 * on this firmware, a provable no-op: g_restart_req's body
+		 * requires g_loop_active (never set -- no classic content),
+		 * g_slot_switch_req reloads trk[] from g_meta.slot[].present[]
+		 * (never nonzero -- the classic-source-absence gate proves it
+		 * fail-closed), g_stop_req ends a take that cannot exist, and
+		 * g_chop_req retunes the classic chop window. Clearing them is
+		 * exactly what running those handlers would do, minus the dead
+		 * work -- and NOT clearing them would latch a request forever,
+		 * which is a real bug rather than a saved instruction. */
+		g_stop_req = 0;
+		g_restart_req = 0;
+		g_chop_req = 0;
+		g_slot_switch_req = 0;
+
+		master_vol_ramp(&m0, &md, &mv);
+		stem_audio_block(s, m0, md, mv);
+		audio_block_epilogue();
+		return;
+	}
+	/* No stem song playing: the classic engine below renders this block.
+	 * Freeze the stem transport, and let the meters decay to dark rather
+	 * than hold whatever the last playing block left behind. */
+	st_stream_stop(&g_stem_stream);
+	for (uint32_t sp = 0; sp < ST11_STEM_COUNT; sp++) {
+		atomic_set(&g_stem_peak_pub[sp], 0);
+	}
+#endif
 	if (g_xfer_mode) { memset(s, 0, BLK_BYTES); return; }   /* USB transfer: silence out */
 	/* STEM TAPE: UAC2 removed -- there is no USB-sourced audio to prebuffer
 	 * or drain here any more (see this file's own top-of-file comment).
@@ -2336,329 +2718,13 @@ static void looper_audio_block(int16_t *s)
 	 * exactly as they were -- PASS C simply never reads mix32[] while a
 	 * stem song is active. */
 	{
-		/* the VOL buttons step ~3 dB at a time — ramp each step across the
-		 * block instead of applying it as a hard gain jump (a click). */
-		const int32_t mv = (int32_t)g_master_vol_q8;
-		static int32_t mv_prev;
-		const int32_t md = mv - mv_prev;
-		const int32_t m0 = mv_prev;
-		mv_prev = mv;
-#if SP1_XFER_ENABLE
-		/* Phase 3 control-matrix (fader + mute + solo). Per-stem gain,
-		 * mute AND solo are read from the SAME control surface the
-		 * classic engine's own PASS A/B already read: trk[s].vol_q8
-		 * (fader ladder -> Q8, main-thread-written every ~32 ms round-
-		 * robin), trk[s].muted (bare-track-tap toggle -- the real,
-		 * already-proven "tap -> mute" gesture a few hundred lines up),
-		 * and trk[s].solo (MOMENTARY hold-to-solo -- active only while
-		 * held past TRACK_HOLD_SOLO_MS, cleared the instant of release;
-		 * see st_track_hold.h's own doc comment) -- all three already
-		 * `volatile`, single-
-		 * writer(main thread)/single-reader(audio thread), the SAME
-		 * cross-thread convention PASS A/B's own `vol_s[i] =
-		 * trk[i].vol_q8` snapshot already relies on (see this file's
-		 * PASS A/B above) -- no new synchronization primitive
-		 * introduced. Lane order is identical on both sides: docs/
-		 * FIRMWARE_CONTRACT_V1.md section 2 fixes "1 Vocals - 2 Drums -
-		 * 3 Bass - 4 Instruments", the SAME order st_sector_v11.h's own
-		 * frame layout documents (vocal, drums, bass, inst) and the
-		 * SAME order TRACK1-4/trk[0..3] already use for the classic
-		 * engine, so trk[s] maps directly to stem index s with no
-		 * reordering.
-		 *
-		 * SOLO GESTURE DEVIATES FROM THE DOCUMENTED CHORD, DELIBERATELY:
-		 * docs/FIRMWARE_CONTRACT_V1.md specifies PLAY+Track (<700ms
-		 * overlap) as solo, but PLAY and TRACK1-4 are decoded from ONE
-		 * shared resistor ladder (decode_tracks() above -- enum
-		 * trk_btn's TRK_PLAY is one value in the SAME single-button
-		 * decode as TRK_1..TRK_4), so this hardware cannot report PLAY
-		 * and a Track as simultaneously pressed -- true chording is not
-		 * physically readable through this ladder as wired, unlike the
-		 * FUNCTION+Track bank-jump chord elsewhere in this file
-		 * (FUNCTION is a separate line). TRACK_HOLD_SOLO_MS's own
-		 * comment has the full reasoning and the product decision that
-		 * approved this substitute gesture. */
-		_Static_assert(NTRK == ST11_STEM_COUNT, "trk[]/stem lane count must match 1:1");
-		st_stem_mix_channel_t stem_channels[ST11_STEM_COUNT];
-		st_stem_mix_prepared_t stem_prepared;
+		int32_t m0, md, mv;
 
-		for (uint32_t s = 0; s < ST11_STEM_COUNT; s++) {
-			stem_channels[s].gain_q8 = (int32_t)trk[s].vol_q8;
-			stem_channels[s].mute = trk[s].muted != 0;
-			stem_channels[s].solo = trk[s].solo != 0;
-		}
-		/* ONCE PER BLOCK, never per frame. Fader/mute/solo are
-		 * control-rate quantities that cannot change inside a block
-		 * (the control path runs at a lower priority than this thread),
-		 * so resolving them here collapses the whole channel-strip
-		 * decision -- the solo scan, the mute test, the gain ceiling --
-		 * into four integers the 48 kHz loop just multiplies by. That
-		 * work used to happen inside the mixer on every one of 48000
-		 * frames a second; on this device that is not spare capacity,
-		 * because the eMMC read path is CPU-bound and every cycle the
-		 * audio thread takes is a cycle of read throughput lost. See
-		 * st_stem_mix.h's own "GAIN CEILING" note for the measurement. */
-		st_stem_mix_prepare(stem_channels, &stem_prepared);
-		/* Both audio-thread-EXCLUSIVE (Slice 3B.1): which physical
-		 * buffer (0/1) the last successful mailbox acquire named --
-		 * plain, not shared, not atomic, since only this thread ever
-		 * reads or writes it -- and a local shadow of g_stem_stream.
-		 * underrun_count so the atomic diagnostic mirror below is only
-		 * ever touched on a genuine change. */
-		static uint8_t g_stem_active_buf_idx_local;
-		/* Audio-thread-private latch: "I have already told the mailbox I
-		 * am holding nothing." See the release call site below. */
-		static bool s_stem_released;
-		static uint32_t s_stem_underrun_shadow;
-		/* Reuses the existing PLAY/STOP transport flag as-is (the
-		 * "minimum existing transport state necessary to exercise
-		 * playback" -- no new transport/control-surface wiring in this
-		 * slice): stem playback simply freezes, rather than resetting,
-		 * while stopped, exactly like the classic tracks' own p_w
-		 * position already does. Keeps the pure state machine's own
-		 * transport state in sync every block (idempotent: play()/
-		 * stop() are no-ops when already in the target state).
-		 * g_stem_stream is audio-thread-EXCLUSIVE as of Slice 3B.1 --
-		 * see that struct's own doc comment -- so touching it directly
-		 * here, with no atomics, is correct. A persistently corrupt
-		 * sector is simply never published by the producer, which this
-		 * module already represents as UNDERRUN (silence); see st_stem_
-		 * stream.h's own note on why that is an intentional
-		 * simplification, not a capability loss. */
-		/* Slice C3: post-commit runtime reload consumption -- audio_
-		 * thread's own half of the handoff (see g_stem_reload_req's
-		 * own doc comment, near g_stem_song_selected, for the full
-		 * protocol and why this is safe: g_playing is already 0 for
-		 * the whole duration of any transfer session, so stem_active
-		 * below is already false and this thread is provably not
-		 * touching g_stem_sector_bufs[]/the mailbox anywhere in the window a
-		 * reload can ever be pending in). Checked once per audio
-		 * block, before stem_active is computed, so a reload that
-		 * completes here takes effect the SAME block, never one late.
-		 * This is the ONLY place g_stem_stream/g_stem_mbox/g_stem_
-		 * beat_timing are ever reconstructed after boot -- streamer_
-		 * thread's own stem_song_post_commit_reload() never touches
-		 * them directly, only this published copy of the new STIX
-		 * record (g_stem_reload_pending) and the already-resident,
-		 * already-validated g_stem_sector_bufs[0] it prepared before
-		 * publishing. Deliberately no printk() here (unlike the
-		 * equivalent boot-time diagnostic in streamer_thread): this
-		 * runs on the real-time audio thread, which never blocks on
-		 * the console elsewhere in this file either -- a sector-0/
-		 * STIX timing disagreement, if any, is silently resolved the
-		 * same way it always is (the STIX record wins), not logged
-		 * from here. */
-		if (atomic_get(&g_stem_reload_req)) {
-			bool reload_ok = false;
-
-			if (st_stream_init(&g_stem_stream, g_stem_reload_pending.song_start_block,
-					    g_stem_reload_pending.song_block_count, g_stem_reload_pending.frames,
-					    g_stem_reload_pending.sector_count, /*loop_enabled=*/true)) {
-				st11_sector_header_t hdr;
-
-				if (st11_sector_read_header(g_stem_sector_bufs[0], &hdr) &&
-				    st_stream_validate_sector(&g_stem_stream, 0u, &hdr)) {
-					(void)st_beat_timing_init(&g_stem_beat_timing, g_stem_reload_pending.bpm_q8,
-								   g_stem_reload_pending.downbeat_frame,
-								   g_stem_reload_pending.sample_rate);
-					st_stem_mbox_init(&g_stem_mbox, 0u);
-					reload_ok = true;
-				}
-			}
-			if (!reload_ok) {
-				(void)atomic_add(&g_stem_reload_fail_count, 1);
-			}
-			atomic_set(&g_stem_song_selected, reload_ok ? 1 : 0);
-			atomic_set(&g_stem_reload_req, 0);
-		}
-
-		bool stem_active = atomic_get(&g_stem_song_selected) != 0 && g_playing;
-
-		if (stem_active) {
-			st_stream_play(&g_stem_stream);
-		} else {
-			st_stream_stop(&g_stem_stream);
-		}
-		/* BEAT PULSE (per-stem): largest absolute sample magnitude each
-		 * stem produced during THIS block, in the stored 24-bit domain,
-		 * published once per block for led_service() to envelope (see
-		 * st_stem_meter.h). Block-local, audio-thread-private until the
-		 * single atomic store below -- no per-frame atomics. */
-		uint32_t stem_peak[ST11_STEM_COUNT] = { 0u, 0u, 0u, 0u };
-		/* Audibility for the meters is read straight off stem_prepared:
-		 * a zero effective gain IS "this stem is not heard", and it is
-		 * the very value the mixer multiplies by a line below, so the
-		 * lights and the audio cannot possibly be applying two
-		 * different rules (host-tested across all 256 mute/solo
-		 * combinations -- see tests/test_stem_mix.c's own prepared-form
-		 * equivalence case). It also means a stem whose FADER is at
-		 * zero meters dark, which is right: it is producing silence.
-		 *
-		 * The first version of this metering called
-		 * st_stem_mix_channel_audible() inside the frame loop, once per
-		 * stem: four cross-module calls per frame, each running its own
-		 * four-iteration solo scan, at 48 kHz. That is pure waste, and
-		 * on this device it is not harmless waste -- the eMMC read path
-		 * is CPU-bound (bit-banged start-bit hunt, SPIM setup, CRC), so
-		 * every cycle the audio thread takes is a cycle the streamer
-		 * does not get, and read throughput falls in direct
-		 * proportion. */
-#endif
-#if SP1_XFER_ENABLE
-		if (stem_active) {
-			/* ==== STORED-SONG PLAYBACK, RENDERED IN RUNS ====
-			 *
-			 * This used to be a 256-iteration per-frame loop that,
-			 * on EVERY frame, re-derived the needed sector (a
-			 * division), re-tested residency, published the
-			 * requested sector, and -- whenever the sector was
-			 * missing -- polled the SPSC mailbox with a barriered
-			 * atomic. None of that can change inside a run: a run
-			 * never crosses a sector boundary, by construction.
-			 * So it was ~48000 repetitions a second of work whose
-			 * answer was already known.
-			 *
-			 * Worse, the starved case was self-reinforcing. With
-			 * the stream short, the mailbox said "not ready" on
-			 * most frames, and the thread answered by polling it
-			 * 48000 times a second while emitting silence --
-			 * burning exactly the CPU the streamer needed in order
-			 * to make the sector ready. The read path is CPU-bound,
-			 * so starvation was feeding itself.
-			 *
-			 * Now: decide once per run, render the run in a tight
-			 * -O2 loop (stem_render_run()), and advance the stream
-			 * by the whole run in one call. When the needed sector
-			 * genuinely is not there, emit silence for the rest of
-			 * the block and stop -- ONE mailbox poll per block, not
-			 * one per frame, so a starving stream stops stealing the
-			 * CPU that would end the starvation.
-			 *
-			 * Output is bit-identical to the per-frame form over a
-			 * whole real song, host-tested (tests/test_stem_stream.c,
-			 * run-form equivalence). */
-			uint32_t f = 0;
-
-			while (f < BLK_FRAMES) {
-				uint32_t needed = st_stream_required_sector(&g_stem_stream);
-				uint32_t fis, run, left_in_song, want;
-
-				if (g_stem_stream.ready_sector != needed) {
-					/* Ask the mailbox (st_stem_bufmbox.h) whether
-					 * the producer has published it since we last
-					 * looked. Wait-free: one acquire load, and on
-					 * success one release store. */
-					uint32_t acquired_slot;
-
-					if (st_stem_mbox_try_acquire(&g_stem_mbox, needed, &acquired_slot)) {
-						g_stem_active_buf_idx_local = (uint8_t)acquired_slot;
-						st_stream_sector_ready(&g_stem_stream, needed);
-						s_stem_released = false;   /* holding a buffer again */
-					} else if (!s_stem_released) {
-						/* Genuinely reading nothing: say so, so the
-						 * producer may fill every slot including the
-						 * one the previously-held sector maps to. See
-						 * st_stem_mbox_release()'s own doc comment for
-						 * the loop-wrap stall this prevents. Latched,
-						 * so it happens once per starvation episode. */
-						st_stem_mbox_release(&g_stem_mbox);
-						s_stem_released = true;
-					}
-				}
-
-				/* THE PREFETCH LOOKAHEAD. Once the current sector is
-				 * resident, ask for the one AFTER it, so the producer
-				 * fills an idle slot during the ~7.08 ms this sector
-				 * plays for -- that is what makes the ring actually
-				 * read ahead. While the current sector is NOT resident
-				 * (a real underrun, or the first tick after a seek or
-				 * reload) keep asking for IT: fetching further ahead
-				 * then would strand the consumer waiting on a sector
-				 * nobody is fetching. */
-				want = needed;
-				if (g_stem_stream.ready_sector == needed) {
-					uint32_t ahead = needed + 1u;
-
-					if (ahead >= g_stem_stream.sector_count) {
-						/* End of song: wrap only if this song loops;
-						 * otherwise there is nothing further to fetch
-						 * and re-publishing `needed` is a no-op. */
-						ahead = g_stem_stream.loop_enabled ? 0u : needed;
-					}
-					want = ahead;
-				}
-				st_stem_mbox_set_requested_sector(&g_stem_mbox, want);
-
-				if (g_stem_stream.ready_sector != needed) {
-					/* UNDERRUN: silence for the remainder of the
-					 * block, then stop polling until the next block. */
-					for (; f < BLK_FRAMES; f++) {
-						s[2 * f]     = 0;
-						s[2 * f + 1] = 0;
-					}
-					/* Records the underrun EPISODE (once on the
-					 * transition, not once per stuck frame) and leaves
-					 * song_frame frozen -- the same accounting the
-					 * per-frame form did. */
-					(void)st_stream_advance_frames(&g_stem_stream, 1u);
-					break;
-				}
-
-				/* THE RUN: as many frames as are simultaneously inside
-				 * this sector, inside the song, and inside this output
-				 * block. Every one of those three bounds is required by
-				 * stem_render_run() and st_stream_advance_frames(). */
-				fis = g_stem_stream.song_frame - needed * ST11_FRAMES_PER_SECTOR;
-				run = ST11_FRAMES_PER_SECTOR - fis;
-				left_in_song = g_stem_stream.frames - g_stem_stream.song_frame;
-				if (run > left_in_song) {
-					run = left_in_song;
-				}
-				if (run > BLK_FRAMES - f) {
-					run = BLK_FRAMES - f;
-				}
-				if (run == 0u) {
-					/* Defensive: cannot happen while the stream is
-					 * PLAYING (song_frame < frames is the invariant
-					 * st_stream_advance_frames() maintains), but a
-					 * zero-length run would spin this loop forever, so
-					 * never take that on trust in a real-time thread. */
-					for (; f < BLK_FRAMES; f++) {
-						s[2 * f]     = 0;
-						s[2 * f + 1] = 0;
-					}
-					break;
-				}
-
-				/* RAM-ONLY: decodes out of whichever resident buffer
-				 * g_stem_active_buf_idx_local (audio-thread-exclusive)
-				 * names -- this real-time thread never touches flash. */
-				stem_render_run(g_stem_sector_bufs[g_stem_active_buf_idx_local],
-						 fis, &stem_prepared, m0, md, mv,
-						 f, run, s, stem_peak);
-				f += run;
-				(void)st_stream_advance_frames(&g_stem_stream, run);
-
-				/* Mirror the (audio-thread-exclusive) underrun episode
-				 * counter into its atomic diagnostic twin, but only on
-				 * the rare pass it actually changed -- atomic counters
-				 * are for cross-thread OBSERVABILITY, not a hot-path
-				 * cost. */
-				if (g_stem_stream.underrun_count != s_stem_underrun_shadow) {
-					s_stem_underrun_shadow = g_stem_stream.underrun_count;
-					atomic_set(&g_stem_underrun_count, (atomic_val_t)s_stem_underrun_shadow);
-				}
-			}
-			if (g_stem_stream.underrun_count != s_stem_underrun_shadow) {
-				s_stem_underrun_shadow = g_stem_stream.underrun_count;
-				atomic_set(&g_stem_underrun_count, (atomic_val_t)s_stem_underrun_shadow);
-			}
-		} else
-#endif
-		/* No stem song is active this block: fall back to the classic
-		 * mono bus + master volume + the same proven soft_limit(),
-		 * byte-for-byte as the Tape-Looper-derived engine always
-		 * computed it. */
+		master_vol_ramp(&m0, &md, &mv);
+		/* Classic mono bus + master volume + the proven soft_limit(),
+		 * byte-for-byte as the Tape-Looper-derived engine always computed
+		 * it. Reached only when no stem song is playing -- the stem path
+		 * returned long before this point. */
 		for (uint32_t f = 0; f < BLK_FRAMES; f++) {
 			int32_t m = md ? (m0 + ((md * (int32_t)(f + 1)) >> 8)) : mv;
 			int16_t classic = soft_limit((mix32[f] * m) >> 8);
@@ -2666,80 +2732,8 @@ static void looper_audio_block(int16_t *s)
 			s[2 * f]     = classic;
 			s[2 * f + 1] = classic;
 		}
-#if SP1_XFER_ENABLE
-		/* Publish this block's per-stem peaks for led_service(). One
-		 * atomic store per stem per BLOCK (~5.3 ms), never per frame.
-		 * When no stem song is active every peak is still 0 here, so
-		 * the meters decay to dark on their own rather than freezing
-		 * at whatever the last playing block left behind. */
-		for (uint32_t sp = 0; sp < ST11_STEM_COUNT; sp++) {
-			atomic_set(&g_stem_peak_pub[sp], (atomic_val_t)stem_peak[sp]);
-		}
-#endif
 	}
-	g_sample_clock += BLK_FRAMES;
-	/* TAPPED GRID: MIDI clock in wall (I2S) time, produced block-wise, even
-	 * with the transport stopped — the grid is the decks' clock, not the
-	 * tape's. Bounded catch-up: a block is ~5 ms, ticks are >=10 ms. */
-	if (g_grid_active && g_grid_beat_frames) {
-		uint32_t gtick = g_grid_beat_frames / 24u;
-		if (!gtick) gtick = 1u;
-		while (g_sample_clock >= g_grid_next_tick) {
-			g_grid_next_tick += gtick;
-			g_midi_clk_produced++;
-		}
-		/* M8c: BAR-LINE service — launch-quantized mutes apply here, and a
-		 * pending beatmatch resync restarts the loops on the tapped "1".
-		 * Bars are ~2 s and blocks ~5 ms: one crossing per block, max.
-		 * (v2.0.0: launch-quantized MUTES were removed after live testing —
-		 * a bar is up to ~5 s of felt lag; mutes are instant everywhere
-		 * now, like 1.x. The bar service keeps only the beatmatch resync;
-		 * recording punch-ins stay bar-quantized via g_grid_punch_at.) */
-		if (g_grid_next_bar && g_sample_clock >= g_grid_next_bar) {
-			if (g_grid_resync_at && g_sample_clock >= g_grid_resync_at) {
-				g_grid_resync_at = 0;
-				g_restart_req = 1;      /* loops from the top, ON the "1" */
-			}
-			g_grid_next_bar += (uint64_t)g_grid_beat_frames * 4u;
-		}
-	}
-	/* Beat-phase display computed ONCE per block now (was per loop-sample). It
-	 * only feeds the LED + MIDI-grid diag, so block granularity (~5 ms) is plenty
-	 * -- this lifts three runtime divides off the per-sample hot path. */
-	if (g_loop_active) {
-		uint32_t bs = g_beat_samples ? g_beat_samples : BEAT_SAMPLES_L;
-		if (g_loop_len > 0u) {
-			uint32_t lp = g_consume_pos % g_loop_len;
-			g_beat_phase = lp % bs;
-			g_dbg_beat = (int)(lp / bs);
-		} else {
-			g_beat_phase = g_consume_pos % bs;
-			g_dbg_beat = (int)(g_consume_pos / bs);
-		}
-	} else {
-		g_beat_phase = (uint32_t)((g_sample_clock % BEAT_SAMPLES_I2S) / DECIM);
-	}
-
-#if SP1_XFER_ENABLE
-	/* STEM TAPE Phase 3 control-matrix (beat-sync LED slice): publishes
-	 * g_stem_stream.song_frame -- "the ONE authoritative absolute song
-	 * frame" (st_stem_stream.h's own words), audio-thread-EXCLUSIVE -- to
-	 * its atomic cross-thread mirror ONCE per block, the SAME "computed
-	 * once per block, ~5 ms granularity is plenty for an LED" rationale
-	 * the classic engine's own g_beat_phase above already uses (see that
-	 * block's own comment), not a new convention. led_service() (control
-	 * thread, st_beat_phase.c) reads this mirror -- never g_stem_stream
-	 * itself -- to derive on-beat phase; this is the ONE clock stem beat-
-	 * sync is derived from (see st_beat_phase.h's own doc comment on why
-	 * a loop wrap or a future variable-speed change can never desync a
-	 * second clock: there is no second clock, only this published copy
-	 * of the real one, refreshed every block). Unconditional (not gated
-	 * on stem_active): when no stem song is active this mirror simply
-	 * holds whatever g_stem_stream.song_frame last was (0 if never
-	 * selected) -- harmless, since led_service() only reads it behind
-	 * its own g_stem_song_selected gate. */
-	atomic_set(&g_stem_song_frame_pub, (atomic_val_t)g_stem_stream.song_frame);
-#endif
+	audio_block_epilogue();
 
 	/* diag WATERMARKS (once per block): how close each ring got to its cliff
 	 * this window — shows near-misses even when no starve/overrun fired. */

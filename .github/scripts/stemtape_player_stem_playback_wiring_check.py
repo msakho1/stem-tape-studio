@@ -152,32 +152,36 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from stemtape_player_safety_gate import function_body_bounds, index_functions  # noqa: E402
 
 REQUIRED_CALLS = {
-    # THE AUDIO PATH IS TWO FUNCTIONS NOW, and this gate follows it rather
-    # than being relaxed to accommodate it. looper_audio_block() decides,
-    # once per RUN of frames, which sector is needed and whether it is
-    # resident (the mailbox/stream half); stem_render_run() is the tight
-    # -O2 loop that turns that sector's bytes into output samples (the
-    # decode/mix half). Splitting them is what took the per-frame division,
-    # residency test and barriered atomic out of the 48 kHz path. Requiring
-    # each call in the function that genuinely makes it keeps the proof
-    # exact: neither half can quietly lose its real wiring, and
-    # looper_audio_block() must still be the thing that drives the
-    # renderer.
+    # THE AUDIO PATH IS THREE FUNCTIONS, and each call is required in the one
+    # that genuinely makes it.
+    #
+    #   looper_audio_block()  -- DISPATCHES. Its first act is the Stem Tape
+    #       decision; when a stem song is playing it renders through
+    #       stem_audio_block() and RETURNS, so none of the inherited classic
+    #       recorder/transport/PASS A/PASS B work below it executes at all.
+    #   stem_audio_block()    -- the fast path: channel strip, mailbox, stream
+    #       bookkeeping, run dispatch.
+    #   stem_render_run()     -- the tight -O2 per-frame decode+mix loop.
+    #
+    # Splitting them this way is the fix for the physical playback failure, so
+    # the split itself is what these checks pin. See also the BYPASS section
+    # below, which proves the dispatch really is a bypass and not another
+    # conditional downstream of the expensive passes.
     "looper_audio_block": [
-        "stem_render_run",
-        # The mixdown is wired in as its two halves, on purpose: prepare
-        # once per block (mute/solo/gain ceiling -- all control-rate), then
-        # frame_prepared per output frame in the renderer below. Requiring
-        # BOTH is what stops the split from silently regressing back into a
-        # per-frame st_stem_mix_frame() call, which is what it cost the
-        # streamer before (see st_stem_mix.h's own "GAIN CEILING"
-        # measurement).
+        "stem_audio_block",
+        "master_vol_ramp",
+        "audio_block_epilogue",
+        "st_stream_play",
+        "st_stream_stop",
+    ],
+    "stem_audio_block": [
         "st_stem_mix_prepare",
+        "stem_render_run",
         "st_stream_required_sector",
         "st_stream_sector_ready",
         # The RUN form, not the per-frame form: advancing frame-by-frame is
-        # exactly the cost this change removed, so requiring the plural name
-        # is what stops a regression back to it. The two are proven
+        # exactly the cost this structure removed, so requiring the plural
+        # name is what stops a regression back to it. The two are proven
         # equivalent over a whole real song in tests/test_stem_stream.c.
         "st_stream_advance_frames",
         "st_stem_mbox_try_acquire",
@@ -210,6 +214,26 @@ REQUIRED_CALLS = {
     ],
 }
 
+# ---------------------------------------------------------------------------
+# BYPASS PROOF (the reason this whole restructure exists).
+#
+# Requirement 1 of the physical-playback fix: when a validated Stem Tape song
+# is selected, the inherited classic-loop transport, resampling, recording,
+# classic mixing and classic play-ring processing must be BYPASSED -- not run
+# first and then ignored. Two independent, fail-closed checks:
+#
+#   A. stem_audio_block() may not NAME any classic-engine symbol. It cannot
+#      accidentally depend on classic work if it cannot refer to it.
+#   B. looper_audio_block() must reach its stem `return;` BEFORE the first
+#      classic-engine statement in its own body. This is what makes the
+#      dispatch a bypass: a version that ran PASS A/PASS B first and then
+#      branched would fail here even though every call-site check above still
+#      passed.
+CLASSIC_SYMBOLS = ["mix32", "posb", "fracb", "vol_s", "pring", "soft_limit",
+                   "g_loop_active", "g_pphase", "g_consume_pos", "g_cur_speed_q16"]
+# First classic statement markers, searched in looper_audio_block()'s body.
+CLASSIC_MARKERS = ["mix32[", "posb[", "fracb[", "vol_s[", "g_rec_track", "g_pphase"]
+
 # Substring checks (see REQUIRED_CALLS's doc comment, check 4): these are
 # array-field reads/assignments, not call expressions, so they cannot be
 # found by calls_in_function()'s `name(` regex -- a plain per-line substring
@@ -218,17 +242,13 @@ REQUIRED_CALLS = {
 # enough not to appear incidentally in unrelated code or in a real (non-
 # comment) statement other than the one it is meant to prove.
 REQUIRED_SUBSTRINGS = {
-    "looper_audio_block": [
+    "stem_audio_block": [
         "trk[s].vol_q8",
         "trk[s].muted",
         "trk[s].solo",
-        "atomic_set(&g_stem_song_frame_pub",
     ],
-    "stem_render_run": [
-        # The per-stem beat-pulse meters are fed from inside the renderer,
-        # gated on the SAME prepared gain the mixer multiplies by -- one
-        # audibility rule, not two.
-        "prep->gain_q8[sp] == 0",
+    "audio_block_epilogue": [
+        "atomic_set(&g_stem_song_frame_pub",
     ],
     "main": [
         "track_hold[ti].solo_active",
@@ -240,13 +260,13 @@ REQUIRED_SUBSTRINGS = {
         "track_led_on(i)",
         "track_led_ghost(i)",
         "track_led_off(i)",
-        # Beat pulse is now per-stem: led_service() reads each stem's own
-        # published peak instead of the song-position mirror and the shared
-        # tempo record. See this file's own "BEAT PULSE, CORRECTED" note.
-        # The [i] subscript is part of the required string on purpose -- it
-        # proves the PER-STEM array is being read, not some single scalar.
         "atomic_get(&g_stem_peak_pub[i])",
         "g_trk_level[i]",
+    ],
+    "stem_render_run": [
+        # Meters fed from the SAME prepared gain the mixer multiplies by --
+        # one audibility rule, not two.
+        "prep->gain_q8[sp] == 0",
     ],
     "streamer_thread": [
         "lib.active.bpm_q8",
@@ -337,6 +357,60 @@ def main() -> int:
                 report.append(f"- **MISSING**: `{s}` not found inside `{func_name}()`'s own body")
                 fail = True
         report.append("")
+
+    # ---- BYPASS PROOF (see CLASSIC_SYMBOLS/CLASSIC_MARKERS above) ----
+    report.append("### Stem Tape bypasses the classic engine (not merely ordered around it)")
+
+    # A. the fast path cannot even name the classic engine
+    fast_body = substrings_in_function(lines, func_of_line, "stem_audio_block")
+    if not fast_body:
+        report.append("- **MISSING**: stem_audio_block() not found -- the Stem Tape fast path "
+                       "must be its own function")
+        fail = True
+    else:
+        leaked = [n for n in CLASSIC_SYMBOLS if re.search(r"\b" + re.escape(n) + r"\b", fast_body)]
+        if leaked:
+            report.append("- **MISSING/BAD**: stem_audio_block() names classic-engine state: "
+                           + ", ".join("`" + n + "`" for n in leaked))
+            fail = True
+        else:
+            report.append("- present: stem_audio_block() names none of "
+                           + ", ".join("`" + n + "`" for n in CLASSIC_SYMBOLS)
+                           + " -- it cannot depend on classic work it cannot refer to")
+
+    # B. the dispatch RETURNS before the first classic statement
+    disp_lines = [i for i, l in enumerate(lines, 1)
+                  if func_of_line.get(i) == "looper_audio_block"]
+    if not disp_lines:
+        report.append("- **MISSING**: looper_audio_block() body not found")
+        fail = True
+    else:
+        ret_line = None
+        first_classic = None
+        for i in disp_lines:
+            stripped = lines[i - 1].strip()
+            if stripped.startswith(("*", "//", "/*")):
+                continue
+            if ret_line is None and stripped == "return;":
+                ret_line = i
+            if first_classic is None and any(m in stripped for m in CLASSIC_MARKERS):
+                first_classic = i
+        if ret_line is None:
+            report.append("- **MISSING**: looper_audio_block() has no early `return;` -- the stem "
+                           "dispatch must return, not fall through into the classic engine")
+            fail = True
+        elif first_classic is not None and ret_line > first_classic:
+            report.append(f"- **MISSING/BAD**: classic-engine work at line {first_classic} runs "
+                           f"BEFORE the stem dispatch returns at line {ret_line} -- that is an "
+                           "ordering, not a bypass")
+            fail = True
+        else:
+            where = f"line {first_classic}" if first_classic else "none present"
+            report.append(f"- present: the stem dispatch returns at line {ret_line}, before the "
+                           f"first classic-engine statement ({where}) -- classic transport, "
+                           "recording, resampling, PASS A and PASS B never execute for a "
+                           "stem-rendered block")
+    report.append("")
 
     report.append("## Result")
     report.append("")
