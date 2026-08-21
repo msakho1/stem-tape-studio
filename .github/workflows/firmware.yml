@@ -1237,6 +1237,60 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Stem Tape Track-chord ADC decoder host tests
+        # src/st_track_chord.c turns ONE shared-ladder voltage into a 4-bit
+        # held-Track mask. Linked into the real firmware target
+        # (CMakeLists.txt) and genuinely called: main.c's control loop feeds
+        # it the SAME raw AIN0 reading decode_tracks() consumes, and bit k of
+        # the settled mask becomes trk[k].solo -- proven by the "stored
+        # four-stem playback wiring check" step below.
+        #
+        # WHY THIS EXISTS. PLAY and Track 1-4 share SAADC AIN0; there is no
+        # per-button digital input, so a chord is one new voltage rather than
+        # two readings. The inherited decode_tracks() maps every voltage onto
+        # exactly one button identity and has no way to say "two pressed", so
+        # a real two-finger chord has always decoded as some single button the
+        # player never touched. Ending that is worth more than the feature:
+        # soloing the wrong stem mid-performance is worse than having no
+        # chords.
+        #
+        # THE HARDWARE FINDING, which this step asserts rather than merely
+        # documents: on this ladder every chord holding BOTH Track 3 and
+        # Track 4 lands at or above PLAY's floor -- T3+T4 ~1609, T1+T3+T4
+        # ~1691, T2+T3+T4 ~1768 and all-four ~1841 straddle PLAY at ~1823.
+        # PLAY is the transport and cannot be surrendered, so those four
+        # masks are undecodable here. The other eleven (four singles, five of
+        # six pairs, two of four triples) are separated by 73 counts or more.
+        #
+        # PROVENANCE, stated plainly: exactly ONE chord band in this
+        # repository is a hardware measurement -- Track 1 + Track 4, raw
+        # 1280..1390, the bootloader DFU failsafe band, which main.c
+        # previously recognised only in order to REJECT it. Every other
+        # centre is model-derived: solving the five measured single-button
+        # centres for their resistor ratios and combining conductances
+        # predicts T1+T4 at 1329 against a measured band centre of 1335, six
+        # counts out of a ~4200-count full scale. That validates the topology
+        # and the ORDERING; it does not place a band edge to the count, so
+        # the production bands are deliberately narrow (the central ~42% of
+        # each gap) and an unrecognised reading HOLDS the previous settled
+        # mask. The failure mode is therefore a chord that does not trigger,
+        # never one that triggers the wrong stems. Widening a band after
+        # measuring a real device is a one-line table edit.
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          cc -std=c11 -Wall -Wextra -Werror -Ifirmware/stemtape_player/src \
+            firmware/stemtape_player/src/st_track_chord.c \
+            firmware/stemtape_player/tests/test_track_chord.c \
+            -o audit/test_track_chord
+          ./audit/test_track_chord | tee audit/track-chord-selftest.txt
+          {
+            echo '### Stem Tape Track-chord ADC decoder'
+            echo '```text'
+            cat audit/track-chord-selftest.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Stem Tape LED acceptance matrix -- boot, battery gauge, beat/chase, solo, shutdown
         # Drives the REAL production LED decision -- src/st_led_mvp.c's
         # st_led_mvp_decide() -- AND the REAL src/st_beat_phase.c's
@@ -1280,6 +1334,7 @@ jobs:
           cc -std=c11 -Wall -Wextra -Werror -Ifirmware/stemtape_player/src \
             firmware/stemtape_player/src/st_led_mvp.c \
             firmware/stemtape_player/src/st_beat_phase.c \
+            firmware/stemtape_player/src/st_track_chord.c \
             firmware/stemtape_player/tests/test_st_led_mvp.c \
             -o audit/test_st_led_mvp
           ./audit/test_st_led_mvp | tee audit/led-acceptance-matrix.txt

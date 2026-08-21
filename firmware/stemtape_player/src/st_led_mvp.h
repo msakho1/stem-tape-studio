@@ -48,6 +48,11 @@
 
 #define ST_LED_MAX 255u
 
+/* All four Track bits of a solo mask. Deliberately the same bit order as
+ * st_track_chord.h's ST_CHORD_T1..T4 -- bit k is Track (k+1) -- because the
+ * value that arrives here IS that decoder's mask, unmodified. */
+#define ST_LED_TRACK_MASK_ALL 0xFu
+
 /* ---- centralized timing, all milliseconds ------------------------------
  * The boot and shutdown sequences are driven from firmware time, never from
  * a sleep loop: main.c passes the elapsed ms and this module decides what
@@ -122,10 +127,16 @@ typedef struct {
 	bool transfer_active;
 	bool transfer_blink_on;
 
-	/* IMMEDIATE MOMENTARY SOLO. True from the instant a Track button goes
-	 * down, false the instant it is released -- no threshold, no latch. */
-	bool    solo_held;
-	uint8_t solo_index;         /* 0..3, valid only while solo_held */
+	/* IMMEDIATE MOMENTARY SOLO, AS A CHORD MASK. Bit k set == Track (k+1)
+	 * physically held right now -- set from the instant the button goes
+	 * down, cleared the instant it is released. No threshold, no latch, no
+	 * persistent state.
+	 *
+	 * THE SAME MASK THE MIXER USES. main.c drives trk[k].solo from these
+	 * exact bits, so what is lit and what is heard cannot disagree: they
+	 * are one value, not two that have to be kept in step. 0 == nothing
+	 * held == normal playback display. */
+	uint8_t solo_mask;          /* bits 0..3; see st_track_chord.h */
 
 	/* Beat phase, envelope and bar position, all from one st_beat_pulse()
 	 * call on the authoritative song_frame. */

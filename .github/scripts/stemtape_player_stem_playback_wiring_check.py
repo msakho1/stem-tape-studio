@@ -210,6 +210,11 @@ REQUIRED_CALLS = {
     ],
     "main": [
         "st_track_hold_tick",
+        # MULTI-STEM SOLO CHORDS. main() must run the real settled-mask
+        # decoder on the real ladder reading. Requiring the CALL is what
+        # stops the chord feature regressing to decode_tracks()' single
+        # identity, which cannot express "two pressed" at all.
+        "st_track_chord_update",
     ],
     "led_service": [
         # THE SINGLE SEMANTIC LED OWNER. led_service() must gather live state
@@ -311,9 +316,19 @@ REQUIRED_SUBSTRINGS = {
     ],
     "main": [
         "track_hold[ti].solo_active",
+        # The chord mask must be fed the SAME raw ladder value the
+        # single-button decode consumes (one ADC read, two readings), and
+        # bit k of it must be what becomes trk[k].solo. Both ends named, so
+        # neither can be quietly replaced by a single-button identity.
+        "st_track_chord_update(&chord_state, trk_raw)",
+        "(chord_mask >> k) & 1u",
+        "trk[k].solo = stem_mode ? (chord_held ? 1u : 0u)",
     ],
     "led_service": [
         "atomic_get(&g_stem_song_selected)",
+        # The LED row must build its mask FROM trk[].solo -- the value that
+        # actually reached the mixer -- so what is lit is what is heard.
+        "in.solo_mask |= (uint8_t)(1u << i)",
         # The pulse's two inputs, by name: the STIX-derived tempo snapshot
         # and the authoritative song-frame mirror. Requiring BOTH is what
         # stops a second, free-running LED clock reappearing.
@@ -548,14 +563,31 @@ def main() -> int:
                            "stem-mode guard -- a tap could still latch mute")
             fail = True
 
-    # B. solo must come from the button being down, not from a threshold.
-    if "trk[k].solo = stem_mode ? (held_now ? 1u : 0u)" in scan_body:
-        report.append("- present: in stem mode `trk[k].solo` is assigned directly from "
-                       "`held_now` -- solo begins on button-down and ends on release, "
-                       "with no TRACK_HOLD_SOLO_MS threshold in the path")
+    # B. Solo must come from the buttons being DOWN, not from a threshold, and
+    #    it must come from the CHORD MASK rather than a single committed button
+    #    identity. decode_tracks() names exactly one button and has no way to
+    #    express "two pressed", so requiring the mask here is what keeps
+    #    multi-stem solo from silently regressing to one-stem-at-a-time.
+    if ("trk[k].solo = stem_mode ? (chord_held ? 1u : 0u)" in scan_body and
+            "bool chord_held = ((chord_mask >> k) & 1u) != 0u" in scan_body):
+        report.append("- present: in stem mode `trk[k].solo` is assigned from bit k of "
+                       "the settled chord mask -- solo begins on button-down and ends on "
+                       "release, with no TRACK_HOLD_SOLO_MS threshold in the path, and "
+                       "several stems can be held at once")
     else:
         report.append("- **MISSING**: stem-mode solo is not driven directly from the "
-                       "button-down state -- the 700 ms hold threshold would still gate it")
+                       "chord mask's button-down bits -- either the 700 ms hold threshold "
+                       "still gates it, or it regressed to a single committed button")
+        fail = True
+
+    # B2. The mask the LEDs show must be rebuilt from what the MIXER got.
+    if "in.solo_mask |= (uint8_t)(1u << i)" in led_body and "trk[i].solo" in led_body:
+        report.append("- present: `led_service()` builds its solo mask from `trk[].solo` "
+                       "-- the value that actually reached the channel strip, so what is "
+                       "lit cannot drift from what is heard")
+    else:
+        report.append("- **MISSING**: the LED solo mask is not rebuilt from `trk[].solo` "
+                       "-- lights and mixer could disagree")
         fail = True
 
     # C. selecting a song must clear inherited mute state.

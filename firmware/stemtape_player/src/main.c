@@ -124,8 +124,9 @@
  * about the change -- stop and re-flash before reading another number out
  * of it.
  */
-#define ST_BUILD_TAG "st13"
+#define ST_BUILD_TAG "st14"
 #include "st_track_hold.h"
+#include "st_track_chord.h"
 #include "st_stix.h"
 #include "st_v11_format.h"
 
@@ -5540,9 +5541,15 @@ static void led_service(void)
 			 * envelope only; it never gates or times a light. */
 			peak >>= 15;
 			in.stem_activity[i] = (peak > 255u) ? 255u : (uint8_t)peak;
+			/* THE SAME BITS THE MIXER IS USING. Rebuilt from
+			 * trk[].solo rather than from the chord decoder's own
+			 * output, so the lights are driven by the value that
+			 * actually reached the channel strip -- if the two ever
+			 * disagreed, the LEDs would show what is HEARD, not what
+			 * was decoded. One or several bits; a chord is not a
+			 * special case. */
 			if (trk[i].solo) {
-				in.solo_held = true;
-				in.solo_index = (uint8_t)i;
+				in.solo_mask |= (uint8_t)(1u << i);
 			}
 		}
 	}
@@ -6519,6 +6526,31 @@ int main(void)
 			} else {
 				raw = decode_tracks(trk_raw);
 			}
+
+			/* STEM TAPE: MULTI-TRACK CHORD DECODE, from the SAME raw
+			 * reading the single-button decode above consumes -- one
+			 * ADC read, two interpretations, no extra ladder traffic
+			 * (ladder_read() blocks this thread, which preempts the
+			 * eMMC streamer; a second read here would be real risk to
+			 * playback for no information).
+			 *
+			 * decode_tracks() cannot express "two pressed": it maps
+			 * every voltage onto one identity, so a genuine chord has
+			 * always decoded as some single button the player never
+			 * touched. st_track_chord_update() answers with a settled
+			 * 4-bit mask instead, and answers "hold what you had" for
+			 * any voltage it does not positively recognise. See
+			 * st_track_chord.h for the ladder model, the one measured
+			 * chord band, and why every chord containing both Track 3
+			 * and Track 4 is undecodable on this hardware. */
+			static st_track_chord_t chord_state;
+			static bool             chord_seeded;
+
+			if (!chord_seeded) {
+				st_track_chord_reset(&chord_state);
+				chord_seeded = true;
+			}
+			uint8_t chord_mask = st_track_chord_update(&chord_state, trk_raw);
 			/* trailing-PLAY guard (see the FUNCTION+PLAY combo exit): ignore
 			 * the ladder until the RAW reading goes fully idle once, so a PLAY
 			 * still held after the mode toggle — and its whole release sweep
@@ -6860,8 +6892,17 @@ int main(void)
 					bool solo = st_track_hold_tick(&track_hold[k], held_now,
 									held_ms,
 									TRACK_HOLD_SOLO_MS);
+					/* CHORD: bit k of the settled mask, not a single
+					 * committed identity. This is the whole of the
+					 * multi-stem solo -- st_stem_mix.h's own rule
+					 * ("if ANY stem is soloed, every non-soloed stem
+					 * is silent") turns two set bits into exactly two
+					 * audible stems, with their fader gains intact.
+					 * No mixer change was needed, and none was made. */
+					bool chord_held = ((chord_mask >> k) & 1u) != 0u &&
+							  !pwr_pressed();
 
-					trk[k].solo = stem_mode ? (held_now ? 1u : 0u)
+					trk[k].solo = stem_mode ? (chord_held ? 1u : 0u)
 								: (solo ? 1u : 0u);
 				}
 			}

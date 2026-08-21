@@ -214,18 +214,24 @@ static void decide_boot(const st_led_inputs_t *in, st_led_frame_t *out)
 }
 
 /*
- * 4. IMMEDIATE MOMENTARY SOLO. Only the held stem's Track LED, at maximum --
- *    never faint, never ghosted -- and every other Track LED completely off.
- *    This overrides the beat/chase display entirely; it does not blend with
- *    it. The side row is left to the caller's playing/charging decision so
- *    S4 can keep showing tempo while a stem is soloed.
+ * 4. IMMEDIATE MOMENTARY SOLO, ONE OR SEVERAL TRACKS. Every held Track LED
+ *    at maximum -- never faint, never ghosted -- and every Track LED that is
+ *    NOT held completely off. This overrides the beat/chase display
+ *    entirely; it does not blend with it. The side row is left to the
+ *    caller's playing/stopped decision so S4 can keep showing tempo, or the
+ *    battery gauge can stay lit, while stems are soloed.
+ *
+ *    A chord is not a special case here: the mask simply has more bits set,
+ *    and adding or removing a finger changes exactly the corresponding LED
+ *    while the others hold. That falls out of assigning all four from the
+ *    mask on every call rather than tracking "which one" is soloed.
  */
 static void decide_solo_tracks(const st_led_inputs_t *in, st_led_frame_t *out)
 {
 	uint8_t i;
 
 	for (i = 0; i < ST_LED_TRACK_COUNT; i++) {
-		out->level[i] = (i == in->solo_index) ? ST_LED_MAX : 0u;
+		out->level[i] = ((in->solo_mask >> i) & 1u) ? ST_LED_MAX : 0u;
 	}
 }
 
@@ -345,8 +351,9 @@ void st_led_mvp_decide(const st_led_inputs_t *in, st_led_frame_t *out)
 			      /*blink_step=*/(in->batt_state == ST_LED_BATT_CHARGING));
 	}
 
-	/* 4. IMMEDIATE SOLO overrides the track row, at any transport state. */
-	if (in->solo_held && in->solo_index < ST_LED_TRACK_COUNT) {
+	/* 4. IMMEDIATE SOLO overrides the track row, at any transport state.
+	 *    Any nonzero mask means at least one Track is physically down. */
+	if ((in->solo_mask & ST_LED_TRACK_MASK_ALL) != 0u) {
 		decide_solo_tracks(in, out);
 	}
 }
