@@ -1426,6 +1426,14 @@ jobs:
           check() {
             if ! grep -qE " [tT] ${1}\$" audit/nm.txt; then
               echo "MISSING required linked symbol: $1" >&2
+              # Say WHY, right here. A bare "MISSING" forces whoever reads
+              # this to guess whether the function was inlined, renamed by
+              # an IPA clone, garbage-collected as uncalled, or emitted with
+              # a non-text symbol type -- and that guessing has already cost
+              # several round trips. Print every symbol whose name begins
+              # with the required one, so the answer is in the log.
+              grep -E " [a-zA-Z] ${1}" audit/nm.txt \
+                || echo "  -> no symbol beginning '${1}' exists in the ELF at all (uncalled and garbage-collected, or never compiled in)"
               missing=1
             else
               echo "present: $1"
@@ -1437,16 +1445,8 @@ jobs:
           # other than t/T (e.g. b/B/d/D/r/R), so check()'s text-only
           # pattern would never match them even when genuinely linked.
           check_any() {
-            # Accept GCC's own IPA clone suffixes (.constprop.N, .isra.N,
-            # .part.N). Those are the SAME function -- the compiler
-            # specialises or splits a body and renames the emitted symbol --
-            # so requiring the bare name would fail the build over a codegen
-            # detail while the code is genuinely linked in. It is not a
-            # loosening of what is proven: a clone only exists if the
-            # original function is really there and really called.
-            if ! grep -qE " [a-zA-Z] ${1}(\.[a-z]+\.[0-9]+)*\$" audit/nm.txt; then
+            if ! grep -qE " [a-zA-Z] ${1}\$" audit/nm.txt; then
               echo "MISSING required linked symbol: $1" >&2
-              grep -E " [a-zA-Z] ${1}" audit/nm.txt || echo "  (no symbol whose name starts with ${1} exists at all)"
               missing=1
             else
               echo "present: $1"
