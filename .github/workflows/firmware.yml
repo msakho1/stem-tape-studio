@@ -1226,22 +1226,24 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Stem Tape MVP LED acceptance matrix (production decision, all ten states)
+      - name: Stem Tape LED acceptance matrix -- boot, beat/chase, solo, charging, shutdown
         # Drives the REAL production LED decision -- src/st_led_mvp.c's
-        # st_led_mvp_decide(), the same object file linked into the firmware
-        # and the same function main.c's led_service() calls -- across all ten
-        # required acceptance states: song selected/stopped, playing, mute and
-        # unmute, momentary solo and release, transfer begin and complete,
-        # stop and restart, USB disconnect, no song selected, battery
-        # unavailable/faulted, and charging/charge-complete.
+        # st_led_mvp_decide() -- AND the REAL src/st_beat_phase.c's
+        # st_beat_pulse(), the same object files linked into the firmware and
+        # the same functions main.c's led_service() calls. Covers the boot
+        # sequence and its fade, every battery preview level, idle, all four
+        # beats of the bar chase, the between-beats darkness, activity
+        # scaling, an absent tempo, immediate solo hold and release, the
+        # charging gauge, transfer, the shutdown sequence, and the full
+        # priority order.
         #
-        # Audibility comes from the REAL st_stem_mix_channel_audible() in
-        # src/st_stem_mix.c -- the SAME rule the audio thread applies -- so a
-        # mute/solo row passes because the mixer agrees the stem is silent,
-        # not because the test asserted it should be. That is what makes this
-        # coverage of the shipping behaviour rather than of a reference model:
-        # the previous LED tests exercised st_led_pattern.c/led_render.c,
-        # which CMakeLists.txt does not compile into this firmware at all.
+        # The beat/chase rows pass only because st_beat_pulse() derives the
+        # envelope and bar position from a real STIX-style tempo snapshot and
+        # a song_frame -- not because the test asserted a shape. That is what
+        # makes this coverage of the shipping behaviour rather than of a
+        # reference model: the LED tests this replaced exercised
+        # st_led_pattern.c/led_render.c, which CMakeLists.txt does not
+        # compile into this firmware at all.
         #
         # TRUTHFUL WORDING: this proves the production DECISION assigns those
         # eight modes. It does NOT prove the physical device lights up that
@@ -1252,7 +1254,7 @@ jobs:
           set -euo pipefail
           cc -std=c11 -Wall -Wextra -Werror -Ifirmware/stemtape_player/src \
             firmware/stemtape_player/src/st_led_mvp.c \
-            firmware/stemtape_player/src/st_stem_mix.c \
+            firmware/stemtape_player/src/st_beat_phase.c \
             firmware/stemtape_player/tests/test_st_led_mvp.c \
             -o audit/test_st_led_mvp
           ./audit/test_st_led_mvp | tee audit/led-acceptance-matrix.txt

@@ -213,10 +213,13 @@ REQUIRED_CALLS = {
         # itself. st_stem_mix_channel_audible() is the mixer's OWN audibility
         # rule read back, so mute/solo/solo-suppression cannot drift between
         # what is heard and what is lit.
-        "st_stem_mix_channel_audible",
         "st_led_batt_classify",
         "st_led_mvp_decide",
         "led_apply_frame",
+        # BEAT/CHASE FROM STIX TIMING. led_service() must derive the pulse
+        # from the real tempo snapshot and the live song position -- not
+        # from a clock of its own.
+        "st_beat_pulse",
     ],
 }
 
@@ -265,12 +268,19 @@ LED_FORBIDDEN_ANYWHERE = [
     "show_song_leds",     # the inherited 16-song bank/position side display
     "st_stem_meter_update",     # the ad-hoc peak meter that owned the track row
     "st_stem_meter_brightness",
+    "g_trk_level_active",       # the meter's renderer gate
+    "led_apply_mode",           # the superseded three-state applier
 ]
+
+# led_service() must not read trk[].muted at all: Stem Tape has no persistent
+# mute, and a display that consulted one would be showing state no gesture in
+# this firmware can produce.
+LED_FORBIDDEN_IN_LED_SERVICE_EXTRA = ["trk[i].muted"]
 LED_FORBIDDEN_IN_LED_SERVICE = [
     "track_led_on(", "track_led_off(", "track_led_ghost(",
     "led_on(", "led_off(", "track_all_off(",
-    "g_trk_level[", "g_led_p0_on", "g_led_p1_on",
-]
+    "g_led_level[", "g_led_p0_on", "g_led_p1_on",
+] + LED_FORBIDDEN_IN_LED_SERVICE_EXTRA
 
 # Substring checks (see REQUIRED_CALLS's doc comment, check 4): these are
 # array-field reads/assignments, not call expressions, so they cannot be
@@ -293,8 +303,12 @@ REQUIRED_SUBSTRINGS = {
     ],
     "led_service": [
         "atomic_get(&g_stem_song_selected)",
+        # The pulse's two inputs, by name: the STIX-derived tempo snapshot
+        # and the authoritative song-frame mirror. Requiring BOTH is what
+        # stops a second, free-running LED clock reappearing.
+        "&g_stem_beat_timing",
+        "atomic_get(&g_stem_song_frame_pub)",
         "trk[i].solo",
-        "trk[i].muted",
     ],
     "stem_render_run": [
         # Meters fed from the SAME prepared gain the mixer multiplies by --
@@ -495,6 +509,49 @@ def main() -> int:
             report.append("- present: led_service() writes no LED mask directly -- it gathers "
                            "state, calls st_led_mvp_decide(), and renders through "
                            "led_apply_frame() alone")
+    report.append("")
+
+    # ---- STEM TAPE TRACK-BUTTON PROOF ----
+    report.append("### Stem Tape Track button: immediate solo, never a mute")
+
+    scan_body = substrings_in_function(lines, func_of_line, "main")
+
+    # A. tap-to-mute must be unreachable with a stem song selected. The mute
+    #    toggle still exists for the classic engine, so its ABSENCE cannot be
+    #    required; what must be true is that it sits behind a stem-mode guard.
+    if "trk[ti].muted = !trk[ti].muted;" not in scan_body:
+        report.append("- present: no tap-to-mute toggle exists at all")
+    else:
+        idx = scan_body.index("trk[ti].muted = !trk[ti].muted;")
+        guard = "atomic_get(&g_stem_song_selected) != 0"
+        window = scan_body[max(0, idx - 1600):idx]
+        if guard in window:
+            report.append("- present: the tap-to-mute toggle is guarded by `" + guard +
+                           "` -- a Track tap cannot mutate mute while a Stem Tape song "
+                           "is selected")
+        else:
+            report.append("- **MISSING/BAD**: the tap-to-mute toggle is NOT behind a "
+                           "stem-mode guard -- a tap could still latch mute")
+            fail = True
+
+    # B. solo must come from the button being down, not from a threshold.
+    if "trk[k].solo = stem_mode ? (held_now ? 1u : 0u)" in scan_body:
+        report.append("- present: in stem mode `trk[k].solo` is assigned directly from "
+                       "`held_now` -- solo begins on button-down and ends on release, "
+                       "with no TRACK_HOLD_SOLO_MS threshold in the path")
+    else:
+        report.append("- **MISSING**: stem-mode solo is not driven directly from the "
+                       "button-down state -- the 700 ms hold threshold would still gate it")
+        fail = True
+
+    # C. selecting a song must clear inherited mute state.
+    if "trk[mi].muted = 0u;" in "\n".join(l for _, l in code_lines):
+        report.append("- present: song selection clears any inherited `trk[].muted`, so a "
+                       "mute latched by earlier firmware cannot survive into Stem Tape")
+    else:
+        report.append("- **MISSING**: song selection does not clear inherited "
+                       "`trk[].muted` -- a stem could stay silent with no gesture to recover it")
+        fail = True
     report.append("")
 
     report.append("## Result")
