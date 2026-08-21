@@ -106,6 +106,25 @@
 #include "st_stem_mix.h"
 #include "st_stem_meter.h"
 #include "st_stem_stream.h"
+
+/*
+ * BUILD IDENTITY -- printed in the boot banner AND on every LOOPER
+ * diagnostic line as b=<tag>.
+ *
+ * This exists because of a real, expensive failure: a serial capture was
+ * analysed at length as evidence about a fix, when the device was in fact
+ * still running a firmware from before that fix. Nothing in the output said
+ * so. The only way to tell was to notice which diagnostic lines had
+ * appeared or disappeared between builds -- which is not a check anyone
+ * should have to perform, and is exactly the check that was missed.
+ *
+ * So: bump this string in the SAME commit as any change whose effect is to
+ * be judged from a capture. If a capture's b= does not match the build that
+ * was handed over, the flash did not take and the capture says nothing
+ * about the change -- stop and re-flash before reading another number out
+ * of it.
+ */
+#define ST_BUILD_TAG "st5"
 #include "st_track_hold.h"
 #include "st_stix.h"
 #include "st_v11_format.h"
@@ -3969,6 +3988,10 @@ static void streamer_thread(void *a, void *b, void *c)
 	 * hunts, CRC tokens, busy polls) has been running ~4x slower than
 	 * intended this whole time. Zero it here so it actually sticks. */
 	g_emmc_clk_half_us = 0u;
+	/* Announce the build BEFORE anything else this thread prints, right
+	 * after the Zephyr banner, so the very first lines of any capture
+	 * identify the firmware. See ST_BUILD_TAG. */
+	printk("STEMTAPE BUILD %s\n", ST_BUILD_TAG);
 	g_emmc_ready = emmc_is_ready() ? 1 : 0;
 
 	/* Enable the card's internal write cache if it has one. Read EXT_CSD (CMD8) to
@@ -4934,8 +4957,9 @@ static void controls_diag(void)
 	int mg[NTRK];
 	for (int _i = 0; _i < NTRK; _i++)
 		mg[_i] = (int)((int32_t)(trk[_i].p_w - cpos) / (int)(LOOP_RATE / 1000u));
-	printk("LOOPER %dHz song=%d %s hp=%d hpin=%d usb=%d chg=%d batt=%d bpm=%d detbpm=%d vol=%d "
+	printk("LOOPER b=%s %dHz song=%d %s hp=%d hpin=%d usb=%d chg=%d batt=%d bpm=%d detbpm=%d vol=%d "
 	       "trk[%s %s %s %s] rec=%d mut=%u%u%u%u ovr=%u rerr=%u werr=%u marg=[%d %d %d %d]ms stv=[%u %u %u %u] len=[%u %u %u %u] st=[%u %u %u %u] spim=%d cache=%d ckb=%u wbi=%u chop=%u/%u\n",
+	       ST_BUILD_TAG,
 	       (int)LOOP_RATE, (int)g_slot, g_playing ? "PLAY" : "STOP", g_hp_on, g_hp_in,
 	       usb_present() ? 1 : 0, charging() ? 1 : 0, batt,
 	       g_play_bpm, g_det_bpm, g_master_vol_q8,
