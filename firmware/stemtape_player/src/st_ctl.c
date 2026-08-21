@@ -46,7 +46,6 @@ static void publish_levels(const st_ctl_t *c, st_ctl_out_t *out)
 {
 	out->loop_active  = st_loop_active(&c->loop);
 	out->loop_latched = (c->loop.state == ST_LOOP_LATCHED);
-	out->loop_reverse = st_loop_reverse(&c->loop);
 	out->loop_start   = c->loop.start_frame;
 	out->loop_end     = c->loop.end_frame;
 	out->loop_resume  = st_loop_resume_frame(&c->loop);
@@ -61,23 +60,18 @@ static void publish_levels(const st_ctl_t *c, st_ctl_out_t *out)
 	 * certainly must be fetched during the hold. It is also every forward
 	 * wrap's destination.
 	 *
-	 * The exit end is published as end_frame - 1, the LAST frame the window
-	 * contains, rather than end_frame itself. That one frame of slack makes
-	 * a single pinned region serve both jobs: it is the reverse wrap's
-	 * destination outright, and it is in the same sector as end_frame (or
-	 * the one before it), so the region's depth still covers the forward
-	 * exit with runway to spare. An exit can happen on the very next pass
-	 * after entry, so neither can be left until the release. */
+	 * The exit end is end_frame itself -- the first frame of ordinary
+	 * playback after the loop, and exactly where the exit seek lands. An
+	 * exit can happen on the very next pass after entry, so neither region
+	 * can be left until the release. */
 	if (st_loop_active(&c->loop)) {
 		out->pin_valid       = true;
 		out->pin_entry_frame = c->loop.start_frame;
-		out->pin_exit_frame  = (c->loop.end_frame > 0u)
-					? c->loop.end_frame - 1u : 0u;
+		out->pin_exit_frame  = c->loop.end_frame;
 	} else if (st_loop_armed(&c->loop)) {
 		out->pin_valid       = true;
 		out->pin_entry_frame = st_loop_cand_start(&c->loop);
-		out->pin_exit_frame  = (st_loop_cand_end(&c->loop) > 0u)
-					? st_loop_cand_end(&c->loop) - 1u : 0u;
+		out->pin_exit_frame  = st_loop_cand_end(&c->loop);
 	} else {
 		out->pin_valid = false;
 	}
@@ -163,11 +157,6 @@ void st_ctl_service(st_ctl_t *c, const st_ctl_in_t *in, st_ctl_out_t *out)
 		 * power-off countdown, a brightness step or a bank move. It is
 		 * released when FUNCTION is. */
 		c->fn_consumed = true;
-		break;
-	case ST_LOOP_ACT_DIRECTION:
-		out->loop_direction = true;
-		c->play_hold_spent  = true;   /* never also a tap */
-		c->fn_consumed      = true;
 		break;
 	case ST_LOOP_ACT_EXIT:
 		out->loop_exit     = true;

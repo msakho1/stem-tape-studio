@@ -9,7 +9,7 @@
  *     -> st_ladder: one stable physical classification
  *       -> a Track mask, or a PLAY event
  *         -> the PLAY/FUNCTION/VOLUME gesture state machine
- *           -> st_loop: transport, window, direction, latch
+ *           -> st_loop: transport, window, latch
  *             -> ONE published output the mixer and the LEDs both consume
  *
  * ======================================================================
@@ -108,13 +108,11 @@ typedef struct {
 	bool     loop_enter;       /* SEEK to loop_start, then start wrapping   */
 	bool     loop_resize;
 	bool     loop_latch;
-	bool     loop_direction;
 	bool     loop_exit;        /* stop wrapping, SEEK to loop_resume        */
 
 	/* ---- loop, as levels ---------------------------------------------- */
 	bool     loop_active;
 	bool     loop_latched;
-	bool     loop_reverse;
 	uint32_t loop_start;       /* inclusive */
 	uint32_t loop_end;         /* EXCLUSIVE -- half-open, everywhere */
 	uint32_t loop_resume;      /* first normal frame after an exit */
@@ -122,7 +120,7 @@ typedef struct {
 	/* ---- what main.c must have resident before the loop runs ---------- */
 	bool     pin_valid;
 	uint32_t pin_entry_frame;  /* the seek-back target: loop/candidate start */
-	uint32_t pin_exit_frame;   /* the window's LAST frame; see st_ctl.c      */
+	uint32_t pin_exit_frame;   /* end_frame: where every exit seek lands     */
 
 	/* ---- what main.c must NOT also act on ----------------------------- */
 	bool     function_consumed;/* this FUNCTION press belongs to the loop */

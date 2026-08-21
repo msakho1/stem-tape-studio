@@ -82,10 +82,9 @@ typedef struct {
 	bool         playing;
 	bool         loop_on;
 	uint32_t     lo, hi;      /* the published half-open window */
-	bool         reverse;
 
 	/* Everything the rig observed, for the ordering assertions. */
-	int      n_arm, n_enter, n_exit, n_latch, n_tap, n_resize, n_dir;
+	int      n_arm, n_enter, n_exit, n_latch, n_tap, n_resize;
 	uint32_t first_frame_after_enter;
 	uint32_t first_frame_after_exit;
 	bool     saw_frame_after_enter;
@@ -132,7 +131,6 @@ static void pass(rig_t *r, int raw, int8_t vol, bool fn)
 	r->n_latch  += r->out.loop_latch     ? 1 : 0;
 	r->n_tap    += r->out.play_tap       ? 1 : 0;
 	r->n_resize += r->out.loop_resize    ? 1 : 0;
-	r->n_dir    += r->out.loop_direction ? 1 : 0;
 
 	entered_this_pass = r->out.loop_enter;
 	exited_this_pass  = r->out.loop_exit;
@@ -145,7 +143,6 @@ static void pass(rig_t *r, int raw, int8_t vol, bool fn)
 		r->loop_on    = true;
 		r->lo         = r->out.loop_start;
 		r->hi         = r->out.loop_end;
-		r->reverse    = r->out.loop_reverse;
 		if (!r->saw_frame_after_enter) {
 			r->first_frame_after_enter = r->song_frame;
 			r->saw_frame_after_enter   = true;
@@ -154,9 +151,6 @@ static void pass(rig_t *r, int raw, int8_t vol, bool fn)
 	if (r->out.loop_resize) {
 		r->lo = r->out.loop_start;
 		r->hi = r->out.loop_end;
-	}
-	if (r->out.loop_direction) {
-		r->reverse = r->out.loop_reverse;
 	}
 	if (exited_this_pass) {
 		/* Stop wrapping FIRST, then seek to the published resume frame.
@@ -179,18 +173,10 @@ static void pass(rig_t *r, int raw, int8_t vol, bool fn)
 	if (r->playing) {
 		for (i = 0; i < frames; i++) {
 			if (r->loop_on && r->hi > r->lo) {
-				if (r->reverse) {
-					if (r->song_frame <= r->lo) {
-						r->song_frame = r->hi - 1u;
-					} else {
-						r->song_frame--;
-					}
+				if (r->song_frame + 1u >= r->hi) {
+					r->song_frame = r->lo;
 				} else {
-					if (r->song_frame + 1u >= r->hi) {
-						r->song_frame = r->lo;
-					} else {
-						r->song_frame++;
-					}
+					r->song_frame++;
 				}
 			} else {
 				r->song_frame++;
@@ -249,12 +235,12 @@ static void case_entry(void)
 	      N <= 1234567u + 48u * (40u + PASS_MS * ST_LADDER_SETTLE_READS),
 	      "   the captured frame %u is the live playhead at the edge", N);
 
-	/* 6. COLD BOOT DEFAULT: exactly one bar of the measured tempo. The exit
-	 * pin names the window's LAST frame, hence the - 1. */
-	CHECK(r.out.pin_exit_frame - r.out.pin_entry_frame == ONE_BAR - 1u,
+	/* 6. COLD BOOT DEFAULT: exactly one bar of the measured tempo. Both
+	 * pinned ends are the real seek targets -- loop_start and loop_end. */
+	CHECK(r.out.pin_exit_frame - r.out.pin_entry_frame == ONE_BAR,
 	      "6. the cold-boot window is exactly one bar: %u frames (4 x %u)",
 	      ONE_BAR, FPB);
-	CHECK(r.out.pin_exit_frame == r.out.pin_entry_frame + ONE_BAR - 1u,
+	CHECK(r.out.pin_exit_frame == r.out.pin_entry_frame + ONE_BAR,
 	      "   and both ends are pinned before anything can be heard");
 
 	/* Still nothing audible: no enter, no tap, and the transport is intact. */
@@ -440,55 +426,6 @@ static void case_division(void)
 		CHECK(fresh.out.loop_end - fresh.out.loop_start == ONE_BAR,
 		      "6. a cold boot is one bar again, inheriting nothing");
 	}
-}
-
-/* ============== 17-18: direction is real, exit is still loop_end ========= */
-static void case_direction(void)
-{
-	rig_t r;
-	uint32_t E, seen_low, seen_high, i;
-
-	g_cases++;
-	printf("\n-- Reverse traverses real frames; exiting it still lands on loop_end\n");
-
-	rig_init(&r, 600000u);
-	hold(&r, RAW_IDLE, 40u, 0, false);
-	hold(&r, RAW_PLAY, ST_LOOP_HOLD_MS + 100u, 0, false);
-	hold(&r, RAW_PLAY, 40u, 0, true);            /* latch */
-	hold(&r, RAW_PLAY, 40u, 0, true);
-	hold(&r, RAW_IDLE, 60u, 0, true);            /* PLAY up, FUNCTION held */
-	CHECK(r.out.loop_latched, "latched with FUNCTION still down");
-
-	hold(&r, RAW_PLAY, 60u, 0, true);            /* FUNCTION + PLAY */
-	CHECK(r.n_dir == 1, "17. exactly one direction toggle (got %d)", r.n_dir);
-	CHECK(r.out.loop_reverse, "17. the loop is now reversed");
-	CHECK(r.out.loop_active, "17. and it did not exit");
-
-	/* Watch the playhead actually move backwards. */
-	hold(&r, RAW_IDLE, 100u, 0, true);
-	seen_high = r.song_frame;
-	for (i = 0; i < 6u; i++) {
-		pass(&r, RAW_IDLE, 0, true);
-	}
-	seen_low = r.song_frame;
-	CHECK(seen_low < seen_high || seen_low > r.out.loop_end - FPB,
-	      "17. the playhead really moved backwards (%u -> %u)", seen_high,
-	      seen_low);
-	for (i = 0; i < 4000u; i++) {
-		pass(&r, RAW_IDLE, 0, true);
-		QUIET(r.song_frame >= r.out.loop_start &&
-		      r.song_frame < r.out.loop_end);
-	}
-	CHECK(1, "17. reversed, the playhead stays inside [start, end) forever");
-
-	E = r.out.loop_end;
-	hold(&r, RAW_PLAY, 60u, 0, false);           /* bare PLAY: exit */
-	CHECK(r.n_exit == 1, "18. the reversed loop exits on a bare PLAY press");
-	CHECK(r.first_frame_after_exit == E,
-	      "18. and resumes FORWARD at loop_end (%u), not at loop_start", E);
-	hold(&r, RAW_IDLE, 300u, 0, false);
-	CHECK(!r.wrapped_after_exit, "18. replaying nothing");
-	CHECK(r.song_frame > E, "18. moving forward from there");
 }
 
 /* ============ 22-26: every measured mask, through the dispatcher ========= */
@@ -695,7 +632,6 @@ int main(void)
 	case_unlatched_exit();
 	case_latch();
 	case_division();
-	case_direction();
 	case_all_masks();
 	case_chord_robustness();
 	case_single_owner();

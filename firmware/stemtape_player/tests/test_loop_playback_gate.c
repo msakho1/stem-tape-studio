@@ -67,7 +67,7 @@ static int g_checks, g_failures, g_cases;
  * DIFFERENT depths, sized to what each has to cover -- see main.c. */
 #define ST_LOOP_PIN_TEST_REGIONS       2u
 #define ST_LOOP_PIN_TEST_ENTRY_SECTORS 3u
-#define ST_LOOP_PIN_TEST_EXIT_SECTORS  4u
+#define ST_LOOP_PIN_TEST_EXIT_SECTORS  3u
 #define PIN_ENTRY 0u
 #define PIN_EXIT  1u
 
@@ -195,6 +195,17 @@ static void emit(emitted_t *e, uint32_t frame, bool silent, bool pin)
 #define FILLS_PER_BLOCK_Q8 269u    /* 1.051 * 256, integer only */
 static uint32_t g_fill_credit_q8;
 
+/* THE WORST-CASE PRODUCER STALL, injectable.
+ *
+ * The pin's depth is sized against a 10.15 ms wait: the streamer may already
+ * be mid-sector-read when a seek lands (5.073 ms to finish it, slice T0's
+ * measured figure) and then needs 5.073 ms to read ours. A steady-rate
+ * producer model never reproduces that, so the sizing argument would be
+ * untested. Setting this to N makes the producer deliver nothing for the next
+ * N output blocks -- 2 blocks is 10.67 ms, slightly worse than the real worst
+ * case -- so the pin has to carry the gap alone. */
+static uint32_t g_stall_blocks;
+
 static void audio_block(st_stream_t *st, ring_t *r, emitted_t *e,
 			 bool lp_on, uint32_t lp_lo, uint32_t lp_hi,
 			 bool *enter_req, uint32_t enter_fr,
@@ -202,7 +213,11 @@ static void audio_block(st_stream_t *st, ring_t *r, emitted_t *e,
 {
 	uint32_t f = 0u;
 
-	g_fill_credit_q8 += FILLS_PER_BLOCK_Q8;
+	if (g_stall_blocks > 0u) {
+		g_stall_blocks--;
+	} else {
+		g_fill_credit_q8 += FILLS_PER_BLOCK_Q8;
+	}
 
 	while (f < BLK) {
 		/* THE ENTRY SEEK, taken before anything else in the block, as
@@ -365,7 +380,7 @@ static void case_wrap_contiguous(void)
 	l.end_frame = hi;
 	l.state = ST_LOOP_MOMENTARY;
 	ring_pin(&r, PIN_ENTRY, lo / ST11_FRAMES_PER_SECTOR);
-	ring_pin(&r, PIN_EXIT, (hi - 1u) / ST11_FRAMES_PER_SECTOR);
+	ring_pin(&r, PIN_EXIT, hi / ST11_FRAMES_PER_SECTOR);
 
 	memset(&e, 0, sizeof(e));
 	e.frames = buf;
@@ -436,7 +451,7 @@ static void case_exit_no_silence(void)
 	(void)st_stream_seek(&st, lo);
 	hi = lo + st_loop_window_frames(ST_LOOP_LEN_DEFAULT, FPB, lo, SONG_FRAMES);
 	ring_pin(&r, PIN_ENTRY, lo / ST11_FRAMES_PER_SECTOR);
-	ring_pin(&r, PIN_EXIT, (hi - 1u) / ST11_FRAMES_PER_SECTOR);
+	ring_pin(&r, PIN_EXIT, hi / ST11_FRAMES_PER_SECTOR);
 
 	memset(&e, 0, sizeof(e));
 	e.frames = buf;
@@ -589,7 +604,7 @@ static void case_all_lengths(void)
 		len = st_loop_window_frames((uint8_t)idx, FPB, lo, SONG_FRAMES);
 		hi = lo + len;
 		ring_pin(&r, PIN_ENTRY, lo / ST11_FRAMES_PER_SECTOR);
-		ring_pin(&r, PIN_EXIT, (hi - 1u) / ST11_FRAMES_PER_SECTOR);
+		ring_pin(&r, PIN_EXIT, hi / ST11_FRAMES_PER_SECTOR);
 
 		memset(&e, 0, sizeof(e));
 		e.frames = buf;
@@ -617,6 +632,140 @@ static void case_all_lengths(void)
 	      "the committed song");
 }
 
+
+/* ===== 5. THE EXIT LANDS LATE IN A SECTOR: the worst case for the pin ==== */
+static void case_exit_at_sector_end(void)
+{
+	/* The pin's whole sizing argument is "the seek target sits on the LAST
+	 * frame of its sector, so only (n-1)*340 + 1 frames are pinned". This
+	 * case constructs exactly that for the EXIT and proves playback runs
+	 * straight on into the following sector with no silence -- which is the
+	 * case that decides whether two pinned sectors would have been enough.
+	 *
+	 * It also covers the opposite alignment (exit exactly ON a sector
+	 * boundary), because that is the other end of the same argument. */
+	static const uint32_t off[2] = { 339u, 0u };
+	const char *what[2] = { "last frame of its sector", "first frame of a sector" };
+	uint32_t c;
+
+	g_cases++;
+	printf("\n-- The exit target sits at a sector edge (the pin's worst case)\n");
+
+	for (c = 0; c < 2u; c++) {
+		st_stream_t st;
+		ring_t r;
+		emitted_t e;
+		static uint32_t buf[120000];
+		uint32_t lo, hi, len, i, at = 0u;
+		bool exit_req = false, enter_req = false, found = false;
+		bool contiguous = true;
+
+		/* Choose the window so that loop_end lands on the alignment we
+		 * want, then place the start to suit. */
+		len = st_loop_window_frames(ST_LOOP_LEN_DEFAULT, FPB, 0u, SONG_FRAMES);
+		/* Far enough in that lo = hi - len is a real frame: a one-bar
+		 * window is 96000 frames = 282.4 sectors. */
+		hi  = 400u * ST11_FRAMES_PER_SECTOR + off[c];
+		lo  = hi - len;
+
+		prime(&st, &r, lo / ST11_FRAMES_PER_SECTOR);
+		(void)st_stream_seek(&st, lo);
+		ring_pin(&r, PIN_ENTRY, lo / ST11_FRAMES_PER_SECTOR);
+		ring_pin(&r, PIN_EXIT, hi / ST11_FRAMES_PER_SECTOR);
+
+		memset(&e, 0, sizeof(e));
+		e.frames = buf;
+		e.cap = (uint32_t)(sizeof(buf) / sizeof(buf[0]));
+
+		/* Run the loop long enough that the ring is full of sectors
+		 * around the LIVE playhead and nothing near `hi` survives in it
+		 * by accident, then exit. */
+		for (i = 0; i < 200u; i++) {
+			audio_block(&st, &r, &e, true, lo, hi,
+				     &enter_req, lo, &exit_req, hi);
+		}
+		at = e.n;
+		exit_req = true;
+		/* The exit lands with the streamer stalled for the full
+		 * worst-case wait. Only the pin can cover this. */
+		g_stall_blocks = 2u;
+		for (i = 0; i < 300u; i++) {
+			audio_block(&st, &r, &e, false, lo, hi,
+				     &enter_req, lo, &exit_req, hi);
+		}
+
+		for (i = at; i < e.n && i < e.cap; i++) {
+			if (buf[i] == hi) {
+				found = true;
+				at = i;
+				break;
+			}
+		}
+		CHECK(found, "exit at %u (%s): resumes on loop_end", hi, what[c]);
+
+		/* Straight on across the sector boundary that follows, with no
+		 * silence and no repeated or skipped frame. */
+		for (i = at + 1u; i < at + 3000u && i < e.n && i < e.cap; i++) {
+			if (buf[i] == NONE || buf[i] != buf[i - 1] + 1u) {
+				contiguous = false;
+				break;
+			}
+		}
+		CHECK(contiguous,
+		      "   and runs on for 3000 frames -- across the %u-frame sector "
+		      "boundary at %u -- with no silence, repeat or skip",
+		      ST11_FRAMES_PER_SECTOR,
+		      ((hi / ST11_FRAMES_PER_SECTOR) + 1u) * ST11_FRAMES_PER_SECTOR);
+		CHECK(e.silent == 0u,
+		      "   zero silent frames across all %u emitted, WITH the "
+		      "streamer stalled for the full 10.15 ms worst case at the "
+		      "moment of the exit", e.n);
+	}
+
+	/* AND THE NEGATIVE: the same worst case with the exit region one sector
+	 * shallower. This is the evidence for "the target's sector plus one
+	 * more is not enough" -- it is measured here, not asserted. */
+	{
+		st_stream_t st;
+		ring_t r;
+		emitted_t e;
+		static uint32_t buf[60000];
+		uint32_t lo, hi, len, i;
+		bool exit_req = false, enter_req = false;
+
+		len = st_loop_window_frames(ST_LOOP_LEN_DEFAULT, FPB, 0u, SONG_FRAMES);
+		hi  = 400u * ST11_FRAMES_PER_SECTOR + 339u;
+		lo  = hi - len;
+
+		prime(&st, &r, lo / ST11_FRAMES_PER_SECTOR);
+		(void)st_stream_seek(&st, lo);
+		ring_pin(&r, PIN_ENTRY, lo / ST11_FRAMES_PER_SECTOR);
+		ring_pin(&r, PIN_EXIT, hi / ST11_FRAMES_PER_SECTOR);
+		r.pin_count[PIN_EXIT] = 2u;          /* one sector shallower */
+
+		memset(&e, 0, sizeof(e));
+		e.frames = buf;
+		e.cap = (uint32_t)(sizeof(buf) / sizeof(buf[0]));
+
+		for (i = 0; i < 200u; i++) {
+			audio_block(&st, &r, &e, true, lo, hi,
+				     &enter_req, lo, &exit_req, hi);
+		}
+		CHECK(e.silent == 0u, "depth 2: the loop itself still runs clean");
+		exit_req = true;
+		g_stall_blocks = 2u;
+		for (i = 0; i < 20u; i++) {
+			audio_block(&st, &r, &e, false, lo, hi,
+				     &enter_req, lo, &exit_req, hi);
+		}
+		CHECK(e.silent > 0u,
+		      "depth 2 DOES emit silence (%u frames) under the same worst "
+		      "case -- 341 pinned frames is 7.10 ms against a 10.15 ms "
+		      "wait, so 'the exit sector plus one' is 3 ms short",
+		      e.silent);
+	}
+}
+
 int main(void)
 {
 	printf("STEM TAPE LOOP PLAYBACK GATE\n");
@@ -627,6 +776,7 @@ int main(void)
 	case_exit_no_silence();
 	case_pin_is_necessary();
 	case_all_lengths();
+	case_exit_at_sector_end();
 
 	printf("\n%s (%d cases, %d checks, %d failures)\n",
 	       g_failures ? "LOOP PLAYBACK GATE FAILED" : "LOOP PLAYBACK GATE PASSED",

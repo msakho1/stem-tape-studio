@@ -1317,8 +1317,8 @@ static st_stem_mbox_t g_stem_mbox;
  *      2 sectors 16384 B ->  7.10 ms   CAN MISS
  *      3 sectors 24576 B -> 14.19 ms   SAFE, 4.04 ms of margin
  *
- * Three is the smallest depth that cannot miss when the region's base IS the
- * seek target. The exit region needs one more; see the depth table below.
+ * Three is the smallest depth that cannot miss; the table below has the
+ * arithmetic for one and two, which both do.
  *
  * TWO REGIONS, not one. A loop has two places the playhead can arrive at
  * without warning, and neither is reachable from the ring:
@@ -1326,12 +1326,17 @@ static st_stem_mbox_t g_stem_mbox;
  *   ENTRY. The window opens at the frame where PLAY went DOWN, which by the
  *   time the hold expires is ST_LOOP_HOLD_MS of song BEHIND the playhead --
  *   about 63 sectors. The entry seek jumps back to it. The same region also
- *   feeds every forward WRAP, which returns to exactly that frame.
+ *   feeds every WRAP, which returns to exactly that frame.
  *
  *   EXIT. Every exit lands on loop_end, which is a whole window ahead of the
  *   start -- 361 sectors at one bar. An exit can happen on the pass right
  *   after entry, so this cannot be left until the release; it is fetched
  *   while the loop is still being armed.
+ *
+ * NEITHER duplicates the ring. The ring holds a 12-sector sliding window
+ * around the LIVE playhead; both of these are far outside it for any window
+ * longer than 12 sectors, which every musical division at this tempo is (the
+ * shortest, 1/8 bar, is 45 sectors).
  *
  * Sector s and sector s+ST_STEM_MBOX_SLOTS share a ring slot, so a window
  * wider than the ring cannot hold both ends resident at once -- which is
@@ -1344,30 +1349,37 @@ static st_stem_mbox_t g_stem_mbox;
  * ever reads a published pin. There is no refill-while-reading hazard to
  * guard against, so this needs no slot protocol of its own.
  */
-/* DEPTHS ARE PER REGION, sized to what each one actually has to cover rather
- * than to the larger of the two. On a 256 KB part 8192 bytes is real money.
+/* WHY THREE PER REGION, AND WHY NOT FEWER.
  *
- * ENTRY = 3. Its base IS the seek target's sector, so the worst case is
- * loop_start sitting on the last frame of that sector: (3-1)*340 + 1 = 681
- * frames = 14.19 ms of runway against the 10.15 ms worst-case wait. Three is
- * the minimum that cannot miss; a fourth would buy nothing.
+ * Both regions are based EXACTLY on their seek target's sector, so both size
+ * identically. The worst case is the target frame sitting on the LAST frame
+ * of its sector, which leaves (n-1)*340 + 1 frames of pinned audio:
  *
- * EXIT = 4. Its base is the window's LAST frame, one short of the seek
- * target, because that one frame of slack lets a single region serve both the
- * forward exit (at loop_end) and the reverse wrap (at loop_end - 1). When
- * loop_end sits exactly on a sector boundary the region's first sector is
- * spent below the target, so a fourth is what makes the guarantee hold in
- * that case instead of holding "usually": (4-1)*340 = 1020 frames = 21.25 ms
- * aligned, 14.19 ms otherwise.
+ *      n=1   ->      1 frame  =  0.02 ms   MISSES
+ *      n=2   ->    341 frames =  7.10 ms   MISSES
+ *      n=3   ->    681 frames = 14.19 ms   SAFE, 4.04 ms of margin
  *
- * 3 + 4 = 7 sectors = 57344 bytes, in one flat array indexed through
- * st_loop_pin_off[] so the two regions cost exactly what they need.
+ * against a 10.15 ms worst-case wait for a fresh sector: the streamer may be
+ * mid-read when the seek lands (5.073 ms to finish it, slice T0's measured
+ * figure) plus 5.073 ms to read ours. Two sectors is 3 ms short of that, so
+ * "the target's sector plus one more" is NOT enough -- it is the depth that
+ * emits silence roughly whenever the seek lands late in a sector and the
+ * streamer happens to be busy. Three is the smallest depth that cannot miss.
+ *
+ * Once the producer is aimed past the target it OUTRUNS the consumer
+ * (5.073 ms per sector read against 7.083 ms of audio per sector), so the
+ * runway is needed only to cover that first handover. Nothing beyond three
+ * buys anything.
+ *
+ * 3 + 3 = 6 sectors = 49152 bytes, in one flat array indexed through
+ * st_loop_pin_off[] -- which keeps the depths independent, so a future need
+ * on one side cannot silently inflate the other.
  */
 #define ST_LOOP_PIN_REGIONS       2u
 #define ST_LOOP_PIN_ENTRY         0u   /* loop_start: the entry seek and every wrap */
-#define ST_LOOP_PIN_EXIT          1u   /* loop_end-1: every exit, both directions   */
+#define ST_LOOP_PIN_EXIT          1u   /* loop_end:   where every exit seek lands   */
 #define ST_LOOP_PIN_ENTRY_SECTORS 3u
-#define ST_LOOP_PIN_EXIT_SECTORS  4u
+#define ST_LOOP_PIN_EXIT_SECTORS  3u
 #define ST_LOOP_PIN_SECTORS       (ST_LOOP_PIN_ENTRY_SECTORS + ST_LOOP_PIN_EXIT_SECTORS)
 
 static const uint8_t st_loop_pin_off[ST_LOOP_PIN_REGIONS] = {
@@ -1442,7 +1454,6 @@ static bool stem_loop_pin_lookup(uint32_t sector, uint32_t *idx)
 static atomic_t g_stem_loop_active    = ATOMIC_INIT(0);
 static atomic_t g_stem_loop_start_fr  = ATOMIC_INIT(0);
 static atomic_t g_stem_loop_end_fr    = ATOMIC_INIT(0);
-static atomic_t g_stem_loop_reverse   = ATOMIC_INIT(0);
 /* THE entry seek: back to the frame where PLAY went down. */
 static atomic_t g_stem_loop_enter_req = ATOMIC_INIT(0);
 static atomic_t g_stem_loop_enter_fr  = ATOMIC_INIT(0);
@@ -1834,7 +1845,7 @@ __attribute__((optimize("O2"), noinline, noclone))
 static void stem_render_run(const uint8_t *buf, uint32_t frame_in_sector,
 			     const st_stem_mix_prepared_t *prep,
 			     int32_t m0, int32_t md, int32_t mv,
-			     uint32_t f0, uint32_t n, int32_t step, int16_t *s,
+			     uint32_t f0, uint32_t n, int16_t *s,
 			     uint32_t peak[ST11_STEM_COUNT])
 {
 	for (uint32_t k = 0; k < n; k++) {
@@ -1842,19 +1853,7 @@ static void stem_render_run(const uint8_t *buf, uint32_t frame_in_sector,
 		st11_audio_frame_t frame;
 		int16_t stem_l, stem_r;
 
-		/* `step` is +1 for ordinary playback and -1 for a REVERSED loop.
-		 * This is the only place direction becomes real: reverse decodes
-		 * the sector's frames in descending order, so the samples the
-		 * codec actually emits run backwards. The output index f always
-		 * ascends -- the block is filled front to back either way.
-		 *
-		 * The caller has already clamped n so that every frame touched
-		 * lies inside this one sector, in whichever direction it asked
-		 * for, so there is still no bounds test in here. */
-		st11_sector_decode_frame(buf,
-					  (uint32_t)((int32_t)frame_in_sector +
-						      (int32_t)k * step),
-					  &frame);
+		st11_sector_decode_frame(buf, frame_in_sector + k, &frame);
 		st_stem_mix_frame_prepared(&frame, prep, &stem_l, &stem_r);
 
 		/* BEAT PULSE: per-stem peak, sampled one frame in 32. The
@@ -2118,11 +2117,8 @@ st_stem_mix_prepare(stem_channels, &stem_prepared);
 		bool     lp_on  = atomic_get(&g_stem_loop_active) != 0;
 		uint32_t lp_lo  = lp_on ? (uint32_t)atomic_get(&g_stem_loop_start_fr) : 0u;
 		uint32_t lp_hi  = lp_on ? (uint32_t)atomic_get(&g_stem_loop_end_fr)   : 0u;
-		bool     lp_rev = lp_on && atomic_get(&g_stem_loop_reverse) != 0;
-
 		if (lp_on && lp_hi <= lp_lo) {
-			lp_on  = false;   /* degenerate window: ignore it entirely */
-			lp_rev = false;
+			lp_on = false;   /* degenerate window: ignore it entirely */
 		}
 
 		/* ---- LOOP ENTRY: seek BACK to the captured frame ----------
@@ -2155,8 +2151,7 @@ st_stem_mix_prepare(stem_channels, &stem_prepared);
 			if (st_stream_seek(&g_stem_stream, resume)) {
 				atomic_inc(&g_stem_loop_exits);
 			}
-			lp_on  = false;   /* the window is no longer in force */
-			lp_rev = false;   /* and the song always resumes FORWARD */
+			lp_on = false;   /* the window is no longer in force */
 		}
 
 		needed = st_stream_required_sector(&g_stem_stream);
@@ -2261,32 +2256,13 @@ st_stem_mix_prepare(stem_channels, &stem_prepared);
 		 * block. Every one of those three bounds is required by
 		 * stem_render_run() and st_stream_advance_frames(). */
 		fis = g_stem_stream.song_frame - needed * ST11_FRAMES_PER_SECTOR;
-		if (lp_rev) {
-			/* REVERSE. The run walks DOWN to this sector's first
-			 * frame, so fis + 1 frames are available; the same three
-			 * bounds apply, with the window's START taking the place
-			 * of its end. */
-			run = fis + 1u;
-			if (g_stem_stream.song_frame >= lp_lo) {
-				uint32_t left = g_stem_stream.song_frame - lp_lo + 1u;
-
-				if (run > left) {
-					run = left;
-				}
-			}
-			if (run > BLK_FRAMES - f) {
-				run = BLK_FRAMES - f;
-			}
-		} else {
-			run = ST11_FRAMES_PER_SECTOR - fis;
-			left_in_song = g_stem_stream.frames -
-				       g_stem_stream.song_frame;
-			if (run > left_in_song) {
-				run = left_in_song;
-			}
-			if (run > BLK_FRAMES - f) {
-				run = BLK_FRAMES - f;
-			}
+		run = ST11_FRAMES_PER_SECTOR - fis;
+		left_in_song = g_stem_stream.frames - g_stem_stream.song_frame;
+		if (run > left_in_song) {
+			run = left_in_song;
+		}
+		if (run > BLK_FRAMES - f) {
+			run = BLK_FRAMES - f;
 		}
 		/* ---- A FOURTH BOUND WHILE LOOPING: the window's end -------
 		 * The run must stop exactly at loop_end_frame so the wrap lands
@@ -2294,7 +2270,7 @@ st_stem_mix_prepare(stem_channels, &stem_prepared);
 		 * run. With that clamp the wrap below is exact: the last frame
 		 * rendered is end-1 and the next one rendered is start, so no
 		 * frame is skipped and none is played twice. */
-		if (lp_on && !lp_rev && g_stem_stream.song_frame >= lp_lo &&
+		if (lp_on && g_stem_stream.song_frame >= lp_lo &&
 		    g_stem_stream.song_frame < lp_hi) {
 			uint32_t left_in_loop = lp_hi - g_stem_stream.song_frame;
 
@@ -2321,24 +2297,9 @@ st_stem_mix_prepare(stem_channels, &stem_prepared);
 		stem_render_run(from_pin ? g_stem_loop_pin_bufs[pin_idx]
 					  : g_stem_sector_bufs[g_stem_active_buf_idx_local],
 				 fis, &stem_prepared, m0, md, mv,
-				 f, run, lp_rev ? -1 : 1, s, stem_peak);
+				 f, run, s, stem_peak);
 		f += run;
-		if (lp_rev) {
-			/* Step the playhead DOWN by exactly what was rendered,
-			 * and turn over at the window's start. Half-open: the
-			 * frame after lp_lo, travelling backwards, is lp_hi - 1.
-			 * No frame is skipped and none is played twice. */
-			uint32_t last = g_stem_stream.song_frame - (run - 1u);
-
-			if (last == lp_lo) {
-				if (st_stream_seek(&g_stem_stream, lp_hi - 1u)) {
-					atomic_inc(&g_stem_loop_wraps);
-				}
-			} else {
-				(void)st_stream_seek(&g_stem_stream, last - 1u);
-			}
-		} else {
-			(void)st_stream_advance_frames(&g_stem_stream, run);
+		(void)st_stream_advance_frames(&g_stem_stream, run);
 
 		/* ---- THE WRAP ---------------------------------------------
 		 * Having rendered up to exactly loop_end_frame (the clamp above
@@ -2351,11 +2312,9 @@ st_stem_mix_prepare(stem_channels, &stem_prepared);
 		 * re-acquires -- from the pin, which holds precisely the
 		 * sectors at loop_start_frame. That is the second reason the
 		 * pin exists: without it every wrap would race the streamer. */
-			if (lp_on && g_stem_stream.song_frame >= lp_hi &&
-			    lp_hi > lp_lo) {
-				if (st_stream_seek(&g_stem_stream, lp_lo)) {
-					atomic_inc(&g_stem_loop_wraps);
-				}
+		if (lp_on && g_stem_stream.song_frame >= lp_hi && lp_hi > lp_lo) {
+			if (st_stream_seek(&g_stem_stream, lp_lo)) {
+				atomic_inc(&g_stem_loop_wraps);
 			}
 		}
 
@@ -4703,10 +4662,9 @@ static void streamer_thread(void *a, void *b, void *c)
 		 * and validates. */
 		/* ---- THE LOOP EXIT KIT ------------------------------------
 		 * Fill both pinned regions -- the window's start (the entry seek
-		 * and every forward wrap) and its last frame (every exit, and
-		 * the reverse wrap) -- once per gesture, BEFORE the ordinary
-		 * prefetch below: the ring can recover from a late fill, an
-		 * entry or an exit cannot.
+		 * and every wrap) and its end (every exit) -- once per gesture,
+		 * BEFORE the ordinary prefetch below: the ring can recover from
+		 * a late fill, an entry or an exit cannot.
 		 *
 		 * The control thread publishes the wanted base sectors in
 		 * g_stem_loop_pin_want[] the instant the gesture ARMS -- on the
@@ -6052,16 +6010,12 @@ static void stem_ctl_apply(void)
 		atomic_set(&g_stem_loop_start_fr,  (atomic_val_t)o->loop_start);
 		atomic_set(&g_stem_loop_end_fr,    (atomic_val_t)o->loop_end);
 		atomic_set(&g_stem_loop_resume_fr, (atomic_val_t)o->loop_resume);
-		atomic_set(&g_stem_loop_reverse,   o->loop_reverse ? 1 : 0);
 		atomic_set(&g_stem_loop_active, 1);
 	}
 	if (o->loop_enter) {
 		/* THE ENTRY SEEK. Frame first, request last. */
 		atomic_set(&g_stem_loop_enter_fr, (atomic_val_t)o->loop_start);
 		atomic_set(&g_stem_loop_enter_req, 1);
-	}
-	if (o->loop_direction) {
-		atomic_set(&g_stem_loop_reverse, o->loop_reverse ? 1 : 0);
 	}
 	if (o->loop_latch) {
 		atomic_set(&g_stem_loop_latched, 1);

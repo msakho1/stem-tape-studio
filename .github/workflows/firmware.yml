@@ -1332,13 +1332,21 @@ jobs:
         # What it establishes:
         #   - every frame-to-frame step is +1 or the exact wrap from end-1 to
         #     start: no frame skipped, none repeated, none duplicated;
-        #   - the exit resumes at exactly loop_start_frame going forward, and
-        #     is checked against each wrong answer individually (not zero, not
-        #     end_frame, not a sector boundary, not the current position);
-        #   - ZERO silent frames, across every one of the eight lengths.
+        #   - the exit resumes at exactly loop_end going forward, and is
+        #     checked against each wrong answer individually (not zero, not
+        #     loop_start -- the st15 rule that made the looped bar play through
+        #     a second time on hardware -- not a sector boundary, not the live
+        #     position), with nothing from [start, end) ever heard again;
+        #   - ZERO silent frames, across every one of the four divisions.
         #     stem_audio_block() writes silence when the needed sector is
         #     missing, so "no silence" is the real no-dropout property here,
-        #     not a proxy for it.
+        #     not a proxy for it;
+        #   - THE PIN DEPTH IS MEASURED, not asserted: the last case puts the
+        #     exit target on the last frame of its sector -- the worst case the
+        #     depth is sized against -- and injects the full 10.15 ms producer
+        #     stall (streamer mid-read when the seek lands). Depth 3 emits zero
+        #     silent frames; the identical case at depth 2 emits 427. That is
+        #     the evidence for "the exit sector plus one more is not enough".
         #
         # THE NEGATIVE CONTROL IS THE POINT of the third case: the identical
         # exit with the pinned sectors removed DOES emit silence. The three

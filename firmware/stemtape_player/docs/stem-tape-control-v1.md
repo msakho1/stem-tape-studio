@@ -12,12 +12,15 @@
 | PLAY held + VOL − / + | loop division: 1 bar → ½ → ¼ → ⅛ bar (clamps) |
 | FUNCTION, during a momentary loop | latch it; release both, it keeps running |
 | FUNCTION held + VOL − / + | division, once latched |
-| FUNCTION + PLAY, while looping | forward ↔ reverse |
 | PLAY, while latched | exit |
 
 Track presses never toggle or latch mute. FUNCTION never unlatches — PLAY
 does, and both that press and its release are consumed so neither also stops
 the transport.
+
+**Playback is forward only.** There is no reverse gesture in this phase.
+Reverse belongs to a later one and its gesture will be a Track-button
+double-tap.
 
 ## Where the loop starts and where it ends
 
@@ -29,9 +32,9 @@ control thread, the audio path, the streamer and the tests, with no exceptions.
   **seeks back** to it, so the first repetition is audible at the threshold —
   not a whole window later.
 - **End** is `start + one division`, clamped to the song.
-- **Exit** — unlatched release, latched PLAY press, forward or reverse —
-  resumes at `end`: the first frame after the section that was looping. Nothing
-  already heard is replayed. If the window was clamped to the song end there is
+- **Exit** — unlatched release or latched PLAY press — resumes at `end`: the
+  first frame after the section that was looping. Nothing already heard is
+  replayed. If the window was clamped to the song end there is
   no later frame, so that one case resumes at 0, exactly as ordinary playback
   does when it reaches the end.
 
@@ -61,19 +64,34 @@ ring holds 12, and sector *s* and sector *s+12* share a slot, so a window wider
 than the ring cannot keep both of its ends resident. Two ends have to be
 reachable without warning:
 
-- **entry** — the seek back to `start`, and every forward wrap;
-- **exit** — `end`, reachable on the pass right after entry, and the reverse
-  wrap target.
+- **entry** — the seek back to `start`, and every wrap;
+- **exit** — `end`, reachable on the pass right after entry.
 
 Both are fetched into pinned buffers outside the ring, requested the instant
-the gesture **arms** — a full hold before the loop can start. Eight sector
-reads take ~41 ms against a 450 ms hold. Depth is 4 sectors each (28.3 ms of
-runway against a 10.15 ms worst-case wait for a fresh sector), 65,536 bytes
-total.
+the gesture **arms** — a full hold before the loop can start. Six sector reads
+take ~30 ms against a 450 ms hold.
 
-`tests/test_loop_playback_gate.c` proves the property that matters — **zero
-silent frames** — and includes a negative control that removes the pins and
-shows the silence they prevent.
+**Depth is 3 sectors each, and three is the minimum.** Both regions are based
+exactly on their seek target's sector, so the worst case is the target frame
+sitting on the *last* frame of its sector, leaving `(n-1)×340 + 1` frames of
+pinned audio:
+
+| depth | pinned runway | verdict |
+|---|---|---|
+| 1 | 1 frame = 0.02 ms | misses |
+| 2 | 341 frames = 7.10 ms | misses |
+| 3 | 681 frames = 14.19 ms | safe, 4.04 ms margin |
+
+against a **10.15 ms** worst-case wait: the streamer may be mid-sector-read
+when the seek lands (5.073 ms to finish) plus 5.073 ms to read ours. Past that
+first handover the producer outruns the consumer (5.073 ms per sector read vs
+7.083 ms of audio per sector), so nothing beyond three buys anything.
+6 × 8192 = **49,152 bytes**.
+
+`tests/test_loop_playback_gate.c` measures all of this rather than asserting
+it: it injects the full worst-case producer stall at the moment of the exit
+and shows depth 3 emits **zero** silent frames, while the same case at depth 2
+emits 427.
 
 ## The ladder
 

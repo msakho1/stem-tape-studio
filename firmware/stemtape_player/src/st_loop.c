@@ -40,7 +40,6 @@ void st_loop_reset(st_loop_t *l)
 	 * another song, not from the classic engine. Within a session the
 	 * player's choice sticks: entry deliberately does NOT re-default it. */
 	l->length_index        = (uint8_t)ST_LOOP_LEN_DEFAULT;
-	l->reverse             = false;
 	l->play_consumed       = false;
 	l->play_was_down       = false;
 	l->fn_was_down         = false;
@@ -81,24 +80,16 @@ uint32_t st_loop_window_frames(uint8_t index, uint32_t frames_per_beat,
 uint32_t st_loop_next_frame(const st_loop_t *l, uint32_t frame, uint32_t song_frames)
 {
 	if (l->state != ST_LOOP_OFF && l->end_frame > l->start_frame) {
-		/* THE STEP AND THE WRAP, decided in exactly one place.
-		 * `end_frame` is exclusive: the last frame the window contains
-		 * is end_frame - 1.
+		/* THE WRAP, decided in exactly one place. `end_frame` is
+		 * exclusive: the last frame the window contains is end_frame-1,
+		 * and the frame after it is start_frame. No frame is skipped
+		 * and none is played twice.
 		 *
-		 * FORWARD: the frame after end-1 is start. REVERSE: the frame
-		 * after start is end-1. Either way no frame is skipped and none
-		 * is played twice, and the window's frame SET is identical --
-		 * only the order changes. A frame that has fallen outside the
-		 * window (a resize just shortened it under the playhead) is
-		 * pulled back to the near edge rather than left to run away. */
+		 * A frame that has fallen outside the window (a resize just
+		 * shortened it under the playhead) is pulled back to the start
+		 * rather than left to run away. */
 		if (frame < l->start_frame || frame >= l->end_frame) {
-			return l->reverse ? (l->end_frame - 1u) : l->start_frame;
-		}
-		if (l->reverse) {
-			if (frame == l->start_frame) {
-				return l->end_frame - 1u;
-			}
-			return frame - 1u;
+			return l->start_frame;
 		}
 		if (frame + 1u >= l->end_frame) {
 			return l->start_frame;
@@ -145,18 +136,6 @@ st_loop_action_t st_loop_tick(st_loop_t *l, const st_loop_in_t *in)
 
 	/* ---- PLAY press edge ------------------------------------------- */
 	if (play_edge) {
-		if (in->function_down && l->state != ST_LOOP_OFF) {
-			/* FUNCTION + PLAY, LOOPING: toggle direction. The press is
-			 * CONSUMED so it cannot also exit and cannot also be read
-			 * as a transport tap on release. FUNCTION is a separate
-			 * GPIO, so this can never be confused with the bare PLAY
-			 * press that exits. */
-			l->reverse        = !l->reverse;
-			l->play_consumed  = true;
-			l->play_was_down  = in->play_down;
-			l->fn_was_down    = in->function_down;
-			return ST_LOOP_ACT_DIRECTION;
-		}
 		if (l->state == ST_LOOP_LATCHED) {
 			/* EXIT ON THE PRESS EDGE, not on the release. The press
 			 * is then CONSUMED: its release must do nothing at all
@@ -251,7 +230,6 @@ st_loop_action_t st_loop_tick(st_loop_t *l, const st_loop_in_t *in)
 		 * player selected earlier in this powered session stays
 		 * selected. Only st_loop_reset() defaults it, at cold boot. */
 		l->start_frame  = l->cand_start;
-		l->reverse      = false;   /* every new loop starts forward */
 		if (apply_window(l, in)) {
 			/* Publish the resume point NOW, at entry, not at exit:
 			 * main.c pins that sector while there is time, and the

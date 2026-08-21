@@ -42,8 +42,15 @@
  *                                       is marked consumed.
  *   that press's release             -> nothing at all: no pause, no new
  *                                       loop, no transport command.
- *   FUNCTION + VOL -/+ while looping -> DIVISION. See below.
- *   FUNCTION + PLAY press, looping   -> DIRECTION. See below.
+ *   VOL -/+ while looping, with PLAY
+ *   or FUNCTION held                 -> DIVISION. See below.
+ *
+ * PLAYBACK IS FORWARD ONLY. There is no reverse gesture and no reverse
+ * traversal in this phase. Reverse is a later phase and its gesture will be a
+ * Track-button DOUBLE-TAP -- not FUNCTION + PLAY, which an earlier revision
+ * of this file invented and which was never authorised. "Loop end direction"
+ * meant only what happens after LEAVING the loop: ordinary forward playback,
+ * resuming at end_frame.
  *
  * THERE IS EXACTLY ONE PLAY-HOLD OWNER. The inherited Tape Looper's
  * "hold PLAY >= 400 ms -> restart from the top" is a different instrument's
@@ -82,8 +89,7 @@
  * EXCLUSIVE -- in this module, in main.c's control and audio paths, in the
  * streamer and in the tests. No other convention appears anywhere.
  *
- *   forward:  start ... end-1, then wrap to start
- *   reverse:  end-1 ... start, then wrap to end-1
+ *   playing:  start ... end-1, then wrap to start
  *   on exit:  the first normal frame is end
  *
  * ======================================================================
@@ -103,8 +109,7 @@
  * no such timeline and there never was: after four laps of a one-bar loop
  * the resume point is one bar past the capture, not four. Nor is it the live
  * frame inside the window -- that would rejoin mid-phrase. It is exactly the
- * first frame after the section that was looping, in BOTH directions: a
- * reversed loop exits forward at end_frame like any other.
+ * first frame after the section that was looping.
  *
  * The ONE degenerate case: a window clamped to the very end of the song has
  * no frame after it. That exit resumes at frame 0, which is precisely what
@@ -145,24 +150,6 @@
  * that is what is implemented. Anyone reconciling the two should change
  * surface.ts, not this file. Both ends CLAMP -- leaning on one button lands
  * on 1/8 bar or 1 bar and stays there rather than wrapping around.
- *
- * ======================================================================
- * DIRECTION -- FORWARD AND REVERSE
- * ======================================================================
- * FORWARD is start -> end, wrapping to start. REVERSE is end -> start,
- * wrapping to end. This is real frame traversal: st_loop_next_frame() is the
- * single place the step is decided, and main.c's audio path steps the master
- * song frame by exactly what it returns, so reverse plays the window's
- * samples in reverse order rather than merely setting a flag.
- *
- * THE GESTURE WAS NOT SPECIFIED, so it is stated here explicitly rather than
- * hidden: FUNCTION held + a PLAY press, while a loop is already running,
- * toggles direction and consumes that press. Without FUNCTION a PLAY press
- * still exits, unchanged. The two cannot be confused -- FUNCTION is a
- * separate GPIO -- and no other gesture on the instrument moves.
- *
- * EXIT IS ALWAYS FORWARD, from loop_start_frame, in both directions: leaving
- * a reversed loop resumes the song playing forward from the captured point.
  *
  * Lengths are exact multiples/divisors of the song's OWN beat, derived from
  * the selected STIX record's bpm_q8 and downbeat_frame through
@@ -212,7 +199,6 @@ typedef enum {
 	ST_LOOP_ACT_ENTER,    /* window is now valid; SEEK to start, then loop */
 	ST_LOOP_ACT_RESIZE,   /* end_frame changed; start_frame did not */
 	ST_LOOP_ACT_LATCH,    /* momentary -> latched; window unchanged */
-	ST_LOOP_ACT_DIRECTION,/* forward <-> reverse; window unchanged */
 	ST_LOOP_ACT_EXIT,     /* resume forward at st_loop_resume_frame() */
 } st_loop_action_t;
 
@@ -225,7 +211,6 @@ typedef struct {
 	uint32_t cand_end;       /* the window that candidate would produce */
 	bool     cand_valid;     /* a PLAY press is armed and not yet resolved */
 	uint8_t  length_index;   /* into st_loop_lengths[] */
-	bool     reverse;        /* true == end -> start, wrapping to end */
 	bool     play_consumed;  /* this PLAY press already exited a latched loop */
 	bool     play_was_down;  /* edge detection for PLAY */
 	bool     fn_was_down;    /* edge detection for FUNCTION */
@@ -297,12 +282,6 @@ static inline void st_loop_reset_gesture_edges(st_loop_t *l)
 	l->cand_valid         = false;
 }
 
-/* True while the loop is running REVERSED. */
-static inline bool st_loop_reverse(const st_loop_t *l)
-{
-	return l->reverse;
-}
-
 /* True while the loop owns playback (either momentary or latched). */
 static inline bool st_loop_active(const st_loop_t *l)
 {
@@ -335,11 +314,10 @@ uint32_t st_loop_window_frames(uint8_t index, uint32_t frames_per_beat,
 			        uint32_t start, uint32_t song_frames);
 
 /*
- * The next master frame given the current one, honouring the loop window AND
- * its direction. This is the ONE place the step and the wrap are decided, so
- * the audio path and the streamer's prefetch cannot disagree about where the
- * loop turns over or which way it is travelling. With no loop active it is
- * simply frame + 1 (bounded by the song).
+ * The next master frame given the current one, honouring the loop window.
+ * This is the ONE place the wrap is decided, so the audio path and the
+ * streamer's prefetch cannot disagree about where the loop turns over. With
+ * no loop active it is simply frame + 1 (bounded by the song).
  */
 uint32_t st_loop_next_frame(const st_loop_t *l, uint32_t frame, uint32_t song_frames);
 
