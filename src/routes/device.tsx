@@ -1,5 +1,4 @@
 /**
-import stemTapeLogo from "@/assets/stemtape-logo.png.asset.json";
  * SP-1 companion uploader — consumer workflow.
  *
  * Exactly three user-facing steps: connect the SP-1, load stems, upload.
@@ -11,6 +10,7 @@ import stemTapeLogo from "@/assets/stemtape-logo.png.asset.json";
  * records. Physical mutation remains gated by the same capability verdict as
  * before; this pass changed presentation and preparation, not the protocol.
  */
+import stemTapeLogo from "@/assets/stemtape-logo.png.asset.json";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { SupportButton } from "@/components/SupportButton";
