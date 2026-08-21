@@ -163,6 +163,31 @@ typedef struct {
 	 * costs no extra animation, no extra timer and no second clock. */
 	st_led_loop_t loop_state;
 
+	/* ---- THE FX OVERLAY -----------------------------------------------
+	 * Ranked ABOVE the solo feedback and the loop chase, below transfer:
+	 * while the overlay is open the eight lights answer "what is the rack
+	 * doing and where is it", because that is the only question the player
+	 * can act on with these buttons.
+	 *
+	 *   TRACK row  one LED per effect, in BUTTON order (T1 Filter,
+	 *              T2 Delay/Echo, T3 Distortion, T4 Gate). LATCHED is
+	 *              SOLID; MOMENTARY breathes with the shared beat
+	 *              envelope. Same distinction the loop marker already
+	 *              uses, so nothing new has to be learned.
+	 *   SIDE row   WHERE the one rack is. STEM scope lights the target
+	 *              stem's side LED alone; GLOBAL lights all four at a
+	 *              lower level, because the rack is on everything.
+	 *
+	 * There is no error state and no new animation. Closing the overlay
+	 * restores the underlying mode on the very next frame -- the beat
+	 * clock and loop phase are never touched, because nothing here owns
+	 * a clock. */
+	bool    fx_open;
+	bool    fx_global;      /* scope: true GLOBAL, false STEM */
+	uint8_t fx_target;      /* 0..3, meaningful in STEM scope only */
+	uint8_t fx_momentary;   /* bit per effect, button order */
+	uint8_t fx_latched;     /* bit per effect, button order */
+
 	/* Per-stem output activity, 0..255. SCALES the shared beat pulse; it
 	 * never gates or times anything. */
 	uint8_t stem_activity[ST_LED_TRACK_COUNT];

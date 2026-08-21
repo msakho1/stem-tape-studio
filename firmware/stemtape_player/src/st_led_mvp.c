@@ -255,6 +255,47 @@ static uint8_t scale8(uint8_t a, uint8_t b)
 	return (uint8_t)(((uint16_t)a * (uint16_t)b) / 255u);
 }
 
+/*
+ * THE FX OVERLAY DISPLAY. Track row = which effects are sounding; side row =
+ * where the one rack is. Ranked above solo and the loop chase because while
+ * the overlay is open those buttons no longer mean solo.
+ */
+static void decide_fx(const st_led_inputs_t *in, st_led_frame_t *out)
+{
+	const uint8_t env = (in->beat.valid && in->beat.in_pulse)
+			    ? in->beat.envelope : 0u;
+	uint8_t i;
+
+	all_dark(out);
+
+	for (i = 0; i < ST_LED_TRACK_COUNT; i++) {
+		const uint8_t bit = (uint8_t)(1u << i);
+
+		if ((in->fx_latched & bit) != 0u) {
+			/* SOLID: still sounding when the finger is off, and it
+			 * survives the overlay closing. */
+			out->level[i] = ST_LED_MAX;
+		} else if ((in->fx_momentary & bit) != 0u) {
+			/* BREATHING on the shared beat envelope -- live, ends
+			 * when released. A momentary with no trustworthy tempo
+			 * still has to be visible, so it floors at half. */
+			out->level[i] = (env > 128u) ? env : 128u;
+		}
+	}
+
+	if (in->fx_global) {
+		/* The rack is on everything: the whole side row, dimmer than a
+		 * single selected stem so the two never read the same. */
+		for (i = 0; i < ST_LED_SIDE_COUNT; i++) {
+			out->level[ST_LED_SIDE_FIRST + i] = 120u;
+		}
+	} else {
+		uint8_t t = (in->fx_target < ST_LED_SIDE_COUNT) ? in->fx_target : 0u;
+
+		out->level[ST_LED_SIDE_FIRST + t] = ST_LED_MAX;
+	}
+}
+
 static void decide_playing(const st_led_inputs_t *in, st_led_frame_t *out)
 {
 	uint8_t i;
@@ -374,6 +415,19 @@ void st_led_mvp_decide(const st_led_inputs_t *in, st_led_frame_t *out)
 		}
 		gauge_on_side(in, out,
 			      /*blink_step=*/(in->batt_state == ST_LED_BATT_CHARGING));
+		return;
+	}
+
+	/* 3b. THE FX OVERLAY, ranked between transfer and solo.
+	 *
+	 *     While the overlay is open the Track buttons are effects, not
+	 *     solos, so showing solo feedback here would be showing something
+	 *     the buttons no longer do. It therefore returns rather than
+	 *     falling through -- and because it owns no clock, closing the
+	 *     overlay restores the underlying mode on the very next frame with
+	 *     the beat phase and loop phase untouched. */
+	if (in->fx_open) {
+		decide_fx(in, out);
 		return;
 	}
 

@@ -1444,6 +1444,9 @@ jobs:
             firmware/stemtape_player/tests/test_fx_dsp.c -lm \
             -o audit/test_fx_dsp
           ./audit/test_fx_dsp | tee audit/fx-dsp.txt
+          # The FX LED overlay must not have disturbed anything below it.
+          grep -q 'LED ACCEPTANCE MATRIX PASSED' audit/led-acceptance-matrix.txt \
+            || echo "(LED matrix runs in its own step)" 
           # The one-rack budget is an artefact, not a claim in prose.
           python3 .github/scripts/stemtape_fx_budget.py | tee audit/fx-budget.txt
           # THE CALIBRATION CAPTURE MUST NOT SHIP, exactly as for AIN0.

@@ -6295,6 +6295,16 @@ static void led_service(void)
 				? ST_LED_LOOP_LATCHED : ST_LED_LOOP_MOMENTARY;
 	}
 
+	/* THE FX OVERLAY, from the same st_fx_ctl output the audio path reads,
+	 * so the lights cannot claim a rack the DSP is not running. Ranked above
+	 * solo inside st_led_mvp_decide(): while the overlay is open the Track
+	 * buttons are effects, not solos. */
+	in.fx_open      = g_stem_fx_out.fx_open;
+	in.fx_global    = g_stem_fx_out.scope == ST_FX_SCOPE_GLOBAL;
+	in.fx_target    = g_stem_fx_out.target_stem;
+	in.fx_momentary = g_stem_fx_out.momentary_mask;
+	in.fx_latched   = g_stem_fx_out.latch_mask;
+
 	/* ---- per-stem activity, and the immediate momentary solo ---------- */
 	if (in.song_selected) {
 		for (i = 0; i < (int)ST_LED_TRACK_COUNT && i < (int)ST11_STEM_COUNT; i++) {

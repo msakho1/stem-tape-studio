@@ -463,6 +463,127 @@ static void case_loop_chase(void)
 	}
 }
 
+/* ================= 4c. the FX overlay display ============================
+ *
+ * Ranked above solo and the loop chase: while the overlay is open the Track
+ * buttons are effects, so solo feedback would be showing something they no
+ * longer do.
+ */
+static void case_fx_overlay(void)
+{
+	st_led_inputs_t in; st_led_frame_t f;
+	const uint32_t fpb = 24000u;
+	int i, lit;
+
+	g_cases++;
+	printf("\n-- FX overlay: track row = effects, side row = where the rack is\n");
+
+	/* STEM scope, one latched effect. */
+	make_playing(&in, 1u * fpb + (fpb * 3u) / 4u, 200u);
+	in.fx_open = true;
+	in.fx_global = false;
+	in.fx_target = 2u;                       /* Bass */
+	in.fx_latched = 1u << 0;                 /* T1 Filter */
+	st_led_mvp_decide(&in, &f);
+	show("FX stem scope, Filter latched, target Bass", &f);
+	CHECK(f.level[0] == ST_LED_MAX, "T1 SOLID for a latched effect");
+	CHECK(f.level[1] == 0u && f.level[2] == 0u && f.level[3] == 0u,
+	      "and the other three effects are dark");
+	CHECK(f.level[ST_LED_SIDE_FIRST + 2] == ST_LED_MAX,
+	      "the target stem's side LED is lit");
+	lit = 0;
+	for (i = 0; i < (int)ST_LED_SIDE_COUNT; i++) {
+		if (f.level[ST_LED_SIDE_FIRST + i]) lit++;
+	}
+	CHECK(lit == 1, "and ONLY that one -- a single stem reads as a single light");
+
+	/* Momentary is distinguishable from latched. */
+	make_playing(&in, 1u * fpb + (fpb / ST_BEAT_PULSE_DEN) / 2u, 200u);
+	in.fx_open = true;
+	in.fx_target = 0u;
+	in.fx_latched = 1u << 2;                 /* T3 latched */
+	in.fx_momentary = 1u << 1;               /* T2 held */
+	st_led_mvp_decide(&in, &f);
+	show("FX: T3 latched, T2 momentary", &f);
+	CHECK(f.level[2] == ST_LED_MAX, "the latched effect is at full");
+	CHECK(f.level[1] > 0u, "the momentary one is lit");
+	CHECK(f.level[1] != f.level[2] || in.beat.envelope == ST_LED_MAX,
+	      "and breathes rather than sitting solid, so the two are "
+	      "distinguishable at a glance");
+	CHECK(f.level[0] == 0u && f.level[3] == 0u, "the untouched effects stay dark");
+
+	/* A momentary with no trustworthy tempo must still be visible. */
+	{
+		st_beat_timing_t bad;
+
+		memset(&in, 0, sizeof(in));
+		in.song_selected = true;
+		in.playing = true;
+		in.fx_open = true;
+		in.fx_momentary = 1u << 3;
+		(void)st_beat_timing_init(&bad, 0u, 0u, 48000u);
+		st_beat_pulse(&bad, 999u, &in.beat);
+		st_led_mvp_decide(&in, &f);
+		CHECK(f.level[3] >= 128u,
+		      "a held effect is visible even with no tempo to breathe on");
+	}
+
+	/* GLOBAL scope lights the whole side row, and not like a single stem. */
+	make_playing(&in, 1u * fpb + (fpb * 3u) / 4u, 200u);
+	in.fx_open = true;
+	in.fx_global = true;
+	in.fx_latched = 0x0Fu;                   /* all four latched */
+	st_led_mvp_decide(&in, &f);
+	show("FX global scope, all four latched", &f);
+	for (i = 0; i < (int)ST_LED_TRACK_COUNT; i++) {
+		CHECK(f.level[i] == ST_LED_MAX, "T%d solid", i + 1);
+	}
+	lit = 0;
+	for (i = 0; i < (int)ST_LED_SIDE_COUNT; i++) {
+		if (f.level[ST_LED_SIDE_FIRST + i]) lit++;
+	}
+	CHECK(lit == (int)ST_LED_SIDE_COUNT, "the whole side row is lit for GLOBAL");
+	CHECK(f.level[ST_LED_SIDE_FIRST] < ST_LED_MAX,
+	      "at a LOWER level than a single selected stem, so GLOBAL and STEM "
+	      "never read the same");
+
+	/* FX OUTRANKS SOLO: the Track buttons are effects while it is open. */
+	make_playing(&in, 1u * fpb + (fpb * 3u) / 4u, 200u);
+	in.fx_open = true;
+	in.fx_latched = 1u << 0;
+	in.solo_mask = 0x0Fu;                    /* would light all four */
+	st_led_mvp_decide(&in, &f);
+	CHECK(f.level[1] == 0u && f.level[2] == 0u && f.level[3] == 0u,
+	      "a solo mask does NOT light the track row while the overlay is open");
+
+	/* AND CLOSING IT RESTORES THE UNDERLYING MODE IMMEDIATELY. */
+	{
+		st_led_frame_t open_f, closed_f, never_f;
+
+		make_playing(&in, 1u * fpb + (fpb * 3u) / 4u, 200u);
+		in.loop_state = ST_LED_LOOP_LATCHED;
+		in.fx_open = true;
+		in.fx_latched = 1u << 0;
+		st_led_mvp_decide(&in, &open_f);
+
+		in.fx_open = false;
+		st_led_mvp_decide(&in, &closed_f);
+
+		make_playing(&in, 1u * fpb + (fpb * 3u) / 4u, 200u);
+		in.loop_state = ST_LED_LOOP_LATCHED;
+		st_led_mvp_decide(&in, &never_f);
+
+		show("overlay open", &open_f);
+		show("overlay closed", &closed_f);
+		CHECK(memcmp(closed_f.level, never_f.level, ST_LED_COUNT) == 0,
+		      "closing the overlay gives EXACTLY the frame a device that "
+		      "never opened it would show -- the loop chase resumes at the "
+		      "correct musical phase because nothing here owns a clock");
+		CHECK(memcmp(open_f.level, closed_f.level, ST_LED_COUNT) != 0,
+		      "and the two really were different, so the check has teeth");
+	}
+}
+
 /* ==================== 5. immediate momentary solo ======================== */
 static void case_solo(void)
 {
@@ -830,6 +951,7 @@ int main(void)
 	case_stopped_gauge();
 	case_playing();
 	case_loop_chase();
+	case_fx_overlay();
 	case_solo();
 	case_solo_chords();
 	case_charging();
