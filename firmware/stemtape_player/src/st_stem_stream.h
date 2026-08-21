@@ -262,4 +262,35 @@ typedef enum {
  */
 st_stream_tick_t st_stream_advance_frame(st_stream_t *st);
 
+/*
+ * Advances by `count` frames in one step, for a caller that renders a RUN
+ * of frames at a time instead of one at a time.
+ *
+ * PRECONDITION, which the caller must establish before calling and which
+ * this function does not re-derive per frame: all `count` frames lie
+ * inside the sector that is currently ready, and inside the song. A caller
+ * computes exactly that by clamping its run to whichever comes first --
+ * the end of the sector, the end of the song, or the end of its output
+ * block. main.c's audio path is written that way.
+ *
+ * Given that precondition this is EXACTLY equivalent to calling
+ * st_stream_advance_frame() `count` times: same final song_frame, same
+ * state, same underrun_count, same terminal tick value. That equivalence
+ * is not asserted, it is host-tested -- tests/test_stem_stream.c walks a
+ * whole song both ways and compares the full state sequence and a hash of
+ * the mixed audio, so the two can never silently diverge.
+ *
+ * WHY IT EXISTS: the per-frame form forced main.c's 48 kHz loop to
+ * re-derive the needed sector (a division), re-test residency, and poll
+ * the SPSC mailbox with a barriered atomic, once per output frame. All of
+ * that is invariant across a run -- a run cannot cross a sector boundary
+ * by construction -- so it was ~48000 repetitions a second of work whose
+ * answer could not change. On this device that is not free: the eMMC read
+ * path is CPU-bound, so audio-thread cycles convert directly into lost
+ * stream throughput, which is what made stored playback run slow.
+ *
+ * count == 0 is a no-op and returns ST_STREAM_TICK_NOT_PLAYING.
+ */
+st_stream_tick_t st_stream_advance_frames(st_stream_t *st, uint32_t count);
+
 #endif /* STEMTAPE_PLAYER_STEM_STREAM_H_ */

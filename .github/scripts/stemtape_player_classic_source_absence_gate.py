@@ -57,8 +57,15 @@ SUM_PATTERNS = [
     r"stem_r\s*\+.*classic",
 ]
 
-STEM_DIRECT_L = re.compile(r"s\[2\s*\*\s*f\]\s*=\s*stem_l;")
-STEM_DIRECT_R = re.compile(r"s\[2\s*\*\s*f\s*\+\s*1\]\s*=\s*stem_r;")
+# The stem branch's stereo stores. The master-volume scale is applied
+# inside the store expression now, so these match "assigned from an
+# expression built out of stem_l/stem_r" rather than a bare identifier --
+# what matters, and what check 3's own report line claims, is that the
+# right-hand side is derived from the STEM MIX ALONE. That the classic bus
+# cannot appear in it is proven separately and more strongly by
+# STEM_RENDERER_CLEAN below.
+STEM_DIRECT_L = re.compile(r"s\[2\s*\*\s*f\]\s*=[^;]*\bstem_l\b[^;]*;")
+STEM_DIRECT_R = re.compile(r"s\[2\s*\*\s*f\s*\+\s*1\]\s*=[^;]*\bstem_r\b[^;]*;")
 CLASSIC_DIRECT_L = re.compile(r"s\[2\s*\*\s*f\]\s*=\s*classic;")
 CLASSIC_DIRECT_R = re.compile(r"s\[2\s*\*\s*f\s*\+\s*1\]\s*=\s*classic;")
 CONTINUE_STMT = re.compile(r"\bcontinue;")
@@ -144,13 +151,47 @@ def main() -> int:
         else:
             report.append(f"- **MISSING**: {label} -- pattern `{pat.pattern}` not found")
             fail = True
-    if CONTINUE_STMT.search(text):
-        report.append("- present: a `continue;` statement exists in the file (the stem branch's "
-                       "own early-exit that skips the classic fallback in the same iteration)")
-    else:
-        report.append("- **MISSING**: no `continue;` statement found -- the stem branch cannot "
-                       "be skipping the classic fallback")
+    # THE STRUCTURAL PROOF, STRENGTHENED. This used to look for a `continue;`
+    # anywhere in the file -- the stem branch's early-exit out of the shared
+    # per-frame loop. There is no shared per-frame loop any more: the stem
+    # renderer is its own function (stem_render_run) selected by an if/else
+    # against the classic fallback, so the two are mutually exclusive by
+    # construction rather than by an early exit. A bare `continue;` search
+    # would now pass on any unrelated loop in the file, i.e. prove nothing.
+    #
+    # What is checked instead is stronger and is the property that actually
+    # matters: the stem renderer cannot sum in the classic bus because it
+    # cannot NAME it. Neither the classic accumulator (`mix32`) nor the
+    # classic sample (`classic`) may appear anywhere inside
+    # stem_render_run()'s own body.
+    m = re.search(r"^static void stem_render_run\(", text, re.M)
+    if not m:
+        report.append("- **MISSING**: stem_render_run() not found -- the stem renderer must be "
+                       "its own function, separate from the classic fallback")
         fail = True
+    else:
+        depth = 0
+        started = False
+        body = []
+        for ch in text[m.start():]:
+            body.append(ch)
+            if ch == "{":
+                depth += 1
+                started = True
+            elif ch == "}":
+                depth -= 1
+                if started and depth == 0:
+                    break
+        body_text = "".join(body)
+        leaked = [n for n in ("mix32", "classic") if re.search(r"\b" + n + r"\b", body_text)]
+        if leaked:
+            report.append("- **MISSING/BAD**: stem_render_run() references the classic bus: "
+                           + ", ".join("`" + n + "`" for n in leaked))
+            fail = True
+        else:
+            report.append("- present: stem_render_run() never names `mix32` or `classic` -- the "
+                           "stem output cannot be summed with the classic bus because the "
+                           "renderer has no access to it")
     report.append("")
 
     report.append("## Result")

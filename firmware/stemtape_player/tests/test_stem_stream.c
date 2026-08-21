@@ -483,6 +483,134 @@ static void test_full_song_walk_transitions_and_hash(void)
 	free(data);
 }
 
+/* ========================================================================
+ * THE RUN-FORM EQUIVALENCE TEST.
+ *
+ * main.c's audio thread no longer advances one frame at a time. It renders
+ * a RUN of frames -- clamped to whichever comes first: the end of the ready
+ * sector, the end of the song, or the end of its 256-frame output block --
+ * and then calls st_stream_advance_frames() once for the whole run. That is
+ * what took the per-frame division, residency test and barriered mailbox
+ * atomic out of the 48 kHz path.
+ *
+ * It is only safe if the two forms are the same state machine. So: walk the
+ * SAME real song twice, once frame-by-frame and once run-by-run using
+ * exactly main.c's own run-clamping rule, and require that every observable
+ * agrees -- the full song_frame sequence, the state sequence, the underrun
+ * count, the terminal tick, and a hash of the mixed audio produced along
+ * the way. If the run form ever diverges, even by one frame at one sector
+ * seam, this fails.
+ * ======================================================================== */
+#define RUN_BLOCK_FRAMES 256u   /* main.c's BLK_FRAMES */
+
+static void test_run_form_matches_frame_form(void)
+{
+	size_t len;
+	uint8_t *data = read_fixture("handoff/v1.1/binaries/song-sectors-four-stem.bin", &len);
+	st_stream_t a, b;
+	st_stem_mix_channel_t channels[ST11_STEM_COUNT];
+	st_stem_mix_prepared_t prep;
+	uint32_t hash_a = ST_CHECKSUM32_INIT;
+	uint32_t hash_b = ST_CHECKSUM32_INIT;
+	uint32_t frames_a = 0, frames_b = 0;
+	int state_mismatches = 0;
+	unsigned guard;
+
+	unity_channels(channels);
+	st_stem_mix_prepare(channels, &prep);
+
+	/* ---- walk A: one frame at a time (the original form) ---- */
+	CHECK(st_stream_init(&a, 4096u, SONG_BLOCK_COUNT_EXACT, SONG_FRAMES, SONG_SECTOR_COUNT, false),
+	      "run-equivalence: frame-form init");
+	st_stream_play(&a);
+	for (guard = 0; guard < SONG_FRAMES * 2u; guard++) {
+		uint32_t needed;
+
+		if (a.state == ST_STREAM_END_OF_SONG) {
+			break;
+		}
+		needed = st_stream_required_sector(&a);
+		if (a.ready_sector != needed) {
+			st_stream_sector_ready(&a, needed);
+		}
+		{
+			const uint8_t *sec = data + (size_t)needed * ST11_SECTOR_BYTES;
+			st11_audio_frame_t fr;
+			int16_t l, r;
+
+			st11_sector_decode_frame(sec, a.song_frame - needed * ST11_FRAMES_PER_SECTOR, &fr);
+			st_stem_mix_frame_prepared(&fr, &prep, &l, &r);
+			hash_a = hash_stereo_sample(hash_a, l, r);
+			frames_a++;
+		}
+		(void)st_stream_advance_frame(&a);
+	}
+
+	/* ---- walk B: run-by-run, using main.c's own clamping rule ---- */
+	CHECK(st_stream_init(&b, 4096u, SONG_BLOCK_COUNT_EXACT, SONG_FRAMES, SONG_SECTOR_COUNT, false),
+	      "run-equivalence: run-form init");
+	st_stream_play(&b);
+	for (guard = 0; guard < SONG_FRAMES * 2u; guard++) {
+		uint32_t block_left = RUN_BLOCK_FRAMES;
+
+		if (b.state == ST_STREAM_END_OF_SONG) {
+			break;
+		}
+		while (block_left > 0u && b.state != ST_STREAM_END_OF_SONG) {
+			uint32_t needed = st_stream_required_sector(&b);
+			uint32_t fis, run, left_in_song;
+			const uint8_t *sec;
+			uint32_t k;
+
+			if (b.ready_sector != needed) {
+				st_stream_sector_ready(&b, needed);
+			}
+			fis = b.song_frame - needed * ST11_FRAMES_PER_SECTOR;
+			run = ST11_FRAMES_PER_SECTOR - fis;          /* to the sector's end */
+			left_in_song = b.frames - b.song_frame;      /* to the song's end   */
+			if (run > left_in_song) {
+				run = left_in_song;
+			}
+			if (run > block_left) {                      /* to the block's end  */
+				run = block_left;
+			}
+			sec = data + (size_t)needed * ST11_SECTOR_BYTES;
+			for (k = 0; k < run; k++) {
+				st11_audio_frame_t fr;
+				int16_t l, r;
+
+				st11_sector_decode_frame(sec, fis + k, &fr);
+				st_stem_mix_frame_prepared(&fr, &prep, &l, &r);
+				hash_b = hash_stereo_sample(hash_b, l, r);
+				frames_b++;
+			}
+			(void)st_stream_advance_frames(&b, run);
+			block_left -= run;
+		}
+	}
+
+	if (a.state != b.state) {
+		state_mismatches++;
+	}
+	if (a.song_frame != b.song_frame) {
+		state_mismatches++;
+	}
+	if (a.underrun_count != b.underrun_count) {
+		state_mismatches++;
+	}
+
+	CHECK(frames_a == SONG_FRAMES, "frame form rendered every frame exactly once (%u)", frames_a);
+	CHECK(frames_b == frames_a, "run form rendered the SAME number of frames (%u vs %u)",
+	      frames_b, frames_a);
+	CHECK(hash_b == hash_a,
+	      "run form produces bit-identical audio over the whole song (0x%08x vs 0x%08x)",
+	      hash_b, hash_a);
+	CHECK(state_mismatches == 0,
+	      "run form ends in the identical stream state (song_frame/state/underruns)");
+
+	free(data);
+}
+
 int main(void)
 {
 	RUN(test_init_rejects_invalid_geometry);
@@ -490,6 +618,7 @@ int main(void)
 	RUN(test_underrun_missing_sector_and_recovery);
 	RUN(test_loop_transition);
 	RUN(test_full_song_walk_transitions_and_hash);
+	RUN(test_run_form_matches_frame_form);
 
 	printf("\nSTEM STREAM TEST %s (%d test cases, %d checks, %d failures)\n",
 	       g_failures == 0 ? "PASSED" : "FAILED", g_test_cases, g_checks, g_failures);

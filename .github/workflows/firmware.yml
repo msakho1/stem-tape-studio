@@ -1551,7 +1551,14 @@ jobs:
           check st_stream_required_sector
           check st_stream_validate_sector
           check st_stream_sector_ready
-          check st_stream_advance_frame
+          # The RUN form is what the audio path calls now; the
+          # per-frame st_stream_advance_frame() remains part of the pure
+          # module's API and is still exercised by tests/test_stem_stream.c
+          # (which proves the two agree over a whole song), but the runtime
+          # no longer calls it, so -ffunction-sections/--gc-sections is
+          # right to drop it and requiring it here would be requiring dead
+          # weight in the ELF.
+          check st_stream_advance_frames
           check st_stem_mbox_init
           check st_stem_mbox_try_acquire
           check st_stem_mbox_set_requested_sector

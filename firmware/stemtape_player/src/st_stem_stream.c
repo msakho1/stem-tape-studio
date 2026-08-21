@@ -155,3 +155,50 @@ st_stream_tick_t st_stream_advance_frame(st_stream_t *st)
 	}
 	return ST_STREAM_TICK_OK;
 }
+
+/* -O2: this is THE call the 48 kHz path makes, once per run. See the
+ * header for the precondition and for why the run form exists at all. */
+__attribute__((optimize("O2")))
+st_stream_tick_t st_stream_advance_frames(st_stream_t *st, uint32_t count)
+{
+	if (count == 0u) {
+		return ST_STREAM_TICK_NOT_PLAYING;
+	}
+	if (st->state == ST_STREAM_STOPPED || st->state == ST_STREAM_END_OF_SONG) {
+		return ST_STREAM_TICK_NOT_PLAYING;
+	}
+
+	uint32_t needed = st_stream_required_sector(st);
+
+	if (st->ready_sector != needed) {
+		/* Same episode accounting as the per-frame form: counted on the
+		 * TRANSITION into underrun, never once per stuck frame. A
+		 * starved caller asks for a whole run and gets none of it. */
+		if (st->state != ST_STREAM_UNDERRUN) {
+			st->underrun_count++;
+		}
+		st->state = ST_STREAM_UNDERRUN;
+		return ST_STREAM_TICK_UNDERRUN;
+	}
+
+	st->state = ST_STREAM_PLAYING;
+	st->song_frame += count;
+
+	if (st->song_frame >= st->frames) {
+		if (st->loop_enabled) {
+			st->song_frame = 0u;
+			/* Identical reasoning to the per-frame form: the sector
+			 * that held the song's last frame is not sector 0, so it
+			 * must be invalidated rather than assumed current. */
+			st->ready_sector = ST_STREAM_NO_SECTOR;
+			return ST_STREAM_TICK_LOOPED;
+		}
+		st->state = ST_STREAM_END_OF_SONG;
+		return ST_STREAM_TICK_ENDED;
+	}
+
+	if (st_stream_required_sector(st) != needed) {
+		return ST_STREAM_TICK_SECTOR_CROSSED;
+	}
+	return ST_STREAM_TICK_OK;
+}

@@ -124,7 +124,7 @@
  * about the change -- stop and re-flash before reading another number out
  * of it.
  */
-#define ST_BUILD_TAG "st5"
+#define ST_BUILD_TAG "st6"
 #include "st_track_hold.h"
 #include "st_stix.h"
 #include "st_v11_format.h"
@@ -1597,6 +1597,98 @@ static inline int16_t soft_limit(int32_t x)
  * this function contains NO flash-write code -- same per-function -O2 already proven
  * werr-safe on the eMMC read path. Speeds the per-frame interp/volume/limit work. */
 __attribute__((optimize("O2")))
+#if SP1_XFER_ENABLE
+/*
+ * THE 48 kHz STORED-PLAYBACK INNER LOOP, lifted out of looper_audio_block()
+ * into its own small -O2 function.
+ *
+ * WHY IT IS SEPARATE. It used to be written inline, inside a 1100-line
+ * function compiled at -Os and carrying dozens of volatile globals. That
+ * costs far more than the arithmetic does: with that much live state and
+ * that many volatiles, the compiler spills and reloads around every
+ * statement, and -Os will not unroll or keep values in registers across the
+ * loop. Measured on hardware, the audio thread was burning ~680 CPU cycles
+ * per output frame to do work that is about 180 cycles of actual
+ * computation. On this device that is not merely wasteful: the eMMC read
+ * path is CPU-bound, so audio-thread cycles convert one-for-one into lost
+ * stream throughput, and the stream running short is exactly what made
+ * stored songs play slow and crushed.
+ *
+ * Here there are no volatiles at all, nothing global, and few enough live
+ * values to stay in registers -- and the same -O2 precedent already applied
+ * to st_stem_mix_frame_prepared(), st11_sector_decode_frame() and
+ * sp1_emmc.c's crc16().
+ *
+ * WHAT IT IS ALLOWED TO ASSUME (the caller establishes all of it before
+ * calling, and it is exactly what st_stream_advance_frames() requires too):
+ * `buf` holds the sector these frames live in, and all `n` frames lie
+ * inside that one sector, inside the song, and inside this output block. So
+ * there is no sector-index division here, no residency test, and no mailbox
+ * traffic -- all three are invariant across the run and are done ONCE by
+ * the caller, instead of 48000 times a second.
+ *
+ * Output and metering are byte-for-byte what the per-frame version
+ * produced; the whole-song equivalence is host-tested (see
+ * tests/test_stem_stream.c's run-form equivalence case).
+ */
+__attribute__((optimize("O2")))
+static void stem_render_run(const uint8_t *buf, uint32_t frame_in_sector,
+			     const st_stem_mix_prepared_t *prep,
+			     int32_t m0, int32_t md, int32_t mv,
+			     uint32_t f0, uint32_t n, int16_t *s,
+			     uint32_t peak[ST11_STEM_COUNT])
+{
+	for (uint32_t k = 0; k < n; k++) {
+		const uint32_t f = f0 + k;
+		st11_audio_frame_t frame;
+		int16_t stem_l, stem_r;
+
+		st11_sector_decode_frame(buf, frame_in_sector + k, &frame);
+		st_stem_mix_frame_prepared(&frame, prep, &stem_l, &stem_r);
+
+		/* BEAT PULSE: per-stem peak, sampled one frame in 32. The
+		 * meters are read by led_service() at ~40 Hz, so 1.5 kHz is
+		 * already two orders of magnitude finer than anything the
+		 * lights can show. A zero prepared gain is the same value the
+		 * mixer just multiplied by, so a muted, solo-silenced or
+		 * faded-out stem meters dark with no second rule to keep in
+		 * sync. INT32_MIN cannot occur in a sign-extended 24-bit
+		 * value, so plain negation is safe. */
+		if ((f & 31u) == 0u) {
+			for (uint32_t sp = 0; sp < ST11_STEM_COUNT; sp++) {
+				int32_t l, r;
+				uint32_t mag;
+
+				if (prep->gain_q8[sp] == 0) {
+					continue;
+				}
+				l = frame.stem_l[sp];
+				r = frame.stem_r[sp];
+				if (l < 0) l = -l;
+				if (r < 0) r = -r;
+				mag = (uint32_t)((l > r) ? l : r);
+				if (mag > peak[sp]) {
+					peak[sp] = mag;
+				}
+			}
+		}
+
+		/* MASTER VOLUME, on the same per-frame ramp the classic path
+		 * uses: a VOL step is ~3 dB and applying it as a hard jump at
+		 * a block boundary is an audible click. st_stem_mix_frame_
+		 * prepared() has already saturated into int16 range and master
+		 * volume only attenuates (Q8 unity = 256 is its clamped
+		 * maximum), so the product cannot leave int16 range. */
+		{
+			const int32_t m = md ? (m0 + ((md * (int32_t)(f + 1)) >> 8)) : mv;
+
+			s[2 * f]     = (int16_t)(((int32_t)stem_l * m) >> 8);
+			s[2 * f + 1] = (int16_t)(((int32_t)stem_r * m) >> 8);
+		}
+	}
+}
+#endif /* SP1_XFER_ENABLE */
+
 static void looper_audio_block(int16_t *s)
 {
 	if (g_xfer_mode) { memset(s, 0, BLK_BYTES); return; }   /* USB transfer: silence out */
@@ -2412,21 +2504,50 @@ static void looper_audio_block(int16_t *s)
 		 * does not get, and read throughput falls in direct
 		 * proportion. */
 #endif
-		for (uint32_t f = 0; f < BLK_FRAMES; f++) {
 #if SP1_XFER_ENABLE
-			if (stem_active) {
-				/* This thread's own (audio-owned) idea of what
-				 * song_frame currently needs. */
+		if (stem_active) {
+			/* ==== STORED-SONG PLAYBACK, RENDERED IN RUNS ====
+			 *
+			 * This used to be a 256-iteration per-frame loop that,
+			 * on EVERY frame, re-derived the needed sector (a
+			 * division), re-tested residency, published the
+			 * requested sector, and -- whenever the sector was
+			 * missing -- polled the SPSC mailbox with a barriered
+			 * atomic. None of that can change inside a run: a run
+			 * never crosses a sector boundary, by construction.
+			 * So it was ~48000 repetitions a second of work whose
+			 * answer was already known.
+			 *
+			 * Worse, the starved case was self-reinforcing. With
+			 * the stream short, the mailbox said "not ready" on
+			 * most frames, and the thread answered by polling it
+			 * 48000 times a second while emitting silence --
+			 * burning exactly the CPU the streamer needed in order
+			 * to make the sector ready. The read path is CPU-bound,
+			 * so starvation was feeding itself.
+			 *
+			 * Now: decide once per run, render the run in a tight
+			 * -O2 loop (stem_render_run()), and advance the stream
+			 * by the whole run in one call. When the needed sector
+			 * genuinely is not there, emit silence for the rest of
+			 * the block and stop -- ONE mailbox poll per block, not
+			 * one per frame, so a starving stream stops stealing the
+			 * CPU that would end the starvation.
+			 *
+			 * Output is bit-identical to the per-frame form over a
+			 * whole real song, host-tested (tests/test_stem_stream.c,
+			 * run-form equivalence). */
+			uint32_t f = 0;
+
+			while (f < BLK_FRAMES) {
 				uint32_t needed = st_stream_required_sector(&g_stem_stream);
-				int16_t stem_l = 0, stem_r = 0;
+				uint32_t fis, run, left_in_song, want;
 
 				if (g_stem_stream.ready_sector != needed) {
-					/* Not locally confirmed ready yet -- ask the
-					 * mailbox (st_stem_bufmbox.h) whether the
-					 * producer has published it since we last
-					 * checked. Wait-free: a single acquire load,
-					 * and (only on success) a single release
-					 * store -- never blocks, never allocates. */
+					/* Ask the mailbox (st_stem_bufmbox.h) whether
+					 * the producer has published it since we last
+					 * looked. Wait-free: one acquire load, and on
+					 * success one release store. */
 					uint32_t acquired_slot;
 
 					if (st_stem_mbox_try_acquire(&g_stem_mbox, needed, &acquired_slot)) {
@@ -2434,196 +2555,116 @@ static void looper_audio_block(int16_t *s)
 						st_stream_sector_ready(&g_stem_stream, needed);
 						s_stem_released = false;   /* holding a buffer again */
 					} else if (!s_stem_released) {
-						/* Genuinely reading nothing. Say so, so
-						 * the producer is free to fill every
-						 * slot -- including the one the
-						 * previously-held sector maps to. See
-						 * st_stem_mbox_release()'s own doc
-						 * comment for the loop-wrap stall this
-						 * specifically prevents.
-						 *
-						 * ONCE per starvation episode, not once
-						 * per starved frame: the mailbox call is
-						 * a sequentially-consistent atomic pair,
-						 * and on a starving stream this branch is
-						 * taken on most of 48000 frames a second.
-						 * The state it publishes is idempotent,
-						 * so repeating it bought nothing and cost
-						 * a memory barrier every frame. */
+						/* Genuinely reading nothing: say so, so the
+						 * producer may fill every slot including the
+						 * one the previously-held sector maps to. See
+						 * st_stem_mbox_release()'s own doc comment for
+						 * the loop-wrap stall this prevents. Latched,
+						 * so it happens once per starvation episode. */
 						st_stem_mbox_release(&g_stem_mbox);
 						s_stem_released = true;
 					}
 				}
-				/* Publish what we need NEXT (only actually stores
-				 * when it changed -- see this call's own doc
-				 * comment) so the producer knows what to fetch;
-				 * done every frame regardless of whether ready_
-				 * sector matched above, so a sector-crossing that
-				 * just happened this very frame is announced
-				 * immediately, not one frame late. */
-				/* THE prefetch lookahead. Publishing `needed` --
-				 * the sector being played RIGHT NOW -- is what
-				 * this did before, and it made the second buffer
-				 * dead weight: the producer only ever started
-				 * fetching a sector at the moment the consumer
-				 * had already crossed into it, so every single
-				 * crossing stalled for the whole ~6.3ms eMMC read
-				 * while the mixer emitted silence. Real physical
-				 * measurement: underrun episodes tracked the read
-				 * count exactly 1:1 (und == rdc, thousands of
-				 * each), i.e. one underrun per sector forever --
-				 * roughly a 10% duty cycle of real audio, which
-				 * is why a correctly stored song was unlistenable.
-				 *
-				 * Once the current sector is resident, ask for the
-				 * one AFTER it instead, so the producer fills the
-				 * idle buffer during the ~7.08ms this sector plays
-				 * for. That is what makes a two-buffer scheme
-				 * actually double-buffer. While the current sector
-				 * is NOT yet resident (a genuine underrun, or the
-				 * first tick after a seek/reload) keep asking for
-				 * it -- fetching further ahead then would strand
-				 * the consumer waiting on a sector nobody is
-				 * fetching. */
-				uint32_t want = needed;
 
+				/* THE PREFETCH LOOKAHEAD. Once the current sector is
+				 * resident, ask for the one AFTER it, so the producer
+				 * fills an idle slot during the ~7.08 ms this sector
+				 * plays for -- that is what makes the ring actually
+				 * read ahead. While the current sector is NOT resident
+				 * (a real underrun, or the first tick after a seek or
+				 * reload) keep asking for IT: fetching further ahead
+				 * then would strand the consumer waiting on a sector
+				 * nobody is fetching. */
+				want = needed;
 				if (g_stem_stream.ready_sector == needed) {
 					uint32_t ahead = needed + 1u;
 
 					if (ahead >= g_stem_stream.sector_count) {
-						/* End of song: wrap only if this song
-						 * loops; otherwise there is nothing
-						 * further to fetch and re-publishing
-						 * `needed` is a no-op for the producer
-						 * (it already published that sector). */
+						/* End of song: wrap only if this song loops;
+						 * otherwise there is nothing further to fetch
+						 * and re-publishing `needed` is a no-op. */
 						ahead = g_stem_stream.loop_enabled ? 0u : needed;
 					}
 					want = ahead;
 				}
 				st_stem_mbox_set_requested_sector(&g_stem_mbox, want);
 
-				if (g_stem_stream.ready_sector == needed) {
-					/* RAM-only: decodes ONE frame out of whichever
-					 * of the two resident buffers g_stem_active_
-					 * buf_idx_local (audio-thread-exclusive) names
-					 * -- never touches flash from this real-time
-					 * thread. */
-					const uint8_t *buf = g_stem_sector_bufs[g_stem_active_buf_idx_local];
-					uint32_t frame_in_sector =
-						g_stem_stream.song_frame - needed * ST11_FRAMES_PER_SECTOR;
-					st11_audio_frame_t frame;
-
-					st11_sector_decode_frame(buf, frame_in_sector, &frame);
-					st_stem_mix_frame_prepared(&frame, &stem_prepared, &stem_l, &stem_r);
-
-					/* BEAT PULSE: per-stem peak magnitude for
-					 * this block, SAMPLED rather than computed
-					 * on every frame.
-					 *
-					 * These peaks drive an envelope that
-					 * led_service() reads at roughly 40 Hz, so
-					 * sampling one frame in 32 (1.5 kHz) is still
-					 * two orders of magnitude finer than anything
-					 * the display can show, and it cuts this work
-					 * by 32x. Metering at the full 48 kHz was
-					 * buying resolution nothing consumes, and
-					 * paying for it out of the CPU budget the
-					 * eMMC streamer needs to keep audio fed.
-					 *
-					 * A peak can be missed between samples. That
-					 * is acceptable HERE and nowhere else: this
-					 * value only lights an LED, it never touches
-					 * the audio path.
-					 *
-					 * A zero prepared gain is the SAME value the
-					 * mixer just multiplied by a line above, so a
-					 * muted, solo-silenced or faded-out stem still
-					 * meters 0 with no second rule to keep in sync.
-					 * Absolute value is taken on the int32 24-bit
-					 * sample; INT32_MIN cannot occur in a
-					 * sign-extended 24-bit value, so plain negation
-					 * is safe. */
-					if ((f & 31u) == 0u) {
-						for (uint32_t sp = 0; sp < ST11_STEM_COUNT; sp++) {
-							int32_t l, r;
-							uint32_t mag;
-
-							if (stem_prepared.gain_q8[sp] == 0) {
-								continue;
-							}
-							l = frame.stem_l[sp];
-							r = frame.stem_r[sp];
-							if (l < 0) l = -l;
-							if (r < 0) r = -r;
-							mag = (uint32_t)((l > r) ? l : r);
-							if (mag > stem_peak[sp]) {
-								stem_peak[sp] = mag;
-							}
-						}
+				if (g_stem_stream.ready_sector != needed) {
+					/* UNDERRUN: silence for the remainder of the
+					 * block, then stop polling until the next block. */
+					for (; f < BLK_FRAMES; f++) {
+						s[2 * f]     = 0;
+						s[2 * f + 1] = 0;
 					}
+					/* Records the underrun EPISODE (once on the
+					 * transition, not once per stuck frame) and leaves
+					 * song_frame frozen -- the same accounting the
+					 * per-frame form did. */
+					(void)st_stream_advance_frames(&g_stem_stream, 1u);
+					break;
 				}
-				/* Advances song_frame (or records the underrun --
-				 * see st_stem_stream.h's own doc comment) exactly
-				 * once per output frame, matching the CURRENT
-				 * frame just produced above -- never ahead of it. */
-				(void)st_stream_advance_frame(&g_stem_stream);
+
+				/* THE RUN: as many frames as are simultaneously inside
+				 * this sector, inside the song, and inside this output
+				 * block. Every one of those three bounds is required by
+				 * stem_render_run() and st_stream_advance_frames(). */
+				fis = g_stem_stream.song_frame - needed * ST11_FRAMES_PER_SECTOR;
+				run = ST11_FRAMES_PER_SECTOR - fis;
+				left_in_song = g_stem_stream.frames - g_stem_stream.song_frame;
+				if (run > left_in_song) {
+					run = left_in_song;
+				}
+				if (run > BLK_FRAMES - f) {
+					run = BLK_FRAMES - f;
+				}
+				if (run == 0u) {
+					/* Defensive: cannot happen while the stream is
+					 * PLAYING (song_frame < frames is the invariant
+					 * st_stream_advance_frames() maintains), but a
+					 * zero-length run would spin this loop forever, so
+					 * never take that on trust in a real-time thread. */
+					for (; f < BLK_FRAMES; f++) {
+						s[2 * f]     = 0;
+						s[2 * f + 1] = 0;
+					}
+					break;
+				}
+
+				/* RAM-ONLY: decodes out of whichever resident buffer
+				 * g_stem_active_buf_idx_local (audio-thread-exclusive)
+				 * names -- this real-time thread never touches flash. */
+				stem_render_run(g_stem_sector_bufs[g_stem_active_buf_idx_local],
+						 fis, &stem_prepared, m0, md, mv,
+						 f, run, s, stem_peak);
+				f += run;
+				(void)st_stream_advance_frames(&g_stem_stream, run);
+
 				/* Mirror the (audio-thread-exclusive) underrun episode
 				 * counter into its atomic diagnostic twin, but only on
-				 * the rare pass it actually changed -- avoids an
-				 * atomic store on every one of the 48000 frames/sec
-				 * this runs at, matching the whole point of atomic
-				 * counters being for cross-thread OBSERVABILITY, not
-				 * a per-frame hot-path cost. */
+				 * the rare pass it actually changed -- atomic counters
+				 * are for cross-thread OBSERVABILITY, not a hot-path
+				 * cost. */
 				if (g_stem_stream.underrun_count != s_stem_underrun_shadow) {
 					s_stem_underrun_shadow = g_stem_stream.underrun_count;
 					atomic_set(&g_stem_underrun_count, (atomic_val_t)s_stem_underrun_shadow);
 				}
-				/* st_stem_mix_frame() already saturates its own int64
-				 * accumulation to the int16 range as part of its own
-				 * contract (and an underrun's silence is trivially in
-				 * range) -- there is no classic contribution left to
-				 * combine either with, so no second soft_limit() pass
-				 * is applied here (that pass existed ONLY to clamp a
-				 * classic+stem SUM, which this architecture no longer
-				 * produces). */
-				/* MASTER VOLUME. This was missing: the stem path
-				 * wrote stem_l/stem_r straight out while only the
-				 * classic fallback below applied g_master_vol_q8,
-				 * so the VOL buttons did nothing whatsoever during
-				 * stored-song playback. Uses the SAME per-frame
-				 * ramp (m0/md, computed once per block above) the
-				 * classic path uses, for the same reason: a VOL
-				 * step is ~3 dB and applying it as a hard jump at
-				 * a block boundary is an audible click.
-				 *
-				 * st_stem_mix_frame() has already saturated its
-				 * own int64 accumulation into int16 range, and
-				 * master volume only ever attenuates (Q8 unity =
-				 * 256 is the maximum -- see g_master_vol_q8's own
-				 * clamp), so the product cannot leave int16 range
-				 * and needs no second soft_limit() pass. */
-				{
-					const int32_t m = md ? (m0 + ((md * (int32_t)(f + 1)) >> 8)) : mv;
-
-					stem_l = (int16_t)(((int32_t)stem_l * m) >> 8);
-					stem_r = (int16_t)(((int32_t)stem_r * m) >> 8);
-				}
-				s[2 * f]     = stem_l;
-				s[2 * f + 1] = stem_r;
-				continue;
 			}
+			if (g_stem_stream.underrun_count != s_stem_underrun_shadow) {
+				s_stem_underrun_shadow = g_stem_stream.underrun_count;
+				atomic_set(&g_stem_underrun_count, (atomic_val_t)s_stem_underrun_shadow);
+			}
+		} else
 #endif
-			/* No stem song is active this block: fall back to the
-			 * classic mono bus + master volume + the same proven
-			 * soft_limit(), byte-for-byte as the Tape-Looper-derived
-			 * engine always computed it. */
-			{
-				int32_t m = md ? (m0 + ((md * (int32_t)(f + 1)) >> 8)) : mv;
-				int16_t classic = soft_limit((mix32[f] * m) >> 8);
+		/* No stem song is active this block: fall back to the classic
+		 * mono bus + master volume + the same proven soft_limit(),
+		 * byte-for-byte as the Tape-Looper-derived engine always
+		 * computed it. */
+		for (uint32_t f = 0; f < BLK_FRAMES; f++) {
+			int32_t m = md ? (m0 + ((md * (int32_t)(f + 1)) >> 8)) : mv;
+			int16_t classic = soft_limit((mix32[f] * m) >> 8);
 
-				s[2 * f]     = classic;
-				s[2 * f + 1] = classic;
-			}
+			s[2 * f]     = classic;
+			s[2 * f + 1] = classic;
 		}
 #if SP1_XFER_ENABLE
 		/* Publish this block's per-stem peaks for led_service(). One

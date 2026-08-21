@@ -18,19 +18,35 @@ index_functions()'s own brace-depth tracking, textually inside the named
 enclosing function's own body, skipping comment lines the same way
 find_call_sites() in stemtape_player_safety_gate.py already does):
 
-  1. looper_audio_block() (the real-time audio mixer, called every I2S
-     block from audio_thread()) -- the mailbox CONSUMER -- calls
-     st_stream_required_sector()/st_stream_sector_ready()/st_stream_
-     advance_frame() (the pure streaming state machine's own per-frame
-     bookkeeping, exclusively audio-thread-owned as of this slice) plus
-     st_stem_mbox_try_acquire()/st_stem_mbox_set_requested_sector() (the
-     atomic mailbox's consumer-side API) plus st11_sector_decode_frame()
-     -- the real STSC per-frame decoder, RAM-only, no I/O -- and
-     st_stem_mix_frame() -- the real 4-stem-to-stereo mixdown. This is
-     the "stored four-stem playback path actually references/uses
-     st_stem_stream/st_stem_bufmbox/st_stem_mix" requirement: not
-     incidental symbol presence, real call sites inside the real real-
-     time audio function.
+  1. The audio path is TWO functions, and both are checked in the
+     function that genuinely makes each call.
+
+     looper_audio_block() (the real-time mixer, called every I2S block
+     from audio_thread()) is the mailbox CONSUMER and the RUN DECIDER: it
+     calls st_stream_required_sector()/st_stream_sector_ready()/
+     st_stream_advance_frames() (the pure streaming state machine,
+     exclusively audio-thread-owned) plus st_stem_mbox_try_acquire()/
+     st_stem_mbox_set_requested_sector() (the mailbox's consumer-side
+     API) plus st_stem_mix_prepare() (mute/solo/gain ceiling, resolved
+     once per block) -- and drives stem_render_run().
+
+     stem_render_run() is the tight -O2 renderer: it calls
+     st11_sector_decode_frame() (the real STSC per-frame decoder,
+     RAM-only, no I/O) and st_stem_mix_frame_prepared() (the real
+     4-stem-to-stereo mixdown).
+
+     The PLURAL st_stream_advance_frames() is required on purpose.
+     Advancing one frame at a time is exactly the per-frame cost this
+     structure removed -- along with the per-frame sector division,
+     residency test and barriered mailbox atomic -- so requiring the run
+     form is what stops a silent regression back to it. The two forms are
+     proven equivalent over a whole real song (identical song_frame,
+     state, underrun count and audio hash) in tests/test_stem_stream.c.
+
+     Together this is the "stored four-stem playback path actually
+     references/uses st_stem_stream/st_stem_bufmbox/st_stem_mix"
+     requirement: not incidental symbol presence, real call sites inside
+     the real real-time audio functions.
 
   2. streamer_thread() (the one thread that ever touches flash) -- the
      mailbox PRODUCER -- calls st_stream_init() (seeding the state
@@ -136,21 +152,40 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from stemtape_player_safety_gate import function_body_bounds, index_functions  # noqa: E402
 
 REQUIRED_CALLS = {
+    # THE AUDIO PATH IS TWO FUNCTIONS NOW, and this gate follows it rather
+    # than being relaxed to accommodate it. looper_audio_block() decides,
+    # once per RUN of frames, which sector is needed and whether it is
+    # resident (the mailbox/stream half); stem_render_run() is the tight
+    # -O2 loop that turns that sector's bytes into output samples (the
+    # decode/mix half). Splitting them is what took the per-frame division,
+    # residency test and barriered atomic out of the 48 kHz path. Requiring
+    # each call in the function that genuinely makes it keeps the proof
+    # exact: neither half can quietly lose its real wiring, and
+    # looper_audio_block() must still be the thing that drives the
+    # renderer.
     "looper_audio_block": [
-        "st11_sector_decode_frame",
+        "stem_render_run",
         # The mixdown is wired in as its two halves, on purpose: prepare
         # once per block (mute/solo/gain ceiling -- all control-rate), then
-        # frame_prepared per output frame. Requiring BOTH is what stops the
-        # split from silently regressing back into a per-frame
-        # st_stem_mix_frame() call, which is what it cost the streamer
-        # before (see st_stem_mix.h's own "GAIN CEILING" measurement).
+        # frame_prepared per output frame in the renderer below. Requiring
+        # BOTH is what stops the split from silently regressing back into a
+        # per-frame st_stem_mix_frame() call, which is what it cost the
+        # streamer before (see st_stem_mix.h's own "GAIN CEILING"
+        # measurement).
         "st_stem_mix_prepare",
-        "st_stem_mix_frame_prepared",
         "st_stream_required_sector",
         "st_stream_sector_ready",
-        "st_stream_advance_frame",
+        # The RUN form, not the per-frame form: advancing frame-by-frame is
+        # exactly the cost this change removed, so requiring the plural name
+        # is what stops a regression back to it. The two are proven
+        # equivalent over a whole real song in tests/test_stem_stream.c.
+        "st_stream_advance_frames",
         "st_stem_mbox_try_acquire",
         "st_stem_mbox_set_requested_sector",
+    ],
+    "stem_render_run": [
+        "st11_sector_decode_frame",
+        "st_stem_mix_frame_prepared",
     ],
     "streamer_thread": [
         "st11_sector_read_header",
@@ -188,6 +223,12 @@ REQUIRED_SUBSTRINGS = {
         "trk[s].muted",
         "trk[s].solo",
         "atomic_set(&g_stem_song_frame_pub",
+    ],
+    "stem_render_run": [
+        # The per-stem beat-pulse meters are fed from inside the renderer,
+        # gated on the SAME prepared gain the mixer multiplies by -- one
+        # audibility rule, not two.
+        "prep->gain_q8[sp] == 0",
     ],
     "main": [
         "track_hold[ti].solo_active",
