@@ -31,3 +31,11 @@ dist-ssr
 *.sln
 *.sw?
 __pycache__/
+
+# CI/local build scratch. The firmware workflow uses audit/ as its working
+# directory and fills it with generated artifacts -- zephyr.elf, the .map,
+# stemtape_player.bin, nm.txt, a copy of the sources, and every host test
+# binary it compiles. Building those host tests locally (the playback gate,
+# its ThreadSanitizer build, the ring-depth sweep) drops the same binaries
+# here. None of it is source and none of it belongs in the repository.
+audit/
