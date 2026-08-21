@@ -1,197 +1,165 @@
 #!/usr/bin/env python3
 """
-stemtape_fx_budget.py — the FX rack resource calculator.
+stemtape_fx_budget.py — the FX resource calculator for the ONE-RACK contract.
 
-THIS SCRIPT IS THE ARGUMENT, NOT A SUMMARY OF ONE. Every byte figure in the FX
-design comes from here, so a reviewer can change one assumption at the top and
-watch the whole conclusion move. Nothing about the rack may be sized from a
-number that is not computed in this file.
+SUPERSEDES the five-rack/twelve-algorithm analysis. That study answered a
+question the product decision then removed: it priced four stem racks plus a
+global rack, each with four banks of three selectable algorithms, and found
+676,140 B in mono against ~110,000 B of projected free RAM. Five racks are not
+part of the product, so that figure is no longer a constraint on anything. It
+is kept only in git history.
 
-WHAT IT ANSWERS. The contract permits a per-stem rack on each of four stems
-plus one global rack (stemPerformance.ts: `StemFxByStem = Record<StemIndex,
-StemFxState>` alongside `globalFx: StemFxState`), each rack holding four banks
-that may all be latched at once (`isBankActive = momentary || latched`). That
-is the worst contract-permitted state, and it has to be priced BEFORE any
-production wiring, not discovered at link time.
+WHAT THE PRODUCT ACTUALLY IS. Exactly ONE DSP rack exists. It is inserted
+either on one selected stem (STEM scope) or over the complete audible mix
+(GLOBAL scope), and moving the target moves the same rack — the previously
+targeted stem returns to dry. Four fixed effects, no algorithm selection, no
+user macro, no per-algorithm macro storage.
 
-THE DOMINANT COST IS DELAY MEMORY, and it is set by musical time, not by any
-constant a firmware author chooses: a tempo-locked echo of D beats needs
-D * frames_per_beat frames, and frames_per_beat = sample_rate * 60 / bpm. So
-the slowest song the firmware admits decides the size of every tempo-locked
-line. There is no BPM clamp anywhere in the firmware today
-(st_beat_phase.c:9-30 accepts any nonzero bpm_q8), which is why MIN_BPM below
-is a decision this analysis has to surface rather than inherit.
+Fixed musical settings are the committed reference defaults from
+src/machine/fx12.ts, evaluated through src/audio/fx/banks.ts:
+
+  Filter      macro 0.50  -> lowpass 1800 Hz, Q 0.9        (banks.ts:104)
+  Delay/Echo  macro 0.50  -> 0.375 beat, feedback 0.43     (banks.ts:460-463)
+  Distortion  macro 0.35  -> tanh k=15, trim 0.8425        (banks.ts:202,228)
+  Gate        macro 0.50  -> 4 cycles/beat (1/16), 50% duty (banks.ts:391-397)
+
+All four have an explicit committed default. Nothing was invented.
+
+THE ONLY LARGE ALLOCATION IS THE ECHO DELAY LINE, and it is sized by musical
+time: 0.375 beat at the slowest admitted tempo. MIN_BPM is therefore a real
+decision and is stated here rather than buried.
 """
 
 SR = 48000                  # Hz, fixed by the I2S path
-BYTES_PER_SAMPLE = 2        # int16 delay storage (Q15)
-FREE_RAM_NOW = 67618        # measured, commit 37a24f3
-FREE_RAM_AFTER_CACHE = 110000   # projected by the unified-cache rework
-
-# The slowest tempo a tempo-locked delay line must serve. Every echo/gate size
-# below scales as 1/MIN_BPM.
-MIN_BPM = 70.0
-
-FRAMES_PER_BEAT_MAX = SR * 60.0 / MIN_BPM
-
-
-def line(seconds, channels=1):
-    """Bytes for a delay line of `seconds` at the given channel count."""
-    return int(round(seconds * SR)) * channels * BYTES_PER_SAMPLE
-
-
-def beats(n, channels=1):
-    """Bytes for a delay line of `n` beats at MIN_BPM."""
-    return int(round(n * FRAMES_PER_BEAT_MAX)) * channels * BYTES_PER_SAMPLE
-
+FREE_RAM_BEFORE_FX = 67618  # measured, commit 37a24f3 (st18)
 
 # ---------------------------------------------------------------------------
-# Per-algorithm delay memory, straight from src/audio/fx/banks.ts.
-# `state` is the non-delay persistent state (filter histories, LFO phase,
-# counters, macro, PRNG) — small and flat.
+# THE TWO DECISIONS THAT SIZE THE ECHO
 # ---------------------------------------------------------------------------
-def algorithms(channels):
-    c = channels
-    return {
-        # ---- TONE (bank 0) — no delay memory at all
-        "filter":       dict(bank="TONE",   delay=0,                    state=32,  note="biquad, 2 histories/ch"),
-        "exciter":      dict(bank="TONE",   delay=0,                    state=96,  note="HP split + shaper + LP + shelf"),
-        "dirt":         dict(bank="TONE",   delay=0,                    state=48,  note="waveshaper + tame LP"),
+# The slowest song the firmware admits. No BPM clamp exists in the firmware
+# today (st_beat_phase.c:9-30 accepts any nonzero bpm_q8), so this becomes the
+# clamp. 60 BPM is a genuine musical floor and a round number; the reference
+# song is 93.71 BPM, so this is comfortably below anything in use.
+MIN_BPM = 60.0
 
-        # ---- MOD (bank 1)
-        # banks.ts:250 createDelay(0.05); sweep reaches 0.0006+0.0038+0.0004+0.0036
-        "reelFlange":   dict(bank="MOD",    delay=line(0.010, c),       state=64,  note="0.4-8 ms modulated, 10 ms line"),
-        "formantShift": dict(bank="MOD",    delay=0,                    state=128, note="4 peaking biquads"),
-        "gate":         dict(bank="MOD",    delay=0,                    state=48,  note="phase counter + VCA"),
+# Delay storage is MONO Q15. The dry path stays fully stereo — only the echo's
+# wet return is summed to mono, which halves the one allocation that matters
+# and centres the repeats. A stereo line at this division and MIN_BPM would be
+# 72,000 B, more than the whole free-RAM budget before the cache rework.
+ECHO_CHANNELS = 1
+ECHO_BYTES_PER_SAMPLE = 2   # Q15 int16
 
-        # ---- MOTION (bank 2)
-        # banks.ts:460 ratios = [0.75, 0.5, 0.375, 0.25] beats; worst 0.75
-        "echo":         dict(bank="MOTION", delay=beats(0.75, c),       state=64,  note="0.75 beat @ MIN_BPM + damp LP"),
-        # banks.ts:464 second tap at ratio * 1.5 -> 1.125 beats
-        "pitchEcho":    dict(bank="MOTION", delay=beats(1.125, c),      state=96,  note="1.125 beat @ MIN_BPM, 2 taps"),
-        # banks.ts:494 createDelay(0.5), base 0.02+3*0.017=0.071, depth <=0.021
-        "scatter":      dict(bank="MOTION", delay=line(0.10, c) * 4,    state=160, note="4 lines x 100 ms + PRNG"),
-
-        # ---- SPACE (bank 3)
-        # banks.ts:552 taps 0.0297/0.0371/0.0411/0.0437
-        "reverb":       dict(bank="SPACE",  delay=line(0.0437, c) * 4,  state=192, note="4-line FDN + damping"),
-        # + banks.ts:574 sparkle delay 0.13 s
-        "shimmer":      dict(bank="SPACE",  delay=line(0.0437, c) * 4 + line(0.13, c),
-                                                                        state=256, note="FDN + 130 ms bright tail"),
-        # banks.ts:634 createDelay(1), delayTime 0.08 + 0.35 * macro -> 0.43 s
-        "freeze":       dict(bank="SPACE",  delay=line(0.43, c),        state=160, note="430 ms capture loop"),
-    }
+ECHO_DIVISION_BEATS = 0.375   # banks.ts:460 ratios[2] at macro 0.5
+ECHO_FEEDBACK = 0.43          # banks.ts:463 0.18 + 0.5 * 0.5
+ECHO_FEEDBACK_CLAMP = 0.72    # contract ceiling
 
 
-BANK_ORDER = ["TONE", "MOD", "MOTION", "SPACE"]
+def frames_per_beat(bpm):
+    return SR * 60.0 / bpm
 
 
-def worst_per_bank(algs):
-    """Algorithms in a bank are mutually exclusive -> arena = the largest."""
-    out = {}
-    for b in BANK_ORDER:
-        members = {k: v for k, v in algs.items() if v["bank"] == b}
-        worst = max(members.items(), key=lambda kv: kv[1]["delay"] + kv[1]["state"])
-        out[b] = (worst[0], worst[1]["delay"] + worst[1]["state"], members)
-    return out
+ECHO_MAX_FRAMES = int(round(ECHO_DIVISION_BEATS * frames_per_beat(MIN_BPM)))
+ECHO_BUFFER_BYTES = ECHO_MAX_FRAMES * ECHO_CHANNELS * ECHO_BYTES_PER_SAMPLE
+
+# ---------------------------------------------------------------------------
+# Persistent state, per effect. Stereo where the effect is stereo.
+# ---------------------------------------------------------------------------
+STATE = {
+    "filter": dict(
+        bytes=2 * 4 * 4 + 5 * 4,
+        note="biquad LP: 2 ch x (x1,x2,y1,y2) int32 + 5 Q14 coeffs"),
+    "distortion": dict(
+        bytes=2 * 4 * 4 + 5 * 4 + 8,
+        note="tame LP biquad (2 ch) + coeffs + trim/drive"),
+    "gate": dict(
+        bytes=4 + 4 + 4 + 4,
+        note="phase accumulator, step, current gain, div"),
+    "echo": dict(
+        bytes=4 + 4 + 2 * 4 + 4 + 4,
+        note="write index, length, damp LP state (mono), feedback, delay frames"),
+}
+
+RACK_STATE = dict(
+    bytes=4 * 4 + 4 + 4 + 4 + 4,
+    note="4 x engage ramp (phase+step), scope, target stem, latch mask, momentary mask")
+
+# Alignment: each block is 4-byte aligned; the echo buffer is int16 so it needs
+# 2-byte alignment but is placed on a 4-byte boundary with the rest.
+ALIGN = 4
 
 
-def report(channels, label):
-    algs = algorithms(channels)
-    print(f"\n{'=' * 78}\n{label}  (delay storage {channels}ch x {BYTES_PER_SAMPLE} B, MIN_BPM {MIN_BPM:g})\n{'=' * 78}")
-    print(f"{'algorithm':<14}{'bank':<8}{'delay B':>10}{'state B':>9}{'total B':>10}   note")
-    for name, a in algs.items():
-        print(f"{name:<14}{a['bank']:<8}{a['delay']:>10,}{a['state']:>9,}"
-              f"{a['delay'] + a['state']:>10,}   {a['note']}")
-
-    wb = worst_per_bank(algs)
-    print(f"\n-- per-bank arena (largest algorithm; the three are mutually exclusive)")
-    rack = 0
-    for b in BANK_ORDER:
-        name, size, _ = wb[b]
-        rack += size
-        print(f"   {b:<8} arena {size:>9,} B   (worst = {name})")
-    print(f"   {'RACK':<8} total {rack:>9,} B   (four banks, all latched at once)")
-
-    print(f"\n-- worst contract-permitted state")
-    for racks, what in ((1, "1 rack  (global only, or one stem)"),
-                        (2, "2 racks (one stem + global)"),
-                        (5, "5 racks (4 stems + global) = FULL CONTRACT")):
-        tot = rack * racks
-        print(f"   {what:<38} {tot:>9,} B"
-              f"   vs {FREE_RAM_NOW:,} free now -> {'FITS' if tot < FREE_RAM_NOW else 'DOES NOT FIT'}"
-              f" | vs {FREE_RAM_AFTER_CACHE:,} projected -> {'FITS' if tot < FREE_RAM_AFTER_CACHE else 'DOES NOT FIT'}")
-    return rack
-
-
-def constrained_rack(min_bpm, echo_max_beats, freeze_s, scatter_line_s, channels=1):
-    """
-    One rack under explicit restrictions, so the decision is a number rather
-    than a shrug. Only the four knobs that actually move the total are exposed:
-    everything else is fixed by the reference.
-    """
-    fpb = SR * 60.0 / min_bpm
-    c = channels
-    b = lambda n: int(round(n * fpb)) * c * BYTES_PER_SAMPLE
-    s = lambda sec: int(round(sec * SR)) * c * BYTES_PER_SAMPLE
-
-    tone = 96
-    mod = s(0.010) + 64
-    # pitchEcho is the worst MOTION member: second tap at 1.5x the base division
-    motion = max(b(echo_max_beats) + 64,
-                 b(echo_max_beats * 1.5) + 96,
-                 s(scatter_line_s) * 4 + 160)
-    space = max(s(0.0437) * 4 + 192,
-                s(0.0437) * 4 + s(0.13) + 256,
-                s(freeze_s) + 160)
-    return tone + mod + motion + space, dict(TONE=tone, MOD=mod, MOTION=motion, SPACE=space)
-
-
-def sensitivity():
-    print(f"\n{'=' * 78}\nWHAT ACTUALLY FITS — sensitivity of ONE rack to the four knobs\n{'=' * 78}")
-    print("Reference values: MIN_BPM 70, echo 1.125 beat, freeze 0.43 s, scatter 0.10 s\n")
-    print(f"{'MIN_BPM':>8}{'echo beat':>11}{'freeze s':>10}{'scatter s':>11}"
-          f"{'1 rack B':>11}{'x5 B':>11}   verdict (1 rack vs 110k projected)")
-    rows = [
-        (70,  0.75,  0.43, 0.10),
-        (70,  0.375, 0.43, 0.10),
-        (70,  0.25,  0.20, 0.06),
-        (100, 0.25,  0.20, 0.06),
-        (100, 0.25,  0.15, 0.05),
-        (120, 0.25,  0.15, 0.05),
-        (120, 0.125, 0.12, 0.04),
-    ]
-    for bpm, eb, fz, sc in rows:
-        tot, _ = constrained_rack(bpm, eb, fz, sc)
-        v = "fits" if tot < FREE_RAM_AFTER_CACHE else "NO"
-        v5 = "fits" if tot * 5 < FREE_RAM_AFTER_CACHE else "NO"
-        print(f"{bpm:>8}{eb:>11}{fz:>10}{sc:>11}{tot:>11,}{tot * 5:>11,}   "
-              f"1x {v}, 5x {v5}")
-    print("\n  Even the most aggressive row leaves the FULL five-rack contract far")
-    print("  out of reach. The binding constraint is not any one algorithm: it is")
-    print("  that the contract permits FIVE independent racks to be latched at")
-    print("  once, and delay memory does not share between racks that can sound")
-    print("  simultaneously.")
+def align_up(n, a=ALIGN):
+    return (n + a - 1) // a * a
 
 
 def main():
     print(__doc__)
-    mono = report(1, "MONO delay storage (wet path summed to mono, dry stays stereo)")
-    stereo = report(2, "STEREO delay storage (a literal port of the Web Audio graph)")
-    sensitivity()
 
-    print(f"\n{'=' * 78}\nCONCLUSION\n{'=' * 78}")
-    print(f"  one rack, mono delay storage   : {mono:,} B")
-    print(f"  one rack, stereo delay storage : {stereo:,} B")
-    print(f"  full contract (5 racks), mono  : {mono * 5:,} B")
-    print(f"  full contract (5 racks), stereo: {stereo * 5:,} B")
-    print(f"  free RAM today                 : {FREE_RAM_NOW:,} B")
-    print(f"  free RAM after unified cache   : ~{FREE_RAM_AFTER_CACHE:,} B (projected, not yet built)")
+    print("=" * 78)
+    print("ECHO DELAY LINE — the only large allocation")
+    print("=" * 78)
+    print(f"  fixed tempo division      : {ECHO_DIVISION_BEATS} beat "
+          f"(banks.ts:460 ratios[2] at the committed default macro 0.5)")
+    print(f"  minimum admitted BPM      : {MIN_BPM:g}")
+    print(f"  frames per beat @ MIN_BPM : {frames_per_beat(MIN_BPM):,.0f}")
+    print(f"  maximum delay frames      : {ECHO_MAX_FRAMES:,}")
+    print(f"  sample format             : Q15 int16, "
+          f"{'mono' if ECHO_CHANNELS == 1 else 'stereo'} wet return")
+    print(f"  exact delay-buffer bytes  : {ECHO_BUFFER_BYTES:,}")
+    print(f"  feedback at default       : {ECHO_FEEDBACK} "
+          f"(contract clamp {ECHO_FEEDBACK_CLAMP})")
+    print(f"  a STEREO line would be    : {ECHO_MAX_FRAMES * 2 * 2:,} B  -- rejected")
+
     print()
-    print("  The MOTION bank alone dominates: a tempo-locked echo is sized by")
-    print(f"  musical time, and 1.125 beats at {MIN_BPM:g} BPM is "
-          f"{beats(1.125, 1):,} B in mono.")
-    print("  Raising MIN_BPM shrinks it linearly; nothing else moves it.")
+    print("=" * 78)
+    print("ONE-RACK RAM")
+    print("=" * 78)
+    print(f"{'component':<16}{'bytes':>10}   note")
+    total_state = 0
+    for k, v in STATE.items():
+        total_state += v["bytes"]
+        print(f"{k:<16}{v['bytes']:>10,}   {v['note']}")
+    total_state += RACK_STATE["bytes"]
+    print(f"{'rack':<16}{RACK_STATE['bytes']:>10,}   {RACK_STATE['note']}")
+    print(f"{'':<16}{'-' * 10}")
+    print(f"{'persistent':<16}{total_state:>10,}   (all four effects + rack)")
+    print(f"{'echo buffer':<16}{ECHO_BUFFER_BYTES:>10,}")
+
+    scratch = 0
+    print(f"{'scratch':<16}{scratch:>10,}   none: every effect processes the "
+          f"output block in place")
+
+    fx_total = align_up(total_state) + align_up(ECHO_BUFFER_BYTES) + scratch
+    pad = fx_total - (total_state + ECHO_BUFFER_BYTES + scratch)
+    print(f"{'alignment pad':<16}{pad:>10,}")
+    print(f"{'':<16}{'=' * 10}")
+    print(f"{'TOTAL FX RAM':<16}{fx_total:>10,}")
+
+    print()
+    print("=" * 78)
+    print("AGAINST THE IMAGE")
+    print("=" * 78)
+    after = FREE_RAM_BEFORE_FX - fx_total
+    print(f"  free RAM before FX (st18, 37a24f3) : {FREE_RAM_BEFORE_FX:>9,} B")
+    print(f"  FX cost                            : {fx_total:>9,} B")
+    print(f"  free RAM after FX (projected)      : {after:>9,} B")
+    print(f"  verdict                            : "
+          f"{'FITS' if after > 0 else 'DOES NOT FIT'}")
+    print()
+    print("  No new permanent 8 KiB sector buffer is added for FX.")
+    print("  The unified playback-cache and stale-memory cleanup continue")
+    print("  independently; the RAM they reclaim is NOT spent here.")
+
+    print()
+    print("=" * 78)
+    print("REMOVED FROM SCOPE — no memory is reserved for any of these")
+    print("=" * 78)
+    for name in ("Reel Flange", "Formant Shift", "Pitch Echo", "Granular Scatter",
+                 "Reverb", "Shimmer", "Spectral Freeze", "Exciter"):
+        print(f"    {name}")
+    print("  There are no per-bank arenas, no algorithm arrays and no macro")
+    print("  arrays: the four effects are fixed, so nothing is sized for a")
+    print("  member that cannot be selected.")
 
 
 if __name__ == "__main__":
