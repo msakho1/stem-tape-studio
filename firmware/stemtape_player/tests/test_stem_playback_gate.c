@@ -217,8 +217,28 @@ typedef struct {
 	 * polling loop is test-harness pacing, not part of the mailbox
 	 * API): */
 	int32_t corrupt_at_sector;   /* -1 = never; else corrupt the FIRST attempt to serve this sector once */
-	int32_t stall_at_sector;     /* -1 = never; else skip fetching this sector this many times first */
-	uint32_t stall_iterations;
+	int32_t stall_at_sector;     /* -1 = never; else withhold this sector until the stall releases */
+	/* How long the producer withholds stall_at_sector, expressed in the
+	 * CONSUMER's own observed UNDERRUN ticks -- deliberately NOT in
+	 * producer loop iterations.
+	 *
+	 * A producer-iteration count does not measure the thing this test
+	 * is about. The consumer spins freely while starved (a frozen
+	 * playhead makes no progress, so it merely burns iterations against
+	 * WALK_ITERATION_CAP), and how many of ITS iterations elapse per
+	 * producer iteration is decided entirely by the OS scheduler --
+	 * core count, machine load, sched_yield() semantics. So a stall of
+	 * N producer iterations cost the consumer an unbounded, machine-
+	 * dependent number of its own: the walk hit the cap and failed in
+	 * roughly 1.5% of runs on a 4-core host (3 of 200), and in CI. The
+	 * flakiness was latent while the ring held two sectors and became
+	 * reproducible once the stall was scaled to a 12-slot ring.
+	 *
+	 * Counting the CONSUMER's underrun ticks instead closes the loop:
+	 * the stall releases exactly when the starvation this test asserts
+	 * has actually been observed, after a bounded and deterministic
+	 * number of consumer iterations, whatever the scheduler does. */
+	uint32_t stall_until_underruns;
 } walk_options_t;
 
 typedef struct {
@@ -247,7 +267,6 @@ typedef struct {
 
 	/* Producer-local (this thread only). */
 	bool corrupted_once;
-	uint32_t stall_remaining;
 
 	/* Shared, real atomic (st_stem_bufmbox.h's own dual-backend
 	 * primitive -- the host stdatomic backend here, exactly what this
@@ -255,6 +274,11 @@ typedef struct {
 	 * g_stem_corrupt_count plays, reused here for the identical
 	 * reason: a cross-thread-visible diagnostic counter. */
 	st_atomic32_t corrupt_count;
+
+	/* Same role, same reason, for the other direction: the CONSUMER is
+	 * the only writer, and the PRODUCER reads it to decide when to
+	 * release a stall (see walk_options_t::stall_until_underruns). */
+	st_atomic32_t underrun_seen;
 
 	walk_result_t result;
 } walk_ctx_t;
@@ -299,8 +323,13 @@ static void *walk_producer_main(void *arg)
 			continue;
 		}
 
-		if ((int32_t)needed == ctx->opt.stall_at_sector && ctx->stall_remaining > 0u) {
-			ctx->stall_remaining--;
+		/* Withhold the stalled sector until the consumer has actually
+		 * starved for as long as this walk asked for -- measured in
+		 * the consumer's own underrun ticks, never in iterations of
+		 * this loop (see walk_options_t::stall_until_underruns for
+		 * why the iteration form was inherently racy). */
+		if ((int32_t)needed == ctx->opt.stall_at_sector &&
+		    (uint32_t)st_atomic_get(&ctx->underrun_seen) < ctx->opt.stall_until_underruns) {
 			sched_yield();
 			continue;
 		}
@@ -423,6 +452,10 @@ static void *walk_consumer_main(void *arg)
 			break;
 		case ST_STREAM_TICK_UNDERRUN:
 			ctx->result.underrun_ticks++;
+			/* Publish it: this thread is the only writer, and the
+			 * producer polls it to decide when a deliberate stall
+			 * has starved the consumer long enough to release. */
+			st_atomic_set(&ctx->underrun_seen, (int32_t)ctx->result.underrun_ticks);
 			break;
 		case ST_STREAM_TICK_NOT_PLAYING:
 		default:
@@ -446,8 +479,8 @@ static void run_production_walk(const uint8_t *fixture, size_t fixture_len, cons
 	ctx.fixture = fixture;
 	ctx.fixture_len = fixture_len;
 	ctx.opt = *opt;
-	ctx.stall_remaining = opt->stall_iterations;
 	st_atomic_set(&ctx.corrupt_count, 0); /* explicit atomic init, not relied on the memset above */
+	st_atomic_set(&ctx.underrun_seen, 0); /* likewise */
 	/* FNV-1a's own real seed, NOT zero -- memset(0) above would silently
 	 * start the hash from the wrong initial value (0 happens to also be
 	 * a technically-valid-looking uint32_t, so this class of bug does
@@ -492,7 +525,7 @@ static void test_full_song_production_walk(void)
 	CHECK(len == (size_t)SONG_SECTOR_COUNT * ST11_SECTOR_BYTES, "real fixture is the expected 43-sector size");
 
 	walk_options_t opt = { .loop_enabled = false, .total_frames_target = SONG_FRAMES,
-				.corrupt_at_sector = -1, .stall_at_sector = -1, .stall_iterations = 0 };
+				.corrupt_at_sector = -1, .stall_at_sector = -1, .stall_until_underruns = 0 };
 	walk_result_t r;
 
 	run_production_walk(data, len, &opt, &r);
@@ -541,7 +574,7 @@ static void test_loop_reproduces_identical_hash(void)
 	uint8_t *data = read_fixture("handoff/v1.1/binaries/song-sectors-four-stem.bin", &len);
 
 	walk_options_t opt = { .loop_enabled = true, .total_frames_target = 2u * SONG_FRAMES,
-				.corrupt_at_sector = -1, .stall_at_sector = -1, .stall_iterations = 0 };
+				.corrupt_at_sector = -1, .stall_at_sector = -1, .stall_until_underruns = 0 };
 	walk_result_t r;
 
 	run_production_walk(data, len, &opt, &r);
@@ -568,7 +601,7 @@ static void test_loop_reproduces_identical_hash(void)
 	 * separately re-run a single fresh pass to get pass 2's own
 	 * standalone hash for direct comparison. */
 	walk_options_t opt_single = { .loop_enabled = false, .total_frames_target = SONG_FRAMES,
-				       .corrupt_at_sector = -1, .stall_at_sector = -1, .stall_iterations = 0 };
+				       .corrupt_at_sector = -1, .stall_at_sector = -1, .stall_until_underruns = 0 };
 	walk_result_t r_single;
 
 	run_production_walk(data, len, &opt_single, &r_single);
@@ -590,7 +623,7 @@ static void test_corrupt_sector_recovers(void)
 	uint8_t *data = read_fixture("handoff/v1.1/binaries/song-sectors-four-stem.bin", &len);
 
 	walk_options_t opt = { .loop_enabled = false, .total_frames_target = SONG_FRAMES,
-				.corrupt_at_sector = 5, .stall_at_sector = -1, .stall_iterations = 0 };
+				.corrupt_at_sector = 5, .stall_at_sector = -1, .stall_until_underruns = 0 };
 	walk_result_t r;
 
 	run_production_walk(data, len, &opt, &r);
@@ -642,26 +675,38 @@ static void test_stalled_producer_recovers(void)
 	uint8_t *data = read_fixture("handoff/v1.1/binaries/song-sectors-four-stem.bin", &len);
 
 	/* The stall must be long enough to EXHAUST the ring's read-ahead,
-	 * or this test stops testing anything. With (SLOTS-1) sectors
-	 * buffered the consumer can coast (SLOTS-1) * ST11_FRAMES_PER_SECTOR
-	 * frames before it can possibly starve, so a stall sized in
-	 * producer iterations has to comfortably exceed that -- 500 was
-	 * chosen against the old two-buffer mailbox, where a single sector
-	 * of read-ahead meant almost any stall starved the consumer
-	 * immediately, and it became scheduling-dependent (it held under a
-	 * plain build but not under ThreadSanitizer, which shifts the
-	 * relative thread speeds). Scaled to the ring depth so it stays
-	 * deterministic in both builds and stays correct if SLOTS changes. */
+	 * or this test stops testing anything -- and it must do so without
+	 * depending on how the OS interleaves the two threads.
+	 *
+	 * Exhaustion is now guaranteed by construction rather than by
+	 * arithmetic: an UNDERRUN tick can only be produced by a consumer
+	 * that has already drained every buffered sector up to the withheld
+	 * one, so requiring underrun ticks at all IS the proof that the
+	 * whole (SLOTS-1)-sector read-ahead window was consumed first. This
+	 * asks for two full sectors' worth of them -- 680 frames, ~14 ms of
+	 * real silence -- so the test covers SUSTAINED starvation, not a
+	 * single boundary tick, and it stays correct at any ring depth.
+	 *
+	 * The previous form asked for 40 * SLOTS * FRAMES_PER_SECTOR
+	 * PRODUCER iterations. That number never bounded what it needed to:
+	 * the cost to the CONSUMER (which spins against WALK_ITERATION_CAP
+	 * while starved) depended entirely on the scheduler, so the walk
+	 * blew its cap in ~1.5% of runs on a 4-core host and in CI. Nothing
+	 * about the production path was wrong -- the harness was measuring
+	 * one thread's time in the other thread's units. */
 	walk_options_t opt = { .loop_enabled = false, .total_frames_target = SONG_FRAMES,
 				.corrupt_at_sector = -1, .stall_at_sector = 10,
-				.stall_iterations = 40u * ST_STEM_MBOX_SLOTS * ST11_FRAMES_PER_SECTOR };
+				.stall_until_underruns = 2u * ST11_FRAMES_PER_SECTOR };
 	walk_result_t r;
 
 	run_production_walk(data, len, &opt, &r);
 
 	CHECK(!r.exceeded_iteration_cap && !r.unexpected_tick, "the walk completed cleanly despite the stall");
-	CHECK(r.underrun_ticks > 0u,
-	      "the deliberately stalled producer caused real, observed UNDERRUN ticks (silence) at sector 10");
+	CHECK(r.underrun_ticks >= 2u * ST11_FRAMES_PER_SECTOR,
+	      "the deliberately stalled producer caused real, observed, SUSTAINED UNDERRUN ticks at sector 10 "
+	      "(%u ticks, at least the two full sectors' worth the stall demanded) -- which is itself the proof "
+	      "that the entire %u-sector read-ahead window was drained first",
+	      r.underrun_ticks, (unsigned)(ST_STEM_MBOX_SLOTS - 1u));
 	CHECK(r.decoded_frame_count == SONG_FRAMES,
 	      "every real frame was still eventually decoded once the stall released");
 	CHECK(r.hash == 0xe9650ddau,
