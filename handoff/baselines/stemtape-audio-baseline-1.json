@@ -1,0 +1,97 @@
+{
+  "baseline_id": "stemtape-audio-baseline-1",
+  "title": "First hardware-confirmed Stem Tape stored-song playback",
+  "frozen_at": "2026-08-21",
+  "status": "hardware-confirmed",
+
+  "confirmation": {
+    "confirmed_by": "device owner, on real SP-1 hardware",
+    "claim": "stored four-stem song played back correctly from this BIN",
+    "note": "This is the FIRST baseline in this repository whose audio behaviour was confirmed by listening on real hardware rather than inferred from host tests. Every earlier Stem Tape build was CI-green only."
+  },
+
+  "firmware": {
+    "commit": "1143cc9b788f53b4c4f6a37adcfa32c7554cdb15",
+    "branch": "claude/stemtape-m0-safety-audit-1vg9pq",
+    "tag": "stemtape-audio-baseline-1",
+    "build_tag": "st10",
+    "build_tag_note": "printed at boot as 'STEMTAPE BUILD st10' and on every diagnostic line as b=st10; if a capture does not show this, it is not this firmware",
+    "artifact": "stemtape_player.bin",
+    "size_bytes": 97716,
+    "sha256": "a717a21924dc54fd82a69d4cfd6374acceed801417cbb29d3c5536d1501da546",
+    "flash_bytes": 97716,
+    "flash_region_bytes": 913408,
+    "ram_used_bytes": 161630,
+    "ram_free_bytes": 100514,
+    "ram_region_bytes": 262144,
+    "source_tree": "da4cce94751c1f88a6caaec30f9bd208fc0c6c5a",
+    "source_tree_note": "git tree object of firmware/stemtape_player/src at the tagged commit"
+  },
+
+  "reproducibility": {
+    "verified": true,
+    "method": "two independent CI runs of the same commit, on different runners, produced byte-identical output",
+    "runs": [32438676107, 32438678221],
+    "note": "The SHA-256 above is therefore an anchor, not a per-run accident. A rebuild of this commit that does NOT produce this hash means the toolchain or environment changed."
+  },
+
+  "toolchain": {
+    "zephyr": "v4.3.1",
+    "zephyr_sdk": "0.17.4",
+    "target": "arm-zephyr-eabi",
+    "board": "stem_player"
+  },
+
+  "companion": {
+    "in_this_repository": false,
+    "important": "The companion that uploaded the song is a SEPARATE application and its source is NOT in this repository. Do not mistake this repo's src/ for it -- src/ contains no SP1XFER/bulk-upload implementation at all. What is frozen here is the CONTRACT and the FIXTURES the companion was implemented against, which is what determines wire compatibility.",
+    "contract_documents": {
+      "docs/stem-tape-transfer-v1.1.md": "257da2e907e1e6d7e28183ed529e5246638bf27be641b551dc8c9305142d2eca",
+      "docs/stem-tape-bulk-upload-v1.md": "f75da0961f3578b262e7e36f712a93cced12d6872c55fe13700892765dc72dfa",
+      "docs/stem-tape-bulk-upload-handoff.md": "6c345e3ea75ac247901f8e4fd496c3b574dc5c807e0e7c366b5b35c12b6de28f"
+    },
+    "fixture_bundle": {
+      "path": "handoff/v1.1",
+      "tree": "f6e98ab24cea55ee7b04c1d8210d91dfc0c8d11e",
+      "manifest": "handoff/v1.1/SHA256SUMS.txt"
+    },
+    "build_identity": {
+      "recorded": false,
+      "reason": "Not knowable from inside this repository. The companion's own commit/deployment identity must be supplied by whoever ran the upload.",
+      "deployment_url": null,
+      "commit": null,
+      "uploaded_at": null
+    }
+  },
+
+  "uploaded_song": {
+    "recorded": false,
+    "known": {
+      "sample_rate_hz": 48000,
+      "format": "Stem Tape v1.1, four stems, stereo, 24-bit, 8192-byte sectors"
+    },
+    "note": "Title, duration and byte-level identity of the specific song used were not captured at test time. Recording them would make this baseline reproducible end to end rather than firmware-only."
+  },
+
+  "audio_geometry": {
+    "sample_rate_hz": 48000,
+    "bytes_per_frame": 24,
+    "required_stream_bytes_per_sec": 1152000,
+    "sector_bytes": 8192,
+    "frames_per_sector": 340,
+    "sector_duration_us": 7083,
+    "audio_block_frames": 256,
+    "audio_block_budget_us": 5333,
+    "read_ahead_slots": 12,
+    "read_ahead_sectors": 11,
+    "read_ahead_us": 77916,
+    "ring_bytes": 98304
+  },
+
+  "not_measured_on_hardware": [
+    "worst audio-block execution time (aus=) for this build",
+    "achieved sustained read margin (margin=) for this build",
+    "whether the summed four-stem mix clips on the song used"
+  ],
+  "not_measured_note": "Playback was confirmed by listening. The STEMRT diagnostic line reports all three; capturing it during a future run would upgrade this baseline from 'sounds right' to 'sounds right AND here are the numbers'."
+}
