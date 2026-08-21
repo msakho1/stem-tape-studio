@@ -1979,4 +1979,47 @@ jobs:
           grep -E " [a-zA-Z] (st_stream_|st_stem_|stem_render_|st11_|stem_)" audit/nm.txt || echo "(none found)"
           echo "=== end ==="
 
+      # RELEASE IDENTITY, LAST, ALWAYS. Everything printed here already
+      # exists somewhere in this job -- the BIN's size and SHA-256 from
+      # "Hashes and sources", the RAM figures from the RAM budget assertion,
+      # the FLASH figures from the link itself. The problem is WHERE: all of
+      # them are emitted mid-job, and the only part of this log reachable
+      # from the environment this is released from is the tail, which the
+      # runner's own post-job cleanup fills. On a failing run the extra
+      # diagnostics step happened to push the hashes into view; on a PASSING
+      # run -- the only kind whose artifact anyone would actually flash --
+      # they fall out of reach entirely.
+      #
+      # These are exactly the numbers a candidate binary has to be handed
+      # over with: which image, how big, what hash, and how much RAM is
+      # genuinely left after the read-ahead ring. Being unable to read them
+      # off a green build is not acceptable, so they get restated here, at
+      # the very end, on success and on failure alike.
+      - name: Release identity (BIN hash/size, FLASH and RAM use) -- printed last so it is readable
+        if: ${{ always() }}
+        working-directory: project
+        run: |
+          echo "=== release identity ==="
+          echo "commit: ${{ github.event.pull_request.head.sha || github.sha }}"
+          if [ -f audit/stemtape_player.bin ]; then
+            stat -c 'stemtape_player.bin: %s bytes' audit/stemtape_player.bin
+            sha256sum audit/stemtape_player.bin
+          else
+            echo "stemtape_player.bin: NOT PRODUCED (the build did not reach a final link)"
+          fi
+          # The authoritative memory-region report west itself computed from
+          # the real linked ELF -- not a re-derived estimate.
+          if [ -f audit/build.log ]; then
+            grep -E '^ *(FLASH|RAM):' audit/build.log | tail -n 4 || echo "(no memory-region lines found)"
+            RAM_LINE="$(grep -E '^ *RAM:' audit/build.log | tail -n1 || true)"
+            if [ -n "$RAM_LINE" ]; then
+              USED="$(echo "$RAM_LINE" | grep -oE '[0-9]+' | head -n1)"
+              echo "RAM used: ${USED} bytes; free: $((262144 - USED)) bytes of the 262144-byte region"
+              echo "          (the gate requires at least 32768 bytes free, and that floor is unchanged)"
+            fi
+          else
+            echo "(audit/build.log absent -- nothing to report)"
+          fi
+          echo "=== end release identity ==="
+
 
