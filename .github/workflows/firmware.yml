@@ -1411,6 +1411,16 @@ jobs:
           # any forbidden symbol present = CI failure).
           test -s audit/nm.txt
           missing=0
+          # THE VERDICT GOES TO A FILE, not only to stdout. This step's own
+          # log tail is entirely consumed by the runner's post-job cleanup,
+          # and artifact/raw-log downloads are blocked by egress policy in
+          # the environment this is debugged from -- so a "MISSING x" line
+          # printed here is, in practice, unreadable. Every failure gets
+          # recorded here instead and re-printed by the "Failure
+          # diagnostics" step at the very end of the job, where it lands
+          # inside the readable tail. Guessing which symbol -Os inlined has
+          # already cost real round trips; this ends that.
+          : > audit/symbol-gate-verdict.txt
           # nm marks a function's own text symbol lowercase 't' when it has
           # internal (static) linkage and uppercase 'T' when it's external --
           # nearly everything in main.c is `static`, so both cases count as
@@ -1442,6 +1452,11 @@ jobs:
               # with the required one, so the answer is in the log.
               grep -E " [a-zA-Z] ${1}" audit/nm.txt \
                 || echo "  -> no symbol beginning '${1}' exists in the ELF at all (uncalled and garbage-collected, or never compiled in)"
+              {
+                echo "MISSING required linked symbol: ${1}"
+                grep -E " [a-zA-Z] ${1}" audit/nm.txt \
+                  || echo "  -> no symbol beginning '${1}' exists in the ELF at all"
+              } >> audit/symbol-gate-verdict.txt
               missing=1
             else
               echo "present: $1"
@@ -1455,6 +1470,7 @@ jobs:
           check_any() {
             if ! grep -qE " [a-zA-Z] ${1}\$" audit/nm.txt; then
               echo "MISSING required linked symbol: $1" >&2
+              echo "MISSING required linked object: ${1}" >> audit/symbol-gate-verdict.txt
               missing=1
             else
               echo "present: $1"
@@ -1604,6 +1620,10 @@ jobs:
           absent() {
             if grep -qE "[[:space:]]${1}\$" audit/nm.txt; then
               echo "FORBIDDEN symbol present in final ELF: $1" >&2
+              {
+                echo "FORBIDDEN symbol present in final ELF: ${1}"
+                grep -E "[[:space:]]${1}\$" audit/nm.txt || true
+              } >> audit/symbol-gate-verdict.txt
               missing=1
             else
               echo "confirmed absent: $1"
@@ -1889,12 +1909,33 @@ jobs:
       # log-tailing tools cannot reach it -- which has already cost more
       # than one round trip to diagnose a single missing name. This puts the
       # relevant facts where they can always be read.
-      - name: Failure diagnostics (stem/stream symbols actually linked)
+      - name: Failure diagnostics (symbol-gate verdict + stem/stream symbols actually linked)
         if: ${{ failure() }}
         working-directory: project
         run: |
-          echo "=== symbols matching st_stream_/st_stem_/stem_render_ in the ELF ==="
-          grep -E " [a-zA-Z] (st_stream_|st_stem_|stem_render_)" audit/nm.txt || echo "(none found)"
+          # THE SYMBOL-GATE VERDICT COMES FIRST, and it is the whole point
+          # of this step. The gate itself runs ~60 checks and prints its
+          # failures in the middle of the job, where the log tail (the only
+          # part reachable when artifact and raw-log downloads are blocked
+          # by egress policy) never reaches. It now records every failure to
+          # audit/symbol-gate-verdict.txt, and this step -- the last one in
+          # the job -- prints it where it can actually be read. A previous
+          # round of this exact failure was diagnosed by guessing which
+          # function -Os had inlined, using a hand-written prefix grep that
+          # happened not to cover the symbol that was actually missing.
+          echo "=== symbol-gate verdict (every failed check, in order) ==="
+          if [ -f audit/symbol-gate-verdict.txt ]; then
+            if [ -s audit/symbol-gate-verdict.txt ]; then
+              cat audit/symbol-gate-verdict.txt
+            else
+              echo "(the symbol gate ran and passed every check -- the failure is in some other step)"
+            fi
+          else
+            echo "(the symbol gate did not run -- an earlier step failed first)"
+          fi
+          echo "=== end verdict ==="
+          echo "=== symbols matching st_stream_/st_stem_/stem_render_/st11_/stem_ in the ELF ==="
+          grep -E " [a-zA-Z] (st_stream_|st_stem_|stem_render_|st11_|stem_)" audit/nm.txt || echo "(none found)"
           echo "=== end ==="
 
 
