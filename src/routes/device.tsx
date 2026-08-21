@@ -10,6 +10,7 @@
  * records. Physical mutation remains gated by the same capability verdict as
  * before; this pass changed presentation and preparation, not the protocol.
  */
+import stemTapeLogo from "@/assets/stemtape-logo.png.asset.json";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { SupportButton } from "@/components/SupportButton";
@@ -637,15 +638,7 @@ function DevicePage() {
         </div>
         <div className="flex flex-wrap items-center gap-x-8 gap-y-3 px-4 pb-5 pt-3 md:px-8">
           <Link to="/" className="flex items-center gap-4">
-            <svg
-              width="52"
-              height="52"
-              viewBox="0 0 34 34"
-              aria-hidden
-              className="text-[var(--ink)]"
-            >
-              <path d="M17 5 L30 28 H4 Z" fill="none" stroke="currentColor" strokeWidth="1.2" />
-            </svg>
+            <img src={stemTapeLogo.url} alt="Stem Tape logo" width={52} height={52} className="h-[52px] w-[52px] object-contain" />
             <div>
               <h1 className="font-mono text-[28px] leading-none tracking-tight text-[var(--ink)]">
                 stem tape uploader

@@ -1,4 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
+import stemTapeLogo from "@/assets/stemtape-logo.png.asset.json";
 import { useState } from "react";
 import hero from "@/assets/sp1-hero-grey.png.asset.json";
 import whiteFront from "@/assets/sp1-white-front.png.asset.json";
@@ -93,10 +94,7 @@ function ShopPage() {
         </div>
         <div className="flex flex-wrap items-center gap-x-8 gap-y-3 px-4 pb-4 pt-2 md:px-8">
           <Link to="/" className="flex items-center gap-3">
-            <svg width="34" height="34" viewBox="0 0 34 34" aria-hidden className="text-[var(--ink)]">
-              <path d="M17 5 L30 28 H4 Z" fill="none" stroke="currentColor" strokeWidth="1.2" />
-              <path d="M17 13 L23 24 H11 Z" fill="none" stroke="currentColor" strokeWidth="1" opacity="0.6" />
-            </svg>
+            <img src={stemTapeLogo.url} alt="Stem Tape logo" width={34} height={34} className="h-[34px] w-[34px] object-contain" />
             <div>
               <p className="font-mono text-xl tracking-tight text-[var(--ink)]">Stem Tape</p>
               <p className="font-mono text-[11px] text-[var(--ink-dim)]">shop · sp-1 interface</p>
