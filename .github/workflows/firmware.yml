@@ -2000,15 +2000,9 @@ jobs:
         working-directory: project
         run: |
           echo "=== release identity ==="
-          echo "commit: ${{ github.event.pull_request.head.sha || github.sha }}"
-          if [ -f audit/stemtape_player.bin ]; then
-            stat -c 'stemtape_player.bin: %s bytes' audit/stemtape_player.bin
-            sha256sum audit/stemtape_player.bin
-          else
-            echo "stemtape_player.bin: NOT PRODUCED (the build did not reach a final link)"
-          fi
           # The authoritative memory-region report west itself computed from
           # the real linked ELF -- not a re-derived estimate.
+          USED=""
           if [ -f audit/build.log ]; then
             grep -E '^ *(FLASH|RAM):' audit/build.log | tail -n 4 || echo "(no memory-region lines found)"
             RAM_LINE="$(grep -E '^ *RAM:' audit/build.log | tail -n1 || true)"
@@ -2020,6 +2014,20 @@ jobs:
           else
             echo "(audit/build.log absent -- nothing to report)"
           fi
-          echo "=== end release identity ==="
+          # ONE DENSE LINE, LAST OF ALL. Everything above is already at the
+          # mercy of how much output the runner's post-job cleanup pushes out
+          # of reach -- on the first run of this step the cache-save output
+          # grew and shoved the BIN's hash out of the readable window, which
+          # is the single number a candidate binary most has to be handed
+          # over with. So the essentials are restated on ONE line, emitted
+          # dead last, small enough to survive whatever the tail budget turns
+          # out to be.
+          if [ -f audit/stemtape_player.bin ]; then
+            BIN_SIZE="$(stat -c '%s' audit/stemtape_player.bin)"
+            BIN_SHA="$(sha256sum audit/stemtape_player.bin | cut -d' ' -f1)"
+            echo "RELEASE commit=${{ github.event.pull_request.head.sha || github.sha }} bin=${BIN_SIZE}B sha256=${BIN_SHA} ram_used=${USED:-?} ram_free=$((262144 - ${USED:-0}))"
+          else
+            echo "RELEASE commit=${{ github.event.pull_request.head.sha || github.sha }} bin=NOT-PRODUCED (the build did not reach a final link)"
+          fi
 
 
