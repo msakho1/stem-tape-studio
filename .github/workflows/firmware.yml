@@ -1420,6 +1420,46 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Stem Tape FX -- control overlay grammar and DSP vs the committed reference
+        # TWO gates in one step. The overlay one drives the REAL st_fx_ctl.c
+        # through every case the FX contract names, including the ones that
+        # decide whether it can corrupt normal mode: a withheld volume press
+        # must still reach master volume, and a Track button the overlay owns
+        # must never also reach the solo handler.
+        #
+        # The DSP one recomputes every expected value in double precision from
+        # src/audio/fx/banks.ts's own expressions, inside the test, so the
+        # reference is never the thing under test.
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          cc -std=c11 -Wall -Wextra -Werror -Ifirmware/stemtape_player/src \
+            firmware/stemtape_player/src/st_fx_ctl.c \
+            firmware/stemtape_player/tests/test_fx_ctl.c \
+            -o audit/test_fx_ctl
+          ./audit/test_fx_ctl | tee audit/fx-ctl.txt
+          cc -std=c11 -Wall -Wextra -Werror -Ifirmware/stemtape_player/src \
+            firmware/stemtape_player/src/st_fx.c \
+            firmware/stemtape_player/src/st_fx_ctl.c \
+            firmware/stemtape_player/tests/test_fx_dsp.c -lm \
+            -o audit/test_fx_dsp
+          ./audit/test_fx_dsp | tee audit/fx-dsp.txt
+          # The one-rack budget is an artefact, not a claim in prose.
+          python3 .github/scripts/stemtape_fx_budget.py | tee audit/fx-budget.txt
+          # THE CALIBRATION CAPTURE MUST NOT SHIP, exactly as for AIN0.
+          if grep -qE '^#define ST_VOL_CAL 1' firmware/stemtape_player/src/main.c; then
+            echo "ST_VOL_CAL is enabled in a shipped image"; exit 1
+          fi
+          echo "AIN1 calibration capture is disabled in this image"
+          {
+            echo '### Stem Tape FX'
+            echo '```text'
+            tail -n 3 audit/fx-ctl.txt
+            tail -n 3 audit/fx-dsp.txt
+            sed -n '/ONE-RACK RAM/,/TOTAL FX RAM/p' audit/fx-budget.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Stem Tape LOOP SEAM gate -- waveform discontinuity in real decoded audio
         # WHY THIS EXISTS SEPARATELY FROM THE PLAYBACK GATE ABOVE.
         #

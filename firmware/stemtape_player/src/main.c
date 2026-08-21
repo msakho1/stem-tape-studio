@@ -129,11 +129,18 @@
  * measurement is committed in docs/ladder-measured.json and src/st_ladder.c
  * decodes against it, so the capture has nothing left to do. A CI gate keeps
  * it from coming back. */
-#define ST_BUILD_TAG "st18"
+#define ST_BUILD_TAG "st19"
+/* AIN1 calibration capture. OFF in every shipped image; a CI gate keeps it
+ * that way, exactly as it does for the AIN0 capture. */
+#ifndef ST_VOL_CAL
+#define ST_VOL_CAL 0
+#endif
 #include "st_track_hold.h"
 #include "st_ladder.h"
 #include "st_latency.h"
 #include "st_seam.h"
+#include "st_fx.h"
+#include "st_fx_ctl.h"
 #include "st_ctl.h"
 #include "st_loop.h"
 #include "st_stix.h"
@@ -1871,6 +1878,26 @@ __attribute__((optimize("O2")))
 #define ST_SEAM_JUMP_WRAP  2u
 #define ST_SEAM_JUMP_EXIT  3u
 static st_seam_t s_stem_seam;
+
+/*
+ * THE ONE FX RACK. One instance, ~36 KiB, of which 36,000 B is the single
+ * echo delay line. There is deliberately no per-stem array: STEM scope points
+ * this rack at s_fx_target, GLOBAL scope inserts the same rack after the mix,
+ * and walking the target moves it rather than creating another.
+ *
+ * The two scope flags are audio-thread-visible copies of the control state,
+ * refreshed once per block by stem_ctl_apply(). They are separate booleans
+ * rather than an enum so the two insertion points in stem_render_run() are one
+ * predictable branch each, and so "no scope" costs nothing at all.
+ */
+static st_fx_t   g_stem_fx;
+static uint8_t   s_fx_target;         /* 0..3, STEM scope */
+static bool      s_fx_stem_scope;     /* rack runs on s_fx_target, pre-mix */
+static bool      s_fx_global_scope;   /* rack runs on the mix, post-mix */
+static uint8_t   s_fx_active_mask;    /* momentary | latch, button order */
+static st_fx_ctl_t g_stem_fx_ctl;
+static st_fx_out_t g_stem_fx_out;
+
 static uint32_t  s_stem_jump_to;     /* song frame to land on */
 static uint32_t  s_stem_seam_lo;     /* window latched at arm time... */
 static uint32_t  s_stem_seam_hi;     /* ...so a release can duck inside it */
@@ -1885,14 +1912,35 @@ static void stem_render_run(const uint8_t *buf, uint32_t frame_in_sector,
 			     int32_t m0, int32_t md, int32_t mv,
 			     uint32_t f0, uint32_t n, int16_t *s,
 			     uint32_t peak[ST11_STEM_COUNT],
-			     st_seam_t *seam)
+			     st_seam_t *seam, uint32_t song_frame)
 {
+	/* Hoisted out of the 48 kHz loop: with the overlay never opened this is
+	 * false and the whole rack costs one test per block. */
+	const bool fx_on = st_fx_running(&g_stem_fx);
+
 	for (uint32_t k = 0; k < n; k++) {
 		const uint32_t f = f0 + k;
 		st11_audio_frame_t frame;
 		int16_t stem_l, stem_r;
 
 		st11_sector_decode_frame(buf, frame_in_sector + k, &frame);
+
+		/* ---- THE FX RACK, STEM SCOPE ------------------------------
+		 * Before the mix, so it lands where the contract puts it:
+		 *   decoded stem -> RACK -> stem fader -> solo -> stem mix.
+		 * One rack, one stem: g_stem_fx_target names it, and moving the
+		 * target moves this same rack, which is why the stem it leaves
+		 * returns to dry with nothing to tear down. The decoder's Q23
+		 * domain is the rack's domain, so nothing is scaled here. */
+		if (s_fx_stem_scope && fx_on) {
+			int32_t fl = frame.stem_l[s_fx_target];
+			int32_t fr = frame.stem_r[s_fx_target];
+
+			st_fx_process(&g_stem_fx, &fl, &fr, song_frame + k);
+			frame.stem_l[s_fx_target] = fl;
+			frame.stem_r[s_fx_target] = fr;
+		}
+
 		st_stem_mix_frame_prepared(&frame, prep, &stem_l, &stem_r);
 
 		/* BEAT PULSE: per-stem peak, sampled one frame in 32. The
@@ -1928,6 +1976,31 @@ static void stem_render_run(const uint8_t *buf, uint32_t frame_in_sector,
 		 * prepared() has already saturated into int16 range and master
 		 * volume only attenuates (Q8 unity = 256 is its clamped
 		 * maximum), so the product cannot leave int16 range. */
+		/* ---- THE FX RACK, GLOBAL SCOPE ----------------------------
+		 * After the audible stem mix -- so it carries every stem, the
+		 * faders and the solo result the contract already ordered -- and
+		 * before the master-volume/seam output stage. The SAME rack
+		 * instance as the stem path above; only its insertion point
+		 * differs, which is what "one rack" means.
+		 *
+		 * The mixer hands back int16; the rack works in Q23, so the pair
+		 * is shifted up 8 and saturated back. Two shifts, no scaling
+		 * decision, one processing path for both scopes. */
+		if (s_fx_global_scope && fx_on) {
+			int32_t gl = (int32_t)stem_l << 8;
+			int32_t gr = (int32_t)stem_r << 8;
+
+			st_fx_process(&g_stem_fx, &gl, &gr, song_frame + k);
+			gl >>= 8;
+			gr >>= 8;
+			if (gl > INT16_MAX) gl = INT16_MAX;
+			if (gl < INT16_MIN) gl = INT16_MIN;
+			if (gr > INT16_MAX) gr = INT16_MAX;
+			if (gr < INT16_MIN) gr = INT16_MIN;
+			stem_l = (int16_t)gl;
+			stem_r = (int16_t)gr;
+		}
+
 		{
 			const int32_t m = md ? (m0 + ((md * (int32_t)(f + 1)) >> 8)) : mv;
 			/* THE SEAM, applied exactly where the base SP-1 applies
@@ -2127,6 +2200,13 @@ for (uint32_t s = 0; s < ST11_STEM_COUNT; s++) {
  * audio thread takes is a cycle of read throughput lost. See
  * st_stem_mix.h's own "GAIN CEILING" note for the measurement. */
 st_stem_mix_prepare(stem_channels, &stem_prepared);
+
+/* THE FX RACK, ONCE PER BLOCK. Tempo-derived quantities (the echo's 0.375-beat
+ * length, the gate's 1/16 cycle) come from the SAME st_beat_timing the LEDs and
+ * the loop already use, so nothing here is a second clock. The active mask is
+ * the control overlay's momentary|latch, published by stem_ctl_apply(). */
+st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
+	       g_stem_beat_timing.downbeat_frame, s_fx_active_mask);
 
 	/* ==== STORED-SONG PLAYBACK, RENDERED IN RUNS ====
 	 *
@@ -2452,7 +2532,8 @@ st_stem_mix_prepare(stem_channels, &stem_prepared);
 		stem_render_run(from_pin ? g_stem_loop_pin_bufs[pin_idx]
 					  : g_stem_sector_bufs[g_stem_active_buf_idx_local],
 				 fis, &stem_prepared, m0, md, mv,
-				 f, run, s, stem_peak, &s_stem_seam);
+				 f, run, s, stem_peak, &s_stem_seam,
+				 g_stem_stream.song_frame);
 		f += run;
 		(void)st_stream_advance_frames(&g_stem_stream, run);
 
@@ -5770,7 +5851,8 @@ static void controls_diag(void)
 
 /* ---- decode the ladders into named buttons (verified thresholds) ---- */
 enum trk_btn { TRK_NONE = -1, TRK_1, TRK_2, TRK_3, TRK_4, TRK_PLAY };
-enum vol_btn { VOL_NONE = -1, VOL_TEMPO_DOWN, VOL_DOWN, VOL_TEMPO_UP, VOL_UP };
+enum vol_btn { VOL_NONE = -1, VOL_TEMPO_DOWN, VOL_DOWN, VOL_TEMPO_UP, VOL_UP,
+               VOL_BOTH /* Vol- and Vol+ together: the FX overlay chord */ };
 
 static enum trk_btn decode_tracks(int v)
 {
@@ -5782,13 +5864,67 @@ static enum trk_btn decode_tracks(int v)
 	return TRK_PLAY;                /* ~1823 */
 }
 
+/*
+ * THE AIN1 LADDER. Four buttons share this one analog rail (see adc_ladder[]:
+ * "AIN1: Vol + FWD/RWD"), and this decode returns exactly one of them.
+ *
+ * ======================================================================
+ * WHY THE FX ENTRY CHORD IS NOT DECODED HERE YET
+ * ======================================================================
+ * The FX overlay is entered by pressing Volume- and Volume+ TOGETHER. On this
+ * hardware that is a CHORD ON A RESISTOR LADDER: the buttons source VDD
+ * through individual resistors into a pulled-down node, so pressing two puts
+ * their resistors in PARALLEL and the node reads HIGHER than either alone --
+ * the same model docs/ladder-measured.json established for AIN0's fifteen
+ * Track masks.
+ *
+ * Volume+ alone is ~1820 and the top band here is "anything >= 1500". A
+ * two-volume chord therefore lands in that same band and is, today,
+ * INDISTINGUISHABLE FROM VOLUME+ ALONE.
+ *
+ * The number needed to separate them has never been measured. AIN0 was
+ * captured in the st16-cal build and its sixteen states are in
+ * docs/ladder-measured.json; AIN1 was not, and nothing in this repository
+ * records what the Vol-/Vol+ chord reads.
+ *
+ * ST_VOL_CHORD_RAW below is therefore UNSET on purpose. Guessing it is worse
+ * than leaving it unset: a threshold placed too low steals Volume+, and one
+ * placed too high makes the gesture simply not work. Flash a build with
+ * ST_VOL_CAL=1 (see the capture in the control loop), press the two buttons
+ * together, read the number off the serial line, and set it here.
+ */
+#ifndef ST_VOL_CHORD_RAW
+#define ST_VOL_CHORD_RAW 0   /* 0 = unmeasured; the chord cannot be decoded */
+#endif
+
 static enum vol_btn decode_vol(int v)
 {
 	if (v <  200) return VOL_NONE;
 	if (v <  560) return VOL_TEMPO_DOWN; /* ~404  */
 	if (v <  950) return VOL_DOWN;       /* ~729  */
 	if (v < 1500) return VOL_TEMPO_UP;   /* ~1220 */
+#if ST_VOL_CHORD_RAW > 0
+	/* Measured: the chord sits above Volume+ alone. Band it the same way
+	 * st_ladder.c bands AIN0 -- centre +/- min(25, 40% of the nearest gap). */
+	if (v >= ST_VOL_CHORD_RAW - 25) return VOL_BOTH;
+#endif
 	return VOL_UP;                       /* ~1820 */
+}
+
+/*
+ * True when the raw AIN1 reading is the two-volume chord. Separate from
+ * decode_vol() so the FX overlay asks a question with one meaning, and so the
+ * unmeasured case is a single obvious `false` rather than a silent fallthrough
+ * into VOL_UP.
+ */
+static bool vol_chord_raw(int v)
+{
+#if ST_VOL_CHORD_RAW > 0
+	return v >= ST_VOL_CHORD_RAW - 25;
+#else
+	(void)v;
+	return false;
+#endif
 }
 
 /* ================= ALWAYS-DIM LEDs (soft PWM) =========================
@@ -6928,7 +7064,63 @@ int main(void)
 		 * which is exactly why holding FUNCTION could not latch a loop on
 		 * real hardware. */
 		int  st_trk_raw = ladder_read(&adc_ladder[LAD_TRACKS]);
-		enum vol_btn st_vraw = decode_vol(ladder_read(&adc_ladder[LAD_VOL]));
+		int  st_vol_raw = ladder_read(&adc_ladder[LAD_VOL]);
+		enum vol_btn st_vraw = decode_vol(st_vol_raw);
+#if ST_VOL_CAL
+		/* AIN1 CALIBRATION CAPTURE. Temporary, exactly like the st16-cal
+		 * build that produced docs/ladder-measured.json for AIN0, and
+		 * removed the same way once the number is recorded. Prints the
+		 * raw rail whenever it moves, so pressing Volume- and Volume+
+		 * together shows the one value ST_VOL_CHORD_RAW needs. */
+		{
+			static int last_cal = -9999;
+
+			if (st_vol_raw > last_cal + 12 || st_vol_raw < last_cal - 12) {
+				last_cal = st_vol_raw;
+				printk("VOLCAL raw=%d decode=%d\n", st_vol_raw, (int)st_vraw);
+			}
+		}
+#endif
+		/* THE FX CONTROL OVERLAY, before st_ctl_service() so anything it
+		 * claims cannot also reach the loop/track dispatcher. */
+#if SP1_XFER_ENABLE
+		{
+			st_fx_in_t fi;
+			bool chord = vol_chord_raw(st_vol_raw);
+
+			memset(&fi, 0, sizeof(fi));
+			/* A ladder reports ONE state, so a real chord arrives as
+			 * VOL_BOTH rather than as two independent downs. Both
+			 * flags are raised together and the arrival window sees
+			 * a zero-gap chord, which is the same-scan case the
+			 * overlay's state machine already handles. */
+			fi.vol_minus_down = chord || (st_vraw == VOL_DOWN);
+			fi.vol_plus_down  = chord || (st_vraw == VOL_UP);
+			fi.function_down  = pwr_pressed();
+			fi.track_down     = g_stem_ctl_out.track_mask;
+			fi.now_ms         = (uint32_t)k_uptime_get();
+
+			st_fx_ctl_service(&g_stem_fx_ctl, &fi, &g_stem_fx_out);
+
+			s_fx_target       = g_stem_fx_out.target_stem;
+			s_fx_stem_scope   = g_stem_fx_out.fx_open &&
+					     g_stem_fx_out.scope == ST_FX_SCOPE_STEM;
+			s_fx_global_scope = g_stem_fx_out.fx_open &&
+					     g_stem_fx_out.scope == ST_FX_SCOPE_GLOBAL;
+			s_fx_active_mask  = g_stem_fx_out.active_mask;
+
+			/* CONSUMPTION. A volume press the overlay claimed must
+			 * not also step master volume, and a Track button it
+			 * claimed must not also solo. */
+			if (g_stem_fx_out.vol_minus_consumed ||
+			    g_stem_fx_out.vol_plus_consumed) {
+				st_vraw = VOL_NONE;
+			}
+			if (g_stem_fx_out.track_consumed != 0u) {
+				st_trk_raw = 0;
+			}
+		}
+#endif
 		bool stem_ctl = false;
 #if SP1_XFER_ENABLE
 		stem_ctl = atomic_get(&g_stem_song_selected) != 0;
