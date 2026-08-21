@@ -277,7 +277,7 @@ void st_fx_process(st_fx_t *fx, int32_t *l, int32_t *r, uint32_t song_frame)
 
 			/* read the tap */
 			ri = (fx->echo_w + ST_FX_ECHO_MAX_FRAMES - fx->echo_len)
-			     % ST_FX_ECHO_MAX_FRAMES;
+			     & ST_FX_ECHO_MASK;
 			rd = (int32_t)fx->echo_line[ri] << 8;   /* Q15 -> Q23 */
 
 			/* one-pole damping lowpass at 7.8 kHz (banks.ts:435,
@@ -291,7 +291,7 @@ void st_fx_process(st_fx_t *fx, int32_t *l, int32_t *r, uint32_t song_frame)
 			fb = (int32_t)(((int64_t)rd * ST_FX_ECHO_FEEDBACK_Q15) >> 15);
 			fx->echo_line[fx->echo_w] =
 				(int16_t)(clamp_q23(in_mono + fb) >> 8);
-			fx->echo_w = (fx->echo_w + 1u) % ST_FX_ECHO_MAX_FRAMES;
+			fx->echo_w = (fx->echo_w + 1u) & ST_FX_ECHO_MASK;
 
 			/* THE WET LEG IS THE REPEATS ONLY. banks.ts:436-440
 			 * connects input->delay->damp->out with NO direct

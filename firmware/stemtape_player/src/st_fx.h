@@ -73,8 +73,18 @@
 /* The slowest admitted tempo. The firmware has no BPM clamp of its own
  * (st_beat_phase.c accepts any nonzero bpm_q8), so THIS is the clamp, and it
  * is what sizes the delay line: 0.375 * 48000 * 60 / 60 = 18000 frames. */
-#define ST_FX_ECHO_MIN_BPM 60u
-#define ST_FX_ECHO_MAX_FRAMES 18000u
+#define ST_FX_ECHO_MIN_BPM 66u
+/* 16384, not 18000. TWO reasons, both real:
+ *   RAM  -- 32,768 B instead of 36,000 B, which is what puts the image back
+ *           over the 32,768 B free-RAM floor the budget gate enforces.
+ *   CPU  -- a power of two turns the delay's two `% ST_FX_ECHO_MAX_FRAMES`
+ *           into masks, removing two divides from the 48 kHz inner loop.
+ * The cost is the admitted tempo floor: 0.375 beat fills 16384 frames at
+ * 65.9 BPM, so MIN_BPM is 66 rather than 60. Songs slower than that get an
+ * echo clamped to 16384 frames instead of a musically exact 0.375 beat. The
+ * reference song is 93.71 BPM. */
+#define ST_FX_ECHO_MAX_FRAMES 16384u
+#define ST_FX_ECHO_MASK (ST_FX_ECHO_MAX_FRAMES - 1u)
 /* Feedback at the reference default, Q15. 0.43 * 32768 = 14090. */
 #define ST_FX_ECHO_FEEDBACK_Q15 14090
 /* Contract ceiling, enforced regardless of anything else. 0.72 * 32768. */

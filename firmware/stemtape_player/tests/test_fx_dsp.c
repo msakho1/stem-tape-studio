@@ -298,8 +298,19 @@ static void case_echo(void)
 	      "0.375 beat at 120 BPM = %u frames", want_len);
 	CHECK(ST_FX_ECHO_FEEDBACK_Q15 < ST_FX_ECHO_FEEDBACK_MAX_Q15,
 	      "the default feedback 0.43 is under the 0.72 contract ceiling");
-	CHECK(ST_FX_ECHO_MAX_FRAMES * 2u == 36000u,
-	      "the delay line is 36,000 bytes: 18,000 frames of Q15 mono");
+	CHECK(ST_FX_ECHO_MAX_FRAMES * 2u == 32768u,
+	      "the delay line is 32,768 bytes: 16,384 frames of Q15 mono");
+	CHECK((ST_FX_ECHO_MAX_FRAMES & (ST_FX_ECHO_MAX_FRAMES - 1u)) == 0u,
+	      "and it is a POWER OF TWO, which is what lets the 48 kHz loop mask "
+	      "instead of divide -- two modulos removed from the hot path");
+	CHECK(ST_FX_ECHO_MASK == ST_FX_ECHO_MAX_FRAMES - 1u,
+	      "the mask matches the length");
+	/* The admitted tempo floor is a CONSEQUENCE of that size, so it is
+	 * asserted rather than left as a comment: 0.375 beat must still fit at
+	 * ST_FX_ECHO_MIN_BPM. */
+	CHECK((48000u * 60u / ST_FX_ECHO_MIN_BPM) * 3u / 8u <= ST_FX_ECHO_MAX_FRAMES,
+	      "0.375 beat at the %u BPM floor still fits the line",
+	      ST_FX_ECHO_MIN_BPM);
 
 	/* An impulse must come back one delay later. */
 	for (n = 0; n < want_len * 2u + 100u; n++) {

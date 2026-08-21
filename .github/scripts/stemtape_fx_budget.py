@@ -40,7 +40,7 @@ FREE_RAM_BEFORE_FX = 67618  # measured, commit 37a24f3 (st18)
 # today (st_beat_phase.c:9-30 accepts any nonzero bpm_q8), so this becomes the
 # clamp. 60 BPM is a genuine musical floor and a round number; the reference
 # song is 93.71 BPM, so this is comfortably below anything in use.
-MIN_BPM = 60.0
+MIN_BPM = 65.9
 
 # Delay storage is MONO Q15. The dry path stays fully stereo — only the echo's
 # wet return is summed to mono, which halves the one allocation that matters
@@ -58,7 +58,10 @@ def frames_per_beat(bpm):
     return SR * 60.0 / bpm
 
 
-ECHO_MAX_FRAMES = int(round(ECHO_DIVISION_BEATS * frames_per_beat(MIN_BPM)))
+# Rounded DOWN to a power of two: masks instead of modulo in the 48 kHz
+# loop, and 32,768 B instead of 36,000 B, which is what keeps the image
+# above the free-RAM floor. MIN_BPM is the consequence, not the input.
+ECHO_MAX_FRAMES = 16384
 ECHO_BUFFER_BYTES = ECHO_MAX_FRAMES * ECHO_CHANNELS * ECHO_BYTES_PER_SAMPLE
 
 # ---------------------------------------------------------------------------
