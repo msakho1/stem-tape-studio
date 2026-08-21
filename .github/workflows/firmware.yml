@@ -1482,7 +1482,48 @@ jobs:
           # cold-boot discovery + the shared-transport playback engine
           check streamer_thread
           check audio_thread
-          check looper_audio_block
+          # looper_audio_block() itself is deliberately NOT checked -- and
+          # this, like trk_blk()/xfer_service()/midi_dev above, is confirmed
+          # by a real CI run, not anticipated. It is `static` with exactly
+          # ONE unconditional call site (inside audio_thread()'s block loop,
+          # between the DWT timestamps that feed aus=), which makes it
+          # eligible for -finline-functions-called-once. It survived as a
+          # standalone symbol while it was ~1070 lines; once the Stem Tape
+          # fast-path work removed PASS 2, PASS B and their buffers it fell
+          # under the compiler's function-growth limit and is now inlined
+          # into audio_thread() with no symbol left. Requiring it would mean
+          # forcing a noinline attribute onto a function whose only purpose
+          # is to be called once per block -- i.e. paying a call frame per
+          # audio block to satisfy a grep. This gate's own rule already
+          # covers that case: requiring a symbol the runtime does not need
+          # would be requiring dead weight in the ELF.
+          #
+          # Nothing is lost from the proof, because what was being proven is
+          # proven better below and elsewhere:
+          #   - audio_thread() itself IS checked present, immediately above,
+          #     and it is the function the inlined body now lives in;
+          #   - the source-level wiring check step REQUIRES audio_thread()
+          #     to call looper_audio_block() and i2s_write(), so the call
+          #     site is proven in main.c's own source, which is the thing a
+          #     symbol's mere presence never proved anyway;
+          #   - and the two checks below name the actual Stem Tape render
+          #     path rather than the inherited wrapper around it.
+          #
+          # THE STEM TAPE AUDIO FAST PATH, at link level. stem_audio_block()
+          # is the whole Stem Tape block renderer (mailbox acquire, channel
+          # strip, mix prepare, run-form advance, peak publication) and
+          # stem_render_run() is its per-frame decode/mix/meter/master-volume
+          # inner loop. Both are reached ONLY from the dispatch that runs
+          # before any classic work and returns without touching it, so
+          # requiring them here is link-level evidence of the bypassing path
+          # itself -- strictly more specific than requiring the shared
+          # wrapper that both engines used to run through. The complementary
+          # source-level proof (that this dispatch precedes every classic
+          # statement, rather than merely running near it) is the wiring
+          # check's own BYPASS PROOF section plus the classic-source-absence
+          # gate.
+          check stem_audio_block
+          check stem_render_run
           # physical control scanner (button/fader ladder read) + LED output
           check ladder_read
           check led_service

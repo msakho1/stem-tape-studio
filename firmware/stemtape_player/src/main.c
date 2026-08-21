@@ -124,7 +124,7 @@
  * about the change -- stop and re-flash before reading another number out
  * of it.
  */
-#define ST_BUILD_TAG "st9"
+#define ST_BUILD_TAG "st10"
 #include "st_track_hold.h"
 #include "st_stix.h"
 #include "st_v11_format.h"
@@ -1634,7 +1634,10 @@ __attribute__((optimize("O2")))
  * produced; the whole-song equivalence is host-tested (see
  * tests/test_stem_stream.c's run-form equivalence case).
  */
-__attribute__((optimize("O2"), noinline))
+/* noclone for the same reason as stem_audio_block()'s own attribute: the
+ * symbol gate requires this name exactly, and an anchored nm grep does not
+ * match a .constprop/.isra clone suffix. */
+__attribute__((optimize("O2"), noinline, noclone))
 static void stem_render_run(const uint8_t *buf, uint32_t frame_in_sector,
 			     const st_stem_mix_prepared_t *prep,
 			     int32_t m0, int32_t md, int32_t mv,
@@ -1788,7 +1791,7 @@ atomic_set(&g_stem_song_frame_pub, (atomic_val_t)g_stem_stream.song_frame);
  *
  * Renders one whole I2S block of stored four-stem playback, and nothing else.
  *
- * WHY IT EXISTS. looper_audio_block() is ~1070 lines of engine inherited from
+ * WHY IT EXISTS. looper_audio_block() was ~1070 lines of engine inherited from
  * the Tape Looper, and it did not ask whether a stem song was playing until
  * roughly 780 lines in. Before reaching the stem output, EVERY 5.33 ms block
  * unconditionally executed:
@@ -1820,7 +1823,14 @@ atomic_set(&g_stem_song_frame_pub, (atomic_val_t)g_stem_stream.song_frame);
  * the master-volume ramp, publish per-stem meter peaks, write stereo output,
  * and advance the stem playhead.
  */
-__attribute__((noinline))
+/* noinline, noclone: the same reasoning already applied to xfer_do_commit()
+ * and friends below. The runtime symbol-presence gate now requires this
+ * function by exact name as its link-level evidence of the Stem Tape fast
+ * path, and an anchored nm grep does not match a .constprop/.isra clone
+ * suffix. This function also has exactly one call site, which is precisely
+ * what made looper_audio_block() vanish from the ELF the moment it shrank --
+ * so the attribute is what keeps that from silently happening here too. */
+__attribute__((noinline, noclone))
 static void stem_audio_block(int16_t *s, int32_t m0, int32_t md, int32_t mv)
 {
 	/* Audio-thread-EXCLUSIVE, and now genuinely private to this function:
@@ -5068,6 +5078,58 @@ static void controls_diag(void)
 	printk("STEMRD hunt=%uus dma=%uus crc=%uus huntclk=%u\n",
 	       (unsigned)emmc_dbg_rd_hunt_us, (unsigned)emmc_dbg_rd_dma_us,
 	       (unsigned)emmc_dbg_rd_crc_us, (unsigned)emmc_dbg_rd_hunt_clks);
+	/* SUSTAINED REAL-TIME FEASIBILITY, stated in the terms the acceptance
+	 * test is judged in, so the physical run answers the question directly
+	 * instead of handing back raw counters to do arithmetic on afterwards.
+	 * Every figure here is DERIVED from counters printed above -- this line
+	 * measures nothing new and costs the audio path nothing (it runs in the
+	 * diagnostic printer, not in looper_audio_block()).
+	 *
+	 *   aus=    worst looper_audio_block() execution time this session, in
+	 *           us (the same g_audio_us_max the EMMC48 line reports), and
+	 *           budget= that same number as a percentage of the 5333 us a
+	 *           256-frame block at 48 kHz is allowed to take. Over 100%
+	 *           means the audio thread alone cannot keep up and no amount
+	 *           of read-ahead will help.
+	 *   need=   the stream rate four 24-bit stereo stems at 48 kHz demand:
+	 *           48000 * 24 = 1152000 B/s. Not a target, an identity.
+	 *   have=   the measured sustained read rate (STEMIO rate= above), and
+	 *           margin= have/need as a percentage. Below 100% the playhead
+	 *           is being starved faster than it is being fed, which shows
+	 *           up as a SLOW song rather than as dropouts, because
+	 *           st_stream_advance_frame() freezes the playhead on underrun
+	 *           instead of skipping frames.
+	 *   ahead=  the read-ahead the ring actually holds when full, in whole
+	 *           sectors and in milliseconds of audio. This is the outage it
+	 *           can absorb, not evidence of throughput: a deeper ring buys
+	 *           time, it does not buy bytes per second. margin= is the term
+	 *           that has to be over 100%; ahead= only says how long a
+	 *           transient may last before it is audible.
+	 *   und=    steady-state underrun episodes must be ZERO. Any non-zero
+	 *           value here invalidates the run regardless of every other
+	 *           number on this line. */
+	{
+		uint32_t aus = g_audio_us_max;
+		uint32_t have = stem_diag_sustained_read_bytes_per_sec();
+		/* Whole-percent integer math throughout: no floating point in
+		 * this firmware's diagnostics, and none needed. BLK_FRAMES
+		 * frames at ST11_SAMPLE_RATE_HZ is the block period in us. */
+		uint32_t budget_us = (uint32_t)((1000000ull * (uint64_t)BLK_FRAMES) / ST11_SAMPLE_RATE_HZ);
+		uint32_t need = ST11_SAMPLE_RATE_HZ * ST11_BYTES_PER_FRAME;
+		uint32_t ahead_sectors = ST_STEM_MBOX_SLOTS - 1u;
+		uint32_t ahead_us = (uint32_t)((1000000ull * (uint64_t)ahead_sectors *
+						 (uint64_t)ST11_FRAMES_PER_SECTOR) / ST11_SAMPLE_RATE_HZ);
+
+		printk("STEMRT aus=%uus budget=%u%% need=%uBps have=%uBps margin=%u%% "
+		       "ahead=%usec/%uus und=%u\n",
+		       (unsigned)aus, (unsigned)((aus * 100u) / budget_us),
+		       (unsigned)need, (unsigned)have,
+		       /* need is a nonzero compile-time constant (48000 * 24),
+		        * so no divide-by-zero guard is possible or needed. */
+		       (unsigned)(uint32_t)(((uint64_t)have * 100ull) / need),
+		       (unsigned)ahead_sectors, (unsigned)ahead_us,
+		       (unsigned)atomic_get(&g_stem_underrun_count));
+	}
 #endif
 	emmc_dbg_wr_busy_max = 0u;   /* per-window worst, reset each print */
 	emmc_dbg_wr_busy_us_max = 0u;
