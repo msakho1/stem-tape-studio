@@ -1865,8 +1865,18 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      # Runs ONLY when something above failed, and runs LAST, so its output
-      # is at the very end of the job log. The symbol gate's own failure
+      - name: Upload stemtape-player-audit
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: stemtape-player-audit
+          path: project/audit/**
+          if-no-files-found: error
+
+      # Runs ONLY when something above failed, and is the LAST step in the
+      # job -- placed AFTER the artifact upload on purpose, because the
+      # upload emits ~45 lines and pushed the first version of this step
+      # out of the readable tail of the log. The symbol gate's own failure
       # message is emitted mid-job, thousands of lines from the end, where
       # log-tailing tools cannot reach it -- which has already cost more
       # than one round trip to diagnose a single missing name. This puts the
@@ -1879,11 +1889,4 @@ jobs:
           grep -E " [a-zA-Z] (st_stream_|st_stem_|stem_render_)" audit/nm.txt || echo "(none found)"
           echo "=== end ==="
 
-      - name: Upload stemtape-player-audit
-        if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: stemtape-player-audit
-          path: project/audit/**
-          if-no-files-found: error
 
