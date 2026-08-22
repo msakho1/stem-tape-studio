@@ -688,6 +688,62 @@ jobs:
             cmake --build build-stemtape-player "${BUILD_ARGS[@]}" \
             2>&1 | tee audit/compile.log | tee -a audit/build.log
 
+      - name: AIN1 CALIBRATION IMAGE (separate build, never the shipped one)
+        # WHY THIS EXISTS. The FX overlay is entered with Volume- and Volume+
+        # together, and on this hardware that is a chord on a resistor ladder:
+        # adc_ladder[] documents AIN1 as "Vol + FWD/RWD", four buttons on one
+        # analog rail, and decode_vol() returns exactly one of them. Volume+
+        # alone reads ~1820 and the top band is "anything >= 1500", so the
+        # chord is today indistinguishable from Volume+ alone.
+        #
+        # The separating value has never been measured. AIN0's sixteen states
+        # were captured in the st16-cal build and live in
+        # docs/ladder-measured.json; AIN1 was never captured, and there is no
+        # local Zephyr toolchain to build a capture with -- hence CI.
+        #
+        # This builds a SECOND image with ST_VOL_CAL=1 into its own build
+        # directory. It reuses the Zephyr environment this job already set up,
+        # so it costs seconds, and it cannot contaminate the shipped image:
+        # the define is passed on the command line, the production image above
+        # is already linked and measured, and the two checks below prove the
+        # capture is present in one and absent from the other.
+        timeout-minutes: 20
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          west build -p always -b stem_player firmware/stemtape_player \
+            -d build-stemtape-volcal \
+            -- -DBOARD_ROOT="$GITHUB_WORKSPACE/project/firmware" \
+               -DST_VOL_CAL=1 \
+            2>&1 | tail -n 20
+          cp build-stemtape-volcal/zephyr/zephyr.bin audit/stemtape_player-VOLCAL.bin
+          SZ="$(stat -c '%s' audit/stemtape_player-VOLCAL.bin)"
+          SH="$(sha256sum audit/stemtape_player-VOLCAL.bin | cut -d' ' -f1)"
+          echo "VOLCAL image: ${SZ} B sha256=${SH}"
+          # Prove the capture really is in one image and not the other.
+          # Without this the artifact could be silently identical and nobody
+          # would find out until the hardware printed nothing.
+          if strings audit/stemtape_player.bin | grep -q 'VOLCAL raw='; then
+            echo "FAIL: the SHIPPED image contains the calibration capture"
+            exit 1
+          fi
+          if ! strings audit/stemtape_player-VOLCAL.bin | grep -q 'VOLCAL raw='; then
+            echo "FAIL: the calibration image does NOT contain the capture"
+            exit 1
+          fi
+          echo "capture present in VOLCAL, absent from the shipped image"
+          {
+            echo '### AIN1 calibration image'
+            echo 'In the `stemtape-player-audit` artifact:'
+            echo '`stemtape_player-VOLCAL.bin`'
+            echo ''
+            echo "size ${SZ} B, sha256 \`${SH}\`"
+            echo ''
+            echo 'Flash it, open the serial console, hold Volume- and Volume+'
+            echo 'together, and report the `VOLCAL raw=` value. The same build'
+            echo 'also prints the `STACK unused` line.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: RAM budget assertion (fail-closed)
         # PHASE 1 must fit in a real, measured RAM budget: max 229,376 bytes
         # used (256 KiB region minus a required 32 KiB free), leaving real

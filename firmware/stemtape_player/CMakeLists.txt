@@ -177,3 +177,18 @@ target_compile_options(app PRIVATE -fno-strict-aliasing)
 target_compile_definitions(app PRIVATE ST_STEM_BUFMBOX_ZEPHYR)
 
 target_link_libraries(app PRIVATE m)
+
+# ---- AIN1 CALIBRATION CAPTURE ------------------------------------------
+# OFF unless -DST_VOL_CAL=1 is passed on the west/cmake command line. An
+# explicit hook rather than EXTRA_COMPILE_DEFINITIONS, which is not a
+# dependable Zephyr variable across versions.
+#
+# The capture prints the raw AIN1 rail so the Volume-/Volume+ chord value can
+# be measured; the FX overlay cannot decode that chord until it is. It must
+# never reach a shipped image, which two independent checks enforce: the
+# safety gate greps main.c's own #define, and the CI build compares `strings`
+# on the two BINs.
+if(ST_VOL_CAL)
+  zephyr_compile_definitions(ST_VOL_CAL=1)
+  message(STATUS "AIN1 CALIBRATION CAPTURE ENABLED -- not a shippable image")
+endif()
