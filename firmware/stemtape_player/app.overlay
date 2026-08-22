@@ -1,0 +1,67 @@
+#include <zephyr/dt-bindings/adc/adc.h>
+#include <zephyr/dt-bindings/adc/nrf-saadc.h>
+#include <zephyr/dt-bindings/pinctrl/nrf-pinctrl.h>
+
+/* STEM TAPE: src/main.c is now a real derivative of the Tape Looper (see
+ * its provenance banner) -- it drives the eight physical LEDs directly via
+ * raw GPIO register access (leds[]/track_leds[] + the soft-PWM timer ISR,
+ * NOT the Zephyr PWM peripheral), on exactly the same pins listed below.
+ * This overlay previously (superseded design, see git history) claimed
+ * those SAME pins for the hardware PWM2/PWM3 peripheral via pinctrl -- a
+ * real pin-ownership conflict with main.c's raw-GPIO driver, for the exact
+ * reason firmware/boards/teenageengineering/stem_player/stem_player.dts's
+ * own comment already documents: "PWM owning those pins would fight" the
+ * raw-GPIO row driver. That PWM2/PWM3 devicetree block (and the pwm-leds
+ * container that exposed it to led_render.c, also no longer built into
+ * this target -- see CMakeLists.txt) has been removed; this overlay now
+ * only carries the ADC channel setup, identical to firmware/app.overlay,
+ * which main.c's ladder_read()/adc_ladder[] actually depend on. */
+
+&adc {
+	channel@2 { reg = <2>; zephyr,gain = "ADC_GAIN_1_6"; zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS, 20)>;
+		zephyr,input-positive = <NRF_SAADC_AIN3>; zephyr,resolution = <12>; };   /* Fader 1 P0.05 */
+	channel@3 { reg = <3>; zephyr,gain = "ADC_GAIN_1_6"; zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS, 20)>;
+		zephyr,input-positive = <NRF_SAADC_AIN6>; zephyr,resolution = <12>; };   /* Fader 2 P0.30 */
+	channel@4 { reg = <4>; zephyr,gain = "ADC_GAIN_1_6"; zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS, 20)>;
+		zephyr,input-positive = <NRF_SAADC_AIN2>; zephyr,resolution = <12>; };   /* Fader 3 P0.04 */
+	channel@5 { reg = <5>; zephyr,gain = "ADC_GAIN_1_6"; zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS, 20)>;
+		zephyr,input-positive = <NRF_SAADC_AIN7>; zephyr,resolution = <12>; };   /* Fader 4 P0.31 */
+	channel@6 { reg = <6>; zephyr,gain = "ADC_GAIN_1_6"; zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS, 20)>;
+		zephyr,input-positive = <NRF_SAADC_AIN4>; zephyr,resolution = <12>; };   /* Battery level P0.28 (divider, per SP-1-dev wiki) */
+};
+&zephyr_user {
+	io-channels = <&adc 0>, <&adc 1>, <&adc 2>, <&adc 3>, <&adc 4>, <&adc 5>, <&adc 6>;
+};
+
+/* GATE 1: class-compliant USB-MIDI 2.0 receive-only endpoint for KO II pad
+ * cue control via a standalone MIDI bridge (the SP-1 stays a USB device; it
+ * never becomes a USB host). This node is target-specific (main.c's real
+ * DEVICE_DT_GET(DT_NODELABEL(usb_midi))) and stemtape_player-only -- the
+ * shared board DTS (firmware/boards/teenageengineering/stem_player/
+ * stem_player.dts, used by every target including the golden Tape Looper)
+ * is untouched; this lives only in this target's own overlay. One
+ * bidirectional Group Terminal Block, matching Zephyr's own usb/midi
+ * sample's app.overlay exactly (compatible, #address-cells/#size-cells,
+ * reg/protocol/terminal-type). "midi1-up-to-128b": KO II pad Note On/Off
+ * are ordinary 3-byte MIDI 1.0 messages, well under 128 bits. */
+/ {
+	usb_midi: usb_midi {
+		compatible = "zephyr,midi2-device";
+		status = "okay";
+		#address-cells = <1>;
+		#size-cells = <1>;
+		label = "Stem Tape Cue In";
+
+		cue_in@0 {
+			reg = <0 1>;
+			protocol = "midi1-up-to-128b";
+			terminal-type = "input-only";
+			label = "SP-1 Cue In";
+		};
+	};
+};

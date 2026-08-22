@@ -1,0 +1,186 @@
+{
+  "_comment": [
+    "Ownership metadata for the RAM inventory. This is DATA, deliberately:",
+    "a claim about who owns a buffer, when it is alive and what evidence sets",
+    "its size is reviewable in a diff here, instead of being re-derived from",
+    "prose in a comment every time someone asks.",
+    "",
+    "'evidence' is the field that matters. 'NOT MEASURED' is the honest value",
+    "for anything whose size was chosen rather than derived, and the report",
+    "lists every large allocation still carrying it. Do not write a number",
+    "into this field that is not traceable to a measurement or to",
+    "src/st_latency.h."
+  ],
+  "default": {
+    "category": "unclassified",
+    "owner": "unattributed",
+    "lifetime": "unknown",
+    "writers": "unknown",
+    "readers": "unknown",
+    "phases": "unknown",
+    "evidence": "NOT MEASURED"
+  },
+  "symbols": {
+    "g_stem_sector_bufs": {
+      "category": "sector_pool",
+      "owner": "read-ahead ring (st_stem_bufmbox)",
+      "declared_in": "src/main.c",
+      "lifetime": "whole session; filled by streamer_thread, drained by audio_thread",
+      "writers": "streamer_thread",
+      "readers": "audio_thread",
+      "phases": "playback, looping",
+      "overlaps": "loop pins (both live while a loop runs)",
+      "evidence": "depth 12 predates st_latency.h and was chosen against a since-disproven claim that 11 sectors cover the driver's 80 ms allowance. Required read-ahead per st_latency.h is ST_LAT_READAHEAD_SECTORS. OVERSIZED, pending the unified-cache rework."
+    },
+    "g_stem_loop_pin_bufs": {
+      "category": "sector_pool",
+      "owner": "loop entry/exit residency",
+      "declared_in": "src/main.c",
+      "lifetime": "filled when the PLAY gesture arms; released when the loop ends",
+      "writers": "streamer_thread",
+      "readers": "audio_thread",
+      "phases": "looping only",
+      "overlaps": "read-ahead ring (both live while a loop runs); dead during idle, transfer and non-loop playback",
+      "evidence": "ST_LAT_RESIDENCY_SECTORS per region, derived from st_latency.h's guarantee. st17 shipped 3 per region against a wrong 10.15 ms bound; corrected here."
+    },
+    "s_v11_verify_scratch": {
+      "category": "transfer",
+      "owner": "bulk upload read-back verify",
+      "declared_in": "src/main.c",
+      "lifetime": "one sector verify inside a transfer",
+      "writers": "the transfer command path (main thread)",
+      "readers": "the same",
+      "phases": "transfer only",
+      "overlaps": "MUTUALLY EXCLUSIVE with playback: entering transfer mode sets g_xfer_mode (streamer stops prefetching) and g_playing=0 (audio thread stops rendering the stem path).",
+      "evidence": "one sector, fixed by ST11_SECTOR_BYTES; the question is not its size but whether it needs to be its own allocation. ALIASING WAS ATTEMPTED IN THE MEMORY-CLEANUP COMMIT AND WITHDRAWN, deliberately. Overlaying it on the sector pool is sound on the two ends that stop (producer and consumer both quiesce, and a two-block barrier makes the consumer's stop provable rather than probable) but NOT on what is left behind: st_stream_stop() does not clear ready_sector, and the SPSC mailbox may still publish a slot whose bytes the transfer overwrote. Fixing that needs a way to say 'nothing in this ring is resident any more', and the mailbox API cannot say it: st_stem_mbox_init() is documented as requiring a quiescent ring AND as asserting that one named sector is ALREADY resident and adopted -- which is precisely the claim that is false after a transfer has written over the pool. Making it true again means re-reading that sector synchronously, i.e. rebuilding the boot/reload sequence at every transfer exit. The unified sector cache carries per-slot validity, so 'void' is a state it can already represent, and the reclamation moves there rather than shipping a stale-sector race for 8192 bytes."
+    },
+    "g_meta": {
+      "category": "classic_inherited",
+      "owner": "inherited Tape Looper slot metadata",
+      "declared_in": "src/main.c",
+      "lifetime": "whole session",
+      "writers": "main thread",
+      "readers": "main thread",
+      "phases": "loaded at boot, mutated by control paths whose audio effect is unreachable",
+      "overlaps": "none",
+      "evidence": "NOT MEASURED"
+    },
+    "metabuf": {
+      "category": "classic_inherited",
+      "owner": "inherited slot-index staging",
+      "declared_in": "src/main.c (function-local static)",
+      "lifetime": "whole session",
+      "writers": "main thread",
+      "readers": "main thread",
+      "phases": "boot and metadata save",
+      "overlaps": "none",
+      "evidence": "NOT MEASURED"
+    },
+    "mix32": {
+      "category": "classic_inherited",
+      "owner": "inherited classic mixer accumulator",
+      "declared_in": "src/main.c",
+      "lifetime": "whole session",
+      "writers": "audio_thread (classic path only)",
+      "readers": "audio_thread (classic path only)",
+      "phases": "none reachable with a Stem Tape song selected",
+      "overlaps": "none",
+      "evidence": "NOT MEASURED"
+    },
+    "trk": {
+      "category": "classic_inherited",
+      "owner": "inherited per-track state; Stem Tape reads vol/mute/solo from it",
+      "declared_in": "src/main.c",
+      "lifetime": "whole session",
+      "writers": "main thread (controls)",
+      "readers": "audio_thread (mixer)",
+      "phases": "all",
+      "overlaps": "none",
+      "evidence": "partially live: Stem Tape genuinely uses vol_q8/muted/solo. The rest is classic."
+    },
+    "g_stem_fx": {
+      "category": "fx",
+      "owner": "THE one FX rack (st_fx.c)",
+      "declared_in": "src/main.c",
+      "lifetime": "whole session; audio-thread exclusive",
+      "writers": "audio_thread (st_fx_process/st_fx_prepare)",
+      "readers": "audio_thread",
+      "phases": "FX overlay open, and the bounded echo tail after it closes",
+      "overlaps": "none. ONE rack exists: STEM scope points it at a stem, GLOBAL scope inserts it after the mix. Moving the target moves this instance rather than creating another, which is the whole reason there is no per-stem array here.",
+      "evidence": "32,768 B of it is the echo delay line, sized by .github/scripts/stemtape_fx_budget.py: 0.375 beat (banks.ts:460 ratios[2] at the committed default macro 0.5) at the 66 BPM admitted floor, Q15 mono, rounded to a power of two so the 48 kHz loop masks instead of dividing. The remaining ~184 B is filter/distortion/gate/echo state plus four engage ramps. A stereo line would be 65,536 B and was rejected."
+    }
+  },
+  "prefixes": {
+    "g_stem_": {
+      "category": "stemtape",
+      "owner": "Stem Tape runtime state",
+      "declared_in": "src/main.c",
+      "lifetime": "whole session",
+      "writers": "control/audio/streamer threads (per symbol)",
+      "readers": "same",
+      "phases": "playback, looping",
+      "evidence": "scalar state, not a pool"
+    },
+    "g_led": {
+      "category": "leds",
+      "owner": "LED renderer",
+      "declared_in": "src/main.c, src/led_*.c",
+      "lifetime": "whole session",
+      "writers": "control thread, TIMER3 ISR",
+      "readers": "TIMER3 ISR",
+      "phases": "all",
+      "evidence": "fixed by LED_PHYS_COUNT"
+    },
+    "z_": {
+      "category": "zephyr_kernel",
+      "owner": "Zephyr kernel",
+      "lifetime": "whole session",
+      "phases": "all",
+      "evidence": "framework-generated; sized by Kconfig"
+    },
+    "_k_": {
+      "category": "zephyr_kernel",
+      "owner": "Zephyr kernel object",
+      "lifetime": "whole session",
+      "phases": "all",
+      "evidence": "framework-generated; sized by Kconfig"
+    },
+    "_kernel": {
+      "category": "zephyr_kernel",
+      "owner": "Zephyr kernel",
+      "lifetime": "whole session",
+      "phases": "all",
+      "evidence": "framework-generated"
+    },
+    "usb": {
+      "category": "usb",
+      "owner": "USB device stack",
+      "lifetime": "whole session",
+      "phases": "transfer, console",
+      "evidence": "NOT MEASURED"
+    },
+    "udc": {
+      "category": "usb",
+      "owner": "USB device controller driver",
+      "lifetime": "whole session",
+      "phases": "transfer, console",
+      "evidence": "NOT MEASURED"
+    },
+    "cdc": {
+      "category": "usb",
+      "owner": "USB CDC ACM",
+      "lifetime": "whole session",
+      "phases": "transfer, console",
+      "evidence": "NOT MEASURED"
+    },
+    "tx_slab": {
+      "category": "i2s",
+      "owner": "I2S transmit slab",
+      "lifetime": "whole session",
+      "writers": "audio_thread",
+      "readers": "I2S DMA",
+      "phases": "playback",
+      "evidence": "NOT MEASURED"
+    }
+  }
+}

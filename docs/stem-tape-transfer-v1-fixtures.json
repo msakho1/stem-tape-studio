@@ -1,0 +1,98 @@
+{
+  "$comment": "Machine-readable mirror of firmware/stemtape_player/src/st_transfer_protocol.h and st_storage_layout.h. Keep in sync by hand with those headers -- see docs/stem-tape-transfer-v1.md section 8.",
+  "protocolVersion": { "major": 1, "minor": 0 },
+  "storageLayoutVersion": 1,
+  "magic": {
+    "handshake": "SP1XFER!",
+    "versionResponse": "STV1"
+  },
+  "idleTimeoutMs": 15000,
+  "commands": {
+    "classic": {
+      "ping": "P",
+      "read": "R",
+      "write": "W",
+      "flush": "F",
+      "exit": "X"
+    },
+    "stemTapeV1": {
+      "version": "V",
+      "begin": "B",
+      "stage": "S",
+      "verify": "K",
+      "commit": "C",
+      "abort": "A",
+      "delete": "D",
+      "init": "I"
+    }
+  },
+  "responses": {
+    "okGeneric": "k",
+    "errGeneric": "e",
+    "beginOk": "b",
+    "stageOk": "s",
+    "commitOk": "c",
+    "abortOk": "a",
+    "deleteOk": "d",
+    "initOk": "i"
+  },
+  "versionResponse": {
+    "totalBytes": 16,
+    "fields": [
+      { "name": "magic", "offset": 0, "bytes": 4, "value": "STV1" },
+      { "name": "protocolMinor", "offset": 4, "bytes": 1, "type": "u8" },
+      { "name": "storageLayoutVersion", "offset": 5, "bytes": 1, "type": "u8" },
+      { "name": "reserved", "offset": 6, "bytes": 2 },
+      { "name": "capabilityFlags", "offset": 8, "bytes": 4, "type": "u32le" },
+      { "name": "sectorBytes", "offset": 12, "bytes": 4, "type": "u32le" }
+    ]
+  },
+  "capabilityFlags": {
+    "transactionalSlots": 1,
+    "crc32": 2
+  },
+  "destructiveConfirmToken": "STCONFRM",
+  "crc32": { "polynomialReflected": "0xEDB88320", "init": "0xFFFFFFFF" },
+  "audioFormat": {
+    "sectorBytes": 8192,
+    "sampleRateHz": 48000,
+    "stemCount": 4,
+    "stemOrder": ["vocal", "drums", "bass", "instrument"],
+    "channelsPerStem": 2,
+    "bytesPerSample": 3,
+    "frameBytes": 24,
+    "maxSongSeconds": 600
+  },
+  "beginRequest": {
+    "fields": [
+      { "name": "slot", "bytes": 2, "type": "u16le" },
+      { "name": "frameCount", "bytes": 8, "type": "u64le" },
+      { "name": "payloadCrc32", "bytes": 4, "type": "u32le" },
+      { "name": "stemPresentMask", "bytes": 1, "type": "u8" }
+    ]
+  },
+  "beginResponse": {
+    "fields": [
+      { "name": "status", "bytes": 1 },
+      { "name": "resumeSectorOffset", "bytes": 4, "type": "u32le" }
+    ]
+  },
+  "stageRequest": {
+    "fields": [
+      { "name": "sectorIndex", "bytes": 4, "type": "u32le" },
+      { "name": "data", "bytes": 8192 },
+      { "name": "sectorCrc32", "bytes": 4, "type": "u32le" }
+    ]
+  },
+  "deleteRequest": {
+    "fields": [
+      { "name": "slot", "bytes": 2, "type": "u16le" },
+      { "name": "confirmToken", "bytes": 8 }
+    ]
+  },
+  "initRequest": {
+    "fields": [
+      { "name": "confirmToken", "bytes": 8 }
+    ]
+  }
+}
