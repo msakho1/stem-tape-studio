@@ -732,6 +732,30 @@ jobs:
             exit 1
           fi
           echo "capture present in VOLCAL, absent from the shipped image"
+          # THE TWO IMAGES MUST ANNOUNCE THEMSELVES DIFFERENTLY. The checks
+          # above prove the capture code is compiled into one BIN and not the
+          # other, which is a property of the FILES. It says nothing about
+          # whether an operator holding the hardware can tell which one they
+          # flashed. In st19 both printed "STEMTAPE BUILD st19", so the banner
+          # confirmed the console worked while leaving the actual question --
+          # which binary is running -- unanswered, and a mis-flash was
+          # indistinguishable from a broken capture. Assert the divergence.
+          # `|| true` on both: under `set -o pipefail` a grep that matches
+          # nothing (or a SIGPIPE from head) would abort the step before the
+          # explicit emptiness check below could report what actually went
+          # wrong. Let the check do the reporting.
+          SHIP_TAG="$(strings audit/stemtape_player.bin | grep -oE '^st[0-9]+(-VOLCAL)?$' | head -1 || true)"
+          CAL_TAG="$(strings audit/stemtape_player-VOLCAL.bin | grep -oE '^st[0-9]+(-VOLCAL)?$' | head -1 || true)"
+          echo "shipped build tag: ${SHIP_TAG:-<none>} / calibration build tag: ${CAL_TAG:-<none>}"
+          if [ -z "$SHIP_TAG" ] || [ -z "$CAL_TAG" ]; then
+            echo "FAIL: could not recover a build tag from both images"
+            exit 1
+          fi
+          if [ "$SHIP_TAG" = "$CAL_TAG" ]; then
+            echo "FAIL: both images announce the same build tag '${SHIP_TAG}'."
+            echo "The banner cannot tell the operator which image is running."
+            exit 1
+          fi
           {
             echo '### AIN1 calibration image'
             echo 'In the `stemtape-player-audit` artifact:'
@@ -739,9 +763,22 @@ jobs:
             echo ''
             echo "size ${SZ} B, sha256 \`${SH}\`"
             echo ''
-            echo 'Flash it, open the serial console, hold Volume- and Volume+'
-            echo 'together, and report the `VOLCAL raw=` value. The same build'
-            echo 'also prints the `STACK unused` line.'
+            echo "Boot banner: \`STEMTAPE BUILD ${CAL_TAG}\`"
+            echo "(the shipped image announces \`${SHIP_TAG}\` -- if you see"
+            echo 'that one, the wrong BIN is flashed and no VOLCAL line will'
+            echo 'ever appear.)'
+            echo ''
+            echo 'Every capture line begins with the literal prefix `VOLCAL `'
+            echo 'and they print continuously, ~4 per second, whether or not'
+            echo 'any button is pressed:'
+            echo ''
+            echo '```'
+            echo 'VOLCAL raw=163 set=163 lo=161 hi=163 dec=-1'
+            echo '```'
+            echo ''
+            echo 'Hold Volume- and Volume+ together; `hi` is then the chord'
+            echo 'value ST_VOL_CHORD_RAW needs. The same build also prints'
+            echo 'the `STACK unused` line.'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: RAM budget assertion (fail-closed)

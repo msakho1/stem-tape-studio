@@ -129,11 +129,22 @@
  * measurement is committed in docs/ladder-measured.json and src/st_ladder.c
  * decodes against it, so the capture has nothing left to do. A CI gate keeps
  * it from coming back. */
-#define ST_BUILD_TAG "st19"
 /* AIN1 calibration capture. OFF in every shipped image; a CI gate keeps it
  * that way, exactly as it does for the AIN0 capture. */
 #ifndef ST_VOL_CAL
 #define ST_VOL_CAL 0
+#endif
+/* THE BUILD TAG IS PART OF THE CALIBRATION IMAGE'S IDENTITY, deliberately.
+ * st19 printed the same "STEMTAPE BUILD st19" banner from both the shipped
+ * image and the calibration image, so seeing the banner proved the console
+ * worked but proved NOTHING about which of the two binaries was running --
+ * and "flashed the shipped image by mistake" is indistinguishable from "the
+ * capture is broken" when the capture prints nothing. The tag now carries
+ * the distinction, so the banner alone settles it. */
+#if ST_VOL_CAL
+#define ST_BUILD_TAG "st20-VOLCAL"
+#else
+#define ST_BUILD_TAG "st20"
 #endif
 #include "st_track_hold.h"
 #include "st_ladder.h"
@@ -7077,17 +7088,65 @@ int main(void)
 		int  st_vol_raw = ladder_read(&adc_ladder[LAD_VOL]);
 		enum vol_btn st_vraw = decode_vol(st_vol_raw);
 #if ST_VOL_CAL
-		/* AIN1 CALIBRATION CAPTURE. Temporary, exactly like the st16-cal
-		 * build that produced docs/ladder-measured.json for AIN0, and
-		 * removed the same way once the number is recorded. Prints the
-		 * raw rail whenever it moves, so pressing Volume- and Volume+
-		 * together shows the one value ST_VOL_CHORD_RAW needs. */
+		/* AIN1 CALIBRATION CAPTURE -- st20-VOLCAL images only. Temporary,
+		 * exactly like the st16-cal build that produced
+		 * docs/ladder-measured.json for AIN0, and removed the same way
+		 * once the number is recorded.
+		 *
+		 * PRINTS UNCONDITIONALLY, ON A FIXED ~250 ms CADENCE. The st19
+		 * version printed only when the rail moved more than 12 counts,
+		 * which collapsed four completely different failures into one
+		 * indistinguishable symptom -- silence: the wrong image flashed,
+		 * the console not carrying output, the buttons not reaching AIN1,
+		 * and the capture itself broken all looked identical from the
+		 * operator's side. A steady stream separates them. If no VOLCAL
+		 * line ever appears, the image or the console is wrong. If lines
+		 * appear and `raw` never moves while a button is held, that
+		 * button is not reaching this rail -- which is a hardware finding,
+		 * not a firmware one.
+		 *
+		 * NOT gated on DTR, unlike controls_diag() just above. That is
+		 * deliberate: whether output survives without an asserted DTR is
+		 * one of the things under test. feed_wdt() follows the print for
+		 * the same reason controls_diag()'s caller does it -- a slow
+		 * console write must never starve the watchdog.
+		 *
+		 * Every line begins with the literal "VOLCAL " so the whole
+		 * capture is one grep. Fields:
+		 *   raw  instantaneous ladder_read() of AIN1
+		 *   set  the SETTLED value: raw held within +/-8 counts for 6
+		 *        consecutive 8 ms passes (~48 ms), i.e. the plateau of a
+		 *        real press rather than a sample caught on the edge
+		 *   lo   lowest raw seen since boot (the resting rail)
+		 *   hi   highest raw seen since boot -- hold both Volume buttons
+		 *        and this is the chord value ST_VOL_CHORD_RAW needs,
+		 *        because parallel ladder resistors read HIGHER than
+		 *        either button alone
+		 *   dec  what decode_vol() currently returns (see enum vol_btn:
+		 *        -1 none, 0 tempo-, 1 vol-, 2 tempo+, 3 vol+, 4 both)
+		 */
 		{
-			static int last_cal = -9999;
+			static int64_t cal_next;
+			static int cal_ref = -9999, cal_set = -1;
+			static int cal_lo = 99999, cal_hi = -1;
+			static int cal_run;
 
-			if (st_vol_raw > last_cal + 12 || st_vol_raw < last_cal - 12) {
-				last_cal = st_vol_raw;
-				printk("VOLCAL raw=%d decode=%d\n", st_vol_raw, (int)st_vraw);
+			if (st_vol_raw < cal_lo) cal_lo = st_vol_raw;
+			if (st_vol_raw > cal_hi) cal_hi = st_vol_raw;
+
+			if (st_vol_raw <= cal_ref + 8 && st_vol_raw >= cal_ref - 8) {
+				if (++cal_run >= 6) cal_set = st_vol_raw;
+			} else {
+				cal_ref = st_vol_raw;
+				cal_run = 0;
+			}
+
+			if (now >= cal_next) {
+				cal_next = now + 250;
+				printk("VOLCAL raw=%d set=%d lo=%d hi=%d dec=%d\n",
+				       st_vol_raw, cal_set, cal_lo, cal_hi,
+				       (int)st_vraw);
+				feed_wdt();
 			}
 		}
 #endif
