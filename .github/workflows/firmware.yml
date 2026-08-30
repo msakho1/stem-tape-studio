@@ -806,8 +806,11 @@ jobs:
             echo '```'
             echo ''
             echo 'Hold Volume- and Volume+ together; `hi` is then the chord'
-            echo 'value ST_VOL_CHORD_RAW needs. The same build also prints'
-            echo 'the `STACK unused` line.'
+            echo 'value ST_VOL_CHORD_RAW needs.'
+            echo ''
+            echo 'This image prints NOTHING ELSE: the EMMC48/STEMIO/STEMRD/'
+            echo 'STEMRT/LOOPER/CPU/STACK status block is suppressed here so'
+            echo 'the capture is readable. Use the shipped image for those.'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: RAM budget assertion (fail-closed)

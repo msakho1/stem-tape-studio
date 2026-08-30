@@ -5636,6 +5636,17 @@ static uint32_t semitone_next(uint32_t sp, int dir)
 	return k_semi_q16[0];
 }
 
+/* Marked unused because the calibration image suppresses its ONE call site
+ * (see the control loop) and this would otherwise warn as an unused static.
+ * The body is still not dead weight there: Zephyr links with
+ * -ffunction-sections and --gc-sections, so an uncalled static is dropped
+ * from the image rather than carried in it.
+ *
+ * Spelled as the bare GCC attribute rather than Zephyr's __maybe_unused:
+ * nothing else in this tree uses that macro, so whether it reaches this
+ * translation unit is unverified, and the only way to find out would be a
+ * CI round. The attribute is unconditionally available on this toolchain. */
+static void controls_diag(void) __attribute__((unused));
 static void controls_diag(void)
 {
 	/* Stream one status line over USB-serial, but ONLY when a host has opened
@@ -7059,11 +7070,26 @@ int main(void)
 		/* Print one status line ~twice a second (the 500 ms gate below) for
 		 * monitoring. Only prints when a serial monitor is attached (DTR). */
 		int64_t now = k_uptime_get();
+#if ST_VOL_CAL
+		/* THE CALIBRATION IMAGE PRINTS NOTHING BUT ITS CAPTURE. The status
+		 * block is seven lines twice a second -- EMMC48, STEMIO, STEMRD,
+		 * STEMRT, LOOPER, CPU, STACK -- which buries the one line this build
+		 * exists to produce and makes the console unreadable in practice.
+		 * That is fine in a shipped image, where the block IS the point, and
+		 * useless here. Suppressed rather than throttled: a calibration image
+		 * has exactly one job.
+		 *
+		 * feed_wdt() is not needed in its place -- the loop already feeds the
+		 * watchdog at the top of every pass; the call inside the branch below
+		 * exists only because the diag print itself can be slow. */
+		(void)last_diag;
+#else
 		if (now - last_diag >= 500) {
 			last_diag = now;
 			controls_diag();
 			feed_wdt();      /* the diag print path can be slow; never starve the WDT */
 		}
+#endif
 
 		/* STEM TAPE: the USB feedback-format auto-negotiation watchdog
 		 * (UAC2-only) is REMOVED along with UAC2 itself -- see this
