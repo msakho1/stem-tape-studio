@@ -243,6 +243,35 @@ typedef struct {
 	bool      use_seam;
 } pump_t;
 
+/*
+ * ENGAGE and RELEASE. Neither moves the playhead -- that is the SP-1 transport
+ * contract, and it is why this file no longer measures an "entry seam" or an
+ * "exit seam": those transitions have no seam because nothing moves across
+ * them. The wrap is the only remaining discontinuity, and the only one this
+ * gate has any business measuring.
+ *
+ * tests/test_loop_transport_gate.c owns the proof that engage and release are
+ * position-preserving. This file owns the proof that the one real seam is
+ * inaudible.
+ */
+static void pump_enter(pump_t *p, uint32_t lo, uint32_t hi)
+{
+	p->in_loop = true;
+	p->lo = lo;
+	p->hi = hi;
+}
+
+static void pump_exit(pump_t *p)
+{
+	p->in_loop = false;
+	if (p->pend && p->pend_ev == 2) {
+		/* A wrap already ducking must not fire on a release. Reverse
+		 * the ramp where it is rather than snapping the gain. */
+		p->pend = false;
+		st_seam_cancel(&p->seam);
+	}
+}
+
 /* Ask for a jump. With the ducker engaged this arms the duck; without it the
  * jump happens on the very next frame, which is what st17 shipped. */
 static void pump_request(pump_t *p, uint32_t to, int ev)
@@ -341,12 +370,9 @@ static void run_loop(uint32_t at, uint32_t len, uint32_t laps, bool use_seam)
 		pump_frame(&p);
 	}
 
-	/* ENTRY: the gesture crosses its threshold; seek back to the captured
-	 * frame. The duck decides when. */
-	pump_request(&p, p.lo, 1);
-	while (p.pend) {
-		pump_frame(&p);
-	}
+	/* ENGAGE: the gesture crosses its threshold. The window comes into
+	 * force; the playhead is not touched. */
+	pump_enter(&p, p.lo, p.hi);
 
 	while (wraps < laps) {
 		pump_frame(&p);
@@ -355,12 +381,9 @@ static void run_loop(uint32_t at, uint32_t len, uint32_t laps, bool use_seam)
 		}
 	}
 
-	/* EXIT to loop_end, requested at an arbitrary moment -- deliberately
-	 * without waiting for the wrap duck to finish. */
-	pump_request(&p, p.hi, 3);
-	while (p.pend) {
-		pump_frame(&p);
-	}
+	/* RELEASE, at an arbitrary moment -- deliberately without waiting for a
+	 * wrap duck that may be in flight. Also does not touch the playhead. */
+	pump_exit(&p);
 	for (i = 0; i < 400u; i++) {
 		pump_frame(&p);
 	}
@@ -439,10 +462,17 @@ static void case_st17_reproduces_the_click(void)
 	printf("      entry %6d | wrap %6d | exit %6d"
 	       "   (local natural %6d, whole-fixture %6d)\n",
 	       g_raw_entry, g_raw_wrap, g_raw_exit, g_local, g_natural);
-	CHECK(g_raw_entry > 0 && g_raw_wrap > 0 && g_raw_exit > 0,
-	      "all three transitions produce a real step in the output -- the "
-	      "audible blip, reproduced on the host, with NO silent frame and NO "
-	      "repeated or skipped frame anywhere");
+	CHECK(g_raw_wrap > 0,
+	      "the WRAP produces a real step in the output -- the audible blip, "
+	      "reproduced on the host, with NO silent frame and NO repeated or "
+	      "skipped frame anywhere");
+	/* ENGAGE AND RELEASE PRODUCE NO STEP AT ALL, ducker or not, because
+	 * neither moves the playhead any more. They are not seams; there is
+	 * nothing to duck. Asserted rather than dropped, so that reintroducing
+	 * an entry or exit seek fails HERE as well as in the transport gate. */
+	CHECK(g_raw_entry == 0 && g_raw_exit == 0,
+	      "engage and release move nothing, so they produce no step "
+	      "(entry %d, exit %d)", g_raw_entry, g_raw_exit);
 }
 
 /* A seam must be at least this much smaller than the raw jump it replaces.
@@ -465,16 +495,13 @@ static void case_seam_removes_the_click(void)
 	x = step_at_events(3, &whr);
 	printf("      entry %6d | wrap %6d | exit %6d   (local natural %6d)\n",
 	       e, w, x, g_local);
-	printf("      improvement: entry %5.1fx | wrap %5.1fx | exit %5.1fx\n",
-	       (double)g_raw_entry / (e ? e : 1), (double)g_raw_wrap / (w ? w : 1),
-	       (double)g_raw_exit / (x ? x : 1));
+	printf("      improvement: wrap %5.1fx\n",
+	       (double)g_raw_wrap / (w ? w : 1));
 
-	CHECK(e <= g_local, "entry step %d is within the LOCAL natural step %d",
-	      e, g_local);
+	CHECK(e == 0 && x == 0,
+	      "engage and release still move nothing (entry %d, exit %d)", e, x);
 	CHECK(w <= g_local, "wrap step %d is within the LOCAL natural step %d",
 	      w, g_local);
-	CHECK(x <= g_local, "exit step %d is within the LOCAL natural step %d",
-	      x, g_local);
 	CHECK(e * SEAM_MIN_IMPROVEMENT <= g_raw_entry,
 	      "entry step shrank at least %dx (%d -> %d)", SEAM_MIN_IMPROVEMENT,
 	      g_raw_entry, e);
@@ -553,33 +580,50 @@ static void case_seam_across_geometry(void)
 	      "rather than assuming it does", cross);
 }
 
-static void case_exit_destination(void)
+static void case_exit_is_position_preserving(void)
 {
 	uint32_t len = 4u * ST11_FRAMES_PER_SECTOR + 137u;
 	uint32_t at  = 3u * ST11_FRAMES_PER_SECTOR + 291u;
-	uint32_t n, replayed = 0;
-	bool found = false;
+	uint32_t n, jumps = 0, last_wrap = 0;
 
 	g_cases++;
-	printf("\n-- The exit still lands on loop_end and replays nothing\n");
+	printf("\n-- The release lands nowhere: it leaves the playhead alone\n");
 	run_loop(at, len, 3, true);
 
-	for (n = 0; n < g_n; n++) {
-		if (g_em[n].event == 3) {
-			CHECK(g_em[n].frame == at + len,
-			      "the first post-loop frame is loop_end (%u)", at + len);
-			found = true;
-			break;
+	/* THIS REPLACES "the exit lands on loop_end and replays nothing".
+	 * That was the st_loop.h EXIT POSITION rule, and the product ruling
+	 * overturned it: a release may not move the playhead under any
+	 * circumstances. The consequence is accepted deliberately -- the rest
+	 * of the looped section plays once more before the song moves on --
+	 * because it is what "continue organically" means. What must be true
+	 * now is simply that NOTHING moves at the release. */
+	for (n = 1; n < g_n; n++) {
+		if (g_em[n].frame != g_em[n - 1].frame + 1u) {
+			jumps++;
+			CHECK(g_em[n].event == 2,
+			      "the only position changes are wraps (emit %u was "
+			      "event %d)", n, g_em[n].event);
+			last_wrap = n;
 		}
 	}
-	CHECK(found, "an exit occurred");
-	for (; n < g_n; n++) {
-		if (g_em[n].frame >= at && g_em[n].frame < at + len) {
-			replayed++;
-		}
+	CHECK(jumps > 0, "the loop did wrap (%u times)", jumps);
+
+	/* After the last wrap the run continues forward, through loop_end and
+	 * out into the song, with no further discontinuity. */
+	for (n = last_wrap + 1u; n < g_n; n++) {
+		CHECK(g_em[n].frame == g_em[n - 1].frame + 1u,
+		      "post-release playback is contiguous at emit %u (%u -> %u)",
+		      n, g_em[n - 1].frame, g_em[n].frame);
+		if (g_failures) break;
 	}
-	CHECK(replayed == 0,
-	      "no frame of the looped section is heard again after the exit");
+	/* And it moved FORWARD from wherever the release found it. Not "past
+	 * loop_end": run_loop() releases immediately after the final wrap and
+	 * then pumps a fixed 400 frames, which is far short of a whole lap, so
+	 * a past-loop_end assertion would be unsatisfiable by construction
+	 * rather than meaningful. What is meaningful is the direction. */
+	CHECK(g_em[g_n - 1].frame > g_em[last_wrap].frame,
+	      "playback ran forward after the release (%u -> %u)",
+	      g_em[last_wrap].frame, g_em[g_n - 1].frame);
 }
 
 /* ---------------------------------------------------------------------- *
@@ -606,11 +650,8 @@ static void run_blocked_x(uint32_t at, uint32_t len, uint32_t laps,
 	}
 	for (i = 0; i < BLK_FRAMES; i++) {
 		if (i == entry_off) {
-			pump_request(&p, p.lo, 1);
+			pump_enter(&p, p.lo, p.hi);
 		}
-		pump_frame(&p);
-	}
-	while (p.pend) {
 		pump_frame(&p);
 	}
 	while (wraps < laps) {
@@ -624,11 +665,8 @@ static void run_blocked_x(uint32_t at, uint32_t len, uint32_t laps,
 	}
 	for (i = 0; i < BLK_FRAMES; i++) {
 		if (i == exit_off) {
-			pump_request(&p, p.hi, 3);
+			pump_exit(&p);
 		}
-		pump_frame(&p);
-	}
-	while (p.pend) {
 		pump_frame(&p);
 	}
 	for (i = 0; i < 2u * BLK_FRAMES; i++) {
@@ -835,10 +873,7 @@ static void case_length_changes_while_looping(void)
 	for (i = 0; i < BLK_FRAMES; i++) {
 		pump_frame(&p);
 	}
-	pump_request(&p, p.lo, 1);
-	while (p.pend) {
-		pump_frame(&p);
-	}
+	pump_enter(&p, p.lo, p.hi);
 	/* run a while, then HALVE the window -- the playhead is now past hi */
 	for (i = 0; i < 6u * ST11_FRAMES_PER_SECTOR; i++) {
 		pump_frame(&p);
@@ -857,10 +892,7 @@ static void case_length_changes_while_looping(void)
 	for (i = 0; i < 8u * ST11_FRAMES_PER_SECTOR; i++) {
 		pump_frame(&p);
 	}
-	pump_request(&p, p.hi, 3);
-	while (p.pend) {
-		pump_frame(&p);
-	}
+	pump_exit(&p);
 	for (i = 0; i < BLK_FRAMES; i++) {
 		pump_frame(&p);
 	}
@@ -942,7 +974,7 @@ int main(void)
 	case_st17_reproduces_the_click();
 	case_seam_removes_the_click();
 	case_seam_across_geometry();
-	case_exit_destination();
+	case_exit_is_position_preserving();
 	case_request_at_every_block_offset();
 	case_many_consecutive_wraps();
 	case_length_changes_while_looping();

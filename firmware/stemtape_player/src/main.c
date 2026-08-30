@@ -151,9 +151,9 @@
  * failure that cost several rounds before the shipped/calibration tags were
  * split apart. The tag is the only thing the operator can read. */
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st22-VOLCAL"
+#define ST_BUILD_TAG "st23-VOLCAL"
 #else
-#define ST_BUILD_TAG "st22"
+#define ST_BUILD_TAG "st23"
 #endif
 #include "st_track_hold.h"
 #include "st_ladder.h"
@@ -1492,9 +1492,7 @@ static atomic_t g_stem_loop_start_fr  = ATOMIC_INIT(0);
 static atomic_t g_stem_loop_end_fr    = ATOMIC_INIT(0);
 /* THE entry seek: back to the frame where PLAY went down. */
 static atomic_t g_stem_loop_enter_req = ATOMIC_INIT(0);
-static atomic_t g_stem_loop_enter_fr  = ATOMIC_INIT(0);
 /* THE exit target: loop_end, the first frame after the looped section. */
-static atomic_t g_stem_loop_resume_fr = ATOMIC_INIT(0);
 static atomic_t g_stem_loop_exit_req  = ATOMIC_INIT(0);
 /* Latched vs momentary, for the LED marker only -- never a decision input. */
 static atomic_t g_stem_loop_latched  = ATOMIC_INIT(0);
@@ -1895,9 +1893,7 @@ __attribute__((optimize("O2")))
  * File scope rather than function-local so the song-reload path can clear a
  * jump armed against the song that is being replaced.
  */
-#define ST_SEAM_JUMP_ENTER 1u
 #define ST_SEAM_JUMP_WRAP  2u
-#define ST_SEAM_JUMP_EXIT  3u
 static st_seam_t s_stem_seam;
 
 /*
@@ -2278,24 +2274,26 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 			lp_on = false;   /* degenerate window: ignore it entirely */
 		}
 
-		/* ---- LOOP ENTRY: seek BACK to the captured frame ----------
-		 * The window opens where PLAY went DOWN, which is a whole hold
-		 * behind the playhead by now. One-shot, consumed with an atomic
-		 * clear, and taken before the exit test because a gesture can
-		 * only ever be in one of the two states. The pinned ENTRY
-		 * region already holds those sectors -- the streamer fetched
-		 * them while the hold was still in progress -- so the seek is
-		 * immediately followed by a hit, with no silence and no wait.
+		/* ---- LOOP ENTRY: THE TRANSPORT IS NOT TOUCHED -------------
+		 * Engaging the loop sets a boundary. It does not move the
+		 * playhead, at all.
 		 *
-		 * ARMED, not performed: the duck runs first (see the jump site
-		 * below). The request is still consumed here, exactly once. */
-		if (atomic_cas(&g_stem_loop_enter_req, 1, 0)) {
-			s_stem_jump_to   = (uint32_t)atomic_get(&g_stem_loop_enter_fr);
-			s_stem_jump_pend = ST_SEAM_JUMP_ENTER;
-			s_stem_seam_lo   = lp_lo;
-			s_stem_seam_hi   = lp_hi;
-			st_seam_begin(&s_stem_seam);
-		}
+		 * This REPLACES an entry seek back to the captured frame, which
+		 * is the defect the product ruling names directly. loop_start is
+		 * captured at PLAY-DOWN, so by the time the hold threshold makes
+		 * it a loop the playhead is a whole hold past it -- and seeking
+		 * back replayed every sample in between. On a vocal reading
+		 * "for me no", engaging during "me" produced "for me - me no":
+		 * the syllable audibly restarted. The SP-1 does not do that.
+		 * Loop state and transport position are separate concerns, and
+		 * only a boundary CROSSING may move the playhead.
+		 *
+		 * So the request is consumed and nothing else happens. The
+		 * window is already published (stem_ctl_apply set the bounds
+		 * before `active`), playback continues sample-for-sample from
+		 * wherever it is, and the first thing the player hears is
+		 * simply the song carrying on. The wrap below does the rest. */
+		(void)atomic_cas(&g_stem_loop_enter_req, 1, 0);
 
 		/* ---- LOOP EXIT, taken before anything else in the block ----
 		 * A one-shot request from the control thread. Consumed with an
@@ -2317,62 +2315,101 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 		 * ducker at all for exactly this case.
 		 */
 		if (atomic_cas(&g_stem_loop_exit_req, 1, 0)) {
-			s_stem_jump_to   = (uint32_t)atomic_get(&g_stem_loop_resume_fr);
-			s_stem_jump_pend = ST_SEAM_JUMP_EXIT;
-			/* stem_ctl_apply() clears g_stem_loop_active BEFORE it
-			 * raises this request, so lp_on is already false here.
-			 * The window has to stay in force until the jump, or the
-			 * ducking audio would run out of the loop and into the
-			 * material that follows -- audibly, and twice, since the
-			 * jump then replays it. Latched from the atomics rather
-			 * than from lp_lo/lp_hi for that reason. */
-			s_stem_seam_lo = (uint32_t)atomic_get(&g_stem_loop_start_fr);
-			s_stem_seam_hi = (uint32_t)atomic_get(&g_stem_loop_end_fr);
-			st_seam_begin(&s_stem_seam);
+			/* THE TRANSPORT IS NOT TOUCHED HERE EITHER. Releasing
+			 * stops future wrapping and nothing more: the iteration
+			 * already in flight plays on through the loop end and
+			 * into the material that follows, which is how playback
+			 * rejoins the song without a discontinuity.
+			 *
+			 * stem_ctl_apply() has already cleared g_stem_loop_active,
+			 * so lp_on is false and the wrap arm below can no longer
+			 * fire. That is the entire exit.
+			 *
+			 * THIS REVERSES A DOCUMENTED EARLIER DECISION, and the
+			 * reversal is deliberate: st_loop.h's "EXIT POSITION"
+			 * section resumes at loop_end so nothing already heard
+			 * repeats. The product ruling is that a release must not
+			 * move the playhead under any circumstances, which is
+			 * incompatible with that, and it wins. The accepted
+			 * consequence is that releasing part-way through an
+			 * iteration lets the rest of the looped section play once
+			 * more before the song moves on -- organically, with no
+			 * seam, which is the point.
+			 *
+			 * A WRAP MAY ALREADY BE DUCKING. Its duck arms
+			 * ST_SEAM_FRAMES before the boundary, so a release can
+			 * land inside it. That wrap must not fire -- it would be
+			 * a jump caused by releasing -- but the gain cannot snap
+			 * back either. st_seam_cancel() reverses the ramp at the
+			 * gain it has already reached. */
+			if (s_stem_jump_pend == ST_SEAM_JUMP_WRAP) {
+				s_stem_jump_pend = 0u;
+				st_seam_cancel(&s_stem_seam);
+			}
+			atomic_inc(&g_stem_loop_exits);
 		}
 
-		/* While a release is ducking, the loop is still the loop. */
-		if (s_stem_jump_pend == ST_SEAM_JUMP_EXIT &&
-		    s_stem_seam_hi > s_stem_seam_lo) {
-			lp_on = true;
-			lp_lo = s_stem_seam_lo;
-			lp_hi = s_stem_seam_hi;
+		/* ---- THE BOUNDARY THE PLAYHEAD IS ACTUALLY APPROACHING ----
+		 * WITH NO ENTRY SEEK, THE PLAYHEAD CAN START OUTSIDE THE
+		 * WINDOW, and that has to be handled or the loop silently never
+		 * engages.
+		 *
+		 * loop_start is captured at PLAY-DOWN and the loop only becomes
+		 * a loop once the hold threshold expires, so the playhead is
+		 * always some hundreds of ms past loop_start by then -- and if
+		 * the chosen division is SHORTER than that hold, it is already
+		 * past loop_end too. A test of "song_frame < lp_hi" would then
+		 * be false forever and nothing would ever wrap.
+		 *
+		 * The window is treated as PERIODIC from loop_start: the
+		 * boundary being approached is the first lp_lo + n*len strictly
+		 * above the playhead. That keeps the first lap on the musical
+		 * grid -- it ends a whole number of loop lengths after the
+		 * capture, never at an arbitrary offset -- and after the first
+		 * wrap the playhead is at lp_lo, so every later lap is exactly
+		 * one length. One division per block, not per frame. */
+		uint32_t lp_end = lp_hi;
+
+		if (lp_on) {
+			const uint32_t len = lp_hi - lp_lo;
+			const uint32_t pos = g_stem_stream.song_frame;
+
+			if (pos >= lp_hi) {
+				lp_end = lp_lo + ((pos - lp_lo) / len + 1u) * len;
+			}
 		}
 
 		/* ---- THE WRAP, ARMED BEFORE THE BOUNDARY ------------------
-		 * The wrap is the one transition known in advance, so its duck
-		 * starts ST_SEAM_FRAMES ahead of loop_end and the jump lands
-		 * exactly ON it. Arming at the boundary instead leaves the gain
-		 * near unity when the jump happens and removes almost none of
-		 * the step -- measured on the frozen fixture: 8753 armed at the
-		 * boundary, 176 armed ahead of it. The run clamp further down
-		 * guarantees the playhead lands on this frame rather than
-		 * stepping over it. */
+		 * The wrap is now the ONLY transition that moves the transport,
+		 * and it is the one the contract explicitly allows: the
+		 * playhead crossing loopEnd. Its duck starts ST_SEAM_FRAMES
+		 * ahead of the boundary and the jump lands exactly ON it.
+		 * Arming at the boundary instead leaves the gain near unity
+		 * when the jump happens and removes almost none of the step --
+		 * measured on the frozen fixture: 8753 armed at the boundary,
+		 * 176 armed ahead of it. The run clamp further down guarantees
+		 * the playhead lands on this frame rather than stepping over
+		 * it. */
 		if (lp_on && !s_stem_jump_pend &&
 		    g_stem_stream.song_frame >= lp_lo &&
-		    g_stem_stream.song_frame < lp_hi &&
-		    g_stem_stream.song_frame + ST_SEAM_FRAMES >= lp_hi) {
+		    g_stem_stream.song_frame < lp_end &&
+		    g_stem_stream.song_frame + ST_SEAM_FRAMES >= lp_end) {
 			s_stem_jump_to   = lp_lo;
 			s_stem_jump_pend = ST_SEAM_JUMP_WRAP;
 			s_stem_seam_lo   = lp_lo;
-			s_stem_seam_hi   = lp_hi;
+			s_stem_seam_hi   = lp_end;
 			st_seam_begin_in(&s_stem_seam,
-					  (uint16_t)(lp_hi - g_stem_stream.song_frame));
+					  (uint16_t)(lp_end - g_stem_stream.song_frame));
 		}
 
 		/* ---- THE JUMP, on the frame the gain actually reached zero -
 		 * Never after a fixed count. This is the whole contract of
-		 * st_seam.h and the one place it is honoured. */
+		 * st_seam.h and the one place it is honoured. WRAP is the only
+		 * kind that reaches here: entry and release no longer move the
+		 * transport at all. */
 		if (s_stem_jump_pend && st_seam_jump_due(&s_stem_seam)) {
-			bool moved = st_stream_seek(&g_stem_stream, s_stem_jump_to);
-
-			if (moved && s_stem_jump_pend == ST_SEAM_JUMP_WRAP) {
+			if (st_stream_seek(&g_stem_stream, s_stem_jump_to)) {
 				atomic_inc(&g_stem_loop_wraps);
-			} else if (moved && s_stem_jump_pend == ST_SEAM_JUMP_EXIT) {
-				atomic_inc(&g_stem_loop_exits);
-			}
-			if (s_stem_jump_pend == ST_SEAM_JUMP_EXIT) {
-				lp_on = false;   /* the window is done */
 			}
 			s_stem_jump_pend = 0u;
 		}
@@ -2495,8 +2532,8 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 		 * rendered is end-1 and the next one rendered is start, so no
 		 * frame is skipped and none is played twice. */
 		if (lp_on && g_stem_stream.song_frame >= lp_lo &&
-		    g_stem_stream.song_frame < lp_hi) {
-			uint32_t left_in_loop = lp_hi - g_stem_stream.song_frame;
+		    g_stem_stream.song_frame < lp_end) {
+			uint32_t left_in_loop = lp_end - g_stem_stream.song_frame;
 
 			if (run > left_in_loop) {
 				run = left_in_loop;
@@ -2511,8 +2548,8 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 			 * un-ducked jump. Clamping here costs one extra loop
 			 * iteration per lap and nothing else. */
 			if (!s_stem_jump_pend &&
-			    g_stem_stream.song_frame + ST_SEAM_FRAMES < lp_hi) {
-				uint32_t to_arm = lp_hi - ST_SEAM_FRAMES -
+			    g_stem_stream.song_frame + ST_SEAM_FRAMES < lp_end) {
+				uint32_t to_arm = lp_end - ST_SEAM_FRAMES -
 						  g_stem_stream.song_frame;
 
 				if (run > to_arm) {
@@ -2585,7 +2622,7 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 		 * sectors at loop_start_frame. That is the second reason the
 		 * pin exists: without it every wrap would race the streamer. */
 		if (lp_on && s_stem_jump_pend != ST_SEAM_JUMP_WRAP &&
-		    g_stem_stream.song_frame >= lp_hi && lp_hi > lp_lo) {
+		    g_stem_stream.song_frame >= lp_end && lp_end > lp_lo) {
 			if (st_stream_seek(&g_stem_stream, lp_lo)) {
 				atomic_inc(&g_stem_loop_wraps);
 			}
@@ -6355,22 +6392,24 @@ static void stem_ctl_apply(void)
 	if (o->loop_enter || o->loop_resize) {
 		atomic_set(&g_stem_loop_start_fr,  (atomic_val_t)o->loop_start);
 		atomic_set(&g_stem_loop_end_fr,    (atomic_val_t)o->loop_end);
-		atomic_set(&g_stem_loop_resume_fr, (atomic_val_t)o->loop_resume);
 		atomic_set(&g_stem_loop_active, 1);
 	}
 	if (o->loop_enter) {
-		/* THE ENTRY SEEK. Frame first, request last. */
-		atomic_set(&g_stem_loop_enter_fr, (atomic_val_t)o->loop_start);
+		/* NO ENTRY FRAME IS PUBLISHED. Entering does not move the
+		 * transport, so there is nothing to seek to; the request
+		 * survives only as the one-shot edge the audio thread consumes.
+		 * Publishing the window above IS the whole of entry. */
 		atomic_set(&g_stem_loop_enter_req, 1);
 	}
 	if (o->loop_latch) {
 		atomic_set(&g_stem_loop_latched, 1);
 	}
 	if (o->loop_exit) {
-		/* Mirror of entry: `active` cleared FIRST, then the one-shot
-		 * seek the audio thread consumes. The resume frame is written
-		 * before the request so it can never be read half-published. */
-		atomic_set(&g_stem_loop_resume_fr, (atomic_val_t)o->loop_resume);
+		/* Clearing `active` is the ENTIRE exit as far as the transport
+		 * is concerned: the wrap arm stops firing and the playhead runs
+		 * on through the loop end into the song. o->loop_resume is
+		 * deliberately NOT consumed -- see the exit block in the audio
+		 * thread for why a release may not move the playhead. */
 		atomic_set(&g_stem_loop_active, 0);
 		atomic_set(&g_stem_loop_latched, 0);
 		atomic_set(&g_stem_loop_exit_req, 1);

@@ -218,4 +218,32 @@ static inline bool st_seam_active(const st_seam_t *s)
 	return s->phase != ST_SEAM_IDLE;
 }
 
+/*
+ * ABORT A DUCK THAT IS NO LONGER GOING TO JUMP, without a step in the gain.
+ *
+ * The wrap arms its duck ST_SEAM_FRAMES BEFORE the loop end, so there is a
+ * window in which the gain is already on its way down and the jump has not
+ * happened yet. If the player releases the loop inside that window, the wrap
+ * must not fire -- releasing may not move the transport -- but the gain cannot
+ * simply be slammed back to unity either: that is a step, and a step is a
+ * click, which is the whole thing this ducker exists to prevent.
+ *
+ * Turning DOWN into UP at the SAME gain makes the ramp reverse where it is and
+ * walk back to unity over the remaining frames. Continuous by construction:
+ * DOWN at step k has gain (FRAMES-k)/FRAMES, and UP at step FRAMES-k has gain
+ * (FRAMES-k)/FRAMES -- the same value, so the frame after the cancel is the
+ * frame before it.
+ *
+ * Idempotent, and a no-op unless a duck is actually descending.
+ */
+static inline void st_seam_cancel(st_seam_t *s)
+{
+	if (s->phase == ST_SEAM_DOWN) {
+		uint16_t k = (s->step > ST_SEAM_FRAMES) ? ST_SEAM_FRAMES : s->step;
+
+		s->phase = ST_SEAM_UP;
+		s->step  = (uint16_t)(ST_SEAM_FRAMES - k);
+	}
+}
+
 #endif /* ST_SEAM_H_ */

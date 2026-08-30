@@ -1745,6 +1745,66 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Stem Tape LOOP TRANSPORT gate -- engage/release never move the playhead
+        # THE SP-1 LOOP CONTRACT, as a machine check. Engaging or releasing the
+        # loop changes the transport's RULES, never its POSITION; only the
+        # playhead crossing loopEnd may move it.
+        #
+        # WHAT THIS CAUGHT. The shipped loop seeked BACK to the captured frame
+        # on engage. loop_start is captured at PLAY-DOWN, so by the time the
+        # hold threshold made it a loop the playhead was a whole hold past it,
+        # and the seek replayed everything in between -- on a vocal reading
+        # "for me no", engaging during "me" gave "for me - me no", with the
+        # syllable audibly restarting. Release did the mirror, seeking forward
+        # to loop_end. Reported from hardware; both seeks are now gone.
+        #
+        # The assertions are on the EMITTED FRAME SEQUENCE, not on any internal
+        # flag, so an engine that merely believes it behaved cannot pass. The
+        # engage is swept over all 256 block offsets and the release over a
+        # whole lap, because both land wherever the player's finger lands --
+        # including inside the wrap's duck window, which is the case that used
+        # to fire a jump on release.
+        #
+        # It also covers the failure the missing entry seek could have
+        # introduced: with no seek the playhead can start OUTSIDE the window,
+        # and a loop shorter than the hold would otherwise never wrap at all --
+        # silence where a loop should be, which is worse than a click.
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          cc -std=c11 -Wall -Wextra -Werror -Ifirmware/stemtape_player/src \
+            firmware/stemtape_player/src/st_sector_v11.c \
+            firmware/stemtape_player/tests/test_loop_transport_gate.c \
+            -o audit/test_loop_transport_gate
+          ./audit/test_loop_transport_gate | tee audit/loop-transport.txt
+          grep -q 'LOOP TRANSPORT GATE PASSED' audit/loop-transport.txt
+          # PRODUCTION WIRING. The host gate models stem_audio_block()'s loop
+          # handling; that model is only worth something while production
+          # really has no entry or exit seek. Assert the seek kinds are gone
+          # from main.c entirely -- ST_SEAM_JUMP_WRAP must be the only one.
+          M=firmware/stemtape_player/src/main.c
+          for dead in ST_SEAM_JUMP_ENTER ST_SEAM_JUMP_EXIT g_stem_loop_resume_fr g_stem_loop_enter_fr; do
+            if grep -q "$dead" "$M"; then
+              echo "FAIL: $dead is back in main.c -- an entry or exit seek has returned"
+              grep -n "$dead" "$M"
+              exit 1
+            fi
+          done
+          NSEEK="$(grep -c 'st_stream_seek(&g_stem_stream' "$M" || true)"
+          echo "st_stream_seek call sites in the audio path: ${NSEEK}"
+          if [ "$NSEEK" -ne 2 ]; then
+            echo "FAIL: expected exactly 2 (the ducked wrap and its backstop), found ${NSEEK}"
+            grep -n 'st_stream_seek' "$M" || true
+            exit 1
+          fi
+          echo "loop transport: no entry seek, no exit seek, wrap is the only move"
+          {
+            echo '### Stem Tape loop transport'
+            echo '```text'
+            cat audit/loop-transport.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Stem Tape ladder classifier -- MEASURED bands, all 15 masks, no deadlock
         # src/st_ladder.c is THE classifier for the shared AIN0 rail: one
         # sample in, a settled Track mask or PLAY out. Linked into the real
