@@ -268,32 +268,53 @@ static void decide_fx(const st_led_inputs_t *in, st_led_frame_t *out)
 
 	all_dark(out);
 
+	const uint8_t active = (uint8_t)(in->fx_momentary | in->fx_latched);
+
+	/* THE TRACK ROW: a SOUNDING effect flashes fast, on the caller's
+	 * 1/16-note phase. Replaces an earlier solid-for-latched /
+	 * breathe-for-momentary split that was reported on hardware as no
+	 * indication at all: solid is indistinguishable from an ordinary lit
+	 * LED, and the breathe rode beat.envelope, which is dark for three
+	 * quarters of every beat and was itself flickering because the
+	 * momentary mask oscillated (fixed in main.c).
+	 *
+	 * Latched and momentary now look the SAME while sounding, deliberately:
+	 * what a player needs at a glance is which effects are ON, and the
+	 * difference between the two is already unmistakable from the hand --
+	 * one is a button being held. */
 	for (i = 0; i < ST_LED_TRACK_COUNT; i++) {
 		const uint8_t bit = (uint8_t)(1u << i);
 
-		if ((in->fx_latched & bit) != 0u) {
-			/* SOLID: still sounding when the finger is off, and it
-			 * survives the overlay closing. */
-			out->level[i] = ST_LED_MAX;
-		} else if ((in->fx_momentary & bit) != 0u) {
-			/* BREATHING on the shared beat envelope -- live, ends
-			 * when released. A momentary with no trustworthy tempo
-			 * still has to be visible, so it floors at half. */
-			out->level[i] = (env > 128u) ? env : 128u;
+		if ((active & bit) != 0u) {
+			out->level[i] = in->fx_flash_on ? ST_LED_MAX : 0u;
 		}
 	}
 
 	if (in->fx_global) {
 		/* The rack is on everything: the whole side row, dimmer than a
-		 * single selected stem so the two never read the same. */
+		 * single selected stem so the two never read the same. It
+		 * flashes with the Track row while anything is sounding, so
+		 * "which stems am I processing" answers itself. */
+		const uint8_t lvl = (active == 0u) ? 120u
+				    : (in->fx_flash_on ? 120u : 0u);
+
 		for (i = 0; i < ST_LED_SIDE_COUNT; i++) {
-			out->level[ST_LED_SIDE_FIRST + i] = 120u;
+			out->level[ST_LED_SIDE_FIRST + i] = lvl;
 		}
 	} else {
 		uint8_t t = (in->fx_target < ST_LED_SIDE_COUNT) ? in->fx_target : 0u;
 
-		out->level[ST_LED_SIDE_FIRST + t] = ST_LED_MAX;
+		/* THE TARGETED STEM. Steady while the overlay is open with
+		 * nothing sounding -- that steady light IS the "FX mode is
+		 * open" indication, and it must not be mistaken for an effect
+		 * -- then flashing in step with the Track row once an effect is
+		 * actually applied to it. */
+		out->level[ST_LED_SIDE_FIRST + t] =
+			(active == 0u) ? ST_LED_MAX
+				       : (in->fx_flash_on ? ST_LED_MAX : 0u);
 	}
+
+	(void)env;
 }
 
 static void decide_playing(const st_led_inputs_t *in, st_led_frame_t *out)

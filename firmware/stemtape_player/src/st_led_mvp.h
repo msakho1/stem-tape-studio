@@ -187,6 +187,17 @@ typedef struct {
 	uint8_t fx_target;      /* 0..3, meaningful in STEM scope only */
 	uint8_t fx_momentary;   /* bit per effect, button order */
 	uint8_t fx_latched;     /* bit per effect, button order */
+	/* THE FAST FLASH PHASE, on/off, for effects that are actually sounding.
+	 * Supplied by the caller as a boolean for exactly the reason the
+	 * charging blink is (see that note above): this layer is pure and owns
+	 * no clock, and the LED contract forbids a second free-running one.
+	 *
+	 * main.c derives it from the SAME song_frame and the SAME beat timing
+	 * that produce beat.envelope, at a 1/16-note rate, so the flash is
+	 * locked to the music rather than free-running against it. With no
+	 * trustworthy tempo the caller holds it true, which renders an active
+	 * effect as SOLID -- visible and honest -- instead of inventing a grid. */
+	bool    fx_flash_on;
 
 	/* Per-stem output activity, 0..255. SCALES the shared beat pulse; it
 	 * never gates or times anything. */

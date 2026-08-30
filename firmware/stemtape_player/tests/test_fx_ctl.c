@@ -526,6 +526,76 @@ static void case_boot_default(void)
 	      "STEM scope, stem 0");
 }
 
+
+/* ======================================================================
+ * THE REGRESSION THAT KILLED MASTER VOLUME ON HARDWARE.
+ *
+ * An ordinary Volume press must be RELEASED back to the rail once the
+ * arrival window has ruled out a chord. The overlay used to keep claiming it
+ * for as long as the button was down, in every non-IDLE state including
+ * SINGLE. main.c honours vol_*_consumed by zeroing its own reading, so every
+ * volume press was swallowed: the level never moved off the 45/256 power-on
+ * default and the device simply sounded quiet.
+ *
+ * The vol_*_fire edge could not rescue it -- main.c debounces the rail over
+ * three passes and repeats on hold, and a one-pass pulse survives neither.
+ *
+ * These assertions are about CONSUMPTION OVER TIME, which is exactly what
+ * the existing single-button case did not check: it verified the fire edge
+ * and stopped there.
+ * ====================================================================== */
+static void case_ordinary_volume_is_released(void)
+{
+	drv_t d;
+	int held_and_claimed = 0;
+	int i;
+
+	g_cases++;
+	printf("\n-- an ordinary Volume press is handed back after the window\n");
+
+	drv_init(&d);
+	d.in.vol_plus_down = true;
+	step(&d, 10u);
+	CHECK(d.out.vol_plus_consumed,
+	      "inside the arrival window it IS claimed -- the chord is still possible");
+
+	/* Run past the window and keep holding, as a player does. */
+	settle(&d, ST_FX_CHORD_ARRIVAL_MS + 40u);
+	CHECK(!d.out.vol_plus_consumed,
+	      "once the window expires the press is released to master volume");
+
+	for (i = 0; i < 40; i++) {           /* ~400 ms of continued hold */
+		step(&d, 10u);
+		if (d.out.vol_plus_consumed) held_and_claimed++;
+	}
+	CHECK(held_and_claimed == 0,
+	      "and stays released for the whole hold, so hold-to-repeat works "
+	      "(%d of 40 passes still claimed it)", held_and_claimed);
+
+	/* Same for Volume-, and it must not have opened the overlay. */
+	drv_init(&d);
+	d.in.vol_minus_down = true;
+	settle(&d, ST_FX_CHORD_ARRIVAL_MS + 40u);
+	CHECK(!d.out.vol_minus_consumed, "Volume- is released the same way");
+	CHECK(!d.out.fx_open, "and a single button never opens the overlay");
+	CHECK(d.opens == 0, "no open edge was emitted");
+
+	/* THE CLAIM THAT MUST SURVIVE: a real two-button chord is still held
+	 * for the whole gesture, so entering FX never nudges the volume. */
+	drv_init(&d);
+	d.in.vol_minus_down = true;
+	step(&d, 10u);
+	d.in.vol_plus_down = true;
+	step(&d, 10u);
+	settle(&d, 300u);
+	CHECK(d.out.vol_minus_consumed && d.out.vol_plus_consumed,
+	      "a genuine chord keeps BOTH buttons claimed while it is held");
+	d.in.vol_minus_down = false;
+	d.in.vol_plus_down = false;
+	step(&d, 10u);
+	CHECK(d.opens == 1, "and it opened the overlay exactly once");
+}
+
 int main(void)
 {
 	printf("== Stem Tape FX CONTROL OVERLAY ==\n");
@@ -539,6 +609,7 @@ int main(void)
 	case_enter_plus_first();
 	case_same_scan();
 	case_single_button();
+	case_ordinary_volume_is_released();
 	case_arrival_too_wide();
 	case_held_chord();
 	case_bounce();

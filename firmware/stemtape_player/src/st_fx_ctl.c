@@ -141,10 +141,28 @@ static void chord_service(st_fx_ctl_t *s, const st_fx_in_t *in, st_fx_out_t *out
 		break;
 	}
 
-	/* Whatever the outcome, a Volume button that is down while the chord
-	 * machine owns it is claimed: no master-volume step may leak. The two
-	 * fire flags above are the only way an ordinary volume action escapes. */
-	if (s->chord != ST_FX_CHORD_IDLE) {
+	/* A Volume button that is down while the chord machine is STILL DECIDING
+	 * is claimed, so no master-volume step leaks out of a gesture that might
+	 * yet turn out to be the overlay chord.
+	 *
+	 * SINGLE IS NOT SUCH A STATE, and excluding it is a bug fix, not a
+	 * relaxation. SINGLE means the arrival window has already expired with
+	 * one button down: the chord has been RULED OUT and this is an ordinary
+	 * volume press. Consuming it here left master volume permanently dead on
+	 * hardware -- every press was swallowed, the level stayed at the 45/256
+	 * power-on default (about 18%), and the device just sounded quiet.
+	 *
+	 * The vol_*_fire flags were meant to be how an ordinary press escapes,
+	 * but a one-pass pulse cannot survive main.c's 3-pass volume debounce
+	 * and would lose hold-to-repeat entirely. Releasing the rail instead
+	 * lets the existing, proven volume path see the press exactly as it did
+	 * before this overlay existed, debounce and repeat included. The cost is
+	 * that master volume responds one arrival window (120 ms) after the
+	 * press, which is inherent to putting a chord gesture on these buttons.
+	 *
+	 * target_service() below re-asserts consumption for the FUNCTION+Volume
+	 * stem walk, which IS the overlay's press to keep. */
+	if (s->chord != ST_FX_CHORD_IDLE && s->chord != ST_FX_CHORD_SINGLE) {
 		if (m) out->vol_minus_consumed = true;
 		if (p) out->vol_plus_consumed = true;
 	}

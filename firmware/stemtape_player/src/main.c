@@ -151,9 +151,9 @@
  * failure that cost several rounds before the shipped/calibration tags were
  * split apart. The tag is the only thing the operator can read. */
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st21-VOLCAL"
+#define ST_BUILD_TAG "st22-VOLCAL"
 #else
-#define ST_BUILD_TAG "st21"
+#define ST_BUILD_TAG "st22"
 #endif
 #include "st_track_hold.h"
 #include "st_ladder.h"
@@ -6277,6 +6277,26 @@ static void led_service(void)
 	in.fx_target    = g_stem_fx_out.target_stem;
 	in.fx_momentary = g_stem_fx_out.momentary_mask;
 	in.fx_latched   = g_stem_fx_out.latch_mask;
+	/* THE FAST FLASH PHASE. 1/16 notes, square, from the SAME song frame
+	 * and the SAME beat timing st_beat_pulse() above already used -- no
+	 * second clock, which the LED contract forbids and which would drift
+	 * against the music anyway. At 120 BPM that is 8 flashes a second.
+	 *
+	 * Fails closed to SOLID: with no trustworthy tempo (frames_per_beat 0,
+	 * the same condition st_beat_pulse() fails on) an active effect stays
+	 * lit rather than inventing a grid to flash on. */
+	{
+		const uint32_t fpb = g_stem_beat_timing.frames_per_beat;
+
+		if (fpb >= 4u) {
+			const uint32_t cell = fpb / 4u;   /* 1/16 note */
+			const uint32_t pos  = (uint32_t)atomic_get(&g_stem_song_frame_pub);
+
+			in.fx_flash_on = ((pos % cell) * 2u) < cell;
+		} else {
+			in.fx_flash_on = true;
+		}
+	}
 
 	/* ---- per-stem activity, and the immediate momentary solo ---------- */
 	if (in.song_selected) {
@@ -6995,6 +7015,32 @@ int main(void)
 	int64_t cp_dcl_t = 0;            /*   when it committed */
 	uint8_t ctl_flush = 0;      /* looper decode state went stale (FUNCTION page / USB transfer owned the loop) */
 	int64_t last_diag = 0;      /* throttle the control read-out */
+	/* THE FX OVERLAY'S OWN TRACK LADDER. It cannot share st_ctl's, and this
+	 * is a real bug fix, not duplication.
+	 *
+	 * The overlay used to take its held-Track mask from
+	 * g_stem_ctl_out.track_mask, which st_ctl_service() derives from the
+	 * ladder value main.c hands it -- and main.c ZEROES that value on any
+	 * pass the overlay claims a Track. So: overlay claims T1 -> the
+	 * dispatcher is fed 0 -> track_mask settles to 0 -> on the next pass the
+	 * overlay reads 0 and sees the button RELEASED -> the momentary bit
+	 * drops -> nothing is claimed -> the real reading returns -> the bit is
+	 * set again. The effect oscillated on and off every few 8 ms passes.
+	 *
+	 * Physically that is not "an effect": it is the source being chopped at
+	 * ~30-60 Hz, which sounds much the same whichever effect is underneath
+	 * it -- exactly the reported "all of the effects sound the same". It
+	 * also made the momentary LED mask flicker, so the lights could not
+	 * settle either.
+	 *
+	 * Fixed by giving the overlay a ladder of its own, fed the TRUE raw
+	 * reading every pass, before and regardless of any consumption. Same
+	 * proven decoder, same measured bands; only the input is honest. The
+	 * dispatcher keeps being fed the zeroed value, which is what stops a
+	 * claimed Track from also soloing. */
+	st_ladder_t fx_track_ladder;
+
+	st_ladder_reset(&fx_track_ladder);
 
 	while (1) {
 		feed_wdt();
@@ -7064,6 +7110,11 @@ int main(void)
 		int  st_trk_raw = ladder_read(&adc_ladder[LAD_TRACKS]);
 		int  st_vol_raw = ladder_read(&adc_ladder[LAD_VOL]);
 		enum vol_btn st_vraw = st_vol_decode(st_vol_raw);
+
+		/* Tick the overlay's ladder on the TRUE reading, here, before
+		 * anything can zero st_trk_raw. See its declaration for why the
+		 * overlay cannot read the dispatcher's mask instead. */
+		st_ladder_update(&fx_track_ladder, st_trk_raw);
 #if ST_VOL_CAL
 		/* AIN1 CALIBRATION CAPTURE -- st20-VOLCAL images only. Temporary,
 		 * exactly like the st16-cal build that produced
@@ -7148,7 +7199,12 @@ int main(void)
 			fi.vol_minus_down = chord || (st_vraw == VOL_DOWN);
 			fi.vol_plus_down  = chord || (st_vraw == VOL_UP);
 			fi.function_down  = pwr_pressed();
-			fi.track_down     = g_stem_ctl_out.track_mask;
+			/* From the overlay's OWN ladder, fed the true raw above.
+			 * NOT g_stem_ctl_out.track_mask: that is derived from the
+			 * value this block zeroes a few lines further down, which
+			 * fed the release/re-press oscillation described where
+			 * fx_track_ladder is declared. */
+			fi.track_down     = st_ladder_mask(&fx_track_ladder);
 			fi.now_ms         = (uint32_t)k_uptime_get();
 
 			st_fx_ctl_service(&g_stem_fx_ctl, &fi, &g_stem_fx_out);

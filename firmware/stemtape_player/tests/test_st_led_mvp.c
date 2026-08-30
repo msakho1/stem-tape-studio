@@ -478,15 +478,16 @@ static void case_fx_overlay(void)
 	g_cases++;
 	printf("\n-- FX overlay: track row = effects, side row = where the rack is\n");
 
-	/* STEM scope, one latched effect. */
+	/* STEM scope, one latched effect, flash phase ON. */
 	make_playing(&in, 1u * fpb + (fpb * 3u) / 4u, 200u);
 	in.fx_open = true;
 	in.fx_global = false;
 	in.fx_target = 2u;                       /* Bass */
 	in.fx_latched = 1u << 0;                 /* T1 Filter */
+	in.fx_flash_on = true;
 	st_led_mvp_decide(&in, &f);
-	show("FX stem scope, Filter latched, target Bass", &f);
-	CHECK(f.level[0] == ST_LED_MAX, "T1 SOLID for a latched effect");
+	show("FX stem scope, Filter latched, flash ON, target Bass", &f);
+	CHECK(f.level[0] == ST_LED_MAX, "T1 lit on the flash's ON phase");
 	CHECK(f.level[1] == 0u && f.level[2] == 0u && f.level[3] == 0u,
 	      "and the other three effects are dark");
 	CHECK(f.level[ST_LED_SIDE_FIRST + 2] == ST_LED_MAX,
@@ -497,22 +498,68 @@ static void case_fx_overlay(void)
 	}
 	CHECK(lit == 1, "and ONLY that one -- a single stem reads as a single light");
 
-	/* Momentary is distinguishable from latched. */
+	/* THE FLASH ACTUALLY FLASHES. The reported hardware symptom was "no LED
+	 * indication" while using an effect, so the assertion that matters is
+	 * that the two phases DIFFER -- a steady light is the failure. */
+	{
+		st_led_frame_t on_f, off_f;
+
+		make_playing(&in, 1u * fpb + (fpb * 3u) / 4u, 200u);
+		in.fx_open = true;
+		in.fx_target = 1u;
+		in.fx_momentary = 1u << 1;           /* T2 held */
+		in.fx_flash_on = true;
+		st_led_mvp_decide(&in, &on_f);
+		in.fx_flash_on = false;
+		st_led_mvp_decide(&in, &off_f);
+		show("FX flash ON ", &on_f);
+		show("FX flash OFF", &off_f);
+		CHECK(on_f.level[1] == ST_LED_MAX, "the held effect is full on the ON phase");
+		CHECK(off_f.level[1] == 0u, "and dark on the OFF phase -- it flashes");
+		CHECK(on_f.level[ST_LED_SIDE_FIRST + 1] != off_f.level[ST_LED_SIDE_FIRST + 1],
+		      "the stem being processed flashes in step with it");
+	}
+
+	/* A SOUNDING EFFECT NEVER SITS STEADY, whatever the beat envelope is
+	 * doing. The previous design rode beat.envelope, which is dark for three
+	 * quarters of every beat, and read as "nothing is happening". */
+	{
+		uint32_t k;
+		int steady = 0;
+
+		for (k = 0; k < 8u; k++) {
+			st_led_frame_t a, b;
+
+			make_playing(&in, 1u * fpb + (fpb * k) / 8u, 200u);
+			in.fx_open = true;
+			in.fx_latched = 1u << 3;
+			in.fx_flash_on = true;
+			st_led_mvp_decide(&in, &a);
+			in.fx_flash_on = false;
+			st_led_mvp_decide(&in, &b);
+			if (a.level[3] == b.level[3]) steady++;
+		}
+		CHECK(steady == 0,
+		      "at no beat phase does an active effect render the same on "
+		      "both flash phases (%d of 8 were steady)", steady);
+	}
+
+	/* Latched and momentary read the SAME while sounding -- deliberate, and
+	 * asserted so it cannot drift back by accident. */
 	make_playing(&in, 1u * fpb + (fpb / ST_BEAT_PULSE_DEN) / 2u, 200u);
 	in.fx_open = true;
 	in.fx_target = 0u;
 	in.fx_latched = 1u << 2;                 /* T3 latched */
 	in.fx_momentary = 1u << 1;               /* T2 held */
+	in.fx_flash_on = true;
 	st_led_mvp_decide(&in, &f);
-	show("FX: T3 latched, T2 momentary", &f);
-	CHECK(f.level[2] == ST_LED_MAX, "the latched effect is at full");
-	CHECK(f.level[1] > 0u, "the momentary one is lit");
-	CHECK(f.level[1] != f.level[2] || in.beat.envelope == ST_LED_MAX,
-	      "and breathes rather than sitting solid, so the two are "
-	      "distinguishable at a glance");
+	show("FX: T3 latched, T2 momentary, flash ON", &f);
+	CHECK(f.level[2] == ST_LED_MAX, "the latched effect is lit");
+	CHECK(f.level[1] == ST_LED_MAX, "the momentary one is lit the same way");
 	CHECK(f.level[0] == 0u && f.level[3] == 0u, "the untouched effects stay dark");
 
-	/* A momentary with no trustworthy tempo must still be visible. */
+	/* NO TEMPO: the caller holds the phase true, so an active effect is
+	 * SOLID rather than invisible. Nothing here invents a grid. */
 	{
 		st_beat_timing_t bad;
 
@@ -521,11 +568,34 @@ static void case_fx_overlay(void)
 		in.playing = true;
 		in.fx_open = true;
 		in.fx_momentary = 1u << 3;
+		in.fx_flash_on = true;               /* main.c's fail-closed value */
 		(void)st_beat_timing_init(&bad, 0u, 0u, 48000u);
 		st_beat_pulse(&bad, 999u, &in.beat);
 		st_led_mvp_decide(&in, &f);
-		CHECK(f.level[3] >= 128u,
-		      "a held effect is visible even with no tempo to breathe on");
+		CHECK(f.level[3] == ST_LED_MAX,
+		      "a held effect is fully visible even with no tempo to flash on");
+	}
+
+	/* OVERLAY OPEN, NOTHING SOUNDING: the target sits STEADY. That steady
+	 * light is the "FX mode is open" indication and must not be confused
+	 * with an effect, so it must NOT depend on the flash phase. */
+	{
+		st_led_frame_t on_f, off_f;
+
+		make_playing(&in, 1u * fpb + (fpb * 3u) / 4u, 200u);
+		in.fx_open = true;
+		in.fx_target = 3u;
+		in.fx_flash_on = true;
+		st_led_mvp_decide(&in, &on_f);
+		in.fx_flash_on = false;
+		st_led_mvp_decide(&in, &off_f);
+		CHECK(on_f.level[ST_LED_SIDE_FIRST + 3] == ST_LED_MAX &&
+		      off_f.level[ST_LED_SIDE_FIRST + 3] == ST_LED_MAX,
+		      "an open overlay with no effect shows a STEADY target light");
+		for (i = 0; i < (int)ST_LED_TRACK_COUNT; i++) {
+			CHECK(on_f.level[i] == 0u,
+			      "and no effect LED is lit when none is active (T%d)", i + 1);
+		}
 	}
 
 	/* GLOBAL scope lights the whole side row, and not like a single stem. */
@@ -533,10 +603,11 @@ static void case_fx_overlay(void)
 	in.fx_open = true;
 	in.fx_global = true;
 	in.fx_latched = 0x0Fu;                   /* all four latched */
+	in.fx_flash_on = true;
 	st_led_mvp_decide(&in, &f);
-	show("FX global scope, all four latched", &f);
+	show("FX global scope, all four latched, flash ON", &f);
 	for (i = 0; i < (int)ST_LED_TRACK_COUNT; i++) {
-		CHECK(f.level[i] == ST_LED_MAX, "T%d solid", i + 1);
+		CHECK(f.level[i] == ST_LED_MAX, "T%d lit", i + 1);
 	}
 	lit = 0;
 	for (i = 0; i < (int)ST_LED_SIDE_COUNT; i++) {
@@ -551,6 +622,7 @@ static void case_fx_overlay(void)
 	make_playing(&in, 1u * fpb + (fpb * 3u) / 4u, 200u);
 	in.fx_open = true;
 	in.fx_latched = 1u << 0;
+	in.fx_flash_on = true;
 	in.solo_mask = 0x0Fu;                    /* would light all four */
 	st_led_mvp_decide(&in, &f);
 	CHECK(f.level[1] == 0u && f.level[2] == 0u && f.level[3] == 0u,
@@ -564,6 +636,7 @@ static void case_fx_overlay(void)
 		in.loop_state = ST_LED_LOOP_LATCHED;
 		in.fx_open = true;
 		in.fx_latched = 1u << 0;
+		in.fx_flash_on = true;
 		st_led_mvp_decide(&in, &open_f);
 
 		in.fx_open = false;
