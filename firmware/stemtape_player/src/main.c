@@ -151,15 +151,17 @@
  * failure that cost several rounds before the shipped/calibration tags were
  * split apart. The tag is the only thing the operator can read. */
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st24-VOLCAL"
+#define ST_BUILD_TAG "st25-VOLCAL"
 #else
-#define ST_BUILD_TAG "st24"
+#define ST_BUILD_TAG "st25"
 #endif
 #include "st_track_hold.h"
 #include "st_ladder.h"
 #include "st_vol_ladder.h"
 #include "st_latency.h"
 #include "st_seam.h"
+#include "st_inertia.h"
+#include "st_resample.h"
 #include "st_fx.h"
 #include "st_fx_ctl.h"
 #include "st_ctl.h"
@@ -1897,6 +1899,23 @@ __attribute__((optimize("O2")))
 static st_seam_t s_stem_seam;
 
 /*
+ * THE RESAMPLER'S ONE FRAME OF MEMORY. Audio-thread-exclusive, like the seam:
+ * the source frame BEHIND the cursor, which the variable-rate reader blends
+ * with the frame AT the cursor. Thirty-two bytes and no buffer.
+ *
+ * It is invalidated wherever the playhead is moved rather than advanced -- a
+ * loop wrap, an exit, a song reload -- because the frame behind the cursor is
+ * then a frame from somewhere else entirely, and blending across that would be
+ * the discontinuity the seam exists to prevent. Invalid simply means "start
+ * from the frame at the cursor", which costs one frame of hold at a seam whose
+ * gain is already ducked to zero.
+ */
+static st11_audio_frame_t s_rs_prev;
+static bool               s_rs_prev_valid;
+static uint32_t           s_stem_rate_frac;   /* cursor fraction, Q16 [0,1) */
+static st_inertia_t       s_stem_inertia;
+
+/*
  * THE ONE FX RACK. One instance, ~36 KiB, of which 36,000 B is the single
  * echo delay line. There is deliberately no per-stem array: STEM scope points
  * this rack at s_fx_target, GLOBAL scope inserts the same rack after the mix,
@@ -1925,23 +1944,83 @@ static uint8_t   s_stem_jump_pend;   /* 0 none, else ST_SEAM_JUMP_* */
  * symbol gate requires this name exactly, and an anchored nm grep does not
  * match a .constprop/.isra clone suffix. */
 __attribute__((optimize("O2"), noinline, noclone))
-static void stem_render_run(const uint8_t *buf, uint32_t frame_in_sector,
+static uint32_t stem_render_run(const uint8_t *buf, uint32_t frame_in_sector,
 			     const st_stem_mix_prepared_t *prep,
 			     int32_t m0, int32_t md, int32_t mv,
 			     uint32_t f0, uint32_t n, int16_t *s,
 			     uint32_t peak[ST11_STEM_COUNT],
-			     st_seam_t *seam, uint32_t song_frame)
+			     st_seam_t *seam, uint32_t song_frame,
+			     uint32_t rate_q16, uint32_t *frac_io)
 {
 	/* Hoisted out of the 48 kHz loop: with the overlay never opened this is
 	 * false and the whole rack costs one test per block. */
 	const bool fx_on = st_fx_running(&g_stem_fx);
+	/*
+	 * THE TRANSPORT IS AT NOMINAL SPEED almost always -- inertia bends it
+	 * only for the few hundred milliseconds of a spin-up or spin-down. That
+	 * case is hoisted to one test per block and takes the decode call this
+	 * function has always made, with the argument it has always passed, so
+	 * ordinary playback is bit-identical to a build without inertia and the
+	 * full-playback gate's output hash still holds.
+	 */
+	const bool unity = (rate_q16 == ST_RS_ONE) && (*frac_io == 0u);
+	uint32_t frac = *frac_io;
+	uint32_t cur = 0u;              /* source frames consumed within this run */
 
 	for (uint32_t k = 0; k < n; k++) {
 		const uint32_t f = f0 + k;
 		st11_audio_frame_t frame;
 		int16_t stem_l, stem_r;
 
-		st11_sector_decode_frame(buf, frame_in_sector + k, &frame);
+		if (unity) {
+			st11_sector_decode_frame(buf, frame_in_sector + k, &frame);
+			cur = k;   /* at 1x source and output are the same count */
+		} else {
+			/*
+			 * VARIABLE RATE. The output frame sits between the
+			 * source frame BEHIND the cursor and the one AT it, and
+			 * is a straight linear blend of the two. Backward-
+			 * looking on purpose: a forward reader would need the
+			 * frame after the cursor, which at the end of a run
+			 * lives in a sector that is not resident. The frame
+			 * behind is one this loop already decoded and kept.
+			 *
+			 * PITCH AND TIME ARE THE SAME THING HERE. Nothing
+			 * corrects the pitch, because the position advancing at
+			 * `rate_q16` IS the pitch change -- reading the tape
+			 * slowly is what makes it sound slow. There is no
+			 * time-stretch anywhere in this path.
+			 */
+			st11_audio_frame_t nxt;
+
+			st11_sector_decode_frame(buf, frame_in_sector + cur, &nxt);
+			if (!s_rs_prev_valid) {
+				s_rs_prev = nxt;
+				s_rs_prev_valid = true;
+			}
+			for (uint32_t sp = 0; sp < ST11_STEM_COUNT; sp++) {
+				const int32_t pl = s_rs_prev.stem_l[sp];
+				const int32_t pr = s_rs_prev.stem_r[sp];
+
+				frame.stem_l[sp] = pl +
+					(int32_t)(((int64_t)(nxt.stem_l[sp] - pl) *
+						    (int32_t)frac) >> 16);
+				frame.stem_r[sp] = pr +
+					(int32_t)(((int64_t)(nxt.stem_r[sp] - pr) *
+						    (int32_t)frac) >> 16);
+			}
+			/* Advance the cursor by one output frame's worth of
+			 * source. The rate is clamped to 1x upstream, so this
+			 * crosses at most one source frame and the frame it
+			 * leaves behind is the one just decoded -- no skipped
+			 * frame ever has to be fetched. */
+			frac += rate_q16;
+			if (frac >= ST_RS_ONE) {
+				frac -= ST_RS_ONE;
+				s_rs_prev = nxt;
+				cur++;
+			}
+		}
 
 		/* ---- THE FX RACK, STEM SCOPE ------------------------------
 		 * Before the mix, so it lands where the contract puts it:
@@ -1954,7 +2033,7 @@ static void stem_render_run(const uint8_t *buf, uint32_t frame_in_sector,
 			int32_t fl = frame.stem_l[s_fx_target];
 			int32_t fr = frame.stem_r[s_fx_target];
 
-			st_fx_process(&g_stem_fx, &fl, &fr, song_frame + k);
+			st_fx_process(&g_stem_fx, &fl, &fr, song_frame + cur);
 			frame.stem_l[s_fx_target] = fl;
 			frame.stem_r[s_fx_target] = fr;
 		}
@@ -2008,7 +2087,7 @@ static void stem_render_run(const uint8_t *buf, uint32_t frame_in_sector,
 			int32_t gl = (int32_t)stem_l << 8;
 			int32_t gr = (int32_t)stem_r << 8;
 
-			st_fx_process(&g_stem_fx, &gl, &gr, song_frame + k);
+			st_fx_process(&g_stem_fx, &gl, &gr, song_frame + cur);
 			gl >>= 8;
 			gr >>= 8;
 			if (gl > INT16_MAX) gl = INT16_MAX;
@@ -2034,6 +2113,16 @@ static void stem_render_run(const uint8_t *buf, uint32_t frame_in_sector,
 		}
 		st_seam_tick(seam);
 	}
+
+	/* The SOURCE frames this run actually consumed, which is what the
+	 * stream must be advanced by. Reported rather than recomputed by the
+	 * caller: two derivations of the same count is exactly how a playhead
+	 * and the audio it reads drift apart. */
+	if (unity) {
+		return n;
+	}
+	*frac_io = frac;
+	return cur;
 }
 #endif /* SP1_XFER_ENABLE */
 
@@ -2259,9 +2348,59 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 	 * run-form equivalence). */
 	uint32_t f = 0;
 
+	/*
+	 * ---- THE TRANSPORT RATE FOR THIS BLOCK --------------------------
+	 * One rate for the whole block and one for ALL FOUR STEMS, because
+	 * there is one playhead: the stems are interleaved in the same
+	 * sector and decoded from the same frame index, so they cannot
+	 * drift apart by construction. Phase-locked is not a property that
+	 * has to be maintained here; it is a property of there being a
+	 * single transport.
+	 *
+	 * The inertia envelope multiplies the requested rate rather than
+	 * replacing it, so a varispeed target composes with a ramp instead
+	 * of being overridden by one. The requested rate is unity today --
+	 * stem playback has no varispeed control yet -- and the multiply is
+	 * written out anyway so that adding one is a one-line change here
+	 * and nothing at all downstream.
+	 */
+	const uint32_t rate_q16 = st_rs_rate_clamp(
+		(uint32_t)(((uint64_t)ST_RS_ONE *
+			     st_inertia_env_q16(&s_stem_inertia)) >> 16));
+	/* The seam's duck length converted from output frames into the tape
+	 * the playhead covers while it runs. See the arm clamp below. */
+	const uint32_t seam_src = st_rs_src_for_out(ST_SEAM_FRAMES, rate_q16);
+
+	/*
+	 * ---- BACK ONTO THE 1:1 PATH WHEN THE RAMP ENDS ------------------
+	 * A ramp almost never finishes on a whole frame, so the cursor is
+	 * left holding a fraction. At exactly 1x that fraction is CONSTANT --
+	 * the cursor advances one whole frame per output frame -- so nothing
+	 * would ever clear it, and every steady-state frame for the rest of
+	 * the session would be an interpolation between two samples instead
+	 * of a sample. That is a real, permanent softening of the top end
+	 * (linear interpolation at a fixed phase is a mild low-pass), paid
+	 * forever for a ramp that ended half a second ago.
+	 *
+	 * So the cursor is snapped to the frame boundary the moment the reel
+	 * reaches nominal speed. The cost is a position step of LESS THAN ONE
+	 * SAMPLE, once per PLAY, at the top of a spin-up -- far below the
+	 * ramp it is ending, and the price of every other frame in the
+	 * session being read at 1:1 exactly as it was before inertia existed.
+	 */
+	if (st_inertia_at_unity(&s_stem_inertia) && s_stem_rate_frac != 0u) {
+		s_stem_rate_frac = 0u;
+		s_rs_prev_valid  = false;
+	}
+
+	/* The envelope advances on the audio clock, once per block, by the
+	 * frames this block will produce. Same clock as the playhead, so the
+	 * ramp cannot drift against the audio it is bending. */
+	st_inertia_advance(&s_stem_inertia, BLK_FRAMES);
+
 	while (f < BLK_FRAMES) {
 		uint32_t needed;
-		uint32_t fis, run, left_in_song, want;
+		uint32_t fis, run, left_in_song, want, out_n, used;
 		uint32_t pin_idx;
 		bool from_pin = false;
 		/* The loop window, sampled ONCE per iteration. `active` is read
@@ -2409,6 +2548,12 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 		 * kind that reaches here: entry and release no longer move the
 		 * transport at all. */
 		if (s_stem_jump_pend && st_seam_jump_due(&s_stem_seam)) {
+			/* The playhead is MOVED, not advanced: the frame
+			 * behind the cursor is now a frame from somewhere
+			 * else in the song, and blending across that join is
+			 * the discontinuity the duck exists to prevent. */
+			s_rs_prev_valid  = false;
+			s_stem_rate_frac = 0u;
 			if (st_stream_seek(&g_stem_stream, s_stem_jump_to)) {
 				atomic_inc(&g_stem_loop_wraps);
 			}
@@ -2513,18 +2658,31 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 			break;
 		}
 
-		/* THE RUN: as many frames as are simultaneously inside
-		 * this sector, inside the song, and inside this output
-		 * block. Every one of those three bounds is required by
-		 * stem_render_run() and st_stream_advance_frames(). */
+		/* THE RUN, NOW IN TWO DOMAINS.
+		 *
+		 * Until inertia there was only one: output frames and
+		 * source frames were the same number, so a single set of
+		 * clamps served both. A transport spinning up or down
+		 * reads the tape more slowly than it fills the output,
+		 * and the six bounds split accordingly:
+		 *
+		 *   SOURCE  sector, song, loop end, seam arm
+		 *   OUTPUT  this output block, seam jump
+		 *
+		 * `run` is the SOURCE bound -- as many frames as lie
+		 * simultaneously inside this sector, inside the song and
+		 * inside the loop window. That is what stem_render_run()
+		 * may decode out of `buf` and what
+		 * st_stream_advance_frames() may be advanced by. The two
+		 * OUTPUT bounds are applied below to `out_n`, once the
+		 * rate has converted between the domains. At 1x that
+		 * conversion is the identity and every clamp lands on
+		 * exactly the value it did before. */
 		fis = g_stem_stream.song_frame - needed * ST11_FRAMES_PER_SECTOR;
 		run = ST11_FRAMES_PER_SECTOR - fis;
 		left_in_song = g_stem_stream.frames - g_stem_stream.song_frame;
 		if (run > left_in_song) {
 			run = left_in_song;
-		}
-		if (run > BLK_FRAMES - f) {
-			run = BLK_FRAMES - f;
 		}
 		/* ---- A FOURTH BOUND WHILE LOOPING: the window's end -------
 		 * The run must stop exactly at loop_end_frame so the wrap lands
@@ -2547,28 +2705,24 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 			 * having been true at the right moment -- the duck
 			 * would then be short, or the backstop would fire an
 			 * un-ducked jump. Clamping here costs one extra loop
-			 * iteration per lap and nothing else. */
+			 * iteration per lap and nothing else.
+			 *
+			 * ST_SEAM_FRAMES is a duck length in OUTPUT frames and
+			 * this compares SOURCE positions, so the distance is
+			 * converted at the current rate. Below 1x the playhead
+			 * covers less tape during the duck, so the arm point
+			 * sits nearer the end; leaving it unconverted would
+			 * start the duck early, finish it early, and fire the
+			 * wrap before the playhead ever reached loop_end. At 1x
+			 * the conversion returns ST_SEAM_FRAMES unchanged. */
 			if (!s_stem_jump_pend &&
-			    g_stem_stream.song_frame + ST_SEAM_FRAMES < lp_end) {
-				uint32_t to_arm = lp_end - ST_SEAM_FRAMES -
+			    g_stem_stream.song_frame + seam_src < lp_end) {
+				uint32_t to_arm = lp_end - seam_src -
 						  g_stem_stream.song_frame;
 
 				if (run > to_arm) {
 					run = to_arm;
 				}
-			}
-		}
-		/* ---- A SIXTH BOUND: land ON the frame the jump is due ----
-		 * Same argument, for the entry and the release: the seek must
-		 * happen on the frame whose gain is zero, so the run may not
-		 * carry the playhead past it. st_seam_frames_to_jump() is
-		 * UINT16_MAX when nothing is pending, so ordinary playback is
-		 * never shortened by this. */
-		if (s_stem_jump_pend) {
-			uint32_t to_jump = st_seam_frames_to_jump(&s_stem_seam);
-
-			if (to_jump > 0u && run > to_jump) {
-				run = to_jump;
 			}
 		}
 		if (run == 0u) {
@@ -2585,16 +2739,66 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 			break;
 		}
 
+		/* ---- SOURCE FRAMES -> OUTPUT FRAMES ----------------------
+		 * The run is bounded in the source domain above. How many
+		 * output slots it fills depends on the rate: at 1x it is the
+		 * same number and everything below reduces to what shipped;
+		 * during a ramp it is more, because the tape is passing more
+		 * slowly than the output is being produced. */
+		out_n = st_rs_out_frames(run, s_stem_rate_frac, rate_q16);
+
+		/* ---- A FIFTH BOUND, IN THE OUTPUT DOMAIN: this block ----- */
+		if (out_n > BLK_FRAMES - f) {
+			out_n = BLK_FRAMES - f;
+		}
+		/* ---- A SIXTH BOUND: land ON the frame the jump is due ----
+		 * Same argument as the arm clamp, for the entry and the
+		 * release: the seek must happen on the frame whose gain is
+		 * zero, so the run may not carry the playhead past it.
+		 * st_seam_frames_to_jump() is UINT16_MAX when nothing is
+		 * pending, so ordinary playback is never shortened by this.
+		 *
+		 * This one is naturally an OUTPUT bound and always was: the
+		 * seam ticks once per rendered frame, not once per frame of
+		 * tape. It is applied here rather than to `run` for exactly
+		 * that reason. */
+		if (s_stem_jump_pend) {
+			uint32_t to_jump = st_seam_frames_to_jump(&s_stem_seam);
+
+			if (to_jump > 0u && out_n > to_jump) {
+				out_n = to_jump;
+			}
+		}
+		if (out_n == 0u) {
+			/* Same defence as the zero-length source run above.
+			 * st_rs_out_frames() never returns zero, so this can
+			 * only come from a clamp, and a clamp to zero means
+			 * the block is full -- but a real-time loop does not
+			 * get to assume that. */
+			st_seam_advance(&s_stem_seam, BLK_FRAMES - f);
+			for (; f < BLK_FRAMES; f++) {
+				s[2 * f]     = 0;
+				s[2 * f + 1] = 0;
+			}
+			break;
+		}
+
 		/* RAM-ONLY: decodes out of whichever resident buffer
 		 * g_stem_active_buf_idx_local (audio-thread-exclusive)
 		 * names -- this real-time thread never touches flash. */
-		stem_render_run(from_pin ? g_stem_loop_pin_bufs[pin_idx]
-					  : g_stem_sector_bufs[g_stem_active_buf_idx_local],
-				 fis, &stem_prepared, m0, md, mv,
-				 f, run, s, stem_peak, &s_stem_seam,
-				 g_stem_stream.song_frame);
-		f += run;
-		(void)st_stream_advance_frames(&g_stem_stream, run);
+		used = stem_render_run(from_pin ? g_stem_loop_pin_bufs[pin_idx]
+						: g_stem_sector_bufs[g_stem_active_buf_idx_local],
+				       fis, &stem_prepared, m0, md, mv,
+				       f, out_n, s, stem_peak, &s_stem_seam,
+				       g_stem_stream.song_frame,
+				       rate_q16, &s_stem_rate_frac);
+		f += out_n;
+		/* THE PLAYHEAD ADVANCES BY WHAT WAS ACTUALLY READ, which is
+		 * `out_n * rate` rounded down to whole frames -- the
+		 * fractional remainder stays in s_stem_rate_frac and is
+		 * carried into the next run, so nothing is lost or repeated
+		 * across a run boundary. At 1x this is out_n exactly. */
+		(void)st_stream_advance_frames(&g_stem_stream, used);
 
 		/* ---- THE WRAP BACKSTOP ------------------------------------
 		 * The ducked wrap above is the normal path, and after it the
@@ -2624,6 +2828,8 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 		 * pin exists: without it every wrap would race the streamer. */
 		if (lp_on && s_stem_jump_pend != ST_SEAM_JUMP_WRAP &&
 		    g_stem_stream.song_frame >= lp_end && lp_end > lp_lo) {
+			s_rs_prev_valid  = false;   /* moved, not advanced */
+			s_stem_rate_frac = 0u;
 			if (st_stream_seek(&g_stem_stream, lp_lo)) {
 				atomic_inc(&g_stem_loop_wraps);
 			}
@@ -2682,14 +2888,38 @@ static void looper_audio_block(int16_t *s)
 		 * the gain returns to unity with it. */
 		s_stem_jump_pend = 0u;
 		st_seam_reset(&s_stem_seam);
+		/* A new song under the same playhead: the carried frame belongs
+		 * to the song being replaced, and the reel starts from rest. */
+		s_rs_prev_valid  = false;
+		s_stem_rate_frac = 0u;
+		st_inertia_reset(&s_stem_inertia);
 		atomic_set(&g_stem_song_selected, reload_ok ? 1 : 0);
 		atomic_set(&g_stem_reload_req, 0);
 	}
 
-	if (atomic_get(&g_stem_song_selected) != 0 && g_playing) {
+	/*
+	 * ---- THE TRANSPORT HAS MASS -------------------------------------
+	 * PLAY and STOP are requests to the reel, not to the output. The stem
+	 * engine therefore keeps rendering for as long as the reel is TURNING,
+	 * which on a stop is several hundred milliseconds after g_playing went
+	 * false -- that spin-down is audible, pitched, and read from the tape
+	 * like any other audio. Cutting the branch on g_playing alone, as this
+	 * did before, is precisely what would turn a tape stop into a mute.
+	 */
+	if (g_playing) {
+		st_inertia_play(&s_stem_inertia, I2S_TRUE_HZ);
+	} else {
+		st_inertia_stop(&s_stem_inertia, I2S_TRUE_HZ);
+	}
+
+	if (atomic_get(&g_stem_song_selected) != 0 &&
+	    (g_playing || st_inertia_moving(&s_stem_inertia))) {
 		int32_t m0, md, mv;
 
-		st_stream_play(&g_stem_stream);   /* idempotent transport sync */
+		/* Idempotent transport sync -- and it must stay called through
+		 * the spin-down, or the stream would refuse to advance the
+		 * playhead for the very frames the slowdown is made of. */
+		st_stream_play(&g_stem_stream);
 		/* CONSUME the transport/edit request flags rather than leaving
 		 * them latched. Every handler for them below is classic-only and,
 		 * on this firmware, a provable no-op: g_restart_req's body
@@ -2715,6 +2945,15 @@ static void looper_audio_block(int16_t *s)
 	 * Freeze the stem transport, and let the meters decay to dark rather
 	 * than hold whatever the last playing block left behind. */
 	st_stream_stop(&g_stem_stream);
+	/* The reel is at rest, and it must be RECORDED as at rest. Reaching
+	 * here with a spin-down still half-run -- which happens when the song
+	 * is deselected mid-stop -- would leave the envelope frozen part-way,
+	 * and the next PLAY would "catch" a reel that has not turned in
+	 * minutes. The resampler's carried frame belongs to that stopped
+	 * playhead too. */
+	st_inertia_reset(&s_stem_inertia);
+	s_rs_prev_valid  = false;
+	s_stem_rate_frac = 0u;
 	for (uint32_t sp = 0; sp < ST11_STEM_COUNT; sp++) {
 		atomic_set(&g_stem_peak_pub[sp], 0);
 	}

@@ -164,7 +164,11 @@ def main() -> int:
     # cannot NAME it. Neither the classic accumulator (`mix32`) nor the
     # classic sample (`classic`) may appear anywhere inside
     # stem_render_run()'s own body.
-    m = re.search(r"^static void stem_render_run\(", text, re.M)
+    # The return type is deliberately NOT pinned: stem_render_run() returns
+    # the source frames a run consumed since the transport gained a variable
+    # rate, and this gate is about what the renderer can NAME, not its
+    # signature.
+    m = re.search(r"^static \w+ stem_render_run\(", text, re.M)
     if not m:
         report.append("- **MISSING**: stem_render_run() not found -- the stem renderer must be "
                        "its own function, separate from the classic fallback")

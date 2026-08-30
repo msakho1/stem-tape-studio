@@ -123,6 +123,13 @@ include(${ZEPHYR_BASE}/samples/subsys/usb/common/common.cmake)
 # unlinked, host-test-only, in Slice C1 (see git log); this slice gave it
 # its real caller, per this file's own established policy (see
 # st_stem_stream.c's own identical slice-3A/3B split above).
+# Tape transport inertia: src/st_inertia.c -- the pure spin-up/spin-down
+# envelope. It is a 0..1 multiplier on the transport rate and knows nothing
+# about audio; main.c's stem run loop applies it to the shared playhead and
+# src/st_resample.h (header-only, no translation unit) converts between the
+# source-frame and output-frame domains that a rate other than 1x separates.
+# Host-tested in tests/test_inertia.c.
+
 # LED MVP (single semantic owner): src/st_led_mvp.c -- the pure,
 # host-tested decision that turns real runtime state into one complete
 # eight-LED frame, plus the local battery classifier (see st_led_mvp.h) --
@@ -160,6 +167,7 @@ target_sources(app PRIVATE
 	src/st_loop.c
 	src/st_fx.c
 	src/st_fx_ctl.c
+	src/st_inertia.c
 	src/st_beat_phase.c
 	src/st_led_mvp.c
 )

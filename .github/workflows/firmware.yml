@@ -1813,6 +1813,96 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Stem Tape TRANSPORT INERTIA -- the reel has mass, and it is a pitch drop
+        # THE BRIEF, and the line it drew:
+        #
+        #   "If I hear normal-pitched audio simply fading in or out, the
+        #    implementation is wrong."
+        #
+        # That rules out the two easy wrong answers. A gain fade is wrong
+        # because pitch does not move. A time-stretch is wrong because pitch
+        # does not move. The only implementation that satisfies it is the
+        # physical one: advance the read position at the instantaneous
+        # transport rate, so the tape passes the head slowly and the pitch
+        # falls with it because pitch and time are the same quantity.
+        #
+        # TWO GATES, because there are two claims.
+        #
+        # test_inertia.c proves the ENVELOPE -- the shape and duration of the
+        # ramp. Spin-up eases in, drives through the middle and settles;
+        # spin-down loses speed at once then crawls; both stay inside the
+        # briefed 250-500 ms and 400-800 ms windows; a PLAY during a
+        # spin-down catches the reel rather than restarting it; and the ramp
+        # is identical however the audio thread happens to chop its runs.
+        #
+        # test_inertia_transport_gate.c proves the AUDIO, and it is the one
+        # that answers the brief. It renders a 1 kHz tone through a real
+        # spin-down and measures the OUTPUT's own period and level: the
+        # period must stretch by more than an octave, and the level must NOT
+        # collapse. A fade fails the first. A time-stretch fails it too. It
+        # also runs the production run-loop arithmetic across eleven rates
+        # and five starting phases to prove the source/output domain split
+        # never reads past a sector, and checks the rendered waveform against
+        # sin() at the fractional position the cursor claims -- which is what
+        # separates a real blend from a nearest-frame staircase.
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          cc -std=c11 -Wall -Wextra -Werror -Ifirmware/stemtape_player/src \
+            firmware/stemtape_player/src/st_inertia.c \
+            firmware/stemtape_player/tests/test_inertia.c \
+            -lm -o audit/test_inertia
+          ./audit/test_inertia | tee audit/inertia-selftest.txt
+          cc -std=c11 -Wall -Wextra -Werror -Ifirmware/stemtape_player/src \
+            firmware/stemtape_player/src/st_sector_v11.c \
+            firmware/stemtape_player/src/st_inertia.c \
+            firmware/stemtape_player/tests/test_inertia_transport_gate.c \
+            -lm -o audit/test_inertia_transport_gate
+          ./audit/test_inertia_transport_gate | tee audit/inertia-transport-gate.txt
+
+          # THE GATE MUST KEEP MEASURING THE THING, not just exit 0. If the
+          # pitch line or the level line ever stops being printed, the
+          # harness has stopped asking the question the brief asked, and a
+          # silent pass would be worth nothing.
+          grep -q 'level held at' audit/inertia-transport-gate.txt
+          grep -q 'STOP drops the pitch and keeps the level' \
+            audit/inertia-transport-gate.txt
+
+          # AND THE PRODUCTION PATH MUST ACTUALLY USE IT. The modules above
+          # are pure and would pass just as happily unwired -- which is the
+          # shape of mistake the seam step below also guards against.
+          M=firmware/stemtape_player/src/main.c
+          fail=0
+          grep -q '^#include "st_inertia.h"' "$M" || {
+            echo "  main.c does not include st_inertia.h"; fail=1; }
+          grep -q 'st_inertia_play(&s_stem_inertia' "$M" || {
+            echo "  PLAY never spins the reel up"; fail=1; }
+          grep -q 'st_inertia_stop(&s_stem_inertia' "$M" || {
+            echo "  STOP never spins the reel down"; fail=1; }
+          grep -q 'st_inertia_advance(&s_stem_inertia, BLK_FRAMES)' "$M" || {
+            echo "  the envelope is not advanced on the audio clock"; fail=1; }
+          # THE ONE THAT MAKES STOP NOT A MUTE: the stem engine must keep
+          # rendering while the reel is still turning, after g_playing has
+          # already gone false.
+          grep -q 'g_playing || st_inertia_moving(&s_stem_inertia)' "$M" || {
+            echo "  the engine stops rendering the moment PLAY is released --"
+            echo "  the spin-down would be silence, i.e. a mute"; fail=1; }
+          # AND THE RATE MUST REACH THE READ. An envelope that never becomes
+          # a read position is a fade waiting to happen.
+          grep -q 'rate_q16, &s_stem_rate_frac' "$M" || {
+            echo "  the renderer is not given the transport rate"; fail=1; }
+          grep -q 'st_rs_out_frames(run, s_stem_rate_frac, rate_q16)' "$M" || {
+            echo "  the source/output domain conversion is not applied"; fail=1; }
+          [ "$fail" = 0 ] || exit 1
+          echo "inertia wiring: PLAY/STOP move the reel, and the reel moves the tape"
+          {
+            echo '### Stem Tape transport inertia'
+            echo '```text'
+            cat audit/inertia-selftest.txt
+            cat audit/inertia-transport-gate.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Stem Tape ladder classifier -- MEASURED bands, all 15 masks, no deadlock
         # src/st_ladder.c is THE classifier for the shared AIN0 rail: one
         # sample in, a settled Track mask or PLAY out. Linked into the real
@@ -2339,6 +2429,14 @@ jobs:
           # gate.
           check stem_audio_block
           check stem_render_run
+          # TRANSPORT INERTIA. The envelope is a real translation unit and
+          # must be linked, not merely present in the tree: a spin-down that
+          # is not in the image is a mute. (st_resample.h is header-only and
+          # inlines into the run loop, so it has no symbol of its own -- the
+          # inertia step above proves its use by source grep instead.)
+          check st_inertia_play
+          check st_inertia_stop
+          check st_inertia_advance
           # physical control scanner (button/fader ladder read) + LED output
           check ladder_read
           check led_service
