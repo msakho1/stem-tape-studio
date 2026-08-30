@@ -689,17 +689,23 @@ jobs:
             2>&1 | tee audit/compile.log | tee -a audit/build.log
 
       - name: AIN1 CALIBRATION IMAGE (separate build, never the shipped one)
-        # WHY THIS EXISTS. The FX overlay is entered with Volume- and Volume+
-        # together, and on this hardware that is a chord on a resistor ladder:
-        # adc_ladder[] documents AIN1 as "Vol + FWD/RWD", four buttons on one
-        # analog rail, and decode_vol() returns exactly one of them. Volume+
-        # alone reads ~1820 and the top band is "anything >= 1500", so the
-        # chord is today indistinguishable from Volume+ alone.
+        # WHY THIS EXISTS. AIN1 is "Vol + FWD/RWD" -- four buttons on one
+        # analog rail -- and st_vol_decode() returns exactly one of them.
+        # Unlike AIN0, whose sixteen states were captured in the st16-cal
+        # build and live in docs/ladder-measured.json, this rail had NEVER
+        # been measured: every band edge on it was inherited guesswork. There
+        # is no local Zephyr toolchain to build a capture with, hence CI.
         #
-        # The separating value has never been measured. AIN0's sixteen states
-        # were captured in the st16-cal build and live in
-        # docs/ladder-measured.json; AIN1 was never captured, and there is no
-        # local Zephyr toolchain to build a capture with -- hence CI.
+        # ITS ORIGINAL JOB IS DONE. The st20-VOLCAL image built here produced
+        # docs/ain1-measured.json on physical hardware, which established the
+        # Volume-/Volume+/both-together plateaus and unblocked FX entry -- the
+        # chord used to land in the same ">= 1500" band as Volume+ alone and
+        # was undecodable. The "AIN1 volume ladder" gate further down now
+        # holds those numbers to the firmware.
+        #
+        # IT IS KEPT because FWD and RWD were never pressed during that
+        # capture, so their two bands remain inherited guesses. This is how
+        # they get measured if anyone wants them proven.
         #
         # This builds a SECOND image with ST_VOL_CAL=1 into its own build
         # directory. It reuses the Zephyr environment this job already set up,
@@ -805,8 +811,9 @@ jobs:
             echo 'VOLCAL raw=163 set=163 lo=161 hi=163 dec=-1'
             echo '```'
             echo ''
-            echo 'Hold Volume- and Volume+ together; `hi` is then the chord'
-            echo 'value ST_VOL_CHORD_RAW needs.'
+            echo 'Hold FWD and RWD to measure the two bands that are still'
+            echo 'inherited guesses; the Volume buttons are already measured'
+            echo 'in docs/ain1-measured.json.'
             echo ''
             echo 'This image prints NOTHING ELSE: the EMMC48/STEMIO/STEMRD/'
             echo 'STEMRT/LOOPER/CPU/STACK status block is suppressed here so'
@@ -1721,6 +1728,86 @@ jobs:
             echo '### Stem Tape ladder classifier (measured bands)'
             echo '```text'
             cat audit/ladder-selftest.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Stem Tape AIN1 volume ladder -- MEASURED bands, the FX entry chord
+        # The companion rail to the AIN0 step above, and the one that was
+        # never calibrated. AIN1 carries Volume-, Volume+, FWD and RWD.
+        #
+        # PROVENANCE IS A MEASUREMENT, NOT A MODEL. Every asserted band comes
+        # from firmware/stemtape_player/docs/ain1-measured.json -- a capture
+        # taken on a physical SP-1 with the temporary st20-VOLCAL build:
+        #
+        #     nothing pressed      1 ..   10
+        #     Volume-            732 ..  742
+        #     Volume+           1821 .. 1830
+        #     BOTH together     2019 .. 2029
+        #
+        # WHAT THE MEASUREMENT OVERTURNED, and why this gate exists. The top
+        # band used to be "anything >= 1500", so Volume+ and the two-button
+        # chord BOTH decoded as VOL_UP and were indistinguishable. FX mode is
+        # entered by pressing Volume- and Volume+ together, so that one
+        # ambiguity was the entire blocker on FX entry -- it could not be
+        # decoded at all, on any build, until this capture existed.
+        #
+        # The split now sits at the midpoint of the measured 1830..2019 gap,
+        # 95 counts clear of both neighbours against 11 counts of observed
+        # jitter on the widest plateau.
+        #
+        # st_vol_decode() lives in a HEADER (src/st_vol_ladder.h) rather than
+        # as a static inside main.c specifically so this test can call the
+        # SAME function the control loop calls. A hand-edited threshold fails
+        # here instead of silently breaking the gesture on hardware. The test
+        # was mutation-checked before it landed: reverting the split to 1500,
+        # moving it 10 counts, or letting st_vol_is_chord() drift out of step
+        # with the decode each produce failures.
+        #
+        # WHAT IT DELIBERATELY DOES NOT ASSERT: FWD and RWD were never pressed
+        # during the capture, so their bands remain inherited guesses. The
+        # test checks only that they do not swallow anything that WAS
+        # measured. Claiming their centres are correct would be inventing
+        # evidence.
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          cc -std=c11 -Wall -Wextra -Werror -Ifirmware/stemtape_player/src \
+            firmware/stemtape_player/tests/test_vol_ladder.c \
+            -o audit/test_vol_ladder
+          ./audit/test_vol_ladder | tee audit/vol-ladder-selftest.txt
+          # The firmware and the measurement file must not drift apart. The C
+          # test asserts the decode against transcribed numbers; this asserts
+          # the transcription still matches the JSON that is their provenance.
+          python3 - <<'PY'
+          import json, re, sys
+          j = json.load(open('firmware/stemtape_player/docs/ain1-measured.json'))
+          hdr = open('firmware/stemtape_player/src/st_vol_ladder.h').read()
+          tst = open('firmware/stemtape_player/tests/test_vol_ladder.c').read()
+          bad = []
+          for k in ('ST_VOL_CHORD_MIN', 'ST_VOL_CHORD_RAW'):
+              want = j['band_edges'][k]
+              m = re.search(r'#define\s+%s\s+(\d+)' % k, hdr)
+              if not m:
+                  bad.append('%s not found in st_vol_ladder.h' % k); continue
+              if int(m.group(1)) != want:
+                  bad.append('%s: header %s, ain1-measured.json %d'
+                             % (k, m.group(1), want))
+          for st in j['states']:
+              row = '{ %4d, %4d,' % (st['lo'], st['hi'])
+              if row.replace(' ', '') not in tst.replace(' ', ''):
+                  bad.append('state %s (%d..%d) is not a row in test_vol_ladder.c'
+                             % (st['name'], st['lo'], st['hi']))
+          if bad:
+              print('FAIL: firmware and ain1-measured.json disagree')
+              for b in bad:
+                  print('  ' + b)
+              sys.exit(1)
+          print('OK: header constants and test rows match ain1-measured.json')
+          PY
+          {
+            echo '### Stem Tape AIN1 volume ladder (measured bands)'
+            echo '```text'
+            cat audit/vol-ladder-selftest.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 

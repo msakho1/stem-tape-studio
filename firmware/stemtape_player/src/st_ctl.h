@@ -75,8 +75,11 @@ typedef struct {
 	 * HOLD, never a release. */
 	int      ladder_raw;
 
-	/* VOLUME, decoded to a direction by main.c's existing decode_vol():
-	 * -1 = Volume -, 0 = none, +1 = Volume +. Debounced HERE. */
+	/* VOLUME, decoded to a direction from st_vol_decode() (see
+	 * src/st_vol_ladder.h): -1 = Volume -, 0 = none, +1 = Volume +.
+	 * The two-button chord is VOL_BOTH and maps to 0 here -- it belongs
+	 * to the FX overlay and must never move a loop division. Debounced
+	 * HERE. */
 	int8_t   vol_dir;
 
 	/* The FUNCTION GPIO, live. A separate pin, so holding it does not move

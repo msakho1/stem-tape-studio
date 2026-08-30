@@ -148,6 +148,7 @@
 #endif
 #include "st_track_hold.h"
 #include "st_ladder.h"
+#include "st_vol_ladder.h"
 #include "st_latency.h"
 #include "st_seam.h"
 #include "st_fx.h"
@@ -5873,8 +5874,10 @@ static void controls_diag(void)
 
 /* ---- decode the ladders into named buttons (verified thresholds) ---- */
 enum trk_btn { TRK_NONE = -1, TRK_1, TRK_2, TRK_3, TRK_4, TRK_PLAY };
-enum vol_btn { VOL_NONE = -1, VOL_TEMPO_DOWN, VOL_DOWN, VOL_TEMPO_UP, VOL_UP,
-               VOL_BOTH /* Vol- and Vol+ together: the FX overlay chord */ };
+/* enum vol_btn, the AIN1 band edges and their decode now live in
+ * src/st_vol_ladder.h (included at the top of this file) so the host test can
+ * exercise the SAME function this control loop calls. See that header for the
+ * measurement and docs/ain1-measured.json for its full provenance. */
 
 static enum trk_btn decode_tracks(int v)
 {
@@ -5886,68 +5889,7 @@ static enum trk_btn decode_tracks(int v)
 	return TRK_PLAY;                /* ~1823 */
 }
 
-/*
- * THE AIN1 LADDER. Four buttons share this one analog rail (see adc_ladder[]:
- * "AIN1: Vol + FWD/RWD"), and this decode returns exactly one of them.
- *
- * ======================================================================
- * WHY THE FX ENTRY CHORD IS NOT DECODED HERE YET
- * ======================================================================
- * The FX overlay is entered by pressing Volume- and Volume+ TOGETHER. On this
- * hardware that is a CHORD ON A RESISTOR LADDER: the buttons source VDD
- * through individual resistors into a pulled-down node, so pressing two puts
- * their resistors in PARALLEL and the node reads HIGHER than either alone --
- * the same model docs/ladder-measured.json established for AIN0's fifteen
- * Track masks.
- *
- * Volume+ alone is ~1820 and the top band here is "anything >= 1500". A
- * two-volume chord therefore lands in that same band and is, today,
- * INDISTINGUISHABLE FROM VOLUME+ ALONE.
- *
- * The number needed to separate them has never been measured. AIN0 was
- * captured in the st16-cal build and its sixteen states are in
- * docs/ladder-measured.json; AIN1 was not, and nothing in this repository
- * records what the Vol-/Vol+ chord reads.
- *
- * ST_VOL_CHORD_RAW below is therefore UNSET on purpose. Guessing it is worse
- * than leaving it unset: a threshold placed too low steals Volume+, and one
- * placed too high makes the gesture simply not work. Flash a build with
- * ST_VOL_CAL=1 (see the capture in the control loop), press the two buttons
- * together, read the number off the serial line, and set it here.
- */
-#ifndef ST_VOL_CHORD_RAW
-#define ST_VOL_CHORD_RAW 0   /* 0 = unmeasured; the chord cannot be decoded */
-#endif
 
-static enum vol_btn decode_vol(int v)
-{
-	if (v <  200) return VOL_NONE;
-	if (v <  560) return VOL_TEMPO_DOWN; /* ~404  */
-	if (v <  950) return VOL_DOWN;       /* ~729  */
-	if (v < 1500) return VOL_TEMPO_UP;   /* ~1220 */
-#if ST_VOL_CHORD_RAW > 0
-	/* Measured: the chord sits above Volume+ alone. Band it the same way
-	 * st_ladder.c bands AIN0 -- centre +/- min(25, 40% of the nearest gap). */
-	if (v >= ST_VOL_CHORD_RAW - 25) return VOL_BOTH;
-#endif
-	return VOL_UP;                       /* ~1820 */
-}
-
-/*
- * True when the raw AIN1 reading is the two-volume chord. Separate from
- * decode_vol() so the FX overlay asks a question with one meaning, and so the
- * unmeasured case is a single obvious `false` rather than a silent fallthrough
- * into VOL_UP.
- */
-static bool vol_chord_raw(int v)
-{
-#if ST_VOL_CHORD_RAW > 0
-	return v >= ST_VOL_CHORD_RAW - 25;
-#else
-	(void)v;
-	return false;
-#endif
-}
 
 /* ================= ALWAYS-DIM LEDs (soft PWM) =========================
  * Adapted unchanged from TechnicsOP's dimmed-LED build (shared on the SP-1
@@ -7112,7 +7054,7 @@ int main(void)
 		 * real hardware. */
 		int  st_trk_raw = ladder_read(&adc_ladder[LAD_TRACKS]);
 		int  st_vol_raw = ladder_read(&adc_ladder[LAD_VOL]);
-		enum vol_btn st_vraw = decode_vol(st_vol_raw);
+		enum vol_btn st_vraw = st_vol_decode(st_vol_raw);
 #if ST_VOL_CAL
 		/* AIN1 CALIBRATION CAPTURE -- st20-VOLCAL images only. Temporary,
 		 * exactly like the st16-cal build that produced
@@ -7144,12 +7086,17 @@ int main(void)
 		 *        consecutive 8 ms passes (~48 ms), i.e. the plateau of a
 		 *        real press rather than a sample caught on the edge
 		 *   lo   lowest raw seen since boot (the resting rail)
-		 *   hi   highest raw seen since boot -- hold both Volume buttons
-		 *        and this is the chord value ST_VOL_CHORD_RAW needs,
-		 *        because parallel ladder resistors read HIGHER than
-		 *        either button alone
-		 *   dec  what decode_vol() currently returns (see enum vol_btn:
+		 *   hi   highest raw seen since boot, because parallel ladder
+		 *        resistors read HIGHER than either button alone
+		 *   dec  what st_vol_decode() returns (see enum vol_btn:
 		 *        -1 none, 0 tempo-, 1 vol-, 2 tempo+, 3 vol+, 4 both)
+		 *
+		 * THE VOLUME BUTTONS ARE NOW MEASURED -- see st_vol_ladder.h and
+		 * docs/ain1-measured.json -- so this build is no longer what
+		 * unblocks FX entry. It is kept because two buttons on this rail,
+		 * FWD and RWD, were never pressed during that capture and their
+		 * bands remain inherited guesses. This is how they get measured
+		 * when someone wants them proven.
 		 */
 		{
 			static int64_t cal_next;
@@ -7181,7 +7128,7 @@ int main(void)
 #if SP1_XFER_ENABLE
 		{
 			st_fx_in_t fi;
-			bool chord = vol_chord_raw(st_vol_raw);
+			bool chord = st_vol_is_chord(st_vol_raw);
 
 			memset(&fi, 0, sizeof(fi));
 			/* A ladder reports ONE state, so a real chord arrives as
@@ -7384,6 +7331,25 @@ int main(void)
 			 * rocker/Vol behavior outside FUNCTION holds is untouched. */
 			{
 				enum vol_btn vb = st_vraw;   /* the pass's ONE reading of this rail */
+				/* VOL_BOTH IS NOT A CHOP GESTURE. It is the FX overlay's
+				 * entry chord -- and under a FUNCTION hold, specifically
+				 * the GLOBAL-scope one -- which the overlay above claims
+				 * and normally consumes into VOL_NONE before this runs.
+				 * The guard is here for the passes where it does not:
+				 * the dispatch below ends in a bare `else` commented
+				 * "VOL_DOWN", so an unconsumed VOL_BOTH would silently
+				 * shift the chop window LEFT. It became reachable the
+				 * moment the chord got a real ladder value; before that
+				 * the chord decoded as VOL_UP and this branch could not
+				 * see it. Hold the button so nothing else in this
+				 * FUNCTION branch reinterprets it, and change nothing. */
+				if (vb == VOL_BOTH) {
+					cp_cand = VOL_NONE; cp_cnt = 0;
+					midi_service();
+					led_service();
+					k_msleep(25);
+					continue;
+				}
 				if (vb != VOL_NONE) {
 					if (vb == cp_cand) { if (cp_cnt < 1000) cp_cnt++; }
 					else { cp_cand = vb; cp_cnt = 1; }
