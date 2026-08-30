@@ -1424,12 +1424,32 @@ jobs:
         run: |
           set -euo pipefail
           M=firmware/stemtape_player/src/main.c
-          TAG="$(grep -oE '^#define ST_BUILD_TAG "[^"]+"' "$M" | head -1 | sed 's/.*"\(.*\)"/\1/')"
-          echo "build tag: $TAG"
-          if printf '%s' "$TAG" | grep -qi 'cal'; then
-            echo "FAIL: the build tag ($TAG) is a calibration tag."
+          SHIP_BIN=build-stemtape-player/zephyr/zephyr.bin
+          # THE BUILD TAG IS CHECKED IN THE LINKED IMAGE, NOT IN THE SOURCE
+          # TEXT. src/main.c defines ST_BUILD_TAG under `#if ST_VOL_CAL`, so
+          # it legitimately contains BOTH "stNN-VOLCAL" and "stNN". The old
+          # check here was `grep -oE '^#define ST_BUILD_TAG ...' | head -1`,
+          # which takes whichever branch is written first in the file -- the
+          # calibration one -- and then fails a perfectly good production
+          # build for containing "cal". grep cannot evaluate the
+          # preprocessor, so it is the wrong tool for this question.
+          #
+          # The linked binary can only contain the branch that was actually
+          # compiled. Asking it turns a guess about source text into a fact
+          # about the artifact that ships. Stated as absence, so it does not
+          # depend on picking the right string out of the binary: NO string
+          # in the production image may look like a calibration tag.
+          if [ ! -f "$SHIP_BIN" ]; then
+            echo "FAIL: $SHIP_BIN is missing -- cannot check the production build tag"
             exit 1
           fi
+          CAL_TAGS="$(strings "$SHIP_BIN" | grep -xiE 'st[0-9]+-.*cal.*' | sort -u || true)"
+          if [ -n "$CAL_TAGS" ]; then
+            echo "FAIL: the production image carries a calibration build tag:"
+            printf '%s\n' "$CAL_TAGS"
+            exit 1
+          fi
+          echo "OK: no calibration build tag in $SHIP_BIN"
           for sym in ST_CAL_BUILD cal_service cal_mask_str; do
             if grep -qn "$sym" "$M"; then
               echo "FAIL: $sym is still present in the production image."
