@@ -151,9 +151,9 @@
  * failure that cost several rounds before the shipped/calibration tags were
  * split apart. The tag is the only thing the operator can read. */
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st23-VOLCAL"
+#define ST_BUILD_TAG "st24-VOLCAL"
 #else
-#define ST_BUILD_TAG "st23"
+#define ST_BUILD_TAG "st24"
 #endif
 #include "st_track_hold.h"
 #include "st_ladder.h"
@@ -1912,6 +1912,7 @@ static uint8_t   s_fx_target;         /* 0..3, STEM scope */
 static bool      s_fx_stem_scope;     /* rack runs on s_fx_target, pre-mix */
 static bool      s_fx_global_scope;   /* rack runs on the mix, post-mix */
 static uint8_t   s_fx_active_mask;    /* momentary | latch, button order */
+static uint8_t   s_fx_track_claim;    /* Track bits the overlay owns this pass */
 static st_fx_ctl_t g_stem_fx_ctl;
 static st_fx_out_t g_stem_fx_out;
 
@@ -7262,9 +7263,14 @@ int main(void)
 			    g_stem_fx_out.vol_plus_consumed) {
 				st_vraw = VOL_NONE;
 			}
-			if (g_stem_fx_out.track_consumed != 0u) {
-				st_trk_raw = 0;
-			}
+			/* The claim is carried as a MASK, not by zeroing the
+			 * rail. PLAY shares this rail with the four Track
+			 * buttons, so st_trk_raw = 0 erased PLAY as well --
+			 * which made the loop gesture invisible whenever an
+			 * effect was held, and looping inside FX mode
+			 * impossible. st_ctl_service() now subtracts these
+			 * bits after decoding and leaves PLAY alone. */
+			s_fx_track_claim = g_stem_fx_out.track_consumed;
 		}
 #endif
 		bool stem_ctl = false;
@@ -7275,6 +7281,7 @@ int main(void)
 
 			memset(&ci, 0, sizeof(ci));
 			ci.ladder_raw     = st_trk_raw;
+			ci.track_consumed_mask = s_fx_track_claim;
 			/* Only the master-volume pair maps to a loop division. The
 			 * varispeed rocker (VOL_TEMPO_UP/DOWN) is a different
 			 * control and must never resize a loop. */
@@ -8145,6 +8152,11 @@ int main(void)
 			 * Hold to repeat for a quick sweep. */
 			{
 				static int64_t vrep_t = -1, vrep_last;
+				/* True once the overlay's edge has already stepped
+				 * this press, so the level path below does not step
+				 * it a second time. Cleared when the rail returns to
+				 * idle. */
+				static bool vfired;
 				int vdir = (vcommit == VOL_UP) ? 1 : (vcommit == VOL_DOWN) ? -1 : 0;
 
 				/* A Volume press the loop is using as a division
@@ -8154,13 +8166,63 @@ int main(void)
 					vdir = 0;
 				}
 				int vstep = 0;
+				int64_t tnow = k_uptime_get();
+
+				/* ---- ONE CLICK, ONE STEP ---------------------------
+				 * A TAP MUST WORK. Volume shares its buttons with the
+				 * FX entry chord, so every press is withheld for the
+				 * 120 ms arrival window while the overlay decides
+				 * whether a second button is joining it. A press
+				 * released inside that window -- an ordinary quick
+				 * click -- therefore never reaches the level-based
+				 * path below at all: by the time the rail is handed
+				 * back the button is already up.
+				 *
+				 * That is why volume behaved like a slider you had to
+				 * HOLD. The overlay always emitted the right signal
+				 * for it (vol_*_fire, "this was an ordinary press,
+				 * act on it once") and main.c simply never read it.
+				 *
+				 * Read now, as one step, with no debounce of its own:
+				 * st_fx_ctl.c has already resolved the gesture, and
+				 * re-debouncing a decision would just delay it. */
+				{
+					int fdir = 0;
+
+					if (g_stem_fx_out.vol_plus_fire)  fdir = 1;
+					if (g_stem_fx_out.vol_minus_fire) fdir = -1;
+					if (fdir != 0 && !g_stem_ctl_out.vol_consumed) {
+						g_vol_idx += fdir;
+						if (g_vol_idx < 0) g_vol_idx = 0;
+						if (g_vol_idx > VOL_STEPS) g_vol_idx = VOL_STEPS;
+						g_master_vol_q8 = g_vol_table[g_vol_idx];
+						/* Hold-to-repeat starts from HERE, so a held
+						 * press sweeps after the usual delay without
+						 * the level path re-stepping it first. */
+						vfired = true;
+						vrep_t = tnow;
+						vrep_last = tnow;
+					}
+				}
+
 				if (vdir != 0) {
-					int64_t tnow = k_uptime_get();
-					if (vcommit != vbefore) { vstep = 1; vrep_t = tnow; vrep_last = tnow; }
-					else if (tnow - vrep_t >= 500 && tnow - vrep_last >= 110) {
+					if (vcommit != vbefore) {
+						/* Fresh commit. Step unless the overlay's
+						 * edge already did it for this press. */
+						if (!vfired) { vstep = 1; vrep_t = tnow; vrep_last = tnow; }
+					} else if (tnow - vrep_t >= 500 && tnow - vrep_last >= 110) {
 						vstep = 1; vrep_last = tnow;
 					}
 				} else { vrep_t = -1; }
+				/* Armed again only when the button is PHYSICALLY up.
+				 * Tested against the raw rail, not st_vraw: the
+				 * overlay sets st_vraw to VOL_NONE whenever it claims
+				 * a press, so using it here would re-arm mid-hold and
+				 * let the level path fire a second step for the same
+				 * click. */
+				if (st_vol_decode(st_vol_raw) == VOL_NONE) {
+					vfired = false;
+				}
 				/* ---- LOOP DIVISION vs MASTER VOLUME ----------------
 				 * The division change is st_ctl_service()'s: it sees
 				 * the same rail sample this block does, debounces it

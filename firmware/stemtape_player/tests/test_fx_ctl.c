@@ -596,6 +596,86 @@ static void case_ordinary_volume_is_released(void)
 	CHECK(d.opens == 1, "and it opened the overlay exactly once");
 }
 
+
+/* ======================================================================
+ * ONE CLICK, ONE STEP -- the contract main.c's master volume now rests on.
+ *
+ * Volume shares its buttons with the FX entry chord, so every press is
+ * withheld for the 120 ms arrival window while this machine decides whether a
+ * second button is joining. A press RELEASED INSIDE that window never reaches
+ * main.c's level-based volume path at all: by the time the rail is handed
+ * back, the button is already up.
+ *
+ * That is why volume behaved like a slider you had to hold. The fix reads
+ * vol_*_fire as one step, so what must be true here is that a press produces
+ * EXACTLY ONE fire -- never zero (the click is lost) and never two (the click
+ * double-steps). Asserted for both shapes of press, because main.c cannot
+ * distinguish them and must be safe under either.
+ * ====================================================================== */
+static void case_one_click_one_fire(void)
+{
+	drv_t d;
+	int i;
+
+	g_cases++;
+	printf("\n-- a Volume press fires exactly once, tapped or held\n");
+
+	/* A QUICK TAP, released well inside the arrival window. */
+	drv_init(&d);
+	d.in.vol_plus_down = true;
+	step(&d, 10u);
+	step(&d, 20u);                    /* 30 ms: still inside the window */
+	d.in.vol_plus_down = false;
+	step(&d, 10u);
+	settle(&d, 200u);
+	CHECK(d.vol_plus_fires == 1,
+	      "a 30 ms tap fires exactly once (%d)", d.vol_plus_fires);
+	CHECK(d.opens == 0, "and does not open the overlay");
+
+	/* A HELD PRESS, past the window and well beyond. Still exactly one
+	 * fire: main.c takes the repeat from the rail, not from more edges. */
+	drv_init(&d);
+	d.in.vol_minus_down = true;
+	settle(&d, 800u);
+	CHECK(d.vol_minus_fires == 1,
+	      "an 800 ms hold also fires exactly once (%d)", d.vol_minus_fires);
+	d.in.vol_minus_down = false;
+	settle(&d, 100u);
+	CHECK(d.vol_minus_fires == 1,
+	      "and releasing adds no second fire (%d)", d.vol_minus_fires);
+
+	/* REPEATED TAPS each produce their own click -- a volume button is
+	 * pressed many times in a row in real use. */
+	drv_init(&d);
+	for (i = 0; i < 5; i++) {
+		d.in.vol_plus_down = true;
+		step(&d, 10u);
+		step(&d, 20u);
+		d.in.vol_plus_down = false;
+		step(&d, 10u);
+		settle(&d, 60u);
+	}
+	CHECK(d.vol_plus_fires == 5,
+	      "five taps give five clicks (%d)", d.vol_plus_fires);
+	CHECK(d.opens == 0, "and none of them opened the overlay");
+
+	/* THE CHORD IS STILL NOT A CLICK. Both buttons together must open FX
+	 * and must NOT step the volume, or entering FX would nudge the level. */
+	drv_init(&d);
+	d.in.vol_minus_down = true;
+	step(&d, 10u);
+	d.in.vol_plus_down = true;
+	step(&d, 10u);
+	settle(&d, 200u);
+	d.in.vol_minus_down = false;
+	d.in.vol_plus_down = false;
+	settle(&d, 100u);
+	CHECK(d.opens == 1, "the chord opened the overlay");
+	CHECK(d.vol_minus_fires == 0 && d.vol_plus_fires == 0,
+	      "and fired no volume click (%d, %d)",
+	      d.vol_minus_fires, d.vol_plus_fires);
+}
+
 int main(void)
 {
 	printf("== Stem Tape FX CONTROL OVERLAY ==\n");
@@ -610,6 +690,7 @@ int main(void)
 	case_same_scan();
 	case_single_button();
 	case_ordinary_volume_is_released();
+	case_one_click_one_fire();
 	case_arrival_too_wide();
 	case_held_chord();
 	case_bounce();

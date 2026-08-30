@@ -106,6 +106,10 @@ static void rig_init(rig_t *r, uint32_t start_frame)
  * PASS_MS that pass covers. The order is main.c's: control decides, then the
  * audio thread acts on what was published.
  */
+/* Track bits the FX overlay is claiming this pass, applied by pass() below.
+ * Zero for every case that does not set it. */
+static uint8_t g_fx_claim;
+
 static void pass(rig_t *r, int raw, int8_t vol, bool fn)
 {
 	st_ctl_in_t in;
@@ -114,6 +118,7 @@ static void pass(rig_t *r, int raw, int8_t vol, bool fn)
 
 	memset(&in, 0, sizeof(in));
 	in.ladder_raw     = raw;
+	in.track_consumed_mask = g_fx_claim;
 	in.vol_dir        = vol;
 	in.function_down  = fn;
 	in.stem_song      = true;
@@ -620,6 +625,65 @@ static void case_no_tempo_is_reported(void)
 	CHECK(taps == 0, "and the dead hold is not silently turned into a tap");
 }
 
+
+/* ======================================================================
+ * LOOPING WHILE THE FX OVERLAY HOLDS A TRACK BUTTON.
+ *
+ * PLAY shares the AIN0 rail with the four Track buttons. main.c used to
+ * express "the overlay owns this Track" by zeroing the rail reading, which
+ * erased PLAY along with it -- so holding any effect made the loop gesture
+ * invisible and looping inside FX mode was impossible. Reported from
+ * hardware.
+ *
+ * The claim is a MASK now, subtracted after the decode. These assertions are
+ * what stop it going back to a rail-wide erase: the claimed Track bit must
+ * disappear from the published mask, and PLAY must still work.
+ * ====================================================================== */
+static void case_loop_works_while_fx_holds_a_track(void)
+{
+	rig_t r;
+	uint32_t i;
+
+	printf("\n-- the loop still works while the FX overlay holds a Track\n");
+	rig_init(&r, 0u);
+	r.playing = true;
+
+	/* T1 held by the overlay. The dispatcher must not solo it... */
+	g_fx_claim = 1u << 0;
+	for (i = 0; i < 4; i++) {
+		pass(&r, RAW_MASK[1], 0, false);
+	}
+	CHECK((r.out.track_mask & 1u) == 0u,
+	      "a Track the overlay claimed does not reach the mixer as a solo "
+	      "(mask 0x%02x)", r.out.track_mask);
+
+	/* ...and with that same claim in force, a PLAY hold must still open a
+	 * loop. This is the whole point: the effect is held THROUGHOUT. */
+	for (i = 0; i < 60; i++) {          /* well past ST_LOOP_HOLD_MS */
+		pass(&r, RAW_PLAY, 0, false);
+	}
+	CHECK(r.n_enter == 1,
+	      "a loop opened while an effect was held (%d enters)", r.n_enter);
+
+	/* Release PLAY: the loop exits, still with the effect held. */
+	for (i = 0; i < 4; i++) {
+		pass(&r, RAW_MASK[1], 0, false);
+	}
+	CHECK(r.n_exit == 1,
+	      "and released normally (%d exits)", r.n_exit);
+
+	/* THE CLAIM IS THE ONLY THING SUPPRESSED. Drop it and the same reading
+	 * solos again, which proves the mask -- not the rail -- is what moved. */
+	g_fx_claim = 0u;
+	for (i = 0; i < 4; i++) {
+		pass(&r, RAW_MASK[1], 0, false);
+	}
+	CHECK((r.out.track_mask & 1u) != 0u,
+	      "with the claim released the same Track reading solos again "
+	      "(mask 0x%02x)", r.out.track_mask);
+	g_fx_claim = 0u;
+}
+
 int main(void)
 {
 	printf("== st_ctl: the assembled Stem Tape control path ==\n");
@@ -635,6 +699,7 @@ int main(void)
 	case_all_masks();
 	case_chord_robustness();
 	case_single_owner();
+	case_loop_works_while_fx_holds_a_track();
 	case_no_tempo_is_reported();
 
 	printf("\n");

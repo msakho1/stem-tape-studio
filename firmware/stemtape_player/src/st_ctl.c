@@ -106,6 +106,12 @@ void st_ctl_service(st_ctl_t *c, const st_ctl_in_t *in, st_ctl_out_t *out)
 	 * the same object the LED path lights. There is no second decode of
 	 * this rail while a stem song is selected. */
 	out->track_mask = st_ladder_mask(&c->ladder);
+	/* Bits another owner has claimed -- the FX overlay, whose Track buttons
+	 * are effects -- are dropped HERE, after the decode, so they cannot
+	 * solo. PLAY is deliberately NOT affected: it shares this rail, and
+	 * suppressing it along with the Track bits is what made looping
+	 * impossible while an effect was held. */
+	out->track_mask &= (uint8_t)~in->track_consumed_mask;
 
 	/* ---- PLAY edges, from that same classification ------------------- */
 	play_now       = st_ladder_play(&c->ladder);

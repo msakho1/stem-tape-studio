@@ -75,6 +75,20 @@ typedef struct {
 	 * HOLD, never a release. */
 	int      ladder_raw;
 
+	/* TRACK BITS ANOTHER OWNER HAS ALREADY CLAIMED, bits 0..3, subtracted
+	 * from the published mask AFTER this rail is decoded.
+	 *
+	 * The FX overlay claims Track buttons while it is open -- they are
+	 * effects there, not solos. main.c used to express that by zeroing
+	 * ladder_raw, which cannot work: PLAY SHARES THIS RAIL. Erasing the
+	 * reading erased PLAY too, so holding any effect made the loop gesture
+	 * invisible and looping inside FX mode was impossible.
+	 *
+	 * Passing the claim as a MASK keeps the two separable: the claimed
+	 * Track bits are dropped, PLAY is decoded from the same untouched
+	 * reading as always, and the loop works with an effect held. */
+	uint8_t  track_consumed_mask;
+
 	/* VOLUME, decoded to a direction from st_vol_decode() (see
 	 * src/st_vol_ladder.h): -1 = Volume -, 0 = none, +1 = Volume +.
 	 * The two-button chord is VOL_BOTH and maps to 0 here -- it belongs
