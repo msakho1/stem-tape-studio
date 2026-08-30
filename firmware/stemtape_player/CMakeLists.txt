@@ -130,6 +130,14 @@ include(${ZEPHYR_BASE}/samples/subsys/usb/common/common.cmake)
 # source-frame and output-frame domains that a rate other than 1x separates.
 # Host-tested in tests/test_inertia.c.
 
+# Rocker semitone control: src/st_pitch.c -- the song's pitch, on the same
+# equal-tempered 2^(k/12) grid the inherited Tape Looper's own semitone
+# double-click uses (firmware/src/main.c's k_semi_q16), subdivided to half
+# steps. It is a tape varispeed: the value is a playback RATE, so pitch and
+# time move together exactly as they do in the Looper, and no time-stretching
+# was added. Host-tested in tests/test_pitch.c, which re-derives the Looper's
+# whole-semitone table out of this one and compares it entry by entry.
+
 # LED MVP (single semantic owner): src/st_led_mvp.c -- the pure,
 # host-tested decision that turns real runtime state into one complete
 # eight-LED frame, plus the local battery classifier (see st_led_mvp.h) --
@@ -176,6 +184,7 @@ target_sources(app PRIVATE
 	src/st_fx.c
 	src/st_fx_ctl.c
 	src/st_inertia.c
+	src/st_pitch.c
 	src/st_beat_phase.c
 	src/st_stem_meter.c
 	src/st_led_mvp.c

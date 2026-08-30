@@ -151,15 +151,16 @@
  * failure that cost several rounds before the shipped/calibration tags were
  * split apart. The tag is the only thing the operator can read. */
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st27-VOLCAL"
+#define ST_BUILD_TAG "st28-VOLCAL"
 #else
-#define ST_BUILD_TAG "st27"
+#define ST_BUILD_TAG "st28"
 #endif
 #include "st_track_hold.h"
 #include "st_ladder.h"
 #include "st_vol_ladder.h"
 #include "st_latency.h"
 #include "st_seam.h"
+#include "st_pitch.h"
 #include "st_stem_meter.h"
 #include "st_inertia.h"
 #include "st_resample.h"
@@ -1942,6 +1943,16 @@ static st_seam_t s_stem_seam;
  * from the frame at the cursor", which costs one frame of hold at a seam whose
  * gain is already ducked to zero.
  */
+/*
+ * THE SONG'S PITCH, in half semitones, owned by the control thread and read
+ * once per audio block. A plain int rather than an atomic for the same reason
+ * the loop window is not: it is a single aligned 16-bit value, the audio
+ * thread only ever reads it, and a block that catches an old value simply
+ * renders 5 ms at the previous pitch -- which is what "the rocker took effect
+ * on the next block" means anyway.
+ */
+static st_pitch_t s_stem_pitch;
+
 static st11_audio_frame_t s_rs_prev;
 static bool               s_rs_prev_valid;
 static uint32_t           s_stem_rate_frac;   /* cursor fraction, Q16 [0,1) */
@@ -1982,7 +1993,8 @@ static uint32_t stem_render_run(const uint8_t *buf, uint32_t frame_in_sector,
 			     uint32_t f0, uint32_t n, int16_t *s,
 			     uint32_t peak[ST11_STEM_COUNT],
 			     st_seam_t *seam, uint32_t song_frame,
-			     uint32_t rate_q16, uint32_t *frac_io)
+			     uint32_t rate_q16, uint32_t *frac_io,
+			     uint32_t src_avail)
 {
 	/* Hoisted out of the 48 kHz loop: with the overlay never opened this is
 	 * false and the whole rack costs one test per block. */
@@ -2024,8 +2036,19 @@ static uint32_t stem_render_run(const uint8_t *buf, uint32_t frame_in_sector,
 			 * time-stretch anywhere in this path.
 			 */
 			st11_audio_frame_t nxt;
+			uint32_t idx = cur;
 
-			st11_sector_decode_frame(buf, frame_in_sector + cur, &nxt);
+			/* THE HARD BOUND. st_rs_out_frames() floors at one
+			 * output frame, and above 1x that single forced frame
+			 * can ask for a source frame the run does not contain.
+			 * Holding the last available frame is a degenerate
+			 * corner measured in single frames; reading past the
+			 * sector buffer is memory corruption in a real-time
+			 * thread. */
+			if (idx >= src_avail) {
+				idx = src_avail - 1u;
+			}
+			st11_sector_decode_frame(buf, frame_in_sector + idx, &nxt);
 			if (!s_rs_prev_valid) {
 				s_rs_prev = nxt;
 				s_rs_prev_valid = true;
@@ -2041,16 +2064,52 @@ static uint32_t stem_render_run(const uint8_t *buf, uint32_t frame_in_sector,
 					(int32_t)(((int64_t)(nxt.stem_r[sp] - pr) *
 						    (int32_t)frac) >> 16);
 			}
-			/* Advance the cursor by one output frame's worth of
-			 * source. The rate is clamped to 1x upstream, so this
-			 * crosses at most one source frame and the frame it
-			 * leaves behind is the one just decoded -- no skipped
-			 * frame ever has to be fetched. */
+			/*
+			 * Advance the cursor by one output frame's worth of
+			 * source. ABOVE 1x this can cross more than one frame,
+			 * so it WALKS them rather than jumping: `prev` must end
+			 * up holding the frame immediately behind the new
+			 * cursor, or the next output frame would blend across a
+			 * gap it never looked at. Below 1x the loop runs at
+			 * most once and this is what it always was.
+			 */
 			frac += rate_q16;
-			if (frac >= ST_RS_ONE) {
+			while (frac >= ST_RS_ONE) {
 				frac -= ST_RS_ONE;
-				s_rs_prev = nxt;
 				cur++;
+				if (cur >= src_avail) {
+					/*
+					 * OUT OF RUN. Reachable only from the
+					 * floored corner in st_rs_out_frames()
+					 * -- one forced output frame that at a
+					 * rate above 1x wants more source than
+					 * the run holds.
+					 *
+					 * The whole frames the rate asked for
+					 * beyond the run are not there, so they
+					 * are dropped; the SUB-FRAME phase is
+					 * kept, because throwing it away would
+					 * be a position step and leaving frac
+					 * above 1.0 would make the next blend
+					 * extrapolate past both its samples.
+					 * ST_RS_ONE is a power of two, so the
+					 * mask is exactly "the fractional part".
+					 */
+					cur = src_avail;
+					s_rs_prev = nxt;
+					frac &= (ST_RS_ONE - 1u);
+					break;
+				}
+				{
+					uint32_t pidx = cur - 1u;
+
+					if (pidx >= src_avail) {
+						pidx = src_avail - 1u;
+					}
+					st11_sector_decode_frame(
+						buf, frame_in_sector + pidx,
+						&s_rs_prev);
+				}
 			}
 		}
 
@@ -2154,7 +2213,8 @@ static uint32_t stem_render_run(const uint8_t *buf, uint32_t frame_in_sector,
 		return n;
 	}
 	*frac_io = frac;
-	return cur;
+	/* Never report more than the run held, whatever the arithmetic did. */
+	return (cur > src_avail) ? src_avail : cur;
 }
 #endif /* SP1_XFER_ENABLE */
 
@@ -2389,15 +2449,22 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 	 * has to be maintained here; it is a property of there being a
 	 * single transport.
 	 *
-	 * The inertia envelope multiplies the requested rate rather than
-	 * replacing it, so a varispeed target composes with a ramp instead
-	 * of being overridden by one. The requested rate is unity today --
-	 * stem playback has no varispeed control yet -- and the multiply is
-	 * written out anyway so that adding one is a one-line change here
-	 * and nothing at all downstream.
+	 * TWO THINGS MULTIPLY HERE, and they are different in kind.
+	 *
+	 *   THE PITCH is the requested rate: the rocker's semitone setting,
+	 *   as a 2^(n/12) ratio from st_pitch.h -- the same equal-tempered
+	 *   grid the Tape Looper's own semitone control uses. It is a tape
+	 *   varispeed, so pitch and time move together; nothing here
+	 *   time-stretches and nothing preserves pitch independently.
+	 *
+	 *   THE INERTIA is an envelope in 0..1 over that. A song pitched to
+	 *   0.8x therefore spins up 0 -> 0.8x rather than 0 -> 1.0x, which
+	 *   is what makes the two features compose instead of fight. This
+	 *   multiply is the "one-line change" the previous revision of this
+	 *   comment promised; it is now made.
 	 */
 	const uint32_t rate_q16 = st_rs_rate_clamp(
-		(uint32_t)(((uint64_t)ST_RS_ONE *
+		(uint32_t)(((uint64_t)st_pitch_ratio_q16(&s_stem_pitch) *
 			     st_inertia_env_q16(&s_stem_inertia)) >> 16));
 	/* The seam's duck length converted from output frames into the tape
 	 * the playhead covers while it runs. See the arm clamp below. */
@@ -2420,7 +2487,12 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 	 * ramp it is ending, and the price of every other frame in the
 	 * session being read at 1:1 exactly as it was before inertia existed.
 	 */
-	if (st_inertia_at_unity(&s_stem_inertia) && s_stem_rate_frac != 0u) {
+	/* BOTH must be at nominal, not just the reel. With the rocker pitched
+	 * off unity the cursor legitimately carries a fraction on every block,
+	 * and snapping it would be a position jump per block rather than the
+	 * once-per-PLAY sub-sample step this is for. */
+	if (st_inertia_at_unity(&s_stem_inertia) &&
+	    st_pitch_is_unity(&s_stem_pitch) && s_stem_rate_frac != 0u) {
 		s_stem_rate_frac = 0u;
 		s_rs_prev_valid  = false;
 	}
@@ -2823,7 +2895,7 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 				       fis, &stem_prepared, m0, md, mv,
 				       f, out_n, s, stem_peak, &s_stem_seam,
 				       g_stem_stream.song_frame,
-				       rate_q16, &s_stem_rate_frac);
+				       rate_q16, &s_stem_rate_frac, run);
 		f += out_n;
 		/* THE PLAYHEAD ADVANCES BY WHAT WAS ACTUALLY READ, which is
 		 * `out_n * rate` rounded down to whole frames -- the
@@ -2949,6 +3021,10 @@ static void looper_audio_block(int16_t *s)
 		s_rs_prev_valid  = false;
 		s_stem_rate_frac = 0u;
 		st_inertia_reset(&s_stem_inertia);
+		/* A NEW SONG STARTS AT ITS OWN PITCH. Carrying the last song's
+		 * semitone offset across a reload would silently transpose
+		 * something the player never adjusted. */
+		st_pitch_reset(&s_stem_pitch);
 		atomic_set(&g_stem_song_selected, reload_ok ? 1 : 0);
 		atomic_set(&g_stem_reload_req, 0);
 	}
@@ -8594,6 +8670,51 @@ int main(void)
 					  (vcommit == VOL_TEMPO_UP) ? 1 :
 					  (vcommit == VOL_TEMPO_DOWN) ? -1 : 0;
 				int step = 0;
+
+				/* ---- STEM TAPE OWNS THIS ROCKER ------------
+				 * With a stem song selected the rocker is the
+				 * song's SEMITONE control, not the classic
+				 * engine's tempo. The gesture vocabulary is the
+				 * one this block has always used -- single
+				 * click, double click within the same 350 ms --
+				 * but the quantity is pitch, so a single is a
+				 * half semitone and a double a whole one.
+				 *
+				 * st_pitch owns the recognition, including the
+				 * rule that a double must never also emit the
+				 * single. The click EDGE is what is fed; a held
+				 * rocker deliberately does NOT repeat, because
+				 * a pitch that runs away under a resting finger
+				 * is not a control. The tick runs every pass,
+				 * click or not, because that is what commits a
+				 * single once its window closes.
+				 *
+				 * EXCLUSIVE, and it has to be: below this the
+				 * classic g_play_bpm/g_play_speed_q16 are
+				 * written, and in stem mode nothing reads them
+				 * -- the stem fast path bypasses that engine
+				 * entirely. Running both would make two owners
+				 * of one rocker, one of them doing dead work.
+				 *
+				 * Structured as an if/else rather than an early
+				 * `continue`: this loop ends in feed_wdt() and
+				 * led_service(), so skipping the rest of the
+				 * pass would starve the watchdog and freeze the
+				 * lights every time the rocker was touched. */
+				const bool pitch_owns_rocker =
+					atomic_get(&g_stem_song_selected) != 0;
+
+				if (pitch_owns_rocker) {
+					const uint32_t pnow = k_uptime_get_32();
+
+					if (dir != 0 && vcommit != vbefore) {
+						(void)st_pitch_click(&s_stem_pitch,
+								      dir, pnow);
+					}
+					(void)st_pitch_tick(&s_stem_pitch, pnow);
+					dir = 0;   /* the classic path sees no click */
+				}
+
 				if (dir != 0) {
 					int64_t tnow = k_uptime_get();
 					if (vcommit != vbefore) {            /* fresh click */

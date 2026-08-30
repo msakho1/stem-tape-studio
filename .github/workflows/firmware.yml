@@ -1939,6 +1939,81 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Stem Tape ROCKER SEMITONES -- the Tape Looper's own pitch grid, reused
+        # THE BRIEF: expose the semitone capability the Tape Looper already
+        # has, rather than building a second pitch engine.
+        #
+        # WHAT WAS REUSED, and how this step proves it rather than asserting
+        # it. firmware/src/main.c's k_semi_q16[25] is 2^(k/12) in Q16 -- the
+        # Looper's tempo rocker double-click snaps the PLAYBACK SPEED onto it,
+        # so pitch and time move together: tape varispeed, no time-stretching.
+        # src/st_pitch.c is that same grid at half the step, and the host test
+        # transcribes the Looper's table and compares every whole semitone
+        # BIT FOR BIT. "Reuse" for a lookup table has to mean the same
+        # numbers, not similar ones.
+        #
+        # THE GESTURE. Single click = half a semitone, double = a whole one,
+        # cumulative. The requirement that decides the design is that a double
+        # must not ALSO fire the single -- and not merely end up at the right
+        # value, since an implementation that fires +0.5 then corrects to +1.0
+        # has audibly played the wrong pitch. The single is therefore held for
+        # the Looper's own 350 ms window and committed only if no second click
+        # arrives; the test watches the value on every control pass through
+        # the gesture, not just at the end.
+        #
+        # THE RANGE IS ASYMMETRIC ON PURPOSE: -12.0 .. +2.5 semitones. Down is
+        # free. Up is bounded by eMMC READ THROUGHPUT, re-derived in the test
+        # from st_latency.h's own published figures (a sector holds 7083 us of
+        # audio, a typical read costs 5073 us, st_latency.h's own 15% margin),
+        # so changing the read path without revisiting the pitch range fails
+        # here rather than starving the stream on hardware.
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          cc -std=c11 -Wall -Wextra -Werror -Ifirmware/stemtape_player/src \
+            firmware/stemtape_player/src/st_pitch.c \
+            firmware/stemtape_player/tests/test_pitch.c \
+            -lm -o audit/test_pitch
+          ./audit/test_pitch | tee audit/pitch-selftest.txt
+
+          # THE GATE MUST KEEP MEASURING. If the Looper cross-check or the
+          # accumulation trace stops being printed, the harness has stopped
+          # asking the brief's questions.
+          grep -q 'the half-step grid contains' audit/pitch-selftest.txt
+          grep -q 'accumulation: +0.5 -> +1.5 -> +1.0 -> +0.0' \
+            audit/pitch-selftest.txt
+
+          # AND THE PRODUCTION PATH MUST USE IT.
+          M=firmware/stemtape_player/src/main.c
+          fail=0
+          grep -q '^#include "st_pitch.h"' "$M" || {
+            echo "  main.c does not include st_pitch.h"; fail=1; }
+          # THE PITCH IS THE REQUESTED RATE, and inertia multiplies OVER it.
+          # A build that replaced one with the other would still compile and
+          # would silently drop either the pitch or the tape spin-up.
+          grep -q 'st_pitch_ratio_q16(&s_stem_pitch)' "$M" || {
+            echo "  the pitch never reaches the transport rate"; fail=1; }
+          grep -q 'st_inertia_env_q16(&s_stem_inertia)) >> 16' "$M" || {
+            echo "  inertia no longer multiplies the requested rate"; fail=1; }
+          grep -q 'st_pitch_click(&s_stem_pitch' "$M" || {
+            echo "  the rocker never reaches the pitch state"; fail=1; }
+          grep -q 'st_pitch_tick(&s_stem_pitch' "$M" || {
+            echo "  the pending single is never committed"; fail=1; }
+          # ONE OWNER OF THE ROCKER. In stem mode the classic tempo path must
+          # not also run: nothing reads g_play_speed_q16 there, so letting it
+          # write would be a second owner doing dead work.
+          grep -q 'pitch_owns_rocker' "$M" || {
+            echo "  the classic tempo path is not fenced off in stem mode"
+            fail=1; }
+          [ "$fail" = 0 ] || exit 1
+          echo "pitch wiring: rocker -> semitones -> one transport -> four stems"
+          {
+            echo '### Stem Tape rocker semitone control'
+            echo '```text'
+            cat audit/pitch-selftest.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Stem Tape TRANSPORT INERTIA -- the reel has mass, and it is a pitch drop
         # THE BRIEF, and the line it drew:
         #
@@ -1982,6 +2057,7 @@ jobs:
           cc -std=c11 -Wall -Wextra -Werror -Ifirmware/stemtape_player/src \
             firmware/stemtape_player/src/st_sector_v11.c \
             firmware/stemtape_player/src/st_inertia.c \
+            firmware/stemtape_player/src/st_pitch.c \
             firmware/stemtape_player/tests/test_inertia_transport_gate.c \
             -lm -o audit/test_inertia_transport_gate
           ./audit/test_inertia_transport_gate | tee audit/inertia-transport-gate.txt
@@ -2563,6 +2639,12 @@ jobs:
           check st_inertia_play
           check st_inertia_stop
           check st_inertia_advance
+          # ROCKER SEMITONES. The ratio lookup must be in the image: a build
+          # that linked the gesture but not the grid would move a number
+          # nothing plays.
+          check st_pitch_ratio_q16
+          check st_pitch_click
+          check st_pitch_tick
           # physical control scanner (button/fader ladder read) + LED output
           check ladder_read
           check led_service

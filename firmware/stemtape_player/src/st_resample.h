@@ -35,15 +35,21 @@
  * lets a run of ONE source frame still produce output instead of stalling.
  *
  * ======================================================================
- * RATE IS CLAMPED TO 1x
+ * RATE ABOVE 1x, AND ITS STRUCTURAL CEILING
  * ======================================================================
- * `st_rs_rate_clamp()` caps the effective rate at unity, so the cursor never
- * advances more than one source frame per output frame and the renderer never
- * has to decode a frame it skipped over. That is not a limitation in
- * practice: inertia is an envelope in 0..1 multiplying the requested rate, so
- * a 1x song ramps within 0..1x and a 0.8x song within 0..0.8x. Faster-than-1x
- * stem playback does not exist and would need the skip case written first --
- * hence the clamp rather than silent misbehaviour.
+ * This used to clamp at exactly unity, because inertia is an envelope in 0..1
+ * and nothing ever asked to go faster. The rocker's semitone control does: a
+ * pitch above 0 reads the tape FASTER than the output is produced, so the
+ * cursor can cross more than one source frame per output frame and the
+ * renderer has to walk the frames it passes over rather than jumping them.
+ *
+ * ST_RS_RATE_MAX is 2x, and that is a STRUCTURAL bound, not a musical one:
+ * two source frames per output frame is the most the renderer's carried
+ * previous-frame can span in one step, and the run arithmetic below is
+ * written against it. It is NOT the limit the player actually uses --
+ * st_pitch.h caps pitch far below this, at what the eMMC read path can
+ * sustain (about 1.19x). Two separate ceilings for two separate reasons: this
+ * one says what the reader can do, that one says what the storage can feed.
  */
 #ifndef ST_RESAMPLE_H
 #define ST_RESAMPLE_H
@@ -53,14 +59,17 @@
 /* Same fixed point as the inertia envelope: 65536 == 1.0 == source speed. */
 #define ST_RS_ONE 65536u
 
-/* See "RATE IS CLAMPED TO 1x" above. Zero is also refused: a rate of zero
- * would emit output forever without ever consuming a source frame, which is
- * a stalled transport, not a slow one. The inertia module declares the reel
- * stopped well above this. */
+/* The structural ceiling described above: two source frames per output frame. */
+#define ST_RS_RATE_MAX (2u * ST_RS_ONE)
+
+/* See "RATE ABOVE 1x" above. Zero is also refused: a rate of zero would emit
+ * output forever without ever consuming a source frame, which is a stalled
+ * transport, not a slow one. The inertia module declares the reel stopped
+ * well above this. */
 static inline uint32_t st_rs_rate_clamp(uint32_t rate_q16)
 {
-	if (rate_q16 > ST_RS_ONE) {
-		return ST_RS_ONE;
+	if (rate_q16 > ST_RS_RATE_MAX) {
+		return ST_RS_RATE_MAX;
 	}
 	if (rate_q16 == 0u) {
 		return 1u;
@@ -78,10 +87,16 @@ static inline uint32_t st_rs_rate_clamp(uint32_t rate_q16)
  * sector/song/loop clamps established.
  *
  * NEVER RETURNS ZERO. A zero-length run would spin the caller's loop forever
- * in a real-time thread. The formula can produce zero only in the degenerate
- * corner of a one-frame run whose cursor has almost crossed it already; there
- * one output frame is still safe (it reads index 0 and consumes at most 1),
- * so it is floored rather than special-cased anywhere else.
+ * in a real-time thread. The formula can produce zero in the degenerate corner
+ * of a short run whose cursor has almost crossed it already, so it is floored
+ * at one output frame.
+ *
+ * THAT FLOOR IS THE ONE PLACE THE BOUND CAN BE EXCEEDED, and above 1x it
+ * genuinely can: one forced output frame at 1.9x from a one-frame run would
+ * consume two. The renderer therefore clamps its own reads to the run it was
+ * given rather than trusting this -- see stem_render_run(). Belt and braces,
+ * because the cost of being wrong here is a read past a sector buffer in a
+ * real-time thread on a part with no MMU.
  */
 static inline uint32_t st_rs_out_frames(uint32_t src_frames, uint32_t frac_q16,
 					 uint32_t rate_q16)

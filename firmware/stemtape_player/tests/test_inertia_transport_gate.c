@@ -52,6 +52,7 @@
 #include <string.h>
 
 #include "st_inertia.h"
+#include "st_pitch.h"
 #include "st_resample.h"
 #include "st_sector_v11.h"
 
@@ -218,16 +219,19 @@ static void rig_block(rig_t *r, uint32_t rate_q16)
 				g_frac_overflow++;
 			}
 
-			/* THE BOUND UNDER TEST. A read at or past `run` is a
-			 * read into the next sector, which is not resident. */
-			if (cur >= run) {
-				g_oob = true;
-				if (cur - run + 1u > g_worst_over) {
-					g_worst_over = cur - run + 1u;
+/* THE BOUND UNDER TEST. A read at or past `run` is a
+				 * read into the next sector, which is not
+				 * resident. Production clamps rather than
+				 * reading; the rig RECORDS the attempt so the
+				 * clamp cannot hide a bound that is wrong. */
+				if (cur >= run) {
+					g_oob = true;
+					if (cur - run + 1u > g_worst_over) {
+						g_worst_over = cur - run + 1u;
+					}
+					break;
 				}
-				break;
-			}
-			st11_sector_decode_frame(buf, fis + cur, &nxt);
+				st11_sector_decode_frame(buf, fis + cur, &nxt);
 			if (!r->prev_valid) {
 				r->prev = nxt;
 				r->prev_idx = r->song_frame + cur;
@@ -257,12 +261,24 @@ static void rig_block(rig_t *r, uint32_t rate_q16)
 				(void)nxt.stem_l[sp];
 			}
 
+			/* Walks the frames it crosses, as production does --
+			 * above 1x the cursor can pass more than one. */
 			r->frac += rate_q16;
-			if (r->frac >= ST_RS_ONE) {
+			while (r->frac >= ST_RS_ONE) {
 				r->frac -= ST_RS_ONE;
-				r->prev = nxt;
 				r->prev_idx = r->song_frame + cur;
 				cur++;
+				if (cur >= run) {
+					/* Mirrors production: drop the whole
+					 * frames the run cannot supply, keep
+					 * the sub-frame phase. */
+					r->prev = nxt;
+					r->frac &= (ST_RS_ONE - 1u);
+					break;
+				}
+				st11_sector_decode_frame(buf, fis + cur - 1u,
+							  &r->prev);
+				r->prev_idx = r->song_frame + cur - 1u;
 			}
 		}
 		f += out_n;
@@ -276,9 +292,16 @@ static void rig_block(rig_t *r, uint32_t rate_q16)
  * ====================================================================== */
 static void case_bounds_never_escape_the_sector(void)
 {
+	/*
+	 * ABOVE 1x IS NOW REACHABLE, so it is swept. 69433 and 75717 are the
+	 * rocker's +1 and +2.5 semitones; 131072 is 2x, the resampler's
+	 * structural ceiling; 200000 is over it and must be clamped down
+	 * rather than obeyed.
+	 */
 	static const uint32_t rates[] = {
 		1u, 64u, 256u, 1000u, 6553u, 16384u, 32768u, 49152u,
-		65535u, 65536u, 100000u,   /* the last one exercises the clamp */
+		65535u, 65536u, 67456u, 69433u, 75717u, 98304u, 131072u,
+		200000u,
 	};
 	uint32_t ri, start, blocks;
 
@@ -309,7 +332,7 @@ static void case_bounds_never_escape_the_sector(void)
 	CHECK(g_frac_overflow == 0u,
 	      "the cursor fraction left [0,1) %u times -- the blend would be "
 	      "extrapolating, not interpolating", g_frac_overflow);
-	printf("     11 rates x 5 starting offsets x 60 blocks, no escape\n");
+	printf("     16 rates (0.00002x .. clamped 2x) x 5 offsets x 60 blocks, no escape\n");
 }
 
 /* ======================================================================
@@ -650,6 +673,68 @@ static void case_the_blend_actually_interpolates(void)
 }
 
 /* ======================================================================
+ * 5c. THE ROCKER'S SEMITONES, AS HEARD.
+ *
+ * st_pitch's own test proves the gesture and the grid; this proves the grid
+ * reaches the tape. The 1 kHz tone is rendered at each half step and its
+ * measured period compared against 2^(-semitones/12) of the nominal 48
+ * frames per cycle -- so a table that was right on paper but wired in
+ * backwards, halved, or ignored fails here.
+ *
+ * It is also the demonstration that this is a VARISPEED and not a pitch
+ * shifter: the source frames consumed per output frame move with the ratio,
+ * which is the same statement as "the tape runs faster". Nothing in this
+ * path preserves duration.
+ * ====================================================================== */
+static void case_semitones_reach_the_tape(void)
+{
+	static const int steps[] = { -24, -12, -4, -2, 0, 2, 4, 5 };
+	uint32_t i;
+
+	g_cases++;
+	printf("\n-- the rocker's semitones change the rendered pitch\n");
+	printf("     semitones   rate      period   expected   error\n");
+
+	for (i = 0; i < sizeof(steps) / sizeof(steps[0]); i++) {
+		st_pitch_t p;
+		rig_t r;
+		uint32_t b, rate;
+		double period, amp, want, err;
+
+		st_pitch_reset(&p);
+		p.half = (int16_t)steps[i];
+		rate = st_pitch_ratio_q16(&p);
+
+		rig_init(&r, 0u);
+		g_nout = 0;
+		for (b = 0; b < 24u; b++) {
+			rig_block(&r, rate);
+		}
+		measure(g_nout / 8u, g_nout, &period, &amp);
+
+		/* A tone read `rate` times faster comes out `rate` times
+		 * higher, so its period in output frames is 48 / rate. */
+		want = (SR / TONE_HZ) / ((double)rate / 65536.0);
+		err  = (period - want) / want * 100.0;
+		printf("     %+5.1f      %.4fx  %7.1f   %8.1f   %+5.2f%%\n",
+		       steps[i] * 0.5, (double)rate / 65536.0, period, want,
+		       err);
+
+		CHECK(period > 0.0, "no cycles measured at %+.1f semitones",
+		      steps[i] * 0.5);
+		CHECK(fabs(err) < 2.0,
+		      "%+.1f semitones rendered a period of %.1f frames, "
+		      "expected %.1f (%+.2f%%)", steps[i] * 0.5, period, want,
+		      err);
+		/* The level must not move with the pitch: this is a transport
+		 * rate, not a gain. */
+		CHECK(amp > 1900000.0,
+		      "the level fell to %.0f at %+.1f semitones -- pitch must "
+		      "not touch gain", amp, steps[i] * 0.5);
+	}
+}
+
+/* ======================================================================
  * 6. ONE PLAYHEAD, FOUR STEMS. The stems are interleaved in the same
  *    frame and read at one index, so phase lock is structural rather than
  *    maintained -- but a future edit could give a stem its own cursor,
@@ -776,6 +861,7 @@ int main(void)
 	case_spindown_is_a_pitch_drop_not_a_fade();
 	case_spinup_rises_to_pitch();
 	case_the_blend_actually_interpolates();
+	case_semitones_reach_the_tape();
 	case_stems_share_one_playhead();
 	case_unity_is_one_to_one();
 	case_seam_arm_distance_follows_rate();
