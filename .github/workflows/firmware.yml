@@ -720,10 +720,32 @@ jobs:
           SZ="$(stat -c '%s' audit/stemtape_player-VOLCAL.bin)"
           SH="$(sha256sum audit/stemtape_player-VOLCAL.bin | cut -d' ' -f1)"
           echo "VOLCAL image: ${SZ} B sha256=${SH}"
+          # THE SHIPPED IMAGE IS build-stemtape-player/zephyr/zephyr.bin AT
+          # THIS POINT IN THE JOB. It is NOT audit/stemtape_player.bin, which
+          # does not exist yet -- that name is created much later, by the
+          # "Image assertions" step, which copies zephyr.bin to it.
+          #
+          # Every check below used to read the audit/ path anyway. `strings`
+          # printed "No such file" to stderr, `grep -q` then saw empty input
+          # and returned non-zero, the `if` fell through, and the step
+          # cheerfully printed "capture present in VOLCAL, absent from the
+          # shipped image". That reassuring line was derived from a missing
+          # file: the check never once examined the shipped image, and would
+          # not have caught the capture leaking into a release. `set -e` could
+          # not catch it either, because a pipeline used as an `if` condition
+          # is explicitly exempt.
+          #
+          # So: resolve the real path, and assert it exists BEFORE using it.
+          # A path mistake must fail loudly rather than read as a pass.
+          SHIP_BIN=build-stemtape-player/zephyr/zephyr.bin
+          if [ ! -f "$SHIP_BIN" ]; then
+            echo "FAIL: shipped image $SHIP_BIN is missing -- nothing to compare against"
+            exit 1
+          fi
           # Prove the capture really is in one image and not the other.
           # Without this the artifact could be silently identical and nobody
           # would find out until the hardware printed nothing.
-          if strings audit/stemtape_player.bin | grep -q 'VOLCAL raw='; then
+          if strings "$SHIP_BIN" | grep -q 'VOLCAL raw='; then
             echo "FAIL: the SHIPPED image contains the calibration capture"
             exit 1
           fi
@@ -740,22 +762,29 @@ jobs:
           # confirmed the console worked while leaving the actual question --
           # which binary is running -- unanswered, and a mis-flash was
           # indistinguishable from a broken capture. Assert the divergence.
-          # `|| true` on both: under `set -o pipefail` a grep that matches
-          # nothing (or a SIGPIPE from head) would abort the step before the
-          # explicit emptiness check below could report what actually went
-          # wrong. Let the check do the reporting.
-          SHIP_TAG="$(strings audit/stemtape_player.bin | grep -oE '^st[0-9]+(-VOLCAL)?$' | head -1 || true)"
-          CAL_TAG="$(strings audit/stemtape_player-VOLCAL.bin | grep -oE '^st[0-9]+(-VOLCAL)?$' | head -1 || true)"
+          # Checked as PRESENCE/ABSENCE of the calibration tag form rather
+          # than by pulling one tag out of each image and comparing them. A
+          # `head -1` over a loose '^st[0-9]+$' pattern would silently pick
+          # whichever unrelated string happened to sort first, and report a
+          # build tag the firmware never prints. Matching the exact suffixed
+          # form makes the assertion independent of what else lives in the
+          # binary. `|| true` keeps a no-match grep (or a SIGPIPE) from
+          # aborting the step under `set -o pipefail` before these checks can
+          # say what actually went wrong.
+          CAL_TAG="$(strings audit/stemtape_player-VOLCAL.bin | grep -xE 'st[0-9]+-VOLCAL' | sort -u | head -1 || true)"
+          SHIP_CAL_TAG="$(strings "$SHIP_BIN" | grep -xE 'st[0-9]+-VOLCAL' | sort -u | head -1 || true)"
+          SHIP_TAG="$(strings "$SHIP_BIN" | grep -xE 'st[0-9]+' | sort -u | head -1 || true)"
           echo "shipped build tag: ${SHIP_TAG:-<none>} / calibration build tag: ${CAL_TAG:-<none>}"
-          if [ -z "$SHIP_TAG" ] || [ -z "$CAL_TAG" ]; then
-            echo "FAIL: could not recover a build tag from both images"
+          if [ -z "$CAL_TAG" ]; then
+            echo "FAIL: the calibration image does not announce an 'stNN-VOLCAL' build tag."
+            echo "Its banner would be indistinguishable from a shipped image on hardware."
             exit 1
           fi
-          if [ "$SHIP_TAG" = "$CAL_TAG" ]; then
-            echo "FAIL: both images announce the same build tag '${SHIP_TAG}'."
-            echo "The banner cannot tell the operator which image is running."
+          if [ -n "$SHIP_CAL_TAG" ]; then
+            echo "FAIL: the SHIPPED image announces the calibration tag '${SHIP_CAL_TAG}'."
             exit 1
           fi
+          echo "build tags diverge: only the calibration image announces ${CAL_TAG}"
           {
             echo '### AIN1 calibration image'
             echo 'In the `stemtape-player-audit` artifact:'
@@ -764,7 +793,7 @@ jobs:
             echo "size ${SZ} B, sha256 \`${SH}\`"
             echo ''
             echo "Boot banner: \`STEMTAPE BUILD ${CAL_TAG}\`"
-            echo "(the shipped image announces \`${SHIP_TAG}\` -- if you see"
+            echo "(the shipped image announces \`${SHIP_TAG:-<unknown>}\` -- if you see"
             echo 'that one, the wrong BIN is flashed and no VOLCAL line will'
             echo 'ever appear.)'
             echo ''
