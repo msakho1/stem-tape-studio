@@ -1596,6 +1596,67 @@ jobs:
             firmware/stemtape_player/tests/test_fx_dsp.c -lm \
             -o audit/test_fx_dsp
           ./audit/test_fx_dsp | tee audit/fx-dsp.txt
+          # ---- FX PRODUCTION WIRING ------------------------------------
+          # The two tests above are standalone. test_fx_dsp.c says so in its
+          # own closing line: "host arithmetic only. Not production-linked
+          # and not heard." Neither touches main.c, so a rack whose call
+          # sites had been deleted would still have passed both -- correct
+          # arithmetic that no audio ever flows through.
+          #
+          # This gate renders REAL decoded four-stem fixture audio through
+          # the SAME insertion arithmetic main.c performs at both scopes and
+          # asserts the rack changes the samples, that each effect moves the
+          # signal the way its name claims, and -- the case that protects
+          # ordinary playback -- that an empty mask is bit-exact passthrough.
+          # It measures those properties itself; no expected sample comes
+          # from the function under test.
+          #
+          # Mutation-checked before it landed: removing both insertion
+          # points, removing only the STEM one, and cutting the mask off
+          # from st_fx_prepare() each fail it.
+          cc -std=c11 -Wall -Wextra -Werror -Ifirmware/stemtape_player/src \
+            firmware/stemtape_player/src/st_fx.c \
+            firmware/stemtape_player/src/st_fx_ctl.c \
+            firmware/stemtape_player/src/st_sector_v11.c \
+            firmware/stemtape_player/src/st_stem_mix.c \
+            firmware/stemtape_player/tests/test_fx_wiring_gate.c -lm \
+            -o audit/test_fx_wiring_gate
+          ./audit/test_fx_wiring_gate | tee audit/fx-wiring.txt
+          grep -q 'FX WIRING GATE PASSED' audit/fx-wiring.txt
+          # THE GATE COPIES main.c's INSERTION ARITHMETIC, because a host
+          # file cannot call main.c's static render function. That copy is
+          # only worth anything while the original still exists and still
+          # looks like it, so assert the real call sites directly. Counted,
+          # not merely present: exactly two st_fx_process() sites (one per
+          # scope) and one st_fx_prepare(). A third would mean the rack is
+          # being applied somewhere this gate does not model.
+          M=firmware/stemtape_player/src/main.c
+          NPROC="$(grep -c 'st_fx_process(&g_stem_fx' "$M" || true)"
+          NPREP="$(grep -c 'st_fx_prepare(&g_stem_fx' "$M" || true)"
+          echo "main.c FX insertion sites: st_fx_process=${NPROC} st_fx_prepare=${NPREP}"
+          if [ "$NPROC" -ne 2 ]; then
+            echo "FAIL: expected exactly 2 st_fx_process() call sites in main.c, found ${NPROC}"
+            grep -n 'st_fx_process' "$M" || true
+            exit 1
+          fi
+          if [ "$NPREP" -ne 1 ]; then
+            echo "FAIL: expected exactly 1 st_fx_prepare() call site in main.c, found ${NPREP}"
+            grep -n 'st_fx_prepare' "$M" || true
+            exit 1
+          fi
+          # And that the mask the overlay publishes is what prepare receives
+          # -- the link mutation B in the wiring gate simulates breaking.
+          if ! grep -q 's_fx_active_mask' "$M"; then
+            echo "FAIL: main.c never publishes s_fx_active_mask to the rack"
+            exit 1
+          fi
+          echo "FX production wiring: 2 process sites, 1 prepare site, mask published"
+          {
+            echo '### Stem Tape FX production wiring'
+            echo '```text'
+            cat audit/fx-wiring.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
           # The FX LED overlay must not have disturbed anything below it.
           grep -q 'LED ACCEPTANCE MATRIX PASSED' audit/led-acceptance-matrix.txt \
             || echo "(LED matrix runs in its own step)" 
@@ -2306,6 +2367,30 @@ jobs:
           # calls it -- requiring it would be requiring dead weight.
           check st_stem_mix_prepare
           check st_stem_mix_frame_prepared
+          # THE FX RACK. Required here because until this was added, nothing
+          # in CI obliged st_fx_process() to survive linking at all: the two
+          # FX host tests exercise the module standalone and never touch
+          # main.c, so a rack that had lost its call sites would have been
+          # garbage-collected out of the image by -ffunction-sections/
+          # --gc-sections and every gate would still have been green. The
+          # firmware would have shipped with correct FX arithmetic that no
+          # audio ever passed through.
+          #
+          # st_fx_process() is the per-frame entry point (both scopes call
+          # it) and st_fx_prepare() is the once-per-block tempo/mask publish.
+          # The companion "FX PRODUCTION WIRING" gate proves the rack changes
+          # real audio; these prove the code it proves is actually in the
+          # image that ships.
+          #
+          # st_fx_reset() is deliberately NOT required, on the same grounds
+          # this file already states for st_stem_mix_frame() and
+          # st_stream_advance_frame(): it has no production call site. It is
+          # a memset to zero, and g_stem_fx is a file-scope static, so the
+          # boot state it would produce is the one the loader already
+          # guarantees. Requiring it would be requiring dead weight.
+          check st_fx_process
+          check st_fx_prepare
+          check_any g_stem_fx
           check st_stream_init
           check st_stream_required_sector
           check st_stream_validate_sector
