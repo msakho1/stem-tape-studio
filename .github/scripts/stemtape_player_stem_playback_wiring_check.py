@@ -300,6 +300,29 @@ LED_FORBIDDEN_ANYWHERE = [
     "st_beat_led_decide",
 ]
 
+# ======================================================================
+# THE LOOP MAY NOT MOVE THE PLAYHEAD EXCEPT AT A BOUNDARY.
+# ======================================================================
+# Engaging or releasing the loop changes the transport's RULES, never its
+# POSITION. Only the playhead crossing loopEnd may move it.
+#
+# The firmware used to seek BACK to the captured frame on engage --
+# loop_start is captured at PLAY-DOWN, so that replayed the whole hold --
+# and forward to loop_end on release. On a vocal reading "for me no",
+# engaging during "me" gave "for me - me no", with the syllable audibly
+# restarting. Reported from hardware.
+#
+# Each name below is a load-bearing part of one of those two seeks. Naming
+# them here means reintroducing either one fails with THIS explanation
+# rather than as a silent behaviour change that only a listener would
+# catch. Comments may still discuss them; code may not use them.
+LOOP_FORBIDDEN_ANYWHERE = [
+    "ST_SEAM_JUMP_ENTER",     # the entry seek's jump kind
+    "ST_SEAM_JUMP_EXIT",      # the release seek's jump kind
+    "g_stem_loop_enter_fr",   # the frame the entry seek landed on
+    "g_stem_loop_resume_fr",  # the frame the release seek landed on
+]
+
 # led_service() must not read trk[].muted at all: Stem Tape has no persistent
 # mute, and a display that consulted one would be showing state no gesture in
 # this firmware can produce.
@@ -320,15 +343,17 @@ LED_FORBIDDEN_IN_LED_SERVICE = [
 REQUIRED_SUBSTRINGS = {
     "stem_audio_block": [
         # The window bounds the run, so the wrap lands on a frame boundary
-        # instead of inside a rendered run; the exit is a ONE-SHOT consumed
-        # with an atomic CAS so one gesture can only cause one seek.
+        # instead of inside a rendered run. Both gesture edges are ONE-SHOTS
+        # consumed with an atomic CAS, so one gesture is seen exactly once.
         "atomic_cas(&g_stem_loop_enter_req, 1, 0)",
         "atomic_cas(&g_stem_loop_exit_req, 1, 0)",
-        # THE EXIT TARGET IS THE PUBLISHED RESUME FRAME (loop_end), not
-        # loop_start. Naming the atomic here is what stops the st15 rule --
-        # which made the looped bar play through a second time on hardware --
-        # from creeping back.
-        "atomic_get(&g_stem_loop_resume_fr)",
+        # THE PERIODIC BOUNDARY. With no entry seek the playhead can begin
+        # OUTSIDE the window -- loop_start is captured at PLAY-DOWN and the
+        # hold can outlast a short division -- so the boundary approached is
+        # the first loop_start + n*len above it. Without this a short loop
+        # would silently never wrap, which is worse than a click because it
+        # looks like nothing happened.
+        "lp_end = lp_lo + ((pos - lp_lo) / len + 1u) * len;",
         "run > left_in_loop",
         "trk[s].vol_q8",
         "trk[s].muted",
@@ -358,14 +383,17 @@ REQUIRED_SUBSTRINGS = {
     "stem_ctl_apply": [
         # THE PUBLISHED MASK IS WHAT REACHES THE MIXER.
         "trk[k].solo = ((o->track_mask >> k) & 1u) ? 1u : 0u;",
-        # HALF-OPEN EXIT. Every exit targets the published resume frame,
-        # which is loop_end -- never loop_start.
-        "atomic_set(&g_stem_loop_resume_fr, (atomic_val_t)o->loop_resume);",
-        # THE ENTRY SEEK back to the PLAY-down frame.
+        # THE EXIT IS A FLAG, NOT A SEEK. Clearing `active` is the entire
+        # exit as far as the transport is concerned. The resume frame is
+        # deliberately no longer published or consumed: a release may not
+        # move the playhead, so there is nothing to seek to. Its absence is
+        # asserted in FORBIDDEN_SUBSTRINGS below.
+        "atomic_set(&g_stem_loop_active, 0);",
+        # THE ENTRY IS A FLAG TOO -- the one-shot edge, with no frame.
         "atomic_set(&g_stem_loop_enter_req, 1);",
         # BOTH PINNED REGIONS ARE REQUESTED FROM THE ARM ONWARDS, so the
-        # entry seek and any immediately-following exit both land on
-        # resident bytes.
+        # wrap back to loop_start lands on resident bytes from the first
+        # lap onward.
         "g_stem_loop_pin_want[ST_LOOP_PIN_ENTRY]",
         "g_stem_loop_pin_want[ST_LOOP_PIN_EXIT]",
         # THE ONLY PLACE the transport toggles for a Stem Tape song.
@@ -556,6 +584,22 @@ def main() -> int:
         else:
             report.append(f"- present: `{name}` does not exist anywhere in main.c's code -- it "
                            "cannot drive any LED in any state")
+
+    report.append("")
+    report.append("### The loop never moves the playhead except at a boundary")
+    for name in LOOP_FORBIDDEN_ANYWHERE:
+        hits = [i for i, l in code_lines if re.search(r"\b" + re.escape(name) + r"\b", l)]
+        if hits:
+            report.append(f"- **MISSING/BAD**: `{name}` is back in main.c at line(s) "
+                           + ", ".join(str(h) for h in hits[:5])
+                           + " -- an entry or release SEEK has returned. Engaging or releasing "
+                             "the loop may change the transport's rules but never its position; "
+                             "only crossing loopEnd may move the playhead. This is the defect "
+                             "that made a looped syllable restart audibly on hardware.")
+            fail = True
+        else:
+            report.append(f"- present: `{name}` does not exist anywhere in main.c's code -- "
+                          "that seek cannot happen")
 
     # A2. the standby chase must be gone with it
     chase_hits = [i for i, l in code_lines if "STANDBY" in l or "standby chase" in l]
