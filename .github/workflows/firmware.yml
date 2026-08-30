@@ -1715,14 +1715,14 @@ jobs:
             echo "  stem_render_run() does not take the seam"; fail=1; }
           grep -q 'st_seam_gain(seam)' "$M" || {
             echo "  the render loop never applies the seam gain"; fail=1; }
-          # EXACTLY TWO seeks may exist in the audio path: the ducked jump,
-          # and the length-change backstop. A third is an un-ducked
-          # transition, i.e. the defect coming back.
+          # EXACTLY TWO seeks may exist in the audio path: the ducked wrap,
+          # and its containment backstop. A third is an un-ducked transition,
+          # i.e. the defect coming back.
           seeks="$(grep -cE '^[[:space:]]*(bool moved = |if \()st_stream_seek\(' "$M")"
           echo "  st_stream_seek() call sites in the audio path: $seeks (want 2)"
           [ "$seeks" = 2 ] || { echo "  an un-ducked loop seek has appeared"; fail=1; }
           [ "$fail" = 0 ] || exit 1
-          echo "seam wiring: all three loop transitions duck before they jump"
+          echo "seam wiring: the wrap ducks before it jumps"
           # st_seam.h is header-only inline; there is no st_seam.c.
           cc -std=c11 -Wall -Wextra -Werror -Ifirmware/stemtape_player/src \
             firmware/stemtape_player/src/st_loop.c \
@@ -1733,9 +1733,17 @@ jobs:
             -o audit/test_loop_seam_gate
           ./audit/test_loop_seam_gate | tee audit/loop-seam-gate.txt
           # The gate must keep reproducing st17's defect, not just pass. If the
-          # "ducker disengaged" case ever stops showing a real step, the
-          # harness has stopped modelling the thing that failed on hardware.
-          grep -q 'all three transitions produce a real step' \
+          # "ducker disengaged" case ever stops showing a real step at the
+          # WRAP, the harness has stopped modelling the thing that failed on
+          # hardware.
+          #
+          # It used to say "all three transitions"; there is only one seam
+          # now. Engage and release no longer move the playhead, so they have
+          # no step to duck -- the gate asserts they measure ZERO, and the
+          # LOOP TRANSPORT gate owns that claim properly.
+          grep -q 'the WRAP produces a real step' \
+            audit/loop-seam-gate.txt
+          grep -q 'engage and release move nothing' \
             audit/loop-seam-gate.txt
           {
             echo '### Stem Tape LOOP SEAM gate (waveform discontinuity)'
