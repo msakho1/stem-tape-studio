@@ -199,8 +199,23 @@ typedef struct {
 	 * effect as SOLID -- visible and honest -- instead of inventing a grid. */
 	bool    fx_flash_on;
 
-	/* Per-stem output activity, 0..255. SCALES the shared beat pulse; it
-	 * never gates or times anything. */
+	/* ---- THE TRACK ROW ITSELF, one stem each ---------------------------
+	 * Per-stem audio activity, 0..255, and during playback this IS the
+	 * Track LED level -- not a scale factor on something else. Index k is
+	 * the stem behind Track (k+1); they are four independent values and
+	 * nothing here ever mixes them.
+	 *
+	 * ALREADY ENVELOPED AND ALREADY CURVED. st_stem_meter.h owns the
+	 * attack, the release, the noise floor, the sensitivity and the
+	 * logarithmic brightness map, and hands the finished level here. This
+	 * module re-shapes none of it, so there is exactly one place to tune
+	 * how the lights feel and no second curve to keep in step.
+	 *
+	 * 0 means the stem is genuinely silent -- below the meter's noise
+	 * floor -- and the light is off. There is deliberately no tempo input
+	 * anywhere in this path: a stem silent for a bar reads dark for that
+	 * bar, and a stem sustaining across four beats stays lit across all
+	 * four. */
 	uint8_t stem_activity[ST_LED_TRACK_COUNT];
 
 	st_led_batt_state_t batt_state;

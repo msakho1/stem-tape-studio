@@ -139,14 +139,22 @@ include(${ZEPHYR_BASE}/samples/subsys/usb/common/common.cmake)
 # TIMER3/GPIO soft-PWM masks. It is the ONLY thing that writes those masks
 # in normal running.
 #
-# REMOVED from this target: src/st_stem_meter.c. It drove a per-stem peak
-# meter on the track row, described as a "beat pulse". No contract document
-# approves it, and a level meter is not the stable readable indication the
-# LED contract specifies -- a quiet passage dimmed a stem that was audible.
-# st_led_mvp_decide() now owns the track row with the contract's own
-# solid/faint vocabulary, so st_stem_meter.c has no caller left and is not
-# compiled in rather than being linked and garbage-collected silently. Its
-# source and host tests stay in the tree for reference.
+# RE-LINKED: src/st_stem_meter.c -- the per-stem envelope follower and
+# brightness curve, one instance per stem.
+#
+# It was unlinked once, on the reasoning that "a level meter is not the
+# stable readable indication the LED contract specifies -- a quiet passage
+# dimmed a stem that was audible". That reasoning is reversed on the
+# product's own terms: a quiet passage SHOULD dim its stem, because the Track
+# row's job is to show what each part of the arrangement is doing, and a row
+# that reads the same whether a stem is playing or resting shows nothing at
+# all. The stable indication the contract wanted is the SIDE row, which still
+# has it -- S4 carries the beat, unchanged.
+#
+# The module owns no clock and takes no tempo input; it converts a stream of
+# per-stem peaks into a brightness. Host-tested in tests/test_stem_meter.c
+# (the arithmetic) and tests/test_led_audio_reactive.c (the five acceptance
+# behaviours, against synthesised drum/pad/vocal material).
 target_sources(app PRIVATE
 	src/main.c
 	src/sp1_emmc.c
@@ -169,6 +177,7 @@ target_sources(app PRIVATE
 	src/st_fx_ctl.c
 	src/st_inertia.c
 	src/st_beat_phase.c
+	src/st_stem_meter.c
 	src/st_led_mvp.c
 )
 

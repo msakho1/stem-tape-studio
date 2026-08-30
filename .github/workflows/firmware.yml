@@ -1244,7 +1244,7 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: st_stem_meter host tests (module NOT linked into the firmware -- reference only)
+      - name: st_stem_meter host tests (the per-stem envelope and brightness curve)
         # Phase 4 beat pulse: src/st_stem_meter.c's own pure per-stem
         # envelope follower and logarithmic LED brightness curve (see
         # st_stem_meter.h). Linked into the real firmware target
@@ -1269,9 +1269,103 @@ jobs:
             -o audit/test_stem_meter
           ./audit/test_stem_meter | tee audit/stem-meter-selftest.txt
           {
-            echo '### st_stem_meter host tests (NOT in the firmware -- reference only)'
+            echo '### st_stem_meter host tests (per-stem envelope + brightness curve)'
             echo '```text'
             cat audit/stem-meter-selftest.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Stem Tape AUDIO-REACTIVE Track LEDs -- the lights follow the stems, not the clock
+        # THE BRIEF, and the line it drew:
+        #
+        #   stem audio -> activity/envelope detection -> LED brightness
+        #   NOT
+        #   tempo clock -> blink LED
+        #
+        #   "There should NOT be an artificial flash on every quarter note,
+        #    eighth note, beat, or bar unless the audio itself causes that
+        #    response."
+        #
+        # The step above proves the envelope and the curve in isolation, on
+        # fabricated peak values. THIS one proves the behaviour, by
+        # synthesising real stem material -- residual hiss, a sustained note,
+        # isolated drum hits, a vocal with phrases and rests, and three tones
+        # an even 9 dB apart -- and pushing it through the same per-stem peak
+        # extraction, the same envelope follower and the same
+        # st_led_mvp_decide() the firmware runs.
+        #
+        # A LIVE TEMPO RUNS THROUGH EVERY CASE. That is deliberate: the
+        # failure being excluded is a row that tracks the beat, so the beat
+        # has to be available for it to track. Case 6 measures the
+        # correlation directly -- for perfectly steady audio the light must
+        # read the SAME on the beat and off it -- and also checks that S4
+        # still carries the tempo, because removing the beat from the Track
+        # row must not remove it from the device.
+        #
+        # The other structural claim is independence: four meters, one per
+        # stem, never the mix. An implementation that metered the summed
+        # output would give all four lights one value, and case 5 is what
+        # catches it.
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          cc -std=c11 -Wall -Wextra -Werror -Ifirmware/stemtape_player/src \
+            firmware/stemtape_player/src/st_stem_meter.c \
+            firmware/stemtape_player/src/st_beat_phase.c \
+            firmware/stemtape_player/src/st_led_mvp.c \
+            firmware/stemtape_player/tests/test_led_audio_reactive.c \
+            -lm -o audit/test_led_audio_reactive
+          ./audit/test_led_audio_reactive | tee audit/led-audio-reactive.txt
+
+          # THE GATE MUST KEEP MEASURING, not just exit 0. If the on-beat/
+          # off-beat comparison or the dB ladder ever stops being printed,
+          # the harness has stopped asking the brief's question and a silent
+          # pass would be worth nothing.
+          grep -q 'on the beat' audit/led-audio-reactive.txt
+          grep -q 'equal steps in dB are equal steps in brightness' \
+            audit/led-audio-reactive.txt
+
+          # AND THE PRODUCTION PATH MUST USE IT. The modules are pure and
+          # would pass just as happily unwired.
+          M=firmware/stemtape_player/src/main.c
+          L=firmware/stemtape_player/src/st_led_mvp.c
+          fail=0
+          grep -q '^#include "st_stem_meter.h"' "$M" || {
+            echo "  main.c does not include st_stem_meter.h"; fail=1; }
+          grep -q 'st_stem_meter_update(&s_stem_meters\[i\], peak, dt_led)' "$M" || {
+            echo "  the envelopes are not advanced from live per-stem peaks"
+            fail=1; }
+          grep -q 'st_stem_meter_brightness(&s_stem_meters\[i\])' "$M" || {
+            echo "  the meter's brightness never reaches the LED inputs"
+            fail=1; }
+          # READ AND CLEAR. A plain read would leave the audio thread's peak
+          # hold pinned at the loudest sample of the whole song, and every
+          # light would stick on.
+          grep -q 'atomic_set(&g_stem_peak_pub\[i\], 0)' "$M" || {
+            echo "  the peak hold is read without being cleared"; fail=1; }
+          # THE TRACK ROW IS THE ACTIVITY, not something scaled by it.
+          grep -q 'out->level\[i\] = in->stem_activity\[i\];' "$L" || {
+            echo "  the Track row is not driven directly by stem activity"
+            fail=1; }
+          # AND IT IS SET BEFORE THE BEAT GATE. If the assignment moved below
+          # the in_pulse early-return, the row would be dark between beats --
+          # which is exactly the display this replaced.
+          python3 - <<'EOF' || fail=1
+          import re, sys
+          t = open("firmware/stemtape_player/src/st_led_mvp.c").read()
+          i = t.find("out->level[i] = in->stem_activity[i];")
+          j = t.find("if (!in->beat.valid || !in->beat.in_pulse) {")
+          if i < 0 or j < 0 or i > j:
+              print("  the Track row is assigned AFTER the beat gate: it "
+                    "would be dark between pulses")
+              sys.exit(1)
+          EOF
+          [ "$fail" = 0 ] || exit 1
+          echo "audio-reactive wiring: four meters, four stems, no clock in the path"
+          {
+            echo '### Stem Tape audio-reactive Track LEDs'
+            echo '```text'
+            cat audit/led-audio-reactive.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 

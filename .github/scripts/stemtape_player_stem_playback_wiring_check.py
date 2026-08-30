@@ -117,26 +117,32 @@ find_call_sites() in stemtape_player_safety_gate.py already does):
      can only be derived from the same song position the audio path
      publishes.
 
-     WHAT USED TO BE HERE, and why it is gone rather than dormant: this
-     gate once required led_service() to call st_beat_phase_on_beat()/
+     WHAT USED TO BE HERE, and the correction that reversed it. This gate
+     once required led_service() to call st_beat_phase_on_beat()/
      st_beat_led_decide(). That pair derived ONE boolean from the STIX
      tempo and handed the SAME value to all four Track LEDs, so they
-     flashed uniformly, carrying no bar position and no dynamics. A
-     later revision replaced it with per-stem output-level metering
-     (src/st_stem_meter.c), which was also wrong -- a level meter dimmed
-     a stem that was plainly audible during a quiet passage. Both are
-     now superseded by st_beat_pulse() feeding st_led_mvp_decide(): a
-     shared beat envelope, scaled per stem by activity, with a
-     1->2->3->4 bar chase. st_beat_phase_on_beat()/st_beat_led_decide()
-     have been DELETED from src/st_beat_phase.c (they were compiled into
-     the firmware with no caller, and their ghost/solid vocabulary was
-     retired when the track row moved to real 0..255 brightness);
-     st_stem_meter.c is no longer compiled into this target at all. Both
-     appear in the forbidden lists below so neither can quietly return.
+     flashed uniformly, carrying no bar position and no dynamics. They
+     are DELETED from src/st_beat_phase.c and still forbidden below.
 
-     st_beat_timing_init() is still called and still required above --
-     the selected song's tempo is still parsed and held. What changed is
-     only what consumes it.
+     The gate then went the other way and FORBADE per-stem metering
+     (src/st_stem_meter.c), on the reasoning that "a level meter dimmed a
+     stem that was plainly audible during a quiet passage". That is
+     reversed, and stated plainly because it was the wrong call: dimming
+     during a quiet passage is the display WORKING. The Track row's job
+     is to show what each part of the arrangement is doing, and a row
+     that reads the same whether a stem is resting or driving the song
+     shows nothing. The intervening design -- a shared beat envelope,
+     merely SCALED per stem, dark between pulses -- was four tempo
+     indicators: it told the player what the clock was doing, which they
+     could already hear, instead of what each stem was doing, which they
+     could not see any other way.
+
+     The Track row now carries each stem's own enveloped level, with no
+     beat gate and no chase accent, and st_stem_meter_update()/
+     st_stem_meter_brightness() are REQUIRED in led_service() below.
+     st_beat_timing_init() is still called and still required -- the
+     tempo is still parsed, and S4 still shows it. What changed is only
+     what the Track row consumes.
 
 Fails closed: main.c missing, either function's body not found, or any
 required call site/substring absent.
@@ -237,8 +243,18 @@ REQUIRED_CALLS = {
         "led_apply_frame",
         # BEAT/CHASE FROM STIX TIMING. led_service() must derive the pulse
         # from the real tempo snapshot and the live song position -- not
-        # from a clock of its own.
+        # from a clock of its own. This still drives S4; it no longer
+        # reaches the Track row.
         "st_beat_pulse",
+        # THE AUDIO-REACTIVE TRACK ROW. Both halves are required, and
+        # requiring them HERE is what makes "the lights follow the audio" a
+        # property of the source rather than a promise: the envelope must be
+        # advanced from live per-stem peaks, and its brightness must be what
+        # reaches st_led_inputs_t. A build that linked the meter but never
+        # called it would show a beat-driven or dead row and still pass a
+        # symbol-presence check.
+        "st_stem_meter_update",
+        "st_stem_meter_brightness",
     ],
 }
 
@@ -285,8 +301,6 @@ CLASSIC_MARKERS = ["mix32[", "posb[", "fracb[", "vol_s[", "g_rec_track", "g_ppha
 #      is exactly the state this replaced.
 LED_FORBIDDEN_ANYWHERE = [
     "show_song_leds",     # the inherited 16-song bank/position side display
-    "st_stem_meter_update",     # the ad-hoc peak meter that owned the track row
-    "st_stem_meter_brightness",
     "g_trk_level_active",       # the meter's renderer gate
     "led_apply_mode",           # the superseded three-state applier
     # The retired tempo boolean and the on/off/ghost track decision it fed.

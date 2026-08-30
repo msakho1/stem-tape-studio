@@ -236,24 +236,32 @@ static void decide_solo_tracks(const st_led_inputs_t *in, st_led_frame_t *out)
 }
 
 /*
- * 5. PLAYING. One shared beat envelope drives all four Track LEDs and S4, so
- *    they cannot drift apart -- there is a single st_beat_pulse() result and
- *    every light here is derived from it.
+ * 5. PLAYING. THE TRACK ROW FOLLOWS THE AUDIO, NOT THE TEMPO.
  *
- *    Per stem: envelope scaled by that stem's activity, so a loud stem
- *    punches and a quiet one is dim -- but ONLY inside the pulse window.
- *    Activity never gates or times anything; between beats everything is
- *    dark regardless of how loud the audio is. That is the difference
- *    between this and the free-running VU display it replaces.
+ *    Each Track LED carries its own stem's activity level and nothing else:
+ *    no beat gate, no pulse window, no chase accent. A stem that is silent
+ *    for a bar is dark for that bar however fast the song is; a stem that
+ *    sustains across four beats stays lit across all four. The four lights
+ *    move together only when the music makes them.
  *
- *    Bar position: the beat's own Track LED gets the full envelope
- *    regardless of activity, so the 1->2->3->4 chase stays readable even
- *    when that stem is silent.
+ *    WHAT THIS REPLACED, so it does not come back: the row used to be one
+ *    shared beat envelope, with each stem's activity merely SCALING it
+ *    inside the pulse window and the beat's own LED forced to full for a
+ *    1->2->3->4 chase. Between pulses everything was dark no matter what
+ *    the audio was doing. That is four tempo indicators wearing a level
+ *    meter's clothes -- it tells the player what the clock is doing, which
+ *    they can already hear, instead of what each stem is doing, which they
+ *    cannot see any other way.
+ *
+ *    The activity values arrive already enveloped and already curved
+ *    (st_stem_meter.h owns the attack, the release, the noise floor and the
+ *    brightness curve). Nothing is re-shaped here, so there is exactly one
+ *    place to tune the feel.
+ *
+ *    S4 STILL CARRIES THE BEAT. The side row is where tempo lives and it is
+ *    unchanged -- removing the beat from the Track row is not the same as
+ *    removing it from the device.
  */
-static uint8_t scale8(uint8_t a, uint8_t b)
-{
-	return (uint8_t)(((uint16_t)a * (uint16_t)b) / 255u);
-}
 
 /*
  * THE FX OVERLAY DISPLAY. Track row = which effects are sounding; side row =
@@ -369,34 +377,37 @@ static void decide_playing(const st_led_inputs_t *in, st_led_frame_t *out)
 		}
 	}
 
+	/*
+	 * ---- THE AUDIO-REACTIVE TRACK ROW -------------------------------
+	 * Set BEFORE the beat is even consulted, and NOT inside any pulse
+	 * window, because the audio does not stop between beats. Each light
+	 * is its own stem's level, straight through.
+	 *
+	 * This runs whether or not the tempo is trustworthy: a song with no
+	 * usable BPM still has audio, and the lights should still show it.
+	 * That is the practical difference from the beat display, which had
+	 * nothing to draw without a tempo.
+	 */
+	if (!loop_chase) {
+		for (i = 0; i < ST_LED_TRACK_COUNT; i++) {
+			out->level[i] = in->stem_activity[i];
+		}
+	}
+
 	if (!in->beat.valid || !in->beat.in_pulse) {
-		return;   /* between pulses, or no trustworthy tempo: dark */
+		return;   /* no beat to show on the side row; the Track row
+			    * above has already been drawn from the audio */
 	}
 	env = in->beat.envelope;
 
 	if (in->loop_state == ST_LED_LOOP_MOMENTARY) {
-		/* The SAME envelope value the Track row and S4 carry -- one
-		 * shared beat, not a third animation with its own timing. */
+		/* The SAME envelope value S4 carries -- one shared beat, not a
+		 * second animation with its own timing. */
 		out->level[ST_LED_S1] = env;
 	}
 
-	if (!loop_chase) {
-		for (i = 0; i < ST_LED_TRACK_COUNT; i++) {
-			uint8_t lv = scale8(env, in->stem_activity[i]);
-
-			if (i == in->beat.beat_index) {
-				/* CHASE ACCENT: full envelope, never dimmed by
-				 * a quiet stem -- the bar position has to stay
-				 * readable. */
-				lv = env;
-			}
-			out->level[i] = lv;
-		}
-	}
-
-	/* S4 shares the SAME envelope value: playing is shown on the side row
-	 * with the identical pulse, not a second animation. S1..S3 stay dark
-	 * during playback -- playback outranks the charging gauge. */
+	/* S4 carries the beat, and is now the ONLY light that does. S1..S3
+	 * stay dark during playback -- playback outranks the charging gauge. */
 	out->level[ST_LED_S4] = env;
 }
 

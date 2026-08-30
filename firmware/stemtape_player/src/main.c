@@ -151,15 +151,16 @@
  * failure that cost several rounds before the shipped/calibration tags were
  * split apart. The tag is the only thing the operator can read. */
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st25-VOLCAL"
+#define ST_BUILD_TAG "st26-VOLCAL"
 #else
-#define ST_BUILD_TAG "st25"
+#define ST_BUILD_TAG "st26"
 #endif
 #include "st_track_hold.h"
 #include "st_ladder.h"
 #include "st_vol_ladder.h"
 #include "st_latency.h"
 #include "st_seam.h"
+#include "st_stem_meter.h"
 #include "st_inertia.h"
 #include "st_resample.h"
 #include "st_fx.h"
@@ -1617,6 +1618,14 @@ static atomic_t g_stem_song_frame_pub;
  * LED frame slightly wrong, and atomic_t already rules even that out. */
 static atomic_t g_stem_peak_pub[ST11_STEM_COUNT];
 
+/*
+ * THE FOUR ENVELOPE FOLLOWERS, one per stem. Control-thread-only state --
+ * led_service() is the single caller and st_stem_meter.c touches no atomic --
+ * so these need no synchronisation of their own. Twenty bytes in total.
+ */
+static st_stem_meter_t s_stem_meters[ST11_STEM_COUNT];
+static uint32_t        s_meter_last_ms;   /* 0 == no previous pass */
+
 /* Sustained read throughput, bytes/sec, computed from the two CUMULATIVE
  * counters above (successful-read bytes and successful-read time only --
  * deliberately excludes idle time between reads and failed-read time, so
@@ -2850,9 +2859,33 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 		atomic_set(&g_stem_underrun_count, (atomic_val_t)s_stem_underrun_shadow);
 	}
 
-	/* One atomic store per stem per BLOCK (~5.3 ms), never per frame. */
+	/*
+	 * PEAK HOLD, not last-block-wins. One atomic touch per stem per BLOCK
+	 * (~5.3 ms), never per frame.
+	 *
+	 * The control thread services the LEDs roughly every 8-15 ms, so it
+	 * reads this slower than the audio thread writes it. A plain store
+	 * would mean the peaks of every block but the last one before each
+	 * read are simply discarded -- and a drum transient that lands in a
+	 * discarded block never reaches the light at all. Since the display is
+	 * meant to show exactly those transients, the value published here is
+	 * the LARGEST peak since the reader last took it, and the reader
+	 * CLEARS it as it reads (atomic_set returns the old value, so that is
+	 * one atomic exchange, not a read followed by a racy store).
+	 *
+	 * The merge below is a plain load/compare/store rather than a
+	 * compare-and-swap loop, and that is deliberate. Only this thread ever
+	 * raises the value and only the reader ever lowers it, so the single
+	 * losable interleaving -- reader clears between this load and this
+	 * store -- re-publishes a peak that was just reported. One LED frame
+	 * holds a level for ~10 ms longer than it strictly should, which is
+	 * invisible, and it costs a real-time thread nothing.
+	 */
 	for (uint32_t sp = 0; sp < ST11_STEM_COUNT; sp++) {
-		atomic_set(&g_stem_peak_pub[sp], (atomic_val_t)stem_peak[sp]);
+		if ((uint32_t)atomic_get(&g_stem_peak_pub[sp]) < stem_peak[sp]) {
+			atomic_set(&g_stem_peak_pub[sp],
+				    (atomic_val_t)stem_peak[sp]);
+		}
 	}
 }
 #endif /* SP1_XFER_ENABLE */
@@ -6575,15 +6608,39 @@ static void led_service(void)
 		}
 	}
 
-	/* ---- per-stem activity, and the immediate momentary solo ---------- */
+	/* ---- per-stem activity, and the immediate momentary solo ----------
+	 *
+	 * THE FOUR METERS. One per stem, each following only its own audio --
+	 * this is what makes the Track row an image of the arrangement rather
+	 * than four copies of the same clock. Nothing is summed and nothing is
+	 * shared: the mix is never looked at here, because a mix would give
+	 * all four lights the same value and lose the whole point.
+	 *
+	 * READ AND CLEAR. atomic_set() returns the previous value, so this is
+	 * one exchange that takes the largest peak the audio thread has seen
+	 * since the last pass and arms it to accumulate the next one. See the
+	 * publishing side in stem_audio_block() for why a peak HOLD rather
+	 * than the last block's value.
+	 *
+	 * The magnitude is the raw 24-bit stem, and it is already zero for a
+	 * stem the mixer silenced (stem_render_run() skips metering a stem
+	 * whose prepared gain is zero), so a muted or solo-silenced stem
+	 * decays dark through the same envelope as one that simply stopped
+	 * playing. There is no separate rule for it and no state to keep in
+	 * step. */
 	if (in.song_selected) {
-		for (i = 0; i < (int)ST_LED_TRACK_COUNT && i < (int)ST11_STEM_COUNT; i++) {
-			uint32_t peak = (uint32_t)atomic_get(&g_stem_peak_pub[i]);
+		const uint32_t now_led = k_uptime_get_32();
+		const uint32_t dt_led  = s_meter_last_ms ?
+					  (now_led - s_meter_last_ms) : 0u;
 
-			/* 24-bit magnitude -> 0..255. Scales the shared beat
-			 * envelope only; it never gates or times a light. */
-			peak >>= 15;
-			in.stem_activity[i] = (peak > 255u) ? 255u : (uint8_t)peak;
+		s_meter_last_ms = now_led;
+		for (i = 0; i < (int)ST_LED_TRACK_COUNT && i < (int)ST11_STEM_COUNT; i++) {
+			const uint32_t peak =
+				(uint32_t)atomic_set(&g_stem_peak_pub[i], 0);
+
+			st_stem_meter_update(&s_stem_meters[i], peak, dt_led);
+			in.stem_activity[i] =
+				st_stem_meter_brightness(&s_stem_meters[i]);
 			/* THE SAME BITS THE MIXER IS USING. Rebuilt from
 			 * trk[].solo rather than from the chord decoder's own
 			 * output, so the lights are driven by the value that
@@ -6595,6 +6652,15 @@ static void led_service(void)
 				in.solo_mask |= (uint8_t)(1u << i);
 			}
 		}
+	} else {
+		/* NO SONG, NO METERS. Zeroed rather than left to decay, so
+		 * selecting a song later cannot inherit a level from the one
+		 * before it, and so the elapsed-time base restarts from the
+		 * first pass that has audio to measure. */
+		for (i = 0; i < (int)ST11_STEM_COUNT; i++) {
+			st_stem_meter_reset(&s_stem_meters[i]);
+		}
+		s_meter_last_ms = 0u;
 	}
 #endif
 

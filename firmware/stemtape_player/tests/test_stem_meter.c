@@ -134,8 +134,19 @@ static void test_silent_stem_reaches_off(void)
 /* THE UNIFORMITY REGRESSION, stated as a curve property: real programme
  * material lives in the top ~20 dB, and a LINEAR map renders all of it
  * near-full -- which is what made the first implementation look uniform.
- * The log curve must place a 10x amplitude drop far down the visible
- * range, and must keep successive octaves distinguishable. */
+ * The log curve must place a 10x amplitude drop far down the visible range.
+ *
+ * THE BANDS HERE WERE WIDENED, DELIBERATELY. They used to require -40 dBFS
+ * to sit "near half", which followed from mapping the whole ~66 dB between
+ * the noise floor and full scale onto 255 steps. That is 0.26 dB per step,
+ * and on hardware it made the row read as almost static: a drum hit decaying
+ * by a very audible 18 dB moved its light by a quarter of its range. The
+ * display window is now the SPAN octaves below the sensitivity reference
+ * (see st_stem_meter.h), which trades reach at the very quiet end for
+ * contrast where the music actually is. -40 dBFS now reads at the minimum
+ * visible step rather than at half, and that is the intended behaviour, not
+ * a regression -- it is the tuning knob to reach for if quiet passages turn
+ * out to matter more than punch on real material. */
 static void test_curve_spreads_real_material(void)
 {
 	st_stem_meter_t m;
@@ -150,16 +161,29 @@ static void test_curve_spreads_real_material(void)
 	b_hundredth = st_stem_meter_brightness(&m);
 
 	CHECK(b_full == 255u, "full scale is 255");
-	CHECK(b_tenth < 210u && b_tenth > 170u,
-	      "-20 dB sits near three quarters (got %u), not pinned at the top", b_tenth);
-	CHECK(b_hundredth < 150u && b_hundredth > 100u,
-	      "-40 dB sits near half (got %u), still clearly distinguishable", b_hundredth);
-	CHECK(b_full > b_tenth && b_tenth > b_hundredth, "the curve is monotonic");
+	CHECK(b_tenth < 200u && b_tenth > 100u,
+	      "-20 dB sits well down the range (got %u), not pinned at the top",
+	      b_tenth);
+	CHECK(b_full > b_tenth && b_tenth >= b_hundredth,
+	      "the curve is monotonic");
+	CHECK(b_hundredth >= ST_STEM_METER_MIN_ON,
+	      "-40 dB is quiet, but it is not silence: it must not read below "
+	      "the minimum visible step (got %u)", b_hundredth);
 }
 
-/* Every octave step must produce a distinct, evenly spaced brightness --
- * this is what makes four stems at different levels look different rather
- * than uniformly bright. */
+/*
+ * THE DISPLAY WINDOW, walked octave by octave.
+ *
+ * Inside the window every octave must be strictly dimmer than the one above
+ * it -- that is what makes four stems at different levels look different.
+ * Below the window the curve flattens onto the minimum visible step, which is
+ * deliberate: material that far down is present but not worth spending
+ * brightness range on, and it must read as "quiet" rather than as "off".
+ *
+ * The count of distinct steps is checked against SPAN_OCTAVES rather than a
+ * fixed number, so retuning the span by eye moves this expectation with it
+ * instead of breaking it.
+ */
 static void test_octaves_are_evenly_spaced(void)
 {
 	st_stem_meter_t m;
@@ -168,7 +192,7 @@ static void test_octaves_are_evenly_spaced(void)
 	 * against something it can actually be below. */
 	unsigned prev = 256u;
 	uint32_t e;
-	int steps = 0;
+	int steps = 0, distinct = 0;
 
 	st_stem_meter_reset(&m);
 	for (e = FS; e > ST_STEM_METER_FLOOR * 2u; e /= 2u) {
@@ -176,12 +200,27 @@ static void test_octaves_are_evenly_spaced(void)
 
 		m.env = e;
 		b = st_stem_meter_brightness(&m);
-		CHECK((unsigned)b < prev, "octave %d is dimmer than the one above it (%u < %u)",
+		CHECK((unsigned)b <= prev,
+		      "octave %d is not brighter than the one above it (%u <= %u)",
 		      steps, (unsigned)b, prev);
+		if ((unsigned)b < prev) {
+			distinct++;
+		}
+		CHECK(b >= ST_STEM_METER_MIN_ON,
+		      "octave %d reads %u, below the minimum visible step -- "
+		      "audible material must never be dimmer than that",
+		      steps, (unsigned)b);
 		prev = b;
 		steps++;
 	}
-	CHECK(steps >= 10, "at least 10 distinct octaves are visible (got %d)", steps);
+	CHECK(steps >= 10, "the sweep must cover the whole range (got %d)", steps);
+	CHECK(distinct >= (int)ST_STEM_METER_SPAN_OCTAVES,
+	      "only %d distinct octave levels across a %u-octave display "
+	      "window", distinct, ST_STEM_METER_SPAN_OCTAVES);
+	CHECK(distinct <= (int)ST_STEM_METER_SPAN_OCTAVES + 2,
+	      "%d distinct levels for a %u-octave window: the window is wider "
+	      "than it is declared to be", distinct,
+	      ST_STEM_METER_SPAN_OCTAVES);
 }
 
 /* Defensive: a caller-supplied peak above full scale (impossible from the

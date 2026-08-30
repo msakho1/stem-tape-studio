@@ -265,7 +265,19 @@ static void case_stopped_gauge(void)
 	      "a distrusted battery reading is a side-row fact and nothing more");
 }
 
-/* ================= 4. playing: pulse + chase + activity ================== */
+/* ================= 4. playing: the Track row IS the audio ================= *
+ *
+ * REWRITTEN AGAINST THE CURRENT CONTRACT, and worth saying why rather than
+ * quietly editing the numbers. This case used to assert the opposite of what
+ * it asserts now: a shared beat envelope on all four Track LEDs, a full-
+ * brightness chase accent on the beat's own lane, and everything dark between
+ * pulses. That display told the player what the clock was doing -- which they
+ * can hear -- instead of what each stem was doing, which they cannot see any
+ * other way. The Track row now carries each stem's own enveloped level with no
+ * beat gate and no accent; S4 keeps the beat, and is the only light that has
+ * it. tests/test_led_audio_reactive.c is the behavioural proof against real
+ * synthesised material; this case pins the frame-level contract.
+ */
 static void case_playing(void)
 {
 	st_led_inputs_t in; st_led_frame_t f;
@@ -273,42 +285,65 @@ static void case_playing(void)
 	int b;
 
 	g_cases++;
-	printf("\n-- Playing: shared beat pulse, activity scaling, 1-2-3-4 chase\n");
+	printf("\n-- Playing: the Track row is per-stem audio; S4 alone is the beat\n");
 
 	for (b = 0; b < 4; b++) {
-		char lbl[40];
+		char lbl[48];
 		/* A little way into beat b, near the envelope peak. */
 		uint32_t frame = (uint32_t)b * fpb + (fpb / ST_BEAT_PULSE_DEN) / 2u;
+		int k;
 
 		make_playing(&in, frame, 128u);
 		st_led_mvp_decide(&in, &f);
-		snprintf(lbl, sizeof(lbl), "beat %d accent", b + 1);
+		snprintf(lbl, sizeof(lbl), "beat %d, all stems at 128", b + 1);
 		show(lbl, &f);
 
 		CHECK(in.beat.beat_index == (uint8_t)b,
 		      "beat index %d derives from STIX timing and song_frame", b);
-		CHECK(f.level[b] > f.level[(b + 1) & 3],
-		      "T%d carries the chase accent, brighter than the un-accented lanes", b + 1);
-		CHECK(f.level[b] == in.beat.envelope,
-		      "the accented lane gets the FULL envelope, so the chase stays readable "
-		      "regardless of that stem's level");
+		/* NO ACCENT. With every stem at the same activity, every Track
+		 * LED must read the same -- the bar position must not leak into
+		 * the row at all. */
+		for (k = 0; k < 4; k++) {
+			CHECK(f.level[k] == in.stem_activity[k],
+			      "T%d carries its own stem's activity exactly (%u, "
+			      "expected %u) -- beat %d must not accent it",
+			      k + 1, f.level[k], in.stem_activity[k], b + 1);
+		}
 		CHECK(f.level[ST_LED_S4] == in.beat.envelope,
-		      "S4 pulses with the SAME envelope value as the track row -- one shared "
-		      "beat envelope, not a second animation");
+		      "S4 still pulses with the beat envelope -- the tempo was "
+		      "removed from the Track row, not from the device");
 		CHECK(f.level[ST_LED_S1] == 0u && f.level[ST_LED_S2] == 0u &&
 		      f.level[ST_LED_S3] == 0u, "S1-S3 are off during playback");
 	}
 
-	/* Between beats: everything dark. */
-	make_playing(&in, (fpb / ST_BEAT_PULSE_DEN) + (fpb / 2u), 255u);
-	st_led_mvp_decide(&in, &f);
-	show("between beats, loud", &f);
-	CHECK(!in.beat.in_pulse, "the frame is outside the pulse window");
-	CHECK(tracks_all(&f, 0u) && side_all(&f, 0u),
-	      "between beats EVERYTHING is dark even at full activity -- audio modulates "
-	      "brightness only inside the pulse, it never flickers the LEDs on its own");
+	/* BETWEEN BEATS: the Track row is UNCHANGED, because the audio is. */
+	{
+		st_led_frame_t on_beat, off_beat;
+		uint32_t at   = 1u * fpb + (fpb / ST_BEAT_PULSE_DEN) / 2u;
+		uint32_t away = (fpb / ST_BEAT_PULSE_DEN) + (fpb / 2u);
 
-	/* Activity scales the non-accented lanes. */
+		make_playing(&in, at, 200u);
+		st_led_mvp_decide(&in, &on_beat);
+		make_playing(&in, away, 200u);
+		st_led_mvp_decide(&in, &off_beat);
+		show("on the beat,  activity 200", &on_beat);
+		show("between beats, activity 200", &off_beat);
+
+		CHECK(!in.beat.in_pulse, "the second frame is outside the pulse window");
+		CHECK(tracks_all(&off_beat, 200u),
+		      "between beats the Track row still shows the audio -- going "
+		      "dark here is the beat-indicator display this replaced");
+		CHECK(on_beat.level[0] == off_beat.level[0] &&
+		      on_beat.level[1] == off_beat.level[1] &&
+		      on_beat.level[2] == off_beat.level[2] &&
+		      on_beat.level[3] == off_beat.level[3],
+		      "and it is IDENTICAL on and off the beat for identical "
+		      "audio: the beat must not reach the Track row at all");
+		CHECK(off_beat.level[ST_LED_S4] == 0u,
+		      "S4, which IS the beat light, is dark between pulses");
+	}
+
+	/* Louder stems read brighter, on or off the beat. */
 	{
 		st_led_frame_t loud, quiet;
 		uint32_t frame = 1u * fpb + (fpb / ST_BEAT_PULSE_DEN) / 2u;   /* beat 2 */
@@ -320,10 +355,10 @@ static void case_playing(void)
 		show("beat 2, loud stems", &loud);
 		show("beat 2, quiet stems", &quiet);
 		CHECK(loud.level[0] > quiet.level[0],
-		      "a louder stem pulses brighter than a quiet one (T1, un-accented)");
-		CHECK(loud.level[1] == quiet.level[1],
-		      "the accented lane T2 is identical either way -- activity never dims "
-		      "the bar-position accent");
+		      "a louder stem reads brighter than a quiet one (T1)");
+		CHECK(loud.level[1] > quiet.level[1],
+		      "and so does T2 -- there is no accented lane exempt from "
+		      "the audio any more");
 	}
 
 	/* No tempo: no fabricated pulse. */
@@ -449,17 +484,51 @@ static void case_loop_chase(void)
 		      "an absent tempo yields no chase, not a guessed one");
 	}
 
-	/* AND WITHOUT A LOOP NOTHING CHANGED. The pulse display is physically
-	 * verified; this case exists so a regression in it fails here. */
+	/* AND WITHOUT A LOOP, the row is the audio -- including between
+	 * pulses. This used to assert the row was DARK here, which was the
+	 * beat-indicator contract; see case_playing()'s own note. The scoping
+	 * claim it was really making -- that the chase belongs to looping and
+	 * changes nothing else -- is still checked, just against the display
+	 * that now exists. */
 	{
 		st_led_frame_t before;
 
 		make_playing(&in, 1u * fpb + (fpb * 3u) / 4u, 200u);
 		st_led_mvp_decide(&in, &before);
 		show("NOT looping, between pulses", &before);
-		CHECK(tracks_all(&before, 0u),
-		      "without a loop the Track row is still dark between pulses -- "
-		      "the chase is scoped to looping and changes nothing else");
+		CHECK(tracks_all(&before, 200u),
+		      "without a loop the Track row shows each stem's activity, "
+		      "between pulses as much as on them");
+	}
+
+	/* NO TEMPO, BUT STILL AUDIO. A song whose STIX record carries no usable
+	 * BPM has no beat to show and never did -- but it still has sound, and
+	 * the Track row must still show it. The old beat-driven row went dark
+	 * here and had nothing else to draw; this is the case that records the
+	 * difference. */
+	{
+		st_beat_timing_t bad;
+		st_led_frame_t f2;
+		int k;
+
+		memset(&in, 0, sizeof(in));
+		in.song_selected = true;
+		in.playing = true;
+		for (k = 0; k < 4; k++) {
+			in.stem_activity[k] = (uint8_t)(60u + 40u * (unsigned)k);
+		}
+		(void)st_beat_timing_init(&bad, 0u, 0u, 48000u);
+		st_beat_pulse(&bad, 99999u, &in.beat);
+		st_led_mvp_decide(&in, &f2);
+		show("no usable tempo, stems sounding", &f2);
+		CHECK(!in.beat.valid, "the tempo really is unusable");
+		for (k = 0; k < 4; k++) {
+			CHECK(f2.level[k] == in.stem_activity[k],
+			      "T%d still shows its stem (%u) with no tempo at all",
+			      k + 1, f2.level[k]);
+		}
+		CHECK(f2.level[ST_LED_S4] == 0u,
+		      "and S4 shows nothing rather than a fabricated beat");
 	}
 }
 
