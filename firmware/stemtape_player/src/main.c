@@ -141,10 +141,19 @@
  * and "flashed the shipped image by mistake" is indistinguishable from "the
  * capture is broken" when the capture prints nothing. The tag now carries
  * the distinction, so the banner alone settles it. */
+/* st21: FX entry works. The AIN1 volume ladder is measured (st_vol_ladder.h,
+ * docs/ain1-measured.json) and the two-volume chord decodes as VOL_BOTH.
+ *
+ * BUMPED BECAUSE THE OPERATOR HAS TO BE ABLE TO TELL. An st20 shipped image
+ * has already been flashed to the hardware and could not open FX mode. This
+ * one can. If both announced "st20", "the gesture does nothing" and "the old
+ * image is still on the device" would be indistinguishable -- the same
+ * failure that cost several rounds before the shipped/calibration tags were
+ * split apart. The tag is the only thing the operator can read. */
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st20-VOLCAL"
+#define ST_BUILD_TAG "st21-VOLCAL"
 #else
-#define ST_BUILD_TAG "st20"
+#define ST_BUILD_TAG "st21"
 #endif
 #include "st_track_hold.h"
 #include "st_ladder.h"

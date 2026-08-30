@@ -2755,6 +2755,20 @@ jobs:
           else
             echo "RELEASE commit=${{ github.event.pull_request.head.sha || github.sha }} bin=NOT-PRODUCED (the build did not reach a final link)"
           fi
+          # THE CALIBRATION IMAGE'S IDENTITY, RESTATED HERE FOR THE SAME
+          # REASON. It is printed once by the AIN1 CALIBRATION IMAGE step near
+          # the TOP of this job, which is far outside the log tail the API
+          # returns -- so when that image had to be handed to someone to
+          # flash, its size and hash were unreadable and the handover was
+          # "check the Summary page yourself". One more line, dead last,
+          # fixes that.
+          if [ -f audit/stemtape_player-VOLCAL.bin ]; then
+            VC_SIZE="$(stat -c '%s' audit/stemtape_player-VOLCAL.bin)"
+            VC_SHA="$(sha256sum audit/stemtape_player-VOLCAL.bin | cut -d' ' -f1)"
+            echo "VOLCAL bin=${VC_SIZE}B sha256=${VC_SHA}"
+          else
+            echo "VOLCAL bin=NOT-PRODUCED"
+          fi
 
 
 
