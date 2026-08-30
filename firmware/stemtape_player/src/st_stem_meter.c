@@ -1,13 +1,14 @@
 /*
- * st_stem_meter.c -- see st_stem_meter.h for what this displays and why it
- * is deliberately not connected to the tempo.
+ * st_stem_meter.c -- see st_stem_meter.h for what this displays, why there are
+ * two envelopes rather than one, and why none of it consults the tempo.
  */
 
 #include "st_stem_meter.h"
 
 void st_stem_meter_reset(st_stem_meter_t *m)
 {
-	m->env = 0u;
+	m->fast = 0u;
+	m->body = 0u;
 }
 
 /*
@@ -17,8 +18,8 @@ void st_stem_meter_reset(st_stem_meter_t *m)
  * as from a quiet one.
  *
  * A step at or past the whole time constant is stated directly rather than
- * left to the arithmetic, because the proportional form would compute a
- * >=100% move and rely on a clamp.
+ * left to the arithmetic, because the proportional form would compute a >=100%
+ * move and rely on a clamp.
  */
 static uint32_t glide(uint32_t env, uint32_t target, uint32_t dt_ms,
 		       uint32_t tc_ms)
@@ -39,118 +40,115 @@ static uint32_t glide(uint32_t env, uint32_t target, uint32_t dt_ms,
 	return env - (uint32_t)(((uint64_t)span * dt_ms) / tc_ms);
 }
 
+/*
+ * Both envelopes chase the SAME peak, and differ only in how quickly they are
+ * allowed to. Everything expressive about the display comes out of that
+ * difference: see the header's "BODY + ACCENT" section.
+ *
+ * Note that both fall toward the incoming peak rather than toward zero. A
+ * sustained sound following a hit on the same stem must land the envelope ON
+ * the sustained level and stay there, not fade to black underneath the hit's
+ * decay and then climb back.
+ */
 void st_stem_meter_update(st_stem_meter_t *m, uint32_t peak, uint32_t dt_ms)
 {
 	if (peak > ST_STEM_METER_FULL_SCALE) {
 		peak = ST_STEM_METER_FULL_SCALE;
 	}
 
-	if (peak >= m->env) {
-		/* RISING. Attack of 0 is the default and means the peak lands
-		 * whole -- see the header on why that is right for a transient
-		 * and why anything under ~15 ms is instant anyway. */
-		m->env = glide(m->env, peak, dt_ms, ST_STEM_METER_ATTACK_MS);
-		return;
-	}
+	m->fast = glide(m->fast, peak, dt_ms,
+			 (peak >= m->fast) ? ST_STEM_METER_ATTACK_MS
+					   : ST_STEM_METER_FAST_RELEASE_MS);
 
-	/*
-	 * FALLING, toward the incoming peak rather than toward zero.
-	 *
-	 * That distinction matters and is easy to get wrong. Decaying toward
-	 * zero while a quieter sound is still playing would drag the light
-	 * below the level of audio that is genuinely there -- a sustained pad
-	 * following a drum hit on the same stem would fade to black underneath
-	 * the hit's decay and then have to climb back. Falling toward the
-	 * current peak lands the envelope ON the sustained level and stays
-	 * there, which is what a sustained sound should look like.
-	 */
-	m->env = glide(m->env, peak, dt_ms, ST_STEM_METER_RELEASE_MS);
+	/* The body's LAGGING attack is what opens the accent gap. With
+	 * BODY_ATTACK_MS at 0 this line would track `fast` exactly and the
+	 * accent would be identically zero forever. */
+	m->body = glide(m->body, peak, dt_ms,
+			 (peak >= m->body) ? ST_STEM_METER_BODY_ATTACK_MS
+					   : ST_STEM_METER_BODY_RELEASE_MS);
+}
+
+/*
+ * Integer log2 with 4 fractional bits. The 4 bits below the leading one
+ * interpolate within that octave, which is close enough to logarithmic inside
+ * a single octave that the residual error is far under one visible brightness
+ * step. Returns 0 for v == 0.
+ */
+static uint32_t log2_q4(uint32_t v)
+{
+	uint32_t msb = 0u, t = v;
+
+	if (v == 0u) {
+		return 0u;
+	}
+	while (t > 1u) {
+		t >>= 1;
+		msb++;
+	}
+	return (msb << 4) |
+	       ((msb >= 4u) ? ((v >> (msb - 4u)) & 0x0Fu) : 0u);
 }
 
 uint8_t st_stem_meter_brightness(const st_stem_meter_t *m)
 {
-	const uint32_t env = m->env;
-	uint32_t msb = 0u, v, frac, log_q4, floor_q4, ref_q4, span, lit;
+	const uint32_t usable = ST_STEM_METER_MAX - ST_STEM_METER_MIN_ON;
+	const uint32_t body_range =
+		(usable * ST_STEM_METER_BODY_SHARE_Q8) / 256u;
+	const uint32_t accent_range = usable - body_range;
+	uint32_t ref_q4, floor_q4, body_q4, fast_q4;
+	uint32_t span, body_lit = 0u, accent_lit = 0u, level;
 
-	/* THE FLOOR DECIDES OFF, and it is the only thing that does. */
-	if (env <= ST_STEM_METER_FLOOR) {
+	/* SILENCE IS THE ONLY WAY TO ZERO, and it takes BOTH envelopes being
+	 * under the floor -- the body still glowing means the stem was sounding
+	 * a moment ago and is decaying, which is a thing to show, not hide. */
+	if (m->body <= ST_STEM_METER_FLOOR && m->fast <= ST_STEM_METER_FLOOR) {
 		return 0u;
 	}
 
-	/*
-	 * Integer log2 with 4 fractional bits. `msb` is the index of the
-	 * highest set bit; the 4 bits below it interpolate within that octave,
-	 * which is close enough to logarithmic inside one octave that the
-	 * residual error is far under a single visible brightness step.
-	 */
-	v = env;
-	while (v > 1u) {
-		v >>= 1;
-		msb++;
-	}
-	frac = (msb >= 4u) ? ((env >> (msb - 4u)) & 0x0Fu) : 0u;
-	log_q4 = (msb << 4) | frac;
+	ref_q4   = log2_q4(ST_STEM_METER_REF);
+	floor_q4 = log2_q4(ST_STEM_METER_FLOOR);
+	body_q4  = log2_q4(m->body);
+	fast_q4  = log2_q4(m->fast);
 
-	/* The same Q4 log of the two ends of the curve, computed the same way
-	 * so the endpoints cannot disagree with the values being mapped. */
-	floor_q4 = 0u;
-	v = ST_STEM_METER_FLOOR;
-	while (v > 1u) {
-		v >>= 1;
-		floor_q4++;
+	/* ---- THE BODY: how much this stem is doing lately ------------------
+	 * Mapped across BODY_SPAN octaves below the reference, and capped at
+	 * body_range rather than at full brightness. The cap is the
+	 * anti-saturation rule: sustained material must sit in the middle of
+	 * the range so that accents have somewhere to go. */
+	span = ST_STEM_METER_BODY_SPAN_OCTAVES * 16u;
+	if (ref_q4 > floor_q4 && ref_q4 < floor_q4 + span) {
+		span = ref_q4 - floor_q4;   /* never ask for range that is not there */
 	}
-	floor_q4 <<= 4;   /* the floor is a power of two: no fractional part */
-
-	ref_q4 = 0u;
-	v = ST_STEM_METER_REF;
-	while (v > 1u) {
-		v >>= 1;
-		ref_q4++;
+	if (span == 0u) {
+		body_lit = body_range;
+	} else if (body_q4 >= ref_q4) {
+		body_lit = body_range;
+	} else if (body_q4 > ref_q4 - span) {
+		body_lit = ((body_q4 - (ref_q4 - span)) * body_range) / span;
 	}
-	{
-		const uint32_t rmsb = ref_q4;
+	/* else: audible but below the body window -- glow stays at zero and the
+	 * light rests on MIN_ON, which is "quiet", not "off". */
 
-		ref_q4 = (rmsb << 4) |
-			  ((rmsb >= 4u)
-			   ? ((ST_STEM_METER_REF >> (rmsb - 4u)) & 0x0Fu) : 0u);
-	}
-
-	if (ref_q4 <= floor_q4) {
-		/* A sensitivity set at or below the floor leaves no range to
-		 * map; anything audible then reads full rather than dividing
-		 * by nothing. */
-		return (uint8_t)ST_STEM_METER_MAX;
-	}
-
-	/*
-	 * THE VISIBLE WINDOW is the SPAN octaves immediately below the
-	 * reference -- not the whole distance down to the noise floor. See the
-	 * header: stretching the display over all ~66 dB of headroom is what
-	 * makes a row of level meters read as static.
+	/* ---- THE ACCENT: how far ahead of itself this stem just got --------
+	 * A RELATIVE measure, deliberately. It fires on a 6 dB jump whether
+	 * that jump lands at -30 dBFS or at -3 dBFS, so a quiet passage still
+	 * animates instead of flattening out just because it is quiet. This is
+	 * the "0.30 -> 0.45 deserves a visible pulse" requirement: that is
+	 * 3.5 dB, better than half of a full accent.
 	 *
-	 * The bottom of the window is clamped to the floor so that a very wide
-	 * span cannot ask for range that does not exist.
-	 */
-	span = ST_STEM_METER_SPAN_OCTAVES * 16u;
-	if (ref_q4 < floor_q4 + span) {
-		span = ref_q4 - floor_q4;
+	 * Zero when fast has fallen back to body, which is exactly the steady
+	 * state between musical events. */
+	if (fast_q4 > body_q4) {
+		const uint32_t gap  = fast_q4 - body_q4;
+		const uint32_t full = ST_STEM_METER_ACCENT_SPAN_OCTAVES * 16u;
+
+		accent_lit = (gap >= full) ? accent_range
+					   : (gap * accent_range) / full;
 	}
 
-	if (log_q4 >= ref_q4) {
-		lit = 255u;                  /* at or above the reference */
-	} else if (log_q4 <= ref_q4 - span) {
-		lit = 0u;                    /* audible, but under the window */
-	} else {
-		lit = ((log_q4 - (ref_q4 - span)) * 255u) / span;
+	level = ST_STEM_METER_MIN_ON + body_lit + accent_lit;
+	if (level > ST_STEM_METER_MAX) {
+		level = ST_STEM_METER_MAX;
 	}
-
-	/*
-	 * THE VISIBLE RANGE. Anything above the floor is making sound, so it
-	 * is lifted to at least MIN_ON: the eye needs OFF vs QUIET far more
-	 * than it needs the bottom few duty steps, and on real hardware a duty
-	 * of 1/255 may not light the LED at all. Zero is unreachable from
-	 * here -- the floor above is what produces darkness.
-	 */
-	return (uint8_t)(ST_STEM_METER_MIN_ON +
-			  (lit * (ST_STEM_METER_MAX - ST_STEM_METER_MIN_ON)) / 255u);
+	return (uint8_t)level;
 }

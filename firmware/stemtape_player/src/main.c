@@ -151,9 +151,9 @@
  * failure that cost several rounds before the shipped/calibration tags were
  * split apart. The tag is the only thing the operator can read. */
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st26-VOLCAL"
+#define ST_BUILD_TAG "st27-VOLCAL"
 #else
-#define ST_BUILD_TAG "st26"
+#define ST_BUILD_TAG "st27"
 #endif
 #include "st_track_hold.h"
 #include "st_ladder.h"
@@ -1623,6 +1623,29 @@ static atomic_t g_stem_peak_pub[ST11_STEM_COUNT];
  * led_service() is the single caller and st_stem_meter.c touches no atomic --
  * so these need no synchronisation of their own. Twenty bytes in total.
  */
+/*
+ * HOW OFTEN THE AUDIO THREAD SAMPLES A STEM for metering: one frame in this
+ * many, so 32 is one sample per 0.67 ms. Must be a power of two -- the test
+ * in the render loop is a mask, not a modulo.
+ *
+ * MEASURED, NOT ASSUMED. The obvious way to make the lights livelier is to
+ * look at the audio more often, and it was tried: re-running the animation
+ * gate with this at 8 and at 1 (every single frame, 32x the work) moved the
+ * drum LED's standard deviation from 58.4 to 58.2 and its travel from 170 to
+ * 172 out of 255. Nothing. A transient's rise spans 1-5 ms, which is 1.5 to 7
+ * samples even at this stride, so the peak is already being caught within a
+ * dB or so. What made the row static was never the sampling rate -- it was
+ * having a single envelope with no transient accent.
+ *
+ * It stays at 32 because these cycles are spent in the 48 kHz audio thread,
+ * where this file's own comments record that CPU converts one-for-one into
+ * lost stream throughput and a starving stream is what made stored songs play
+ * slow and crushed. Paying that for no measurable visual gain would be a bad
+ * trade; the knob is here so the measurement can be repeated rather than
+ * re-argued.
+ */
+#define ST_STEM_METER_STRIDE 32u
+
 static st_stem_meter_t s_stem_meters[ST11_STEM_COUNT];
 static uint32_t        s_meter_last_ms;   /* 0 == no previous pass */
 
@@ -2057,7 +2080,7 @@ static uint32_t stem_render_run(const uint8_t *buf, uint32_t frame_in_sector,
 		 * faded-out stem meters dark with no second rule to keep in
 		 * sync. INT32_MIN cannot occur in a sign-extended 24-bit
 		 * value, so plain negation is safe. */
-		if ((f & 31u) == 0u) {
+		if ((f & (ST_STEM_METER_STRIDE - 1u)) == 0u) {
 			for (uint32_t sp = 0; sp < ST11_STEM_COUNT; sp++) {
 				int32_t l, r;
 				uint32_t mag;

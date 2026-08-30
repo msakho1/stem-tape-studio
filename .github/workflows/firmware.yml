@@ -1317,13 +1317,17 @@ jobs:
             -lm -o audit/test_led_audio_reactive
           ./audit/test_led_audio_reactive | tee audit/led-audio-reactive.txt
 
-          # THE GATE MUST KEEP MEASURING, not just exit 0. If the on-beat/
-          # off-beat comparison or the dB ladder ever stops being printed,
-          # the harness has stopped asking the brief's question and a silent
-          # pass would be worth nothing.
+          # THE GATE MUST KEEP MEASURING, not just exit 0. If any of these
+          # lines stops being printed, the harness has stopped asking one of
+          # the brief's questions and a silent pass would be worth nothing.
           grep -q 'on the beat' audit/led-audio-reactive.txt
           grep -q 'equal steps in dB are equal steps in brightness' \
             audit/led-audio-reactive.txt
+          # The expressiveness half: the per-stem spread table, and the
+          # measured pop of an attack above the glow it lands on.
+          grep -q 'each stem alone must still visibly animate' \
+            audit/led-audio-reactive.txt
+          grep -q 'pops above the ringing one' audit/led-audio-reactive.txt
 
           # AND THE PRODUCTION PATH MUST USE IT. The modules are pure and
           # would pass just as happily unwired.
@@ -1347,6 +1351,34 @@ jobs:
           grep -q 'out->level\[i\] = in->stem_activity\[i\];' "$L" || {
             echo "  the Track row is not driven directly by stem activity"
             fail=1; }
+          # BOTH ENVELOPES MUST EXIST. The body's LAGGING attack is the whole
+          # mechanism by which an accent can open: set it equal to the fast
+          # attack and the two envelopes track each other, the gap is always
+          # zero, and the display collapses back to the flat single-envelope
+          # row this replaced. Cheap to break by accident while tuning, so it
+          # is asserted rather than trusted.
+          H=firmware/stemtape_player/src/st_stem_meter.h
+          python3 - <<'EOF' || fail=1
+          import re, sys
+          t = open("firmware/stemtape_player/src/st_stem_meter.h").read()
+          def val(name):
+              m = re.search(r"#define %s\s+(\d+)u" % name, t)
+              return int(m.group(1)) if m else None
+          ba = val("ST_STEM_METER_BODY_ATTACK_MS")
+          fa = val("ST_STEM_METER_ATTACK_MS")
+          share = val("ST_STEM_METER_BODY_SHARE_Q8")
+          if ba is None or fa is None or share is None:
+              print("  the meter's tuning constants are not where expected")
+              sys.exit(1)
+          if ba <= fa:
+              print("  BODY_ATTACK_MS (%d) must LAG ATTACK_MS (%d): with no "
+                    "lag there is no accent and the row goes flat" % (ba, fa))
+              sys.exit(1)
+          if share >= 256:
+              print("  BODY_SHARE_Q8 is %d/256: the body would use the whole "
+                    "range and leave no headroom for accents" % share)
+              sys.exit(1)
+          EOF
           # AND IT IS SET BEFORE THE BEAT GATE. If the assignment moved below
           # the in_pulse early-return, the row would be dark between beats --
           # which is exactly the display this replaced.

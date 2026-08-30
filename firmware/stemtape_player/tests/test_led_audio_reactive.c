@@ -137,11 +137,55 @@ static double gen_mid(uint32_t f)
 	return AMP * 0.354 * 0.6 * sin(2.0 * M_PI * 330.0 * f / SR);
 }
 
-/* SUSTAINED NOTE. A continuous tone, on for the whole run. This is the piano
- * or bass case: no gaps, no transients, just level. */
+/*
+ * A CONSTANT TONE. No attacks, no decay, no dynamics at all -- an organ note
+ * held forever. Used for the cases that need a level to hold still: the
+ * "sustained material does not blink" check, and the on-beat/off-beat
+ * comparison, which is only meaningful if the audio itself is not moving.
+ *
+ * It is NOT a stand-in for a piano or a bass. Those are articulated: they have
+ * an attack and a decay on every note, and using a flat tone to represent them
+ * was how the first version of this display came to look static and still
+ * passed its own tests. gen_piano() and gen_bass() below are the honest
+ * material, and case_expressive_animation() is what measures against them.
+ */
 static double gen_sustain(uint32_t f)
 {
 	return AMP * 0.6 * sin(2.0 * M_PI * 220.0 * f / SR);
+}
+
+/*
+ * PIANO. A chord on every beat: sharp attack, then a long decay that is still
+ * clearly sounding when the next chord lands. Continuously active -- the LED
+ * must never go out -- but full of internal dynamics, which is exactly the
+ * case the brief says currently looks like a solid light.
+ */
+static double gen_piano(uint32_t f)
+{
+	const uint32_t into = f % FRAMES_PER_BEAT;
+	const double   t    = (double)into / SR;
+	/* Long decay: ~35% of the chord is still ringing at the next beat. */
+	const double   env  = exp(-t / 0.48);
+	const double   tone = 0.6 * sin(2.0 * M_PI * 262.0 * f / SR) +
+			       0.3 * sin(2.0 * M_PI * 330.0 * f / SR) +
+			       0.3 * sin(2.0 * M_PI * 392.0 * f / SR);
+
+	return AMP * 0.55 * env * tone;
+}
+
+/*
+ * BASS. Notes on the half-beat, each swelling in and decaying -- a softer
+ * attack than the piano and a fatter body, so it exercises the accent path
+ * with something less percussive than a drum.
+ */
+static double gen_bass(uint32_t f)
+{
+	const uint32_t period = FRAMES_PER_BEAT * 2u;
+	const uint32_t into   = f % period;
+	const double   t      = (double)into / SR;
+	const double   env    = (1.0 - exp(-t / 0.03)) * exp(-t / 0.55);
+
+	return AMP * 0.7 * env * sin(2.0 * M_PI * 65.0 * f / SR);
 }
 
 /* PERCUSSION. Isolated hits on the beat, each an exponentially decaying
@@ -333,6 +377,35 @@ static uint32_t dark_count(uint32_t stem)
 	return n;
 }
 
+/*
+ * Spread of one LED over a window: mean, standard deviation, and the range
+ * actually travelled. The standard deviation is the number that matters --
+ * peak-to-trough can be produced by a single glitch, but a large sigma means
+ * the light is moving CONTINUOUSLY, which is what "alive" means to the eye.
+ */
+static void spread(uint32_t stem, uint32_t from, uint32_t to,
+		    double *mean, double *sd, uint8_t *lo, uint8_t *hi)
+{
+	uint32_t i, n = 0;
+	double   acc = 0.0, var = 0.0;
+
+	*lo = 255; *hi = 0;
+	for (i = from; i < to && i < g_nstep; i++) {
+		const uint8_t v = g_led[i][stem];
+
+		acc += v; n++;
+		if (v < *lo) *lo = v;
+		if (v > *hi) *hi = v;
+	}
+	*mean = n ? acc / n : 0.0;
+	for (i = from; i < to && i < g_nstep; i++) {
+		const double d = g_led[i][stem] - *mean;
+
+		var += d * d;
+	}
+	*sd = n ? sqrt(var / n) : 0.0;
+}
+
 /* ======================================================================
  * TEST 1: SILENCE. A silent stem is dark for the whole run -- and the
  * tempo is running the entire time, so this is also the first and
@@ -392,9 +465,29 @@ static void case_sustained(void)
 	 * every beat (ST_BEAT_PULSE_NUM/DEN = 1/4), so its mean would sit near
 	 * a quarter of its peak. A level display holds near its peak.
 	 */
-	CHECK(mean_of(0, settle, g_nstep) > 0.8 * (double)peak_of(0),
-	      "mean %.1f against peak %u: that ratio is a pulse, not a "
-	      "sustained level", mean_of(0, settle, g_nstep), peak_of(0));
+	{
+		/*
+		 * MEASURED AFTER SETTLING, both of them. A tone starting from
+		 * silence IS an attack, and the accent path is supposed to pop
+		 * on it -- comparing the settled mean against that onset peak
+		 * was measuring the feature and calling it a fault. What this
+		 * case is really about is that once the tone is established
+		 * and unchanging, the light stops moving; so the peak it is
+		 * compared against has to come from the same settled window.
+		 */
+		double mean, sd;
+		uint8_t lo, hi;
+
+		spread(0, settle, g_nstep, &mean, &sd, &lo, &hi);
+		printf("     settled window: %u..%u, sd %.2f\n", lo, hi, sd);
+		CHECK(mean > 0.8 * (double)hi,
+		      "mean %.1f against a settled peak of %u: that ratio is a "
+		      "pulse, not a sustained level", mean, hi);
+		CHECK(sd < 4.0,
+		      "a genuinely unchanging tone still wobbles by %.2f -- the "
+		      "movement must come from the audio, and this audio has "
+		      "none", sd);
+	}
 }
 
 /* ======================================================================
@@ -424,10 +517,14 @@ static void case_percussion(void)
 	CHECK(rises >= 4u,
 	      "only %u sharp rises in 3 s at 120 BPM: the hits are not "
 	      "producing distinct punches", rises);
-	/* A smooth decay means many small downward steps, not one cliff. */
-	CHECK(falls > rises * 4u,
-	      "%u decay steps against %u rises -- the fall is a cliff, not a "
-	      "decay", falls, rises);
+	/* A smooth decay means several small downward steps per hit, not one
+	 * cliff. The bar is per-hit rather than a fixed count because the
+	 * release time is a tuning knob: shortening it legitimately produces
+	 * fewer intermediate steps, and this must keep measuring "is there a
+	 * staircase" rather than "is the release still 250 ms". */
+	CHECK(falls > rises * 3u,
+	      "%u decay steps across %u hits -- under three steps per hit is a "
+	      "cliff, not a decay", falls, rises);
 	CHECK(lo < hi / 2u,
 	      "the trough between hits (%u) is not clearly below the peak (%u); "
 	      "the gaps have to be visible", lo, hi);
@@ -606,10 +703,200 @@ static void case_curve_is_logarithmic(void)
 	      "the two 9 dB steps differ by %.2fx (%.1f vs %.1f) -- the curve "
 	      "is not logarithmic, so most of the brightness range is being "
 	      "spent on the loudest few dB", ratio, hi_step, lo_step);
-	CHECK(quiet > (double)ST_STEM_METER_MIN_ON * 2.0,
-	      "material 18 dB down reads %.1f, barely above the minimum "
-	      "visible step of %u -- it should be dim, not off",
-	      quiet, ST_STEM_METER_MIN_ON);
+	/*
+	 * THE THRESHOLD HERE WAS LOWERED, DELIBERATELY. It used to demand that
+	 * material 18 dB down read at twice the minimum visible step, which
+	 * followed from a 30 dB body window. The window is now 24 dB and the
+	 * body is capped at under half the brightness range, both on purpose:
+	 * the brief asked for quiet moments to "visibly fall back" and for
+	 * sustained material not to sit near the top.
+	 *
+	 * Quiet material is therefore expected to sit LOW -- and it is not
+	 * expected to sit STILL, because its animation now comes from the
+	 * accent rather than from the body. case_modest_accent_is_visible()
+	 * is the case that guarantees that, at a level even quieter than this
+	 * one.
+	 */
+	CHECK(quiet > (double)ST_STEM_METER_MIN_ON,
+	      "material 18 dB down reads %.1f, at or under the minimum visible "
+	      "step of %u -- quiet should be dim, not off", quiet,
+	      ST_STEM_METER_MIN_ON);
+}
+
+/* ======================================================================
+ * TEST 5c: THE ACCEPTANCE TEST -- COVER THREE LEDS AND WATCH THE FOURTH.
+ *
+ * The brief's own criterion: "If I cover the other three LEDs, the remaining
+ * LED should still visibly animate throughout the performance. Even a
+ * relatively continuous piano or bass stem should not look like a static
+ * light."
+ *
+ * So each stem is measured ALONE, against articulated material -- a piano
+ * chording on every beat, a bass note every half bar, drums, a vocal -- and
+ * three things are required of every one of them:
+ *
+ *   it never goes out       (the stem is continuously active)
+ *   it moves a lot          (large travel AND large standard deviation, so
+ *                            the movement is continuous rather than one jump)
+ *   it is not pinned high   (a light sitting at 90% has nowhere to animate,
+ *                            which was the first version's real failure)
+ *
+ * The standard deviation is the honest measure of "looks alive". A display
+ * that sat at a constant 60% would pass a peak-to-trough check on one stray
+ * sample; it cannot pass a sigma check.
+ * ====================================================================== */
+static void case_expressive_animation(void)
+{
+	static const char *names[STEMS] = { "drums", "piano", "bass", "vocals" };
+	gen_fn g[STEMS] = { gen_drums, gen_piano, gen_bass, gen_vocal };
+	uint32_t s, settle;
+
+	g_cases++;
+	printf("\n-- TEST 5c: each stem alone must still visibly animate\n");
+
+	run(g, 6000u, 0u);
+	settle = g_nstep / 10u;
+
+	printf("     stem      mean    sd   range      travel\n");
+	for (s = 0; s < STEMS; s++) {
+		double mean, sd;
+		uint8_t lo, hi;
+
+		spread(s, settle, g_nstep, &mean, &sd, &lo, &hi);
+		printf("     %-8s  %5.1f  %4.1f  %3u..%-3u  %3u\n",
+		       names[s], mean, sd, lo, hi, (unsigned)(hi - lo));
+
+		CHECK((unsigned)(hi - lo) > 70u,
+		      "%s travels only %u of 255 -- that reads as a static "
+		      "light", names[s], (unsigned)(hi - lo));
+		CHECK(sd > 18.0,
+		      "%s has a standard deviation of only %.1f: it may reach "
+		      "two levels but it is not continuously moving",
+		      names[s], sd);
+		/* ANTI-SATURATION. This is the one that catches "everything
+		 * looks solid because everything is at 90%". */
+		CHECK(mean < 190.0,
+		      "%s sits at a mean of %.1f of 255 -- too high to have "
+		      "anywhere left to animate", names[s], mean);
+		CHECK(mean > 40.0,
+		      "%s sits at a mean of %.1f -- too dim to read", names[s],
+		      mean);
+	}
+}
+
+/* ======================================================================
+ * TEST 5d: A NOTE ATTACK PRODUCES A VISIBLE POP ABOVE THE GLOW.
+ *
+ * The mechanism, measured directly rather than inferred from the spread: for
+ * a stem that is already sounding, a new attack must push the light
+ * substantially ABOVE where it was sitting a moment earlier. That is the
+ * body-plus-accent design working -- and a single-envelope display, which is
+ * what this replaced, cannot do it, because with the glow already up at the
+ * sustained level there is nothing left for the attack to add.
+ * ====================================================================== */
+static void case_attacks_pop_above_the_glow(void)
+{
+	gen_fn g[STEMS] = { gen_piano, gen_silence, gen_silence, gen_silence };
+	uint32_t i, pops = 0, beats;
+	double   trough_sum = 0.0, peak_sum = 0.0;
+	uint32_t n_win = 0;
+	const uint32_t beat_ms = 60000u / BPM;
+
+	g_cases++;
+	printf("\n-- TEST 5d: a new chord pops above the ringing one\n");
+
+	run(g, 6000u, 0u);
+	beats = (g_nstep ? g_ms[g_nstep - 1u] : 0u) / beat_ms;
+
+	/* For each beat after the first, compare the light just BEFORE the
+	 * chord (the ringing tail of the previous one) with its highest point
+	 * just after. */
+	for (i = 2u; i < beats; i++) {
+		const uint32_t at = i * beat_ms;
+		uint8_t before = 0, after = 0;
+		uint32_t k;
+
+		for (k = 0; k < g_nstep; k++) {
+			if (g_ms[k] + 12u >= at && g_ms[k] < at) {
+				before = g_led[k][0];
+			}
+			if (g_ms[k] >= at && g_ms[k] < at + 90u &&
+			    g_led[k][0] > after) {
+				after = g_led[k][0];
+			}
+		}
+		if (before == 0u && after == 0u) {
+			continue;
+		}
+		trough_sum += before;
+		peak_sum   += after;
+		n_win++;
+		if (after > before + 40u) {
+			pops++;
+		}
+	}
+	trough_sum /= (n_win ? n_win : 1u);
+	peak_sum   /= (n_win ? n_win : 1u);
+
+	printf("     %u chords: glow %.1f just before, %.1f at the attack "
+	       "(+%.1f), %u clear pops\n",
+	       n_win, trough_sum, peak_sum, peak_sum - trough_sum, pops);
+	CHECK(n_win >= 6u, "only %u chord windows measured", n_win);
+	CHECK(pops >= n_win - 1u,
+	      "only %u of %u chords produced a clear pop above the ringing "
+	      "glow", pops, n_win);
+	CHECK(peak_sum - trough_sum > 50.0,
+	      "the average attack only lifts the light by %.1f of 255 -- an "
+	      "accent has to read as an event", peak_sum - trough_sum);
+	CHECK(trough_sum > (double)ST_STEM_METER_MIN_ON,
+	      "the glow between chords fell to %.1f -- the piano is still "
+	      "ringing and the light should show it", trough_sum);
+}
+
+/* ======================================================================
+ * TEST 5e: A MODEST ACCENT IS VISIBLE, wherever it sits in the range.
+ *
+ * The brief: "If a stem goes 0.30 -> 0.45, that musical accent may deserve a
+ * visible pulse even though neither value is particularly loud compared with
+ * the maximum possible signal."
+ *
+ * That is a 3.5 dB step at a level nowhere near full scale, and it is exactly
+ * what an absolute-level display cannot show -- both values map to almost the
+ * same place on the curve. Measured here at a QUIET absolute level on purpose,
+ * so that only a relative detector can pass it.
+ * ====================================================================== */
+static void case_modest_accent_is_visible(void)
+{
+	st_stem_meter_t m;
+	uint8_t steady, accented = 0;
+	uint32_t i;
+	/* Both levels sit well down the range: 0.30 and 0.45 of a signal that
+	 * is itself 18 dB below the meter's reference. */
+	const uint32_t quiet_base = (uint32_t)(ST_STEM_METER_REF * 0.125 * 0.30);
+	const uint32_t quiet_acc  = (uint32_t)(ST_STEM_METER_REF * 0.125 * 0.45);
+
+	g_cases++;
+	printf("\n-- TEST 5e: a 0.30 -> 0.45 accent is visible even when quiet\n");
+
+	st_stem_meter_reset(&m);
+	for (i = 0; i < 200u; i++) {          /* settle at the steady level */
+		st_stem_meter_update(&m, quiet_base, LED_MS);
+	}
+	steady = st_stem_meter_brightness(&m);
+	for (i = 0; i < 6u; i++) {            /* the accent arrives */
+		st_stem_meter_update(&m, quiet_acc, LED_MS);
+		if (st_stem_meter_brightness(&m) > accented) {
+			accented = st_stem_meter_brightness(&m);
+		}
+	}
+	printf("     steady %u -> accented %u (+%u)\n", steady, accented,
+	       (unsigned)(accented - steady));
+	CHECK(accented > steady + 25u,
+	      "a 3.5 dB accent moved the light from %u to %u: not a visible "
+	      "pulse", steady, accented);
+	CHECK(steady < 170u,
+	      "quiet material already sits at %u -- there is no room above it "
+	      "for an accent", steady);
 }
 
 /* ======================================================================
@@ -713,10 +1000,15 @@ int main(void)
 	printf("== Stem Tape AUDIO-REACTIVE TRACK LEDS ==\n");
 	printf("%u Hz, %u-frame blocks, %u ms LED service, %u BPM running "
 	       "throughout\n", SR, BLK_FRAMES, LED_MS, BPM);
-	printf("meter: attack %u ms, release %u ms, floor %u, ref %u, "
-	       "visible %u..%u\n",
-	       ST_STEM_METER_ATTACK_MS, ST_STEM_METER_RELEASE_MS,
+	printf("meter: attack %u ms | fast release %u ms | body %u/%u ms\n",
+	       ST_STEM_METER_ATTACK_MS, ST_STEM_METER_FAST_RELEASE_MS,
+	       ST_STEM_METER_BODY_ATTACK_MS, ST_STEM_METER_BODY_RELEASE_MS);
+	printf("       floor %u, ref %u, body span %u oct, accent span %u oct, "
+	       "body share %u/256, visible %u..%u\n",
 	       ST_STEM_METER_FLOOR, ST_STEM_METER_REF,
+	       ST_STEM_METER_BODY_SPAN_OCTAVES,
+	       ST_STEM_METER_ACCENT_SPAN_OCTAVES,
+	       ST_STEM_METER_BODY_SHARE_Q8,
 	       ST_STEM_METER_MIN_ON, ST_STEM_METER_MAX);
 
 	/* The silence generator's level is a literal; if a retune moves the
@@ -737,6 +1029,9 @@ int main(void)
 	case_vocal();
 	case_four_stems_are_independent();
 	case_curve_is_logarithmic();
+	case_expressive_animation();
+	case_attacks_pop_above_the_glow();
+	case_modest_accent_is_visible();
 	case_not_a_beat_indicator();
 	case_solo_still_confirms();
 
