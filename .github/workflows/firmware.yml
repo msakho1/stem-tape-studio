@@ -1458,6 +1458,33 @@ jobs:
             firmware/stemtape_player/tests/test_stem_bufmbox.c \
             -o audit/test_stem_bufmbox
           ./audit/test_stem_bufmbox | tee audit/stem-bufmbox-selftest.txt
+
+          # THE BATCHED FILL (v1.2 song-planar) MUST ACTUALLY HAVE RUN. A
+          # per-stem ring costs four fills per span instead of one, and the
+          # format is only affordable because runs of consecutive groups are
+          # fetched in ONE read. Two of these claims are the ones that bit
+          # during development and are therefore named explicitly rather than
+          # left to the pass/fail line:
+          #
+          #   - a run must stay inside the READ-AHEAD WINDOW. Overrunning it
+          #     wraps onto a slot holding a sector the consumer has not
+          #     reached, which reads as "fillable", so the producer destroys
+          #     its own read-ahead. It surfaced as a COST INVERSION -- run=2
+          #     issued MORE reads than run=1 -- not as a crash.
+          #   - batching must DEFER a partial read-ahead run. An eagerly
+          #     refilling producer never sees a full run (one slot frees per
+          #     span), so without deferral every fill is a single group and
+          #     the whole us/span saving silently evaporates.
+          grep -q 'the run is ONE read' audit/stem-bufmbox-selftest.txt || {
+            echo "  the batched-fill slot-contiguity claim did not run"; exit 1; }
+          grep -q 'the whole reason batching exists' audit/stem-bufmbox-selftest.txt || {
+            echo "  the batching read-count comparison did not run"; exit 1; }
+          grep -q 'does not divide the ring and is REFUSED' audit/stem-bufmbox-selftest.txt || {
+            echo "  the R-must-divide-G rule was not exercised"; exit 1; }
+          grep -q 'in a 9-sector song, run' audit/stem-bufmbox-selftest.txt || {
+            echo "  the post-seek song-end clamp was not exercised"; exit 1; }
+          grep -q 'the urgency exemption is what allowed it' audit/stem-bufmbox-selftest.txt || {
+            echo "  urgency-beats-batching was not exercised"; exit 1; }
           {
             echo '### Stem Tape v1.1 SPSC mailbox concurrency host tests (Slice 3B.1)'
             echo '```text'

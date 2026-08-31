@@ -260,6 +260,47 @@ void st_stem_mbox_init(st_stem_mbox_t *mb, uint32_t initial_sector);
 bool st_stem_mbox_producer_next_fill(const st_stem_mbox_t *mb, uint32_t sector_count,
 				      uint32_t *out_sector, uint32_t *out_slot);
 
+/*
+ * BATCHED FILL -- the same choice as next_fill(), widened to a RUN of
+ * consecutive sectors that can be fetched in ONE read.
+ *
+ * WHY. Song-planar v1.2 gives each stem its own ring, so a span costs four
+ * fills instead of one. Four separate reads per span is 5147 us against a
+ * 7083 us span -- unaffordable. Reading R consecutive groups of one stem in a
+ * single call amortises the fixed read cost back down, which is legitimate
+ * precisely because a stem's timeline is contiguous on storage.
+ *
+ * THE CONSTRAINT THAT MAKES IT ONE READ. emmc_read_blocks() fills ONE
+ * CONTIGUOUS buffer, so a run is a single read only while its slots are also
+ * consecutive -- `slot_of(first + k) == slot_of(first) + k` for every k in
+ * the run, with no wrap past the end of the ring. Two rules together give
+ * that, and both are enforced here rather than assumed by the caller:
+ *
+ *   1. `run` must DIVIDE ST_STEM_MBOX_SLOTS. Refused otherwise, because with
+ *      a non-dividing run some batch always straddles the ring's end -- at
+ *      G=7/R=3 the sizes cycle 3,3,1 and one refill in three costs an extra
+ *      read, which is a cost model silently different from the intended one.
+ *   2. A run ENDS on a multiple of `run`, so the next one starts aligned.
+ *      `n = run - (first % run)`, which is the full `run` once aligned and a
+ *      single short run to get there after a seek.
+ *
+ * The run is additionally cut short at the song's end, at the consumer's held
+ * slot, and at the first sector already resident -- so it never refetches what
+ * is already there and never writes the buffer being read.
+ *
+ * NOTHING ABOUT THE HANDOFF CHANGES. This is a producer-side convenience over
+ * the same slot state; the mapping, the acquire/release pairing and the
+ * consumer's wait-free single-index lookup are all exactly as before. The
+ * caller MUST publish each sector in the run separately, with publish_ready(),
+ * after all of its bytes are written.
+ *
+ * Returns false when there is nothing to fetch. On true, *out_first is the
+ * first sector, *out_slot its slot, and *out_n the run length (>= 1).
+ */
+bool st_stem_mbox_producer_next_run(const st_stem_mbox_t *mb, uint32_t sector_count,
+				     uint32_t run, uint32_t *out_first,
+				     uint32_t *out_slot, uint32_t *out_n);
+
 /* Which sector index the consumer currently needs. */
 uint32_t st_stem_mbox_producer_requested_sector(const st_stem_mbox_t *mb);
 

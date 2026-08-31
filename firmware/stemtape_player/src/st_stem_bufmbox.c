@@ -124,6 +124,146 @@ bool st_stem_mbox_producer_next_fill(const st_stem_mbox_t *mb, uint32_t sector_c
 	return false;
 }
 
+bool st_stem_mbox_producer_next_run(const st_stem_mbox_t *mb, uint32_t sector_count,
+				     uint32_t run, uint32_t *out_first,
+				     uint32_t *out_slot, uint32_t *out_n)
+{
+	uint32_t first;
+	uint32_t slot;
+	uint32_t n;
+	uint32_t k;
+	int32_t held;
+	uint32_t forbidden_slot;
+	uint32_t requested;
+	uint32_t window;
+
+	/* RULE 1: the run must divide the ring. Refused rather than clamped --
+	 * a caller that asks for a non-dividing run has a cost model that does
+	 * not match what the hardware will do, and silently giving them a
+	 * shorter run would hide exactly that. */
+	if (run == 0u || (ST_STEM_MBOX_SLOTS % run) != 0u) {
+		return false;
+	}
+
+	/* The first sector is chosen by the SAME function as before, so the
+	 * nearest-gap policy and the wrap-stop reasoning have one home. */
+	if (!st_stem_mbox_producer_next_fill(mb, sector_count, &first, &slot)) {
+		return false;
+	}
+
+	held = st_atomic_get(&mb->held_sector);
+	forbidden_slot = (held == ST_STEM_MBOX_NO_SECTOR)
+			 ? ST_STEM_MBOX_SLOTS
+			 : st_stem_mbox_slot_of((uint32_t)held);
+
+	/* The same window next_fill() scans. Re-read rather than threaded out
+	 * of it: a concurrent consumer advance only ever makes `pos` below look
+	 * bigger or wrap, both of which shorten the run, so a race here is
+	 * conservative in the safe direction. */
+	requested = (uint32_t)st_atomic_get(&mb->requested_sector);
+	window = ST_STEM_MBOX_SLOTS;
+	if (window > sector_count) {
+		window = sector_count;
+	}
+
+	/* RULE 2: end on a multiple of `run`. Full runs once aligned; one short
+	 * run to get there after a seek lands mid-block. */
+	n = run - (first % run);
+
+	/* Never past the song's own end. */
+	if (first >= sector_count) {
+		return false;                  /* defensive; next_fill guarantees otherwise */
+	}
+	if (n > sector_count - first) {
+		n = sector_count - first;
+	}
+
+	/*
+	 * AND NEVER PAST THE READ-AHEAD WINDOW. This is a correctness bound,
+	 * not a tuning one, and it is the whole reason a batched fill is not
+	 * simply "next_fill() but longer".
+	 *
+	 * next_fill() only ever chooses inside a window of `window` positions
+	 * from the consumer's requested sector, precisely because that is the
+	 * range over which every position maps to a DISTINCT slot. A run that
+	 * runs off the end of that window wraps onto a slot holding a sector
+	 * the consumer has not reached yet -- and since that slot holds a
+	 * DIFFERENT sector index it reads as "fillable", so the run overwrites
+	 * live read-ahead and the consumer has to refetch it.
+	 *
+	 * It shows up as a COST inversion rather than a crash: batching at
+	 * run=2 issued MORE reads than run=1 (107 against 79 over 90 sectors)
+	 * because it kept destroying what it had already fetched. That is what
+	 * test_batching_cuts_reads_by_the_run_factor() is for.
+	 *
+	 * `pos` is where `first` sits inside the window, computed the long way
+	 * so a wrapped choice (next_fill may cross the loop seam when the song
+	 * length is an exact multiple of the ring) is measured correctly rather
+	 * than going negative.
+	 */
+	{
+		const uint32_t pos = (first >= requested)
+				     ? (first - requested)
+				     : (first + sector_count - requested);
+
+		if (pos >= window) {
+			return false;          /* defensive; next_fill stays inside */
+		}
+		if (n > window - pos) {
+			n = window - pos;
+		}
+	}
+
+	/* And stop at the first sector in the run that must not be written:
+	 * the slot the consumer is reading, or one that already holds what it
+	 * should. Both make a longer read pure waste, and the first would make
+	 * it wrong. */
+	for (k = 1u; k < n; k++) {
+		const uint32_t s = first + k;
+		const uint32_t sl = st_stem_mbox_slot_of(s);
+
+		if (sl == forbidden_slot) {
+			break;
+		}
+		if ((uint32_t)st_atomic_get(&mb->slot_sector[sl]) == s) {
+			break;
+		}
+	}
+	n = k;
+
+	/*
+	 * DEFER A PARTIAL READ-AHEAD RUN -- this is what makes batching
+	 * actually batch, and it is the `depth = G - R` accounting made real.
+	 *
+	 * An eagerly refilling producer never gets a full run: the consumer
+	 * advances one span at a time, so one slot frees at a time, and every
+	 * fill is a single group no matter what `run` says. The reads-per-span
+	 * saving the format depends on only appears if the producer WAITS for
+	 * a whole aligned run to come free -- letting the ring drain from G to
+	 * G-R and then refilling R in ONE read.
+	 *
+	 * Two things are always fetched immediately regardless:
+	 *   - the sector the consumer needs RIGHT NOW (`first == requested`),
+	 *     which after a seek is legitimately missing. Urgency beats
+	 *     batching; a stall here is audible and a wasted read is not.
+	 *   - the song's last partial run, which will never grow to full.
+	 *
+	 * Otherwise the run must END on a multiple of `run`, which admits both
+	 * a full run and the single short run that restores alignment after a
+	 * seek -- and refuses exactly the dribble that defeats the batching.
+	 */
+	if (first != requested &&
+	    ((first + n) % run) != 0u &&
+	    (first + n) != sector_count) {
+		return false;
+	}
+
+	*out_first = first;
+	*out_slot = slot;
+	*out_n = n;
+	return true;
+}
+
 uint32_t st_stem_mbox_producer_requested_sector(const st_stem_mbox_t *mb)
 {
 	return (uint32_t)st_atomic_get(&mb->requested_sector);
