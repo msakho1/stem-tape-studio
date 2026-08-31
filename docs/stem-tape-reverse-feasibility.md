@@ -1,6 +1,41 @@
 # Per-track reverse playback — feasibility, and what it costs
 
-Status: **MEASURED — affordable.** The `'M'` sweep was run on real hardware
+Status: **STORAGE YES, CPU NO at four tracks.** The read-cost sweep passed
+and reproduced (two runs within 1.2%). The CPU gate **failed**: four diverging
+tracks produced 32 and 41 underruns with the processor at 99%. Whether fewer
+diverging tracks fit is now the open question — the gate walks levels 1..4.
+
+## The CPU gate result (firmware st33)
+
+```
+STEMPLANAR sim=ON und=0  rd_max_us=11205 reads=13 busy=51% spare=49%
+STEMPLANAR sim=ON und=32 rd_max_us=32239 reads=73 busy=99% spare=1%     <- run 1
+STEMPLANAR sim=ON und=41 rd_max_us=13552 reads=30 busy=77% spare=23%    <- run 2
+```
+
+**Why it failed is more specific than "too slow".** The worst single read
+stretched to **32.2 ms** — 24x its uncontended 1347 µs, **2.0x** the documented
+`ST_LAT_READ_WORST_US` (16100 µs), and **1.5x the entire 21.2 ms of producer
+silence the read-ahead is designed to cover**. One such stall empties the ring
+outright.
+
+Four reads per sector means **four times the exposure to that tail**, not just
+four times the average work. The tail is what kills it, and averages never
+showed it: uncontended, four planes cost 5388 µs against a 7083 µs budget and
+looked comfortable.
+
+| tracks reversed | read work / sector | vs today |
+|---|---|---|
+| 0 | 3139 µs (44.3%) | — |
+| 1 | 3890 µs (54.9%) | +10.6 CPU points |
+| 2 | 4640 µs (65.5%) | +21.2 CPU points |
+| 3 or 4 | 5388 µs (76.1%) | +31.8 CPU points |
+
+One reversed track costs a third of what four do. That is why the gate is now
+parameterised rather than the feature abandoned.
+
+Superseded status line (kept for the reasoning trail): **MEASURED — affordable**
+referred to STORAGE only. The `'M'` sweep was run on real hardware
 (firmware st32). The start-bit hunt scales with read size, so a stem-planar
 layout makes per-track reverse fit. One gate remains, and it is not storage —
 see "The second gate" below.

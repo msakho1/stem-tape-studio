@@ -169,8 +169,23 @@ typedef struct {
 	uint32_t blocks;     /* blocks this read covers */
 } st_rc_read_t;
 
-/* Fills `out` with the plan and returns how many reads it contains. */
-uint32_t st_readcost_plan_planar(st_rc_read_t out[ST_RC_PLAN_MAX]);
+/*
+ * Fills `out` with the plan for `n_reversed` diverging tracks and returns how
+ * many reads it contains.
+ *
+ * PARAMETERISED BECAUSE THE WORST CASE FAILED. Four diverging tracks measured
+ * 32 and 41 underruns on hardware with the CPU at 99%. That does not
+ * condemn every level of divergence: four reversed costs +31.8 CPU points
+ * over today, ONE reversed costs +10.6, and where between them the ceiling
+ * actually sits is a measurement, not an inference -- so the plan takes the
+ * count and the gate can walk it.
+ *
+ * The forward planes stay contiguous and are always ONE read, whatever their
+ * number; only diverging tracks cost a read each. Every level still covers
+ * the sector exactly once.
+ */
+uint32_t st_readcost_plan_planar(st_rc_read_t out[ST_RC_PLAN_MAX],
+				  uint32_t n_reversed);
 
 /* True when `n_reversed` diverging tracks fit inside the read engine with the
  * given headroom left spare, in ppm. */

@@ -2163,6 +2163,9 @@ jobs:
           test "$(grep -c 'atomic_set(&g_stem_planar_sim' "$M")" = "1" || {
             echo "  g_stem_planar_sim is written from more than one place"
             exit 1; }
+          # LEVEL 0 IS OFF, and off must still be the single full-sector read.
+          grep -q 'if (nrev == 0u) {' "$M" || {
+            echo "  the sim no longer has an explicit off level"; exit 1; }
           # The unarmed path must still be the plain full-sector read.
           grep -q 'return emmc_read_blocks(start_block, buf,' "$M" || {
             echo "  the unarmed read is no longer one full-sector read"
@@ -2189,7 +2192,7 @@ jobs:
           # The plan the simulation reads by must cover the sector exactly
           # once -- a gap leaves stale bytes and an overlap drops a quarter,
           # and either would be heard as the read pattern's fault.
-          grep -q 'the planar read plan covers the sector exactly once' \
+          grep -q 'every divergence level covers the sector exactly once' \
             audit/readcost-selftest.txt
           {
             echo '### Stem Tape read-cost model'

@@ -352,52 +352,63 @@ static void case_planar_plan_covers_the_sector(void)
 {
 	st_rc_read_t plan[ST_RC_PLAN_MAX];
 	uint8_t seen[ST_RC_SECTOR_BLOCKS];
-	uint32_t n, i, b, gaps = 0, dups = 0;
+	uint32_t nrev, n, i, b, gaps = 0, dups = 0;
 
 	g_cases++;
-	printf("\n-- the planar read plan covers the sector exactly once\n");
+	printf("\n-- every divergence level covers the sector exactly once\n");
 
-	memset(seen, 0, sizeof(seen));
-	n = st_readcost_plan_planar(plan);
-	CHECK(n == ST_RC_STEMS, "the plan has %u reads, expected %u", n,
-	      ST_RC_STEMS);
+	for (nrev = 0; nrev <= ST_RC_STEMS; nrev++) {
+		memset(seen, 0, sizeof(seen));
+		n = st_readcost_plan_planar(plan, nrev);
 
-	printf("     order:");
-	for (i = 0; i < n; i++) {
-		printf(" blk%u+%u", plan[i].block_off, plan[i].blocks);
-		/* buf_off must be the block offset in bytes, or a read lands
-		 * in the wrong part of the buffer. */
-		CHECK(plan[i].buf_off == plan[i].block_off * 512u,
-		      "read %u writes to byte %u for block %u -- mismatched",
-		      i, plan[i].buf_off, plan[i].block_off);
-		for (b = 0; b < plan[i].blocks; b++) {
-			const uint32_t blk = plan[i].block_off + b;
+		printf("     %u reversed -> %u read%s:", nrev, n,
+		       n == 1u ? " " : "s");
+		for (i = 0; i < n; i++) {
+			printf(" blk%u+%u", plan[i].block_off, plan[i].blocks);
+			CHECK(plan[i].buf_off == plan[i].block_off * 512u,
+			      "read %u writes byte %u for block %u -- mismatched",
+			      i, plan[i].buf_off, plan[i].block_off);
+			for (b = 0; b < plan[i].blocks; b++) {
+				const uint32_t blk = plan[i].block_off + b;
 
-			if (blk >= ST_RC_SECTOR_BLOCKS) {
-				gaps++;              /* past the sector end */
-				continue;
+				if (blk >= ST_RC_SECTOR_BLOCKS) {
+					gaps++;
+					continue;
+				}
+				if (seen[blk]) {
+					dups++;
+				}
+				seen[blk] = 1u;
 			}
-			if (seen[blk]) {
-				dups++;
+		}
+		printf("\n");
+		for (b = 0; b < ST_RC_SECTOR_BLOCKS; b++) {
+			if (!seen[b]) {
+				gaps++;
 			}
-			seen[blk] = 1u;
 		}
+		CHECK(n <= ST_RC_PLAN_MAX,
+		      "%u reversed needs %u reads, more than the plan holds",
+		      nrev, n);
+		/* One read per diverging track, plus ONE for whatever stays
+		 * contiguous. This is the cost model the duty table is built
+		 * on, so the plan has to match it exactly. */
+		CHECK(n == nrev + (nrev < ST_RC_STEMS ? 1u : 0u),
+		      "%u reversed produced %u reads, expected %u", nrev, n,
+		      nrev + (nrev < ST_RC_STEMS ? 1u : 0u));
 	}
-	printf("\n");
-	for (b = 0; b < ST_RC_SECTOR_BLOCKS; b++) {
-		if (!seen[b]) {
-			gaps++;
-		}
-	}
-	CHECK(gaps == 0, "%u blocks of the sector are never read", gaps);
-	CHECK(dups == 0, "%u blocks of the sector are read twice", dups);
+	CHECK(gaps == 0, "%u blocks were never read across the levels", gaps);
+	CHECK(dups == 0, "%u blocks were read twice across the levels", dups);
 
-	/*
-	 * AND IT IS DESCENDING. Reading the quarters forwards would let the
-	 * card's sequential read-ahead serve most of them, making the
-	 * simulation cheaper than the real thing it stands in for -- an
-	 * optimistic answer to the one question being asked.
-	 */
+	/* Level 0 must be the single full-sector read playback already does,
+	 * or arming the gate at zero would itself change the shipped path. */
+	n = st_readcost_plan_planar(plan, 0u);
+	CHECK(n == 1u && plan[0].block_off == 0u &&
+	      plan[0].blocks == ST_RC_SECTOR_BLOCKS,
+	      "level 0 is not the single full-sector read");
+
+	/* And divergence still reads back to front. */
+	n = st_readcost_plan_planar(plan, ST_RC_STEMS);
 	CHECK(plan[0].block_off > plan[n - 1u].block_off,
 	      "the plan reads forwards (%u then %u); sequential read-ahead "
 	      "would flatter the measurement",

@@ -156,9 +156,9 @@
 #define ST_RC_SWEEP_REPS 24u
 
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st33-VOLCAL"
+#define ST_BUILD_TAG "st34-VOLCAL"
 #else
-#define ST_BUILD_TAG "st33"
+#define ST_BUILD_TAG "st34"
 #endif
 #include "st_track_hold.h"
 #include "st_ladder.h"
@@ -4737,20 +4737,34 @@ static void xfer_service(void)
 		 * Reads only; it changes how a sector is fetched, never what is
 		 * stored. Cleared on reboot, so it cannot be left armed.
 		 */
-		const bool want = atomic_get(&g_stem_planar_sim) == 0;
+		/*
+		 * WALKS THE LEVELS: off -> 1 -> 2 -> 3 -> 4 -> off, where the
+		 * level is HOW MANY TRACKS DIVERGE.
+		 *
+		 * A toggle was enough while the question was "can the CPU do
+		 * this at all". Hardware answered that: four diverging tracks
+		 * produced 32 and 41 underruns with the CPU at 99%. The useful
+		 * question now is where between one and four the ceiling sits,
+		 * because one reversed track costs +10.6 CPU points against
+		 * four's +31.8, and a player who can reverse ONE track still
+		 * has the feature.
+		 */
+		const uint32_t next = ((uint32_t)atomic_get(&g_stem_planar_sim) + 1u) %
+				       (ST_RC_STEMS + 1u);
+		const bool want = next != 0u;
 		uint8_t ack = want ? (uint8_t)'n' : (uint8_t)'o';
 
-		atomic_set(&g_stem_planar_sim, want ? 1 : 0);
+		atomic_set(&g_stem_planar_sim, (atomic_val_t)next);
 		/* Zero the counters so the window that follows is attributable to
 		 * the pattern just selected, not to whatever came before it. */
 		atomic_set(&g_stem_underrun_count, 0);
 		atomic_set(&g_stem_diag_read_us_max, 0);
 		atomic_set(&g_stem_diag_read_calls, 0);
 		cdc_tx(&ack, 1);
-		printk("STEMPLANAR sim=%s -- %s per sector; counters cleared\n",
-		       want ? "ON" : "OFF",
-		       want ? "4 reads of 4 blocks (v1.2 worst case)"
-			    : "1 read of 16 blocks (shipped path)");
+		printk("STEMPLANAR sim=%s rev=%u -- %u read(s) per sector; "
+		       "counters cleared\n",
+		       want ? "ON" : "OFF", (unsigned)next,
+		       (unsigned)(next + (next < ST_RC_STEMS ? 1u : 0u)));
 	} else if (cmd == 'M') {                               /* READ-SIZE SWEEP -- read-only measurement */
 		/*
 		 * WHAT THIS ANSWERS, and why it is worth a command.
@@ -5179,12 +5193,14 @@ static bool stem_read_sector(uint32_t start_block, uint8_t *buf)
 	st_rc_read_t plan[ST_RC_PLAN_MAX];
 	uint32_t n, i;
 
-	if (!atomic_get(&g_stem_planar_sim)) {
+	const uint32_t nrev = (uint32_t)atomic_get(&g_stem_planar_sim);
+
+	if (nrev == 0u) {
 		return emmc_read_blocks(start_block, buf,
 					 ST11_BLOCKS_PER_SECTOR);
 	}
 
-	n = st_readcost_plan_planar(plan);
+	n = st_readcost_plan_planar(plan, nrev);
 	for (i = 0; i < n; i++) {
 		if (!emmc_read_blocks(start_block + plan[i].block_off,
 				       buf + plan[i].buf_off,
@@ -6400,9 +6416,10 @@ static void controls_diag(void)
 					     (mid - l_mid) + (mai - l_mai)) *
 					    100u / d_all);
 
-			printk("STEMPLANAR sim=%s und=%u rd_max_us=%u reads=%u "
+			printk("STEMPLANAR sim=%s rev=%u und=%u rd_max_us=%u reads=%u "
 			       "busy=%u%% spare=%u%%\n",
 			       atomic_get(&g_stem_planar_sim) ? "ON" : "OFF",
+			       (unsigned)atomic_get(&g_stem_planar_sim),
 			       (unsigned)atomic_get(&g_stem_underrun_count),
 			       (unsigned)atomic_get(&g_stem_diag_read_us_max),
 			       (unsigned)atomic_get(&g_stem_diag_read_calls),
