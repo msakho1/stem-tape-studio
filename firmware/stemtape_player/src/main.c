@@ -156,9 +156,9 @@
 #define ST_RC_SWEEP_REPS 24u
 
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st37-VOLCAL"
+#define ST_BUILD_TAG "st38-VOLCAL"
 #else
-#define ST_BUILD_TAG "st37"
+#define ST_BUILD_TAG "st38"
 #endif
 #include "st_track_hold.h"
 #include "st_ladder.h"
@@ -1143,6 +1143,35 @@ static volatile int      g_cache_flush_req;    /* power-off: streamer, flush the
 #define SP1_XFER_ENABLE 1                      /* 1 = USB loop-transfer (website upload/download) enabled */
 #if SP1_XFER_ENABLE
 static volatile uint8_t  g_xfer_mode;          /* 1 = in block-transfer mode (audio paused) */
+/*
+ * THE QUIESCE HANDSHAKE, and why a timing argument is not good enough.
+ *
+ * Transfer mode lets the upload path share storage with the playback ring,
+ * which is only safe while NEITHER the audio thread nor the streamer can still
+ * be touching it. Setting g_xfer_mode and assuming they noticed is a race: the
+ * flag is set and xfer_service() returns, and nothing proves either thread has
+ * observed it before the first command arrives and starts writing.
+ *
+ * So each side ACKNOWLEDGES. The audio thread sets its bit at the same point it
+ * decides to emit silence; the streamer sets its bit where it skips its pass.
+ * Commands that touch shared storage do not dispatch until both are set, which
+ * makes the exclusion a fact rather than an estimate. Cleared on the way in, so
+ * a stale acknowledgement from a previous transfer cannot stand in for a fresh
+ * one.
+ *
+ * Failure mode if this is wrong: the upload silently overwrites audio being
+ * played. Nothing errors; it just sounds wrong. That is the class of bug this
+ * codebase spends effort making impossible, which is why it gets a handshake
+ * instead of a comment about how unlikely it is.
+ */
+static atomic_t g_xfer_audio_quiesced;
+static atomic_t g_xfer_stream_quiesced;
+
+static inline bool xfer_quiesced(void)
+{
+	return atomic_get(&g_xfer_audio_quiesced) != 0 &&
+	       atomic_get(&g_xfer_stream_quiesced) != 0;
+}
 /* Sized to hold ONE COMPLETE largest-possible host request, so the ISR can
  * never be forced to drop a byte no matter how the consumer is scheduled.
  *
@@ -3264,7 +3293,14 @@ static void looper_audio_block(int16_t *s)
 		atomic_set(&g_stem_peak_pub[sp], 0);
 	}
 #endif
-	if (g_xfer_mode) { memset(s, 0, BLK_BYTES); return; }   /* USB transfer: silence out */
+	if (g_xfer_mode) {
+		/* ACKNOWLEDGE, then silence. Set here rather than anywhere
+		 * earlier because this is the point past which this thread
+		 * provably touches no stem buffer for the rest of the block. */
+		atomic_set(&g_xfer_audio_quiesced, 1);
+		memset(s, 0, BLK_BYTES);
+		return;                                 /* USB transfer: silence out */
+	}
 	/* STEM TAPE: UAC2 removed -- there is no USB-sourced audio to prebuffer
 	 * or drain here any more (see this file's own top-of-file comment).
 	 * PASS A below now sources `live` as a constant silence in place of the
@@ -4732,11 +4768,49 @@ static void xfer_service(void)
 					g_stop_req = 1;
 					break;
 				}
+				/* Cleared BEFORE the flag is raised: an
+				 * acknowledgement left over from a previous
+				 * transfer must never stand in for this one. */
+				atomic_set(&g_xfer_audio_quiesced, 0);
+				atomic_set(&g_xfer_stream_quiesced, 0);
 				g_xfer_mode = 1;
 				g_playing = 0;           /* pause the transport during transfer */
 				last = k_uptime_get();
 				break;
 			}
+		}
+		return;
+	}
+
+	/*
+	 * NOTHING DISPATCHES UNTIL BOTH THREADS HAVE ACKNOWLEDGED.
+	 *
+	 * Transfer mode has just been entered; the audio thread and the streamer
+	 * each set their bit at the point they provably stop touching stem
+	 * buffers. Until both have, a command that writes shared storage could
+	 * still land under a thread mid-block. The command byte is left in the
+	 * ring and read on a later pass -- the host's own handshake retries
+	 * anyway, and both acknowledgements arrive within one audio block
+	 * (5.3 ms) and one streamer pass (1 ms) of the flag being raised.
+	 *
+	 * Deliberately gating the WHOLE dispatch rather than only the commands
+	 * that touch the shared buffer: a future command would otherwise have to
+	 * remember to opt in, and forgetting is silent.
+	 */
+	if (!xfer_quiesced()) {
+		/*
+		 * AND IT MUST NOT BE ABLE TO HANG HERE. While gated no command
+		 * is consumed, so the idle timeout below is unreachable -- a
+		 * thread that never acknowledged would strand the device in a
+		 * transfer mode that does nothing at all. A second is orders of
+		 * magnitude longer than the 5.3 ms audio block and 1 ms streamer
+		 * pass both acknowledgements come from, so reaching this means
+		 * something is genuinely wrong, and returning to ordinary
+		 * playback is the better failure.
+		 */
+		if (k_uptime_get() - last > 1000) {
+			g_slot_switch_req = 1;
+			g_xfer_mode = 0;
 		}
 		return;
 	}
@@ -5624,7 +5698,13 @@ static void streamer_thread(void *a, void *b, void *c)
 		if (g_usb_up)
 			xfer_service();
 #endif
-		if (g_xfer_mode) { k_msleep(1); continue; }
+		if (g_xfer_mode) {
+			/* Same acknowledgement, from the producer side: past this
+			 * point the streamer fills no buffer this pass. */
+			atomic_set(&g_xfer_stream_quiesced, 1);
+			k_msleep(1);
+			continue;
+		}
 
 		/* Power-off cache flush: program the volatile write cache to NAND so the
 		 * last take + slot index survive a power cut. Requested by stop_and_flush

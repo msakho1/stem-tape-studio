@@ -2711,6 +2711,48 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Stem Tape TRANSFER QUIESCE handshake -- upload never lands under a live thread
+        # THE PRECONDITION FOR SHARING STORAGE BETWEEN UPLOAD AND PLAYBACK.
+        # Transfer mode is what lets the verify scratch stop being its own
+        # 8,192-byte allocation and share a read-ahead ring slot instead
+        # (docs/stem-tape-ram-v1.md, Stage A). That is only sound while
+        # NEITHER the audio thread nor the streamer can still be touching the
+        # ring -- and "we set a flag and they will notice" is a timing
+        # argument, not a proof: entering transfer mode raises the flag and
+        # returns, with nothing establishing that either thread has OBSERVED
+        # it before the first command starts writing.
+        #
+        # The failure mode is an upload silently overwriting audio that is
+        # playing. Nothing errors. It just sounds wrong -- which is why this
+        # is a gate and not a comment about how unlikely the window is.
+        #
+        # Two scripts, deliberately: the gate proves the handshake is wired,
+        # and the SELF-TEST proves the gate is not vacuous by breaking each
+        # of its checks in turn and requiring a rejection. A structural gate
+        # that greps for something it can always find reports PASS while
+        # proving nothing, so the self-test runs FIRST.
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/stemtape_player_xfer_quiesce_gate_selftest.py \
+            firmware/stemtape_player/src/main.c \
+            .github/scripts/stemtape_player_xfer_quiesce_gate.py \
+            audit/xfer-quiesce-selftest.md | tee audit/xfer-quiesce-selftest.txt
+          grep -q 'ALL 9 MUTANTS CAUGHT' audit/xfer-quiesce-selftest.txt || {
+            echo "  the quiesce gate's own self-test did not cover every check"
+            exit 1; }
+          python3 .github/scripts/stemtape_player_xfer_quiesce_gate.py \
+            firmware/stemtape_player/src/main.c \
+            audit/xfer-quiesce-gate.md | tee audit/xfer-quiesce-gate.txt
+          {
+            echo '### Stem Tape transfer-mode quiesce handshake'
+            echo '```text'
+            cat audit/xfer-quiesce-gate.txt
+            echo ''
+            cat audit/xfer-quiesce-selftest.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Stem Tape v1.1 full continuous playback gate (Slice 3C)
         # Phase 2, Slice 3C -- the FULL continuous playback gate. Drives
         # the REAL production algorithm (st_stem_stream.h + st_stem_

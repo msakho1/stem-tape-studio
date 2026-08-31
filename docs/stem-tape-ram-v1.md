@@ -73,6 +73,27 @@ guard**, because the failure mode if a third use site ever appears outside
 transfer mode is silent corruption of live audio, which is exactly the class of
 bug this codebase spends effort to make impossible.
 
+**The prerequisite is now built.** Everything above turns on "transfer mode
+stops playback at both ends", and until now that was a *timing* claim, not a
+proven one: entering transfer mode raised `g_xfer_mode` and returned, with
+nothing establishing that either thread had observed it before the first
+command started writing. `st38` replaces the assumption with a handshake —
+each thread sets an acknowledgement bit at the exact point it provably stops
+touching stem buffers (the audio thread where it silences the block, the
+streamer where it skips its pass), both bits are cleared on the way in so a
+stale one cannot stand in for a fresh one, and **no command dispatches at all**
+until both are set. Gating the whole dispatch rather than the commands that
+happen to touch shared storage is deliberate: a future command would otherwise
+have to remember to opt in, and forgetting is silent. The gate carries a 1000 ms
+escape back to ordinary playback, because while gated no command is consumed and
+the ordinary idle timeout is therefore unreachable.
+
+Two CI scripts, not one: `stemtape_player_xfer_quiesce_gate.py` proves the
+handshake is wired, and `..._gate_selftest.py` proves that gate is not vacuous
+by breaking each of its checks in turn — nine mutants, including a gate that is
+entirely correct but sits *after* the command byte is consumed — and requiring
+a rejection for every one.
+
 ### Stage B — CORRECTED TWICE. Neither pin region is reclaimable.
 
 This section has now been wrong twice, and both versions are recorded because
@@ -116,7 +137,7 @@ document originally framed them as.
 
 | | bytes | status |
 |---|---|---|
-| Stage A — verify scratch shares a ring slot | 8,192 | real, needs a quiesce handshake |
+| Stage A — verify scratch shares a ring slot | 8,192 | handshake landed in `st38`; the union itself is next |
 | unified associative cache (16 pools → 15 live) | 8,192 | real but marginal; large change for one slot |
 | entry pin | 0 | load-bearing |
 | exit pin | 0 | load-bearing |
@@ -178,7 +199,8 @@ conversation**, which is why the plan above is short.
    two-thread quiesce handshake exists. Not a timing argument: entering
    transfer mode sets the flag and returns, and nothing today *proves* the
    audio thread observed it before the first command lands. Silent audio
-   corruption is the failure mode.
+   corruption is the failure mode. **The handshake is built (`st38`); the
+   union is the remaining half.**
 4. **Unified associative cache** (8,192 B) — worth doing for the addressing,
    marginal for the RAM. Not urgent while song-planar is neutral.
 4. Per-track heads, then the rest of the roadmap, on the freed budget.
