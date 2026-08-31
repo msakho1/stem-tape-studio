@@ -1,5 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import stemTapeLogo from "@/assets/stemtape-logo-bench.png.asset.json";
+import stemTapeLogo from "@/assets/stemtape-logo.png.asset.json";
 import { useState } from "react";
 import hero from "@/assets/sp1-hero-grey.png.asset.json";
 import whiteFront from "@/assets/sp1-white-front.png.asset.json";
