@@ -5,8 +5,14 @@ is left, reorder a playlist, and delete songs.
 
 **Two of the four are buildable today with no firmware change at all, and
 every byte they need is already on the wire.** The other two are not, because
-the device does not hold a playlist — see "What was NOT asked for here" at the
-bottom before building anything beyond this document.
+this firmware holds one song — see "What was NOT asked for here" at the bottom
+before building anything beyond this document.
+
+A true multi-song library **is** the intended architecture and is specified in
+`docs/stem-tape-v1.3-multi-song-library.md`. It is deliberately not being
+started until v1.2 planar playback and per-track reverse are proven on
+hardware. This document is the interim, honest view of a one-song device — not
+a statement that one song is the destination.
 
 ---
 
@@ -16,23 +22,17 @@ Please add a **library view** and a **capacity display** to the companion.
 Both are read-only, both use verbs and fields that already exist, and neither
 needs a firmware change.
 
-### First, what the SP-1 actually stores — the UI must not imply otherwise
+### What this firmware can currently hold
 
-The device is **not** a playlist player. Its storage is four fixed regions:
+**One song.** Uploading a new one replaces it. A multi-song library is a
+planned future firmware, so please build for one song now and do not stub in
+a list, a reorder handle, or a delete button that cannot work yet.
 
-```
-| index A (1 block) | index B (1 block) |   song A   |   song B   |
-```
-
-It holds **one playable song**. The other song region holds the **previous
-song**, kept deliberately so an interrupted or failed upload can roll back to
-it. Uploading does not "add" a song — it writes into whichever song region is
-currently inactive, verifies it, and then atomically switches which one is
-active by committing an index record.
-
-So the honest thing to show is **two slots, one of them current**, not a list
-that looks like it could grow. Please don't build an "add song" affordance
-that implies a third can exist.
+Internally the device keeps a second copy of the previous song so an
+interrupted upload can roll back — that is why the usable size for one song is
+smaller than the raw device capacity. **That mechanism is not something the
+normal user should have to think about.** Its only user-visible consequence is
+the capacity figure, covered below.
 
 ### Where the data comes from
 
@@ -64,50 +64,58 @@ A block whose record fails validation, or whose `SONG_PRESENT` flag is clear,
 means that slot holds no usable song. That is a normal state (a fresh device
 has both), not an error to surface as a failure.
 
-### What to show
+### What the normal user should see
 
-**Per slot (A and B):**
+**The song on the device** — read the record named by `activeSongSlot`:
 
-- title, artist (both already in the record)
-- duration — `frames / sampleRate`, formatted mm:ss
-- `generation` — higher wins; this is what makes one of them current
-- size on device — `songBlockCount * 512` bytes
-- a clear **CURRENT** marker on the slot matching `activeSongSlot`
-- for the other slot, label it **previous — kept for rollback**, not
-  "song 2". It is not independently playable; it is the safety copy.
+- **title** and **artist**
+- **duration** — `frames / sampleRate`, formatted mm:ss
+- **size** — `songBlockCount * 512`
 
-**Capacity.** Please show this per slot, not as one pool:
+If `activeSongSlot` is `0xffffffff`, or that slot's record fails validation or
+has `SONG_PRESENT` clear, the device simply has no song on it yet. Show that
+as an ordinary empty state, not an error — a fresh device is legitimately in
+it.
+
+**Storage**, as three plain figures:
 
 ```
-songARegion = songABlocks * 512
-songBRegion = songBBlocks * 512
+capacity  = songABlocks * 512          // what one song may occupy
+used      = songBlockCount * 512       // the current song, 0 if none
+free      = capacity - used
 ```
 
-and, for the slot that would receive the next upload (the **inactive** one),
-how much of its region a new song may use. A song must fit entirely inside
-**one** region.
+`songABlocks` and `songBBlocks` are equal, so either can be read as "the space
+a song may use". Please present `capacity` as the SP-1's song capacity — do
+not add the two regions together and present the sum, because a single song
+can never span both, and the sum would promise roughly twice what actually
+fits.
 
-**The consequence to surface plainly:** because the two song regions split the
-device evenly and an upload always targets the inactive one, **the largest
-song the SP-1 can hold is about half the device's capacity.** The other half
-is permanently reserved for the rollback copy. Users will otherwise read
-"32 GB device" and expect a 32 GB song to fit. A single line near the capacity
-figure is enough — something like "max song size: X (the other half is
-reserved so an interrupted upload can roll back)".
+### The A/B state: internal, not user-facing
+
+The wire fields for both slots are there and are genuinely useful for
+diagnostics — a stuck generation or an unexpected active slot is exactly the
+kind of thing worth being able to see when an upload misbehaves. Please put
+them behind a **diagnostics / advanced** view rather than in the normal flow:
+slot A and B, each with its record's title, generation and validity, and which
+one is currently active.
+
+The normal user should never see the words "slot A", "slot B", "generation" or
+"rollback".
 
 ### Please do NOT
 
-- compute free space by subtracting both songs from `deviceBlocks` — that is
-  not how the space is usable, and it will overstate what fits;
-- offer reorder, delete, or "add another song" controls (see below);
-- hide or fake a slot when it is empty — show it as empty. A fresh device
-  legitimately has two empty slots and that should look normal.
+- add the two song regions together when reporting capacity — a song cannot
+  span them, and the sum overstates what fits by about 2x;
+- build reorder, delete, or "add another song" controls, even disabled or
+  "coming soon" — the firmware cannot honour them yet;
+- present the rollback copy as a second song in the user's library. It is not
+  independently playable and is not something they chose to keep.
 
 ### What to send back
 
-The changed files, plus a screenshot of the view against a device (or your
-mock) in three states: both slots empty, one song committed, and two slots
-populated with different generations.
+The changed files, plus a screenshot of the view in three states: no song on
+the device, a song present, and the diagnostics view showing both slots.
 
 ## END OF PROMPT
 
