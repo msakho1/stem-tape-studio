@@ -68,29 +68,56 @@ guard**, because the failure mode if a third use site ever appears outside
 transfer mode is silent corruption of live audio, which is exactly the class of
 bug this codebase spends effort to make impossible.
 
-### Stage B — wrap-aware read-ahead absorbs the ENTRY pin (49,152 B)
+### Stage B — CORRECTED
 
-While a loop is armed and the playhead is inside it, the sectors "ahead" of the
-playhead wrap round to `loop_start`. A read-ahead that knows this prefetches the
-entry region as ordinary read-ahead, and the entry pin has nothing left to do.
-The exit region genuinely does need pinning — playback never passes through the
-sectors after `loop_end` while looping, so nothing else will fetch them.
+**The first version of this section was wrong and is kept here as the mistake
+it was.** It claimed a wrap-aware read-ahead could absorb the loop ENTRY pin
+and free 49,152 B. It cannot. Read-ahead is 4 sectors deep — about 28 ms of
+audio — and a single worst-case fetch was *measured* at 21-23 ms under load.
+Pulling five entry sectors in during the last four sectors before a wrap has no
+margin at all. The entry pin is pinned **from the moment the loop is armed**
+precisely so the wrap never depends on that race, and that is correct. It
+stays.
+
+The real candidate is the **EXIT pin**, and it is stale in the most literal
+sense: it holds data for an operation that was removed.
+
+`ST_LOOP_PIN_EXIT` is documented in `main.c` as *"loop_end: where every exit
+seek lands"*. But the audio thread's exit handler says:
+
+> THE TRANSPORT IS NOT TOUCHED HERE EITHER. Releasing stops future wrapping and
+> nothing more: the iteration already in flight plays on through the loop end
+> and into the material that follows […] **THIS REVERSES A DOCUMENTED EARLIER
+> DECISION** […] The product ruling is that a release must not move the
+> playhead under any circumstances.
+
+There is no exit seek any more. A release is ordinary continuous playback
+carrying on past `loop_end`, which is the case ordinary read-ahead exists to
+serve. Residency depth is a property of *seek targets*, where the ring is cold —
+and this is not a seek.
 
 | | slots | bytes |
 |---|---|---|
 | today: ring 6 + entry 5 + exit 5 | 16 | 131,072 |
-| after: unified cache 5 + exit 5 | 10 | 81,920 |
-| **freed** | **6** | **49,152** |
+| after: ring 6 + entry 5 | 11 | 90,112 |
+| **freed** | **5** | **40,960** |
 
-The unified cache is associative: each slot carries the sector index it holds
-plus a pin flag, and lookup is a search rather than `s % SLOTS`. That is the
-change the existing comment already prescribes.
+**NOT YET PROVEN, and it must be before anything is deleted.** The claim rests
+on the ring's prefetch actually holding `loop_end+1…` while a loop runs. If the
+prefetch target is clamped or wrapped to the loop window, that material is not
+in the ring and the exit pin is still earning its place. `st_stream_required_
+sector()` is `song_frame / ST11_FRAMES_PER_SECTOR` — purely linear, no loop
+term — which is the evidence *for*; the producer's own `next_fill()` target
+selection has not been read yet, and it is the one that decides.
 
 **Stage B is a change to the continuous-playback path**, which is otherwise
-under a standing do-not-touch rule. It should be its own commit, with the loop
-seam and transport gates run against it, not folded into anything else.
+under a standing do-not-touch rule. Own commit; loop seam and transport gates
+run against it; nothing folded in.
 
-### Combined: 57,344 B, against 33,570 B free today
+### Combined: 49,152 B (A + corrected B), against 33,570 B free today
+
+Still enough for song-planar's +16,384 B, with 32,768 B spare rather than
+40,960 B.
 
 ## The part that changes the roadmap
 
@@ -134,10 +161,18 @@ conversation**, which is why the plan above is short.
 
 ## Order of work
 
-1. **Stage A** (8,192 B) — small, isolated, transfer-mode only, needs a CI
-   guard proving no use site escapes transfer mode.
-2. **Stage B** (49,152 B) — the unified associative cache. Touches the
-   playback path; own commit; loop seam + transport gates must stay green.
+0. **Prove or kill the Stage B premise** — read the producer's `next_fill()`
+   target selection and settle whether the ring holds `loop_end+1…` during a
+   loop. Costs nothing, decides 40,960 B, and must happen before any deletion.
+1. **Stage B** (40,960 B, if step 0 confirms) — remove the exit pin region.
+   Touches the playback path; own commit; loop seam + transport gates must stay
+   green. Taken FIRST because its failure mode is loud (a gap on loop release,
+   which the seam gate already tests for) where Stage A's is silent.
+2. **Stage A** (8,192 B) — the verify scratch shares a ring slot. Needs a real
+   two-thread quiesce handshake, not a timing argument: entering transfer mode
+   sets the flag and returns, and nothing today *proves* the audio thread has
+   observed it before the first command lands. Silent audio corruption is the
+   failure mode, so this one waits for the handshake.
 3. **Song-planar v1.2** (+16,384 B for per-stem rings) — fits inside what
-   Stage A + B free, with 40,960 B still spare.
+   Stage A + B free, with 32,768 B still spare.
 4. Per-track heads, then the rest of the roadmap, on the freed budget.
