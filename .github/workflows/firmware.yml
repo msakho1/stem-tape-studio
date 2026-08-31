@@ -2114,6 +2114,63 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Stem Tape READ-COST MODEL -- can per-track reverse ever be afforded
+        # THE GATE ON A FORMAT CHANGE, not on a feature.
+        #
+        # Per-track reverse needs a reversed stem to read from its own
+        # position. In the v1.1 layout all four stems are interleaved in one
+        # frame, so that costs a whole extra SECTOR stream: 5073 us of reads
+        # per 7083 us of audio, twice over, is 143% of a 100% read engine.
+        #
+        # Storing each stem in its own contiguous plane would let a reversed
+        # stem fetch only its quarter -- but only if a quarter-size read costs
+        # about a quarter. That turns entirely on the 1763 us start-bit hunt:
+        # per BLOCK and the feature costs 78% duty, per READ and it costs
+        # 153%. This step proves the ARITHMETIC and, crucially, proves the two
+        # hypotheses reach OPPOSITE verdicts -- a model that said "feasible"
+        # either way would make the hardware sweep theatre.
+        #
+        # WHICH hypothesis holds is a measurement, not a test. The 'M' command
+        # in main.c sweeps read sizes on the real card; its numbers go through
+        # st_readcost_fit() before any sector layout is touched.
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          cc -std=c11 -Wall -Wextra -Werror -Ifirmware/stemtape_player/src \
+            firmware/stemtape_player/src/st_readcost.c \
+            firmware/stemtape_player/tests/test_readcost.c \
+            -o audit/test_readcost
+          ./audit/test_readcost | tee audit/readcost-selftest.txt
+
+          # THE GATE MUST KEEP ASKING. If the two hypotheses stop being
+          # compared, or stop diverging, this step is worth nothing.
+          grep -q 'the two hypotheses must disagree' audit/readcost-selftest.txt
+          grep -q 'A (hunt per block)' audit/readcost-selftest.txt
+          grep -q 'B (hunt per read)' audit/readcost-selftest.txt
+          grep -q 'with nothing reversed the layout change costs nothing' \
+            audit/readcost-selftest.txt
+
+          # AND THE SWEEP MUST BE REACHABLE. A model with no way to get real
+          # numbers into it is arithmetic, not evidence.
+          M=firmware/stemtape_player/src/main.c
+          grep -q "cmd == 'M'" "$M" || {
+            echo "  the read-cost sweep command is gone"; exit 1; }
+          # READ-ONLY, PROVABLY. The sweep must never write, erase or flush
+          # -- it exists to measure the read path, and a benchmark that
+          # mutates storage is the shape of the retired 'Y' command this
+          # replaces. A SCRIPT, not an inline heredoc: an indented here-doc
+          # terminator does not close the document and silently swallows the
+          # rest of the step, which is a mistake this workflow has already
+          # made once.
+          python3 .github/scripts/stemtape_player_readcost_sweep_readonly_gate.py \
+            "$M" audit/readcost-readonly-gate.md
+          {
+            echo '### Stem Tape read-cost model'
+            echo '```text'
+            cat audit/readcost-selftest.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Stem Tape TRANSPORT INERTIA -- the reel has mass, and it is a pitch drop
         # THE BRIEF, and the line it drew:
         #

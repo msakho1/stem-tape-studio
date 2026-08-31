@@ -150,10 +150,15 @@
  * image is still on the device" would be indistinguishable -- the same
  * failure that cost several rounds before the shipped/calibration tags were
  * split apart. The tag is the only thing the operator can read. */
+/* Reads per size in the 'M' read-cost sweep. Enough to average out ordinary
+ * card jitter, few enough that the whole sweep stays well inside the transfer
+ * session's patience. */
+#define ST_RC_SWEEP_REPS 24u
+
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st31-VOLCAL"
+#define ST_BUILD_TAG "st32-VOLCAL"
 #else
-#define ST_BUILD_TAG "st31"
+#define ST_BUILD_TAG "st32"
 #endif
 #include "st_track_hold.h"
 #include "st_ladder.h"
@@ -162,6 +167,7 @@
 #include "st_seam.h"
 #include "st_pitch.h"
 #include "st_fnplay.h"
+#include "st_readcost.h"
 #include "st_stem_meter.h"
 #include "st_inertia.h"
 #include "st_resample.h"
@@ -4694,6 +4700,99 @@ static void xfer_service(void)
 			uint8_t h = (xfer_v11_write(blk, sec) == 0) ? (uint8_t)ST11_WRITE_ACK : (uint8_t)'E';
 			cdc_tx(&h, 1);
 		}
+	} else if (cmd == 'M') {                               /* READ-SIZE SWEEP -- read-only measurement */
+		/*
+		 * WHAT THIS ANSWERS, and why it is worth a command.
+		 *
+		 * Per-track reverse playback needs a reversed stem to read from
+		 * its own position. In the v1.1 layout all four stems are
+		 * interleaved in one frame, so that costs a whole extra SECTOR
+		 * stream -- 143% of a read engine that only has 100%. Storing
+		 * each stem in its own contiguous plane would let a reversed
+		 * stem fetch only its own quarter, but ONLY IF a quarter-size
+		 * read actually costs about a quarter.
+		 *
+		 * That hinges entirely on the 1763 us start-bit hunt: per BLOCK
+		 * and the feature is affordable (78% duty), per READ and it is
+		 * not (153%). sp1_emmc.c's loop says per block. This measures
+		 * it, because the change it would justify re-encodes every
+		 * stored song and cannot be walked back cheaply.
+		 *
+		 * READ-ONLY. Nothing here writes, erases or flushes; it reads
+		 * blocks 'R' is already allowed to read. It is also only
+		 * reachable from transfer mode, where playback is stopped, so
+		 * it cannot steal bandwidth from a live stream and skew its own
+		 * measurement.
+		 */
+		/* 1..16 blocks: a full sector, a stem plane (4), and the sizes
+		 * either side of it, so the fit has spread on both sides of the
+		 * quarter-size read the whole question is about. */
+		static const uint32_t k_sizes[] = { 1u, 2u, 4u, 8u, 16u };
+		const uint32_t n_sizes = 5u;
+		const uint32_t total_blocks =
+			SLOT0_BLOCK + (uint32_t)NUM_SLOTS * NTRK * TRACK_BLOCKS;
+		uint8_t ack = 'm';
+		uint32_t si;
+
+		cdc_tx(&ack, 1);
+		printk("STEMRC sweep begin (read-only, %u reps per size)\n",
+		       (unsigned)ST_RC_SWEEP_REPS);
+
+		for (si = 0; si < n_sizes; si++) {
+			const uint32_t nb = k_sizes[si];
+			uint64_t sum_cyc = 0;
+			uint32_t worst_cyc = 0, ok = 0, rep;
+			uint32_t hunt = 0, dma = 0, crc = 0;
+
+			for (rep = 0; rep < ST_RC_SWEEP_REPS; rep++) {
+				/* Step the address every rep so the card's own
+				 * read cache cannot serve a repeat and report a
+				 * cost the streamer will never see. Wrapped
+				 * inside the region 'R' already permits. */
+				const uint32_t span = total_blocks - SLOT0_BLOCK;
+				const uint32_t blk = SLOT0_BLOCK +
+					((rep * ST_RC_SECTOR_BLOCKS) %
+					 (span - ST_RC_SECTOR_BLOCKS));
+				uint32_t c0, c1;
+
+				feed_wdt();
+				c0 = DWT->CYCCNT;
+				if (!emmc_read_blocks(blk, s_v11_verify_scratch,
+						       nb)) {
+					continue;
+				}
+				c1 = DWT->CYCCNT;
+				{
+					const uint32_t d = c1 - c0;
+
+					sum_cyc += d;
+					if (d > worst_cyc) {
+						worst_cyc = d;
+					}
+				}
+				ok++;
+				/* The driver republishes these on every call;
+				 * the last one is representative. */
+				hunt = emmc_dbg_rd_hunt_us;
+				dma  = emmc_dbg_rd_dma_us;
+				crc  = emmc_dbg_rd_crc_us;
+			}
+
+			if (ok == 0u) {
+				printk("STEMRC blocks=%u FAILED (no successful reads)\n",
+				       nb);
+				continue;
+			}
+			/* 64 MHz core clock -> microseconds. */
+			printk("STEMRC blocks=%u n=%u avg_us=%u worst_us=%u "
+			       "hunt_us=%u dma_us=%u crc_us=%u\n",
+			       nb, ok,
+			       (uint32_t)((sum_cyc / ok) / 64u),
+			       worst_cyc / 64u, hunt, dma, crc);
+			feed_wdt();
+		}
+		printk("STEMRC sweep end -- fit these with st_readcost_fit(); "
+		       "hunt_us scaling with blocks= is the whole question\n");
 	} else if (cmd == 'F') {                               /* real durability barrier (docs section 1, 10 item 6) */
 		/* emmc_cache_flush() blocks until the card's internal volatile
 		 * write cache actually programs to NAND (EXT_CSD FLUSH_CACHE) --
