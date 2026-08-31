@@ -170,6 +170,11 @@ target_sources(app PRIVATE
 	src/st_crc32.c
 	src/st_checksum32.c
 	src/st_sector_v11.c
+	# v1.2 song-planar addressing. main.c's read path calls st_pl_group_block(),
+	# st_pl_validate() and st_pl_decode_frame() on every fetch and every frame,
+	# so this is not optional -- omitting it links to nothing and the build dies
+	# at the first link pass with no zephyr.elf, which is exactly what happened.
+	src/st_planar.c
 	src/st_stix.c
 	src/st_stcp.c
 	src/st_ab_session.c
