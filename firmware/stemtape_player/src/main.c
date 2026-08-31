@@ -156,9 +156,9 @@
 #define ST_RC_SWEEP_REPS 24u
 
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st32-VOLCAL"
+#define ST_BUILD_TAG "st33-VOLCAL"
 #else
-#define ST_BUILD_TAG "st32"
+#define ST_BUILD_TAG "st33"
 #endif
 #include "st_track_hold.h"
 #include "st_ladder.h"
@@ -1576,6 +1576,28 @@ static atomic_t g_stem_reload_req;
  * (the producer) is the sole writer of the read/corrupt counters,
  * audio_thread (the consumer) is the sole writer of the underrun
  * counter; both may be read from main()'s own diagnostic thread. */
+/*
+ * PLANAR READ SIMULATION -- the v1.2 CPU-cost gate, off by default.
+ *
+ * The read-cost sweep proved the storage can serve four diverging tracks
+ * (75.7% duty). It did NOT prove the scheduler can hand the streamer that
+ * much wall clock during live playback, and this project has already been
+ * bitten by exactly that: reads stretched 5073 -> 12500 us when the
+ * streamer's share fell to 42%, and the song played slow and crushed.
+ *
+ * A percentage cannot answer it, because today the streamer only ASKS for
+ * ~44% -- what it uses is not what it could get. So the streamer is made to
+ * do the real thing instead: four 4-block reads per sector rather than one
+ * of sixteen, which is precisely v1.2's worst case with all four tracks
+ * reversed. Same sector, same bytes, bit-identical audio; only the read
+ * PATTERN changes, which is the variable under test. If playback survives
+ * with zero new underruns, the CPU can afford per-track reverse.
+ *
+ * OFF BY DEFAULT and set only by an explicit command, so the shipped
+ * playback path is byte-for-byte what it was.
+ */
+static atomic_t g_stem_planar_sim;
+
 static atomic_t g_stem_diag_bytes_total;   /* total bytes physically read (successful reads only) */
 static atomic_t g_stem_diag_read_calls;    /* total emmc_read_blocks() attempts for stem sectors, success or fail */
 static atomic_t g_stem_diag_read_us_last;  /* most recent read attempt's wall time, us (DWT, any outcome) */
@@ -4700,6 +4722,35 @@ static void xfer_service(void)
 			uint8_t h = (xfer_v11_write(blk, sec) == 0) ? (uint8_t)ST11_WRITE_ACK : (uint8_t)'E';
 			cdc_tx(&h, 1);
 		}
+	} else if (cmd == 'N') {                               /* PLANAR READ SIMULATION -- arm/disarm */
+		/*
+		 * Arms the v1.2 read pattern on the sustained prefetch. Set it
+		 * here, then leave transfer mode with 'X' and play a song: the
+		 * streamer now pays v1.2's worst-case read cost while the audio
+		 * path is otherwise untouched.
+		 *
+		 * A TOGGLE RATHER THAN A DURATION, because the thing being
+		 * measured is sustained behaviour -- an underrun that only
+		 * appears after a minute of playing is exactly the failure this
+		 * is looking for, and a timed run could end before it.
+		 *
+		 * Reads only; it changes how a sector is fetched, never what is
+		 * stored. Cleared on reboot, so it cannot be left armed.
+		 */
+		const bool want = atomic_get(&g_stem_planar_sim) == 0;
+		uint8_t ack = want ? (uint8_t)'n' : (uint8_t)'o';
+
+		atomic_set(&g_stem_planar_sim, want ? 1 : 0);
+		/* Zero the counters so the window that follows is attributable to
+		 * the pattern just selected, not to whatever came before it. */
+		atomic_set(&g_stem_underrun_count, 0);
+		atomic_set(&g_stem_diag_read_us_max, 0);
+		atomic_set(&g_stem_diag_read_calls, 0);
+		cdc_tx(&ack, 1);
+		printk("STEMPLANAR sim=%s -- %s per sector; counters cleared\n",
+		       want ? "ON" : "OFF",
+		       want ? "4 reads of 4 blocks (v1.2 worst case)"
+			    : "1 read of 16 blocks (shipped path)");
 	} else if (cmd == 'M') {                               /* READ-SIZE SWEEP -- read-only measurement */
 		/*
 		 * WHAT THIS ANSWERS, and why it is worth a command.
@@ -5110,6 +5161,40 @@ static void codec_unpack(int16_t *ring, uint32_t ring_mask, uint32_t start,
  * the caller reports the real depth rather than the intended one; a song
  * shorter than the ring simply primes fewer.
  */
+/*
+ * ONE SECTOR INTO ONE BUFFER, either as the single 16-block read playback
+ * has always used, or -- when the planar simulation is armed -- as the four
+ * 4-block reads v1.2 would need with every track diverging.
+ *
+ * Both paths deliver the SAME 8192 bytes to the same buffer, so nothing
+ * downstream can tell them apart; the decoded audio is bit-identical. What
+ * differs is only what it COST to get there, which is the whole point.
+ *
+ * With the flag clear this is exactly the call site it replaced -- one
+ * emmc_read_blocks() of ST11_BLOCKS_PER_SECTOR -- so the shipped path is
+ * unchanged.
+ */
+static bool stem_read_sector(uint32_t start_block, uint8_t *buf)
+{
+	st_rc_read_t plan[ST_RC_PLAN_MAX];
+	uint32_t n, i;
+
+	if (!atomic_get(&g_stem_planar_sim)) {
+		return emmc_read_blocks(start_block, buf,
+					 ST11_BLOCKS_PER_SECTOR);
+	}
+
+	n = st_readcost_plan_planar(plan);
+	for (i = 0; i < n; i++) {
+		if (!emmc_read_blocks(start_block + plan[i].block_off,
+				       buf + plan[i].buf_off,
+				       plan[i].blocks)) {
+			return false;
+		}
+	}
+	return true;
+}
+
 static uint32_t stem_prime_read_ahead(void)
 {
 	uint32_t primed = 1u;   /* sector 0: already read, validated and published */
@@ -5603,7 +5688,11 @@ static void streamer_thread(void *a, void *b, void *c)
 					g_stem_stream.song_start_block + needed * ST11_BLOCKS_PER_SECTOR;
 
 				uint32_t read_t0 = DWT->CYCCNT;
-				bool read_ok = emmc_read_blocks(start_block, target_buf, ST11_BLOCKS_PER_SECTOR);
+				/* THE SUSTAINED PATH, and the only one switched. The
+				 * boot prime, the seek refills and the loop pins are
+				 * one-off costs; what decides whether v1.2 fits is the
+				 * read that repeats every sector, forever. */
+				bool read_ok = stem_read_sector(start_block, target_buf);
 				uint32_t read_us = (DWT->CYCCNT - read_t0) / 64u; /* 64 MHz -> us, same convention
 										    * as g_audio_us_max below */
 
@@ -6293,6 +6382,31 @@ static void controls_diag(void)
 			       (unsigned)((str - l_str) * 100u / d_all),
 			       (unsigned)((mid - l_mid) * 100u / d_all),
 			       (unsigned)((mai - l_mai) * 100u / d_all));
+		}
+		/*
+		 * THE v1.2 CPU GATE, stated so it needs no arithmetic to read.
+		 * und= is the whole answer: zero across sustained playback with
+		 * sim=ON means the scheduler can afford four diverging tracks.
+		 * Anything else means it cannot, and no storage layout fixes
+		 * that.
+		 *
+		 * COMPUTED BEFORE the l_* baselines are rolled forward. Written
+		 * after them the deltas are all zero and busy= reads 0%, which
+		 * looks like an idle machine rather than a broken print.
+		 */
+		if (d_all) {
+			const unsigned busy =
+				(unsigned)(((aud - l_aud) + (str - l_str) +
+					     (mid - l_mid) + (mai - l_mai)) *
+					    100u / d_all);
+
+			printk("STEMPLANAR sim=%s und=%u rd_max_us=%u reads=%u "
+			       "busy=%u%% spare=%u%%\n",
+			       atomic_get(&g_stem_planar_sim) ? "ON" : "OFF",
+			       (unsigned)atomic_get(&g_stem_underrun_count),
+			       (unsigned)atomic_get(&g_stem_diag_read_us_max),
+			       (unsigned)atomic_get(&g_stem_diag_read_calls),
+			       busy, busy <= 100u ? 100u - busy : 0u);
 		}
 		l_aud = aud; l_str = str; l_mid = mid; l_mai = mai; l_all = all;
 	}

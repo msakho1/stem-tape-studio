@@ -2153,6 +2153,27 @@ jobs:
           # AND THE SWEEP MUST BE REACHABLE. A model with no way to get real
           # numbers into it is arithmetic, not evidence.
           M=firmware/stemtape_player/src/main.c
+          # THE PLANAR SIMULATION IS OFF UNLESS ARMED. It changes the
+          # sustained playback read path, so the shipped default must be the
+          # single 16-block read it always was -- an atomic_t with no
+          # initialiser is zero, and the ONLY writer is the 'N' command.
+          grep -q 'static atomic_t g_stem_planar_sim;' "$M" || {
+            echo "  the planar sim flag is missing or has a nonzero default"
+            exit 1; }
+          test "$(grep -c 'atomic_set(&g_stem_planar_sim' "$M")" = "1" || {
+            echo "  g_stem_planar_sim is written from more than one place"
+            exit 1; }
+          # The unarmed path must still be the plain full-sector read.
+          grep -q 'return emmc_read_blocks(start_block, buf,' "$M" || {
+            echo "  the unarmed read is no longer one full-sector read"
+            exit 1; }
+          # And the SUSTAINED prefetch is what got switched -- switching a
+          # one-off boot or seek read would measure nothing.
+          grep -q 'bool read_ok = stem_read_sector(start_block, target_buf);' \
+            "$M" || {
+            echo "  the sustained prefetch does not go through stem_read_sector"
+            exit 1; }
+
           grep -q "cmd == 'M'" "$M" || {
             echo "  the read-cost sweep command is gone"; exit 1; }
           # READ-ONLY, PROVABLY. The sweep must never write, erase or flush
@@ -2164,6 +2185,12 @@ jobs:
           # made once.
           python3 .github/scripts/stemtape_player_readcost_sweep_readonly_gate.py \
             "$M" audit/readcost-readonly-gate.md
+
+          # The plan the simulation reads by must cover the sector exactly
+          # once -- a gap leaves stale bytes and an overlap drops a quarter,
+          # and either would be heard as the read pattern's fault.
+          grep -q 'the planar read plan covers the sector exactly once' \
+            audit/readcost-selftest.txt
           {
             echo '### Stem Tape read-cost model'
             echo '```text'

@@ -137,6 +137,41 @@ uint32_t st_readcost_predict_us(const st_readcost_t *rc, uint32_t blocks);
 uint32_t st_readcost_planar_duty_ppm(const st_readcost_t *rc,
 				      uint32_t n_reversed);
 
+/*
+ * ======================================================================
+ * THE PLANAR READ PLAN -- what the streamer does to SIMULATE v1.2 cost
+ * ======================================================================
+ * The duty figures above are arithmetic. Whether the CPU can actually give
+ * the streamer that share during live playback is a different question, and
+ * the honest way to answer it is not to compute a percentage but to make the
+ * streamer do the work and see if the audio survives.
+ *
+ * With all four tracks diverging, v1.2 fetches four 4-block planes from four
+ * unrelated positions per sector-time. The simulation reproduces that COST --
+ * four read commands, sixteen blocks total -- while reading the SAME sector,
+ * so the bytes landing in the buffer are identical and the audio is
+ * bit-identical. Only the read pattern changes, which is exactly the variable
+ * under test.
+ *
+ * DESCENDING ORDER, deliberately. Read the quarters back to front so the
+ * card's own sequential read-ahead cannot flatter the result: in real v1.2
+ * the four planes are at unrelated song positions and get no such help.
+ *
+ * The plan is a pure function because a gap or an overlap in it would corrupt
+ * audio silently -- the buffer would hold one quarter twice and another never
+ * -- and that is worth proving on the host rather than discovering by ear.
+ */
+#define ST_RC_PLAN_MAX 4u
+
+typedef struct {
+	uint32_t block_off;  /* blocks from the sector's first block */
+	uint32_t buf_off;    /* bytes from the start of the sector buffer */
+	uint32_t blocks;     /* blocks this read covers */
+} st_rc_read_t;
+
+/* Fills `out` with the plan and returns how many reads it contains. */
+uint32_t st_readcost_plan_planar(st_rc_read_t out[ST_RC_PLAN_MAX]);
+
 /* True when `n_reversed` diverging tracks fit inside the read engine with the
  * given headroom left spare, in ppm. */
 static inline bool st_readcost_fits(const st_readcost_t *rc,

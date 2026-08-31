@@ -45,6 +45,40 @@ survives, but for a different reason than predicted: not because the fixed
 cost is negligible, but because the whole read is fast enough to pay it four
 times over.
 
+## The second gate — how to run it
+
+Flash **st33**, then:
+
+1. Enter transfer mode and send `'N'`. The device replies `'n'` (armed) and
+   prints `STEMPLANAR sim=ON`. Counters are cleared.
+2. Send `'X'` to leave transfer mode. Playback resumes.
+3. **Play a song for several minutes.** Longer is better — an underrun that
+   only appears after a minute is exactly the failure being looked for.
+4. Watch the diagnostic line:
+
+```
+STEMPLANAR sim=ON und=0 rd_max_us=… reads=… busy=…% spare=…%
+```
+
+**`und=` is the answer.** Zero across sustained playback means the scheduler
+can afford four diverging tracks and v1.2 is clear to build. Anything above
+zero means it cannot, and no storage layout fixes that.
+
+Send `'N'` again (or reboot) to disarm. The flag is never persisted.
+
+### Why a read pattern and not a percentage
+
+`CPU str=` reports what the streamer *uses*, not what it *could get* — today
+it only asks for ~44%, so the number cannot answer whether it could have
+75.7%. Instead the streamer is made to do the real thing: **four 4-block
+reads per sector instead of one of sixteen**, which is exactly v1.2's worst
+case with every track reversed. It reads the same sector, so the bytes and
+the decoded audio are bit-identical; only the cost of getting them changes.
+
+The four quarters are read **back to front**, so the card's sequential
+read-ahead cannot make the simulation cheaper than the real thing — in v1.2
+the four planes sit at unrelated song positions and get no such help.
+
 ## The second gate
 
 Every duty figure above says what fraction of wall clock **the streamer

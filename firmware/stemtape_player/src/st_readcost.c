@@ -100,3 +100,18 @@ uint32_t st_readcost_planar_duty_ppm(const st_readcost_t *rc,
 
 	return (uint32_t)(((uint64_t)total_us * 1000000u) / ST_RC_SECTOR_US);
 }
+
+uint32_t st_readcost_plan_planar(st_rc_read_t out[ST_RC_PLAN_MAX])
+{
+	uint32_t i;
+
+	/* Back to front -- see the header for why the order matters. */
+	for (i = 0; i < ST_RC_STEMS; i++) {
+		const uint32_t q = ST_RC_STEMS - 1u - i;
+
+		out[i].block_off = q * ST_RC_PLANE_BLOCKS;
+		out[i].buf_off   = q * ST_RC_PLANE_BLOCKS * 512u;
+		out[i].blocks    = ST_RC_PLANE_BLOCKS;
+	}
+	return ST_RC_STEMS;
+}

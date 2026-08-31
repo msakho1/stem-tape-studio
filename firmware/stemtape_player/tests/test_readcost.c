@@ -339,6 +339,71 @@ static void case_the_real_measurement(void)
 	      "reversing tracks must cost more than not reversing them");
 }
 
+/* ======================================================================
+ * 8. THE PLANAR READ PLAN COVERS THE SECTOR EXACTLY ONCE.
+ *
+ *    The simulation reads the same sector in four pieces. A gap would leave
+ *    stale bytes in the buffer and an overlap would leave one quarter
+ *    missing -- either way the audio is wrong, and wrong in a way that would
+ *    be blamed on the read pattern rather than on the plan. So the coverage
+ *    is proved byte by byte rather than eyeballed.
+ * ====================================================================== */
+static void case_planar_plan_covers_the_sector(void)
+{
+	st_rc_read_t plan[ST_RC_PLAN_MAX];
+	uint8_t seen[ST_RC_SECTOR_BLOCKS];
+	uint32_t n, i, b, gaps = 0, dups = 0;
+
+	g_cases++;
+	printf("\n-- the planar read plan covers the sector exactly once\n");
+
+	memset(seen, 0, sizeof(seen));
+	n = st_readcost_plan_planar(plan);
+	CHECK(n == ST_RC_STEMS, "the plan has %u reads, expected %u", n,
+	      ST_RC_STEMS);
+
+	printf("     order:");
+	for (i = 0; i < n; i++) {
+		printf(" blk%u+%u", plan[i].block_off, plan[i].blocks);
+		/* buf_off must be the block offset in bytes, or a read lands
+		 * in the wrong part of the buffer. */
+		CHECK(plan[i].buf_off == plan[i].block_off * 512u,
+		      "read %u writes to byte %u for block %u -- mismatched",
+		      i, plan[i].buf_off, plan[i].block_off);
+		for (b = 0; b < plan[i].blocks; b++) {
+			const uint32_t blk = plan[i].block_off + b;
+
+			if (blk >= ST_RC_SECTOR_BLOCKS) {
+				gaps++;              /* past the sector end */
+				continue;
+			}
+			if (seen[blk]) {
+				dups++;
+			}
+			seen[blk] = 1u;
+		}
+	}
+	printf("\n");
+	for (b = 0; b < ST_RC_SECTOR_BLOCKS; b++) {
+		if (!seen[b]) {
+			gaps++;
+		}
+	}
+	CHECK(gaps == 0, "%u blocks of the sector are never read", gaps);
+	CHECK(dups == 0, "%u blocks of the sector are read twice", dups);
+
+	/*
+	 * AND IT IS DESCENDING. Reading the quarters forwards would let the
+	 * card's sequential read-ahead serve most of them, making the
+	 * simulation cheaper than the real thing it stands in for -- an
+	 * optimistic answer to the one question being asked.
+	 */
+	CHECK(plan[0].block_off > plan[n - 1u].block_off,
+	      "the plan reads forwards (%u then %u); sequential read-ahead "
+	      "would flatter the measurement",
+	      plan[0].block_off, plan[n - 1u].block_off);
+}
+
 int main(void)
 {
 	printf("== Stem Tape READ-COST MODEL (per-track reverse feasibility) ==\n");
@@ -352,6 +417,7 @@ int main(void)
 	case_refuses_bad_input();
 	case_tolerates_noise();
 	case_the_real_measurement();
+	case_planar_plan_covers_the_sector();
 
 	printf("\n");
 	if (g_failures) {
