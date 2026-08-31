@@ -292,6 +292,105 @@ static void case_short_tap(void)
 	CHECK(!r.out.pin_valid, "2. the candidate was discarded, so nothing stays pinned");
 }
 
+/* ======================================================================
+ * A FUNCTION-QUALIFIED PLAY PRESS NEVER TOGGLES THE TRANSPORT.
+ *
+ * The bug this pins, reported from hardware: FUNCTION + PLAY toggled slow
+ * playback AND paused the song, so the player had to press PLAY again to
+ * hear the result, and pressed it again on the way out.
+ *
+ * The cause was routing, not audio. st_ctl_service() runs ABOVE main.c's
+ * FUNCTION branch -- deliberately, so the loop engine can see FUNCTION at
+ * all -- and its play_edge_up handler produced an ordinary play_tap without
+ * ever consulting function_down. Every chorded gesture therefore also
+ * toggled the transport underneath itself.
+ *
+ * BOTH FINGER ORDERS ARE CHECKED. FUNCTION is the more awkward finger and is
+ * very often pressed first and released first, so a fix that only tested
+ * function_down at the press edge, or only at the release edge, would leave
+ * one of these two orders still pausing the song.
+ * ====================================================================== */
+static void case_function_play_never_pauses(void)
+{
+	rig_t r;
+
+	g_cases++;
+	printf("\n-- FUNCTION + PLAY never toggles the transport\n");
+
+	/* ---- order A: FUNCTION down first, released last ---------------- */
+	rig_init(&r, 500000u);
+	hold(&r, RAW_IDLE, 40u, 0, false);
+	hold(&r, RAW_IDLE, 40u, 0, true);        /* FUNCTION down */
+	hold(&r, RAW_PLAY, 120u, 0, true);       /* a short PLAY tap under it */
+	hold(&r, RAW_IDLE, 60u, 0, true);        /* PLAY up, FUNCTION still down */
+	hold(&r, RAW_IDLE, 40u, 0, false);       /* FUNCTION up */
+	printf("     FN-first : taps=%d playing=%d\n", r.n_tap, (int)r.playing);
+	CHECK(r.n_tap == 0,
+	      "FUNCTION-first chord produced %d play taps; it must produce none",
+	      r.n_tap);
+	CHECK(r.playing, "the song stopped on a FUNCTION-first chord");
+
+	/* ---- order B: PLAY down first, FUNCTION arrives during the press,
+	 *      and is RELEASED BEFORE PLAY. A release-edge test of
+	 *      function_down sees false here and fires the tap anyway. ---- */
+	rig_init(&r, 500000u);
+	hold(&r, RAW_IDLE, 40u, 0, false);
+	hold(&r, RAW_PLAY, 40u, 0, false);       /* PLAY down, no FUNCTION yet */
+	hold(&r, RAW_PLAY, 60u, 0, true);        /* FUNCTION joins */
+	hold(&r, RAW_PLAY, 40u, 0, false);       /* FUNCTION let go first */
+	hold(&r, RAW_IDLE, 60u, 0, false);       /* then PLAY */
+	printf("     PLAY-first: taps=%d playing=%d\n", r.n_tap, (int)r.playing);
+	CHECK(r.n_tap == 0,
+	      "PLAY-first chord produced %d play taps; the latch did not survive "
+	      "FUNCTION being released first", r.n_tap);
+	CHECK(r.playing, "the song stopped on a PLAY-first chord");
+
+	/* ---- repeated rapid chords: still never a pause ------------------ */
+	{
+		int i;
+
+		rig_init(&r, 500000u);
+		hold(&r, RAW_IDLE, 40u, 0, false);
+		for (i = 0; i < 8; i++) {
+			hold(&r, RAW_IDLE, 24u, 0, true);
+			hold(&r, RAW_PLAY, 80u, 0, true);
+			hold(&r, RAW_IDLE, 40u, 0, true);
+			hold(&r, RAW_IDLE, 24u, 0, false);
+		}
+		printf("     8 rapid chords: taps=%d playing=%d\n",
+		       r.n_tap, (int)r.playing);
+		CHECK(r.n_tap == 0,
+		      "%d play taps leaked from 8 repeated chords", r.n_tap);
+		CHECK(r.playing, "the song stopped during repeated chording");
+	}
+
+	/* ---- AND THE BARE TAP STILL WORKS. The fix must not cost the
+	 *      ordinary transport toggle, which is the whole point of PLAY. */
+	rig_init(&r, 500000u);
+	hold(&r, RAW_IDLE, 40u, 0, false);
+	hold(&r, RAW_PLAY, 120u, 0, false);
+	hold(&r, RAW_IDLE, 60u, 0, false);
+	printf("     bare tap  : taps=%d playing=%d\n", r.n_tap, (int)r.playing);
+	CHECK(r.n_tap == 1,
+	      "a bare PLAY tap must still toggle the transport (got %d taps)",
+	      r.n_tap);
+	CHECK(!r.playing, "a bare PLAY tap must still stop a playing song");
+
+	/* ---- and a bare tap immediately AFTER a chord is not swallowed --- */
+	rig_init(&r, 500000u);
+	hold(&r, RAW_IDLE, 40u, 0, false);
+	hold(&r, RAW_IDLE, 24u, 0, true);
+	hold(&r, RAW_PLAY, 80u, 0, true);        /* the chord */
+	hold(&r, RAW_IDLE, 40u, 0, true);
+	hold(&r, RAW_IDLE, 40u, 0, false);       /* FUNCTION up */
+	hold(&r, RAW_PLAY, 120u, 0, false);      /* now a bare tap */
+	hold(&r, RAW_IDLE, 60u, 0, false);
+	printf("     chord then bare tap: taps=%d\n", r.n_tap);
+	CHECK(r.n_tap == 1,
+	      "the chord's latch leaked into the next bare press (got %d taps)",
+	      r.n_tap);
+}
+
 /* ============ 8-11: unlatched exit lands on loop_end, exactly ============ */
 static void case_unlatched_exit(void)
 {
@@ -693,6 +792,7 @@ int main(void)
 
 	case_entry();
 	case_short_tap();
+	case_function_play_never_pauses();
 	case_unlatched_exit();
 	case_latch();
 	case_division();

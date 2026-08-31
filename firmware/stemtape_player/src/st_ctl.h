@@ -154,6 +154,24 @@ typedef struct {
 	bool     play_prev;
 	uint32_t play_down_ms;
 	bool     play_hold_spent;  /* this press already crossed the threshold */
+	/*
+	 * THIS PLAY PRESS IS PART OF A FUNCTION CHORD, latched for the whole
+	 * of the press and cleared only on its release.
+	 *
+	 * A PLAY press qualified by FUNCTION belongs to one of the chorded
+	 * gestures -- slow playback, snap home, the loop-length mode toggle,
+	 * brightness, the loop latch -- and to NONE of them does "and also
+	 * toggle the transport" belong. Without this latch the release still
+	 * produced an ordinary play_tap, so every chord paused the song and
+	 * the player had to press PLAY again to hear the result.
+	 *
+	 * Latched rather than sampled at the release edge, because the two are
+	 * different questions. FUNCTION is very often let go BEFORE PLAY (it
+	 * is the more awkward finger), and a release-time test would then see
+	 * function_down false and fire the tap anyway -- the bug would survive
+	 * for exactly the players who release in that order.
+	 */
+	bool     play_fn_chord;
 
 	int8_t   vol_cand;
 	uint8_t  vol_cand_n;

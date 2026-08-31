@@ -94,6 +94,7 @@ void st_ctl_service(st_ctl_t *c, const st_ctl_in_t *in, st_ctl_out_t *out)
 	if (!in->stem_song) {
 		c->play_prev      = false;
 		c->play_hold_spent = false;
+		c->play_fn_chord  = false;
 		c->fn_consumed    = false;
 		st_loop_reset_gesture_edges(&c->loop);
 		publish_levels(c, out);
@@ -121,6 +122,21 @@ void st_ctl_service(st_ctl_t *c, const st_ctl_in_t *in, st_ctl_out_t *out)
 	if (play_edge_down) {
 		c->play_down_ms    = in->now_ms;
 		c->play_hold_spent = false;
+		c->play_fn_chord   = false;
+	}
+
+	/*
+	 * THE CHORD LATCH. Set the moment FUNCTION and PLAY are down together,
+	 * and held until PLAY is released.
+	 *
+	 * Tested on EVERY pass the button is down, not only at the press edge,
+	 * so the gesture works in both finger orders: FUNCTION-then-PLAY and
+	 * PLAY-then-FUNCTION. Only checking the press edge would leave the
+	 * second order still toggling the transport, which is the same class
+	 * of half-fix as testing at the release edge.
+	 */
+	if (play_now && in->function_down) {
+		c->play_fn_chord = true;
 	}
 
 	/* ---- VOLUME, debounced to one edge per press --------------------- */
@@ -200,10 +216,21 @@ void st_ctl_service(st_ctl_t *c, const st_ctl_in_t *in, st_ctl_out_t *out)
 	 * stem song is selected, so nothing competes for this press and no
 	 * restart can fire underneath it. */
 	if (play_edge_up) {
-		if (!c->play_hold_spent) {
+		/* ...and not one that FUNCTION qualified. A chorded press has
+		 * already meant something else; letting it ALSO toggle the
+		 * transport is the "one press, two actions" bug this whole
+		 * block exists to prevent. */
+		if (!c->play_hold_spent && !c->play_fn_chord) {
 			out->play_tap = true;
 		}
 		c->play_hold_spent = false;
+		/* play_fn_chord is deliberately NOT cleared here. It is read
+		 * only on this edge, and the next press edge clears it before
+		 * anything can read it again -- so a second clear would be a
+		 * line no behaviour depends on. Mutation testing found exactly
+		 * that: deleting it changed no result. The press-edge clear is
+		 * the one that matters, and "a chord followed by a bare tap"
+		 * in tests/test_ctl.c is what holds it. */
 	}
 
 	if (!in->function_down) {

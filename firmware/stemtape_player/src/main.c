@@ -151,9 +151,9 @@
  * failure that cost several rounds before the shipped/calibration tags were
  * split apart. The tag is the only thing the operator can read. */
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st30-VOLCAL"
+#define ST_BUILD_TAG "st31-VOLCAL"
 #else
-#define ST_BUILD_TAG "st30"
+#define ST_BUILD_TAG "st31"
 #endif
 #include "st_track_hold.h"
 #include "st_ladder.h"

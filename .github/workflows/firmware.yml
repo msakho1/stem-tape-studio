@@ -2373,6 +2373,32 @@ jobs:
             firmware/stemtape_player/tests/test_ctl.c \
             -o audit/test_ctl
           ./audit/test_ctl | tee audit/ctl-selftest.txt
+
+          # THE CHORD MUST NOT PAUSE THE SONG. Reported from hardware:
+          # FUNCTION + PLAY toggled slow playback AND paused, because
+          # st_ctl_service() -- which runs ABOVE main.c's FUNCTION branch so
+          # the loop engine can see FUNCTION -- produced an ordinary play_tap
+          # on the release edge without consulting function_down. The gate
+          # keeps the measurement visible, not just the exit code.
+          grep -q 'FUNCTION + PLAY never toggles the transport' \
+            audit/ctl-selftest.txt
+          grep -q 'FN-first : taps=0 playing=1' audit/ctl-selftest.txt
+          grep -q 'PLAY-first: taps=0 playing=1' audit/ctl-selftest.txt
+          grep -q '8 rapid chords: taps=0 playing=1' audit/ctl-selftest.txt
+          # ...and the bare tap still works. Over-suppressing here would cost
+          # the transport toggle entirely, which is worse than the bug.
+          grep -q 'bare tap  : taps=1 playing=0' audit/ctl-selftest.txt
+
+          # THE LATCH ITSELF, in the dispatcher rather than worked around in
+          # the audio engine: a PLAY press qualified by FUNCTION is consumed
+          # for the whole press cycle, in either finger order.
+          grep -q 'c->play_fn_chord = true;' \
+            firmware/stemtape_player/src/st_ctl.c || {
+            echo "  the FUNCTION+PLAY chord latch is gone"; exit 1; }
+          grep -q '!c->play_hold_spent && !c->play_fn_chord' \
+            firmware/stemtape_player/src/st_ctl.c || {
+            echo "  a chorded PLAY press can reach the transport toggle again"
+            exit 1; }
           {
             echo '### Stem Tape assembled control path'
             echo '```text'
