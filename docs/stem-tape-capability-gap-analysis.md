@@ -195,6 +195,12 @@ urgent next to 149 KB:
 - `s_v11_verify_scratch` (8,192 B) is used **only during upload**, when
   playback is stopped. It can overlay a stem sector buffer instead of holding
   its own allocation for the device's whole life.
+  **DONE in `st38`** — though not where this predicted. Overlaying it on the
+  read-ahead *ring* is unsound: the SPSC mailbox keeps publishing the slot it
+  last published, and an `'X'` exit reloads nothing, so playback resumes on
+  bytes the upload overwrote. It overlays the last **loop-pin** buffer
+  instead, which has a published "nothing is resident" state (`base = -1`) the
+  mailbox lacks. See `stem-tape-ram-v1.md`.
 - `tx_slab`'s comment claims a "~106 ms DMA cushion". At 10 × 256 stereo
   frames it is **53 ms** — the 106 ms figure is left over from the 24 kHz
   (`DECIM=2`) build. Stale comment, not a bug.

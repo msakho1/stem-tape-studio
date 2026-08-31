@@ -1280,14 +1280,17 @@ static st_bulk_seq_t g_v11_bulk_seq;
  * reload_req below, near g_stem_song_selected). */
 static bool g_v11_commit_pending;
 
-/* Non-stack (static) ST11_SECTOR_BYTES (8192-byte) scratch buffer for
- * st_ab_session_verify_song_before_commit()'s real read-back -- same "no
- * 8192-byte automatic stack buffer" discipline the retired v1.0 code's own
- * s_commit_copy_buf followed. Used inside xfer_v11_write() AND (Slice C2)
- * xfer_bulk_write_sector() -- both reached only one command at a time
- * (xfer_service() services one command per call, audio paused throughout
- * a transfer), so there is no concurrent use to guard against. */
-static uint8_t s_v11_verify_scratch[ST11_SECTOR_BYTES];
+/* The ST11_SECTOR_BYTES (8192-byte) upload verify scratch -- for st_ab_
+ * session_verify_song_before_commit()'s real read-back, and for the bulk 'U'
+ * handler's payload and read-back -- NO LONGER HAS AN ALLOCATION OF ITS OWN.
+ * It is the last loop-pin buffer; see xfer_scratch() at that pool's own
+ * declaration for the whole argument, including why the read-ahead RING was
+ * the wrong donor and stayed that way.
+ *
+ * Still the same "no 8192-byte automatic stack buffer" discipline the retired
+ * v1.0 code's own s_commit_copy_buf followed, and still reached only one
+ * command at a time (xfer_service() services one command per call), so there
+ * is no concurrent use among the transfer verbs themselves to guard against. */
 
 /* ============================================================
  * STEM TAPE Phase 2 slice 3B (continuous streaming) / 3B.1 (concurrency
@@ -1303,11 +1306,14 @@ static uint8_t s_v11_verify_scratch[ST11_SECTOR_BYTES];
  * DOUBLE BUFFER, exactly two total, per this slice's own explicit RAM
  * budget -- g_stem_sector_buf is the SAME buffer slice 2 already spent
  * (kept, unchanged in size/name); g_stem_sector_buf_b is the ONE new
- * buffer slice 3B added. Not a reuse of s_v11_verify_scratch just
- * above: that scratch buffer is transient, overwritten on every
- * REPLACE-upload song-verification pass inside xfer_v11_write(), and
- * these two have to stay resident, one of them mid-flight to the audio
- * thread at any given moment, for as long as a song plays.
+ * buffer slice 3B added. Not a reuse of the upload verify scratch
+ * (xfer_scratch(), declared with the loop pins below): that scratch is
+ * transient, overwritten on every REPLACE-upload song-verification pass
+ * inside xfer_v11_write(), and these two have to stay resident, one of them
+ * mid-flight to the audio thread at any given moment, for as long as a song
+ * plays. The scratch went to the PINS rather than here for exactly that
+ * reason -- and see xfer_scratch()'s own comment for why this ring, which
+ * keeps publishing a slot it can no longer vouch for, was the wrong donor.
  *
  * OWNERSHIP (Slice 3B.1 correction -- see st_stem_bufmbox.h's own full
  * protocol specification and correctness argument): streamer_thread is
@@ -1504,6 +1510,70 @@ static bool stem_loop_pin_lookup(uint32_t sector, uint32_t *idx)
 		return true;
 	}
 	return false;
+}
+
+/* Drop BOTH pinned regions: nothing is resident any more, so the lookup above
+ * misses and the ring alone feeds playback. The streamer's own fill step
+ * refills whatever is still wanted on its very next pass, because its
+ * condition is `want >= 0 && base != want` and this leaves base at -1.
+ *
+ * Same primitive the loop's own end already uses ("drop the pin so the ring
+ * alone feeds playback again and no stale sector can ever be preferred over a
+ * fresh one"), reused rather than reinvented. Streamer-thread only, which
+ * includes xfer_service() -- it runs ON the streamer thread, so this needs no
+ * concurrency argument beyond the one the pins already carry. */
+static void stem_loop_pins_drop(void)
+{
+	uint32_t r;
+
+	for (r = 0u; r < ST_LOOP_PIN_REGIONS; r++) {
+		atomic_set(&g_stem_loop_pin_count[r], 0);   /* invalidate first */
+		atomic_set(&g_stem_loop_pin_base[r], -1);
+	}
+}
+
+/*
+ * THE UPLOAD VERIFY SCRATCH IS THE LAST PIN BUFFER -- 8192 bytes reclaimed.
+ *
+ * WHY NOT THE READ-AHEAD RING, which is the obvious donor and was tried
+ * first. Aliasing a ring slot is sound on the two ends that stop -- both
+ * threads now provably quiesce, see the handshake at g_xfer_audio_quiesced --
+ * but not on what is left behind. The SPSC mailbox keeps publishing the slot
+ * it last published, and leaving transfer mode by 'X' commits nothing and so
+ * reloads nothing: playback resumes with the ring still claiming a slot whose
+ * bytes the upload overwrote. Making that claim true again needs a way to say
+ * "nothing in this ring is resident any more", and the mailbox API cannot say
+ * it -- st_stem_mbox_init() requires a quiescent ring AND asserts one named
+ * sector is ALREADY resident and adopted, which is exactly what is false after
+ * a transfer. That reclamation waits for the unified cache, which carries
+ * per-slot validity and can represent "void" directly.
+ *
+ * THE PINS CAN SAY IT. `base = -1` IS that state, it is already part of the
+ * published protocol, and the loop's own end already uses it. So entering
+ * transfer mode drops both pins (see xfer_service()) and the invariant holds
+ * without inventing anything:
+ *
+ *   1. Entry drops both pins, so no valid claim on any pin buffer survives.
+ *   2. Neither thread can be mid-access: the audio thread acknowledges where
+ *      it silences the block, the streamer where it skips its pass, and no
+ *      command dispatches until both have.
+ *   3. The streamer's pin-fill step sits BELOW its own `if (g_xfer_mode)`
+ *      skip, so it cannot refill a pin during a transfer either.
+ *   4. On exit, base(-1) != want, so the next streamer pass refills from
+ *      flash -- the same path a re-arm takes, and playback is stopped
+ *      throughout a transfer anyway (g_playing = 0).
+ *
+ * Which pin: the LAST one, deliberately. Index 0 is a region base and reads
+ * as special; the last is not referenced anywhere except through
+ * st_loop_pin_off[] + k like every other. It stays a full member of its
+ * region -- the pin depth does not shrink, only its contents are dropped
+ * across a transfer.
+ */
+#define ST_XFER_SCRATCH_PIN (ST_LOOP_PIN_SECTORS - 1u)
+
+static inline uint8_t *xfer_scratch(void)
+{
+	return g_stem_loop_pin_bufs[ST_XFER_SCRATCH_PIN];
 }
 
 /* ===================================================================
@@ -4236,7 +4306,7 @@ static int xfer_v11_write(uint32_t block, const uint8_t data[ST11_PHYSICAL_BLOCK
 			 * ever trusts what the companion claimed it sent. */
 			if (st_ab_session_verify_accumulated(&g_v11_session, &candidate) ||
 			    st_ab_session_verify_song_before_commit(&g_v11_session, &candidate, xfer_v11_block_read,
-								     NULL, s_v11_verify_scratch)) {
+								     NULL, xfer_scratch())) {
 				st_ab_session_mark_song_verified(&g_v11_session);
 			}
 		}
@@ -4438,7 +4508,7 @@ static void stem_song_post_commit_reload(void)
  * receive, so an overflow during THIS payload is reported precisely
  * (ERR_CDC_OVERFLOW) rather than silently risking a corrupted accept.
  *
- * RAM: reuses s_v11_verify_scratch (the SAME ST11_SECTOR_BYTES buffer
+ * RAM: reuses xfer_scratch() (the SAME ST11_SECTOR_BYTES buffer
  * xfer_v11_write()'s own verify-before-commit step uses) for both the
  * received payload AND the read-back bytes -- zero new large static
  * allocation. Safe: this function and xfer_v11_write() are never both
@@ -4525,7 +4595,7 @@ static int xfer_bulk_write_sector(void)
 	 * function's own doc comment on why the payload is always drained
 	 * next, regardless of what is wrong with the header). */
 	uint32_t dropped_before = (uint32_t)atomic_get(&g_cdc_rx_dropped_bytes);
-	bool payload_ok = cdc_rx(s_v11_verify_scratch, ST_BULK_PAYLOAD_BYTES, ST_BULK_PAYLOAD_TIMEOUT_MS);
+	bool payload_ok = cdc_rx(xfer_scratch(), ST_BULK_PAYLOAD_BYTES, ST_BULK_PAYLOAD_TIMEOUT_MS);
 	uint32_t dropped_after = (uint32_t)atomic_get(&g_cdc_rx_dropped_bytes);
 
 	feed_wdt();
@@ -4605,7 +4675,7 @@ static int xfer_bulk_write_sector(void)
 	}
 
 	/* Validate the incoming CRC before touching eMMC at all. */
-	uint32_t recv_crc = st_crc32_compute(s_v11_verify_scratch, ST_BULK_PAYLOAD_BYTES);
+	uint32_t recv_crc = st_crc32_compute(xfer_scratch(), ST_BULK_PAYLOAD_BYTES);
 
 	if (recv_crc != hdr.payload_crc32) {
 		uint8_t resp[ST_BULK_RESP_BYTES];
@@ -4655,7 +4725,7 @@ static int xfer_bulk_write_sector(void)
 	 * including on every retry -- is always safe. */
 	for (uint32_t k = 0; k < ST_BULK_BLOCKS_PER_SECTOR; k++) {
 		st_ab_write_check_t chk = st_ab_session_check_write(
-			&g_v11_session, hdr.dest_block + k, s_v11_verify_scratch + k * ST11_PHYSICAL_BLOCK_BYTES);
+			&g_v11_session, hdr.dest_block + k, xfer_scratch() + k * ST11_PHYSICAL_BLOCK_BYTES);
 
 		if (chk != ST_AB_WRITE_OK) {
 			st_bulk_status_t status =
@@ -4671,7 +4741,7 @@ static int xfer_bulk_write_sector(void)
 
 	/* The real multi-block eMMC program -- ONE burst (CMD25), not sixteen
 	 * independent single-block CMD24s. */
-	if (!emmc_write_blocks(hdr.dest_block, s_v11_verify_scratch, ST_BULK_BLOCKS_PER_SECTOR)) {
+	if (!emmc_write_blocks(hdr.dest_block, xfer_scratch(), ST_BULK_BLOCKS_PER_SECTOR)) {
 		uint8_t resp[ST_BULK_RESP_BYTES];
 
 		st_bulk_build_response(ST_BULK_ERR_EMMC_WRITE_FAIL, hdr.seq, hdr.dest_block, 0u, resp);
@@ -4686,7 +4756,7 @@ static int xfer_bulk_write_sector(void)
 	 * captured in hdr.payload_crc32/recv_crc; nothing more is needed from
 	 * those bytes). This IS the read-back verification the wire contract
 	 * replaces the old separate 512-byte read-back pass with. */
-	if (!emmc_read_blocks(hdr.dest_block, s_v11_verify_scratch, ST_BULK_BLOCKS_PER_SECTOR)) {
+	if (!emmc_read_blocks(hdr.dest_block, xfer_scratch(), ST_BULK_BLOCKS_PER_SECTOR)) {
 		uint8_t resp[ST_BULK_RESP_BYTES];
 
 		st_bulk_build_response(ST_BULK_ERR_EMMC_READBACK_FAIL, hdr.seq, hdr.dest_block, 0u, resp);
@@ -4696,7 +4766,7 @@ static int xfer_bulk_write_sector(void)
 
 	feed_wdt();
 
-	uint32_t verified_crc = st_crc32_compute(s_v11_verify_scratch, ST_BULK_PAYLOAD_BYTES);
+	uint32_t verified_crc = st_crc32_compute(xfer_scratch(), ST_BULK_PAYLOAD_BYTES);
 
 	if (verified_crc != hdr.payload_crc32) {
 		uint8_t resp[ST_BULK_RESP_BYTES];
@@ -4721,7 +4791,7 @@ static int xfer_bulk_write_sector(void)
 		 * timeout and the hardware watchdog. Same safety claim, same bytes,
 		 * same derivation; only the timing differs. See
 		 * st_ab_session_accumulate_sector()'s own doc comment. */
-		st_ab_session_accumulate_sector(&g_v11_session, hdr.seq, s_v11_verify_scratch);
+		st_ab_session_accumulate_sector(&g_v11_session, hdr.seq, xfer_scratch());
 	}
 
 	uint8_t resp[ST_BULK_RESP_BYTES];
@@ -4773,6 +4843,17 @@ static void xfer_service(void)
 				 * transfer must never stand in for this one. */
 				atomic_set(&g_xfer_audio_quiesced, 0);
 				atomic_set(&g_xfer_stream_quiesced, 0);
+				/* AND THE PINS GO, BEFORE ANY BYTE IS WRITTEN.
+				 * The upload verify scratch IS the last pin
+				 * buffer (see xfer_scratch()), so a pin left
+				 * claiming residency across a transfer would be
+				 * claiming bytes the upload is about to
+				 * overwrite. Dropped here, at the same point
+				 * the acknowledgements are cleared, so the two
+				 * halves of the same invariant cannot drift
+				 * apart. Refilled by the streamer's own next
+				 * pass after the transfer, from flash. */
+				stem_loop_pins_drop();
 				g_xfer_mode = 1;
 				g_playing = 0;           /* pause the transport during transfer */
 				last = k_uptime_get();
@@ -4965,7 +5046,7 @@ static void xfer_service(void)
 
 				feed_wdt();
 				c0 = DWT->CYCCNT;
-				if (!emmc_read_blocks(blk, s_v11_verify_scratch,
+				if (!emmc_read_blocks(blk, xfer_scratch(),
 						       nb)) {
 					continue;
 				}

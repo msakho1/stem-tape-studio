@@ -148,11 +148,17 @@ Sector pools today, computed from the compiled latency constants
 |---|---|
 | `g_stem_sector_bufs[6][8192]` | 49,152 B |
 | `g_stem_loop_pin_bufs[10][8192]` | 81,920 B |
-| `s_v11_verify_scratch[8192]` | 8,192 B |
-| **total** | **139,264 B** |
+| ~~`s_v11_verify_scratch[8192]`~~ | ~~8,192 B~~ — **reclaimed in `st38`** |
+| **total** | **131,072 B** |
 
-against 228,574 B used of 262,144 B — about 33.5 KB free, and CI fails below
-32,768 B free. There is no slack today.
+That last line was 139,264 B until `st38`: the upload verify scratch no longer
+has an allocation of its own, it is the last loop-pin buffer. So free went from
+about 33.5 KB to about 41.5 KB, against a CI floor of 32,768 B.
+
+**8,192 B of the 16,384 this format needs is banked. The other 8,192 is the
+unified associative cache**, which is also what the read-ahead ring needs
+before *it* can donate anything — see `stem-tape-ram-v1.md` for why the ring
+was the wrong donor for the scratch and remains blocked on that rework.
 
 Per-stem rings at the same 8-span depth cost `8 × 2048 × 4 = 65,536 B` against
 today's 49,152 B ring — **+16,384 B**, which does not fit as things stand.
@@ -163,8 +169,8 @@ read-ahead ring maps sector s to slot s % SLOTS, so a window wider than the
 ring cannot hold both of its ends — an artefact of the ring's addressing, not a
 property of the problem. A unified cache with associative lookup and pinnable
 slots removes them entirely." Song-planar rings want exactly that rework
-anyway. `s_v11_verify_scratch` is another 8,192 B used only while playback is
-paused for upload.
+anyway. `s_v11_verify_scratch` was another 8,192 B used only while playback is
+paused for upload — **that one is now reclaimed** (`st38`).
 
 **But it is not measured, and nothing here should be read as though it were.**
 The RAM reclamation is a prerequisite, not a footnote.

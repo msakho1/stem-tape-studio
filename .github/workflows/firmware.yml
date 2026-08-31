@@ -2712,15 +2712,23 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Stem Tape TRANSFER QUIESCE handshake -- upload never lands under a live thread
-        # THE PRECONDITION FOR SHARING STORAGE BETWEEN UPLOAD AND PLAYBACK.
-        # Transfer mode is what lets the verify scratch stop being its own
-        # 8,192-byte allocation and share a read-ahead ring slot instead
-        # (docs/stem-tape-ram-v1.md, Stage A). That is only sound while
-        # NEITHER the audio thread nor the streamer can still be touching the
-        # ring -- and "we set a flag and they will notice" is a timing
+        # THE PRECONDITION FOR SHARING STORAGE BETWEEN UPLOAD AND PLAYBACK,
+        # and the 8,192 bytes it buys (docs/stem-tape-ram-v1.md, Stage A).
+        # The upload verify scratch no longer has an allocation of its own:
+        # it is the last loop-pin buffer. That is only sound while NEITHER
+        # the audio thread nor the streamer can still be touching stem
+        # buffers -- and "we set a flag and they will notice" is a timing
         # argument, not a proof: entering transfer mode raises the flag and
         # returns, with nothing establishing that either thread has OBSERVED
         # it before the first command starts writing.
+        #
+        # NOT the read-ahead ring, which is the obvious donor and was tried
+        # first. The SPSC mailbox keeps publishing the slot it last published,
+        # and an 'X' exit commits nothing and so reloads nothing -- playback
+        # resumes on bytes the upload overwrote. The pins have the state the
+        # mailbox lacks (base = -1, "nothing is resident"), already part of
+        # their published protocol, so entry drops both pins and the streamer
+        # refills them from flash afterwards.
         #
         # The failure mode is an upload silently overwriting audio that is
         # playing. Nothing errors. It just sounds wrong -- which is why this
@@ -2738,7 +2746,7 @@ jobs:
             firmware/stemtape_player/src/main.c \
             .github/scripts/stemtape_player_xfer_quiesce_gate.py \
             audit/xfer-quiesce-selftest.md | tee audit/xfer-quiesce-selftest.txt
-          grep -q 'ALL 9 MUTANTS CAUGHT' audit/xfer-quiesce-selftest.txt || {
+          grep -q 'ALL 13 MUTANTS CAUGHT' audit/xfer-quiesce-selftest.txt || {
             echo "  the quiesce gate's own self-test did not cover every check"
             exit 1; }
           python3 .github/scripts/stemtape_player_xfer_quiesce_gate.py \

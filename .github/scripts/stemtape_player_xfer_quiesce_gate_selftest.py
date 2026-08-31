@@ -44,8 +44,10 @@ DEFAULT_GATE = ".github/scripts/stemtape_player_xfer_quiesce_gate.py"
 AUDIO_ACK = "\t\tatomic_set(&g_xfer_audio_quiesced, 1);\n"
 STREAM_ACK = "\t\t\tatomic_set(&g_xfer_stream_quiesced, 1);\n"
 CLEAR = ("\t\t\t\tatomic_set(&g_xfer_audio_quiesced, 0);\n"
-         "\t\t\t\tatomic_set(&g_xfer_stream_quiesced, 0);\n"
-         "\t\t\t\tg_xfer_mode = 1;\n")
+         "\t\t\t\tatomic_set(&g_xfer_stream_quiesced, 0);\n")
+DROP = "\t\t\t\tstem_loop_pins_drop();\n"
+ENTER = "\t\t\t\tg_xfer_mode = 1;\n"
+SCRATCH = "\treturn g_stem_loop_pin_bufs[ST_XFER_SCRATCH_PIN];\n"
 HELPER = ("\treturn atomic_get(&g_xfer_audio_quiesced) != 0 &&\n"
           "\t       atomic_get(&g_xfer_stream_quiesced) != 0;\n")
 ESCAPE = ("\t\tif (k_uptime_get() - last > 1000) {\n"
@@ -79,13 +81,12 @@ MUTANTS = [
      lambda s: sub(s, STREAM_ACK, "")),
 
     ("N4  the acks are never cleared, so a stale one can stand in",
-     lambda s: sub(s, CLEAR, "\t\t\t\tg_xfer_mode = 1;\n")),
+     lambda s: sub(s, CLEAR, "")),
 
+    # Two steps, because a comment block sits between the clears and the drop:
+    # cut the clears out, then paste them back below the entry.
     ("N4b the acks are cleared AFTER transfer mode is entered",
-     lambda s: sub(s, CLEAR,
-                   "\t\t\t\tg_xfer_mode = 1;\n"
-                   "\t\t\t\tatomic_set(&g_xfer_audio_quiesced, 0);\n"
-                   "\t\t\t\tatomic_set(&g_xfer_stream_quiesced, 0);\n")),
+     lambda s: sub(sub(s, CLEAR, ""), ENTER, ENTER + CLEAR)),
 
     ("N5  dispatch is not gated at all",
      lambda s: sub(s, "\tif (!xfer_quiesced()) {", "\tif (0) {")),
@@ -104,6 +105,21 @@ MUTANTS = [
 
     ("N6  the gate has no escape and can strand the device",
      lambda s: sub(s, ESCAPE, "")),
+
+    ("N7  the verify scratch gets its own 8 KB allocation back",
+     lambda s: sub(s, SCRATCH, "\treturn s_v11_verify_scratch;\n").replace(
+         "static uint8_t g_stem_loop_pin_bufs",
+         "static uint8_t s_v11_verify_scratch[ST11_SECTOR_BYTES];\n"
+         "static uint8_t g_stem_loop_pin_bufs", 1)),
+
+    ("N8  the scratch aliases the READ-AHEAD RING instead of a pin",
+     lambda s: sub(s, SCRATCH, "\treturn g_stem_sector_bufs[0];\n")),
+
+    ("N9  the pins are NOT dropped before transfer mode is entered",
+     lambda s: sub(s, DROP, "")),
+
+    ("N9b the pins are dropped AFTER transfer mode is entered",
+     lambda s: sub(s, DROP + ENTER, ENTER + DROP)),
 ]
 
 

@@ -58,7 +58,7 @@ change for its own sake, but it buys one slot, not a pool.
 
 ## The reclamation, staged
 
-### Stage A — the verify scratch stops being its own allocation (8,192 B)
+### Stage A — the verify scratch stops being its own allocation (8,192 B) — **DONE, st38**
 
 `s_v11_verify_scratch` has exactly two use sites, `xfer_v11_write()` and the
 `'U'` bulk-sector handler. Both are transfer-mode only, and transfer mode stops
@@ -68,10 +68,45 @@ playback at both ends: the audio block returns silence
 `g_slot_switch_req`, which reloads the song and re-primes the ring from empty —
 so the ring's contents are discarded on the way out regardless.
 
-The scratch can therefore share storage with a ring slot. **This needs a CI
-guard**, because the failure mode if a third use site ever appears outside
-transfer mode is silent corruption of live audio, which is exactly the class of
-bug this codebase spends effort to make impossible.
+The scratch can therefore share storage with another sector buffer. **This
+needs a CI guard**, because the failure mode if a third use site ever appears
+outside transfer mode is silent corruption of live audio, which is exactly the
+class of bug this codebase spends effort to make impossible.
+
+#### But not with a *ring* slot — and that is the whole interesting part
+
+The read-ahead ring is the obvious donor and it is the wrong one. Aliasing a
+ring slot is sound on the two ends that *stop* — both threads now provably
+quiesce — but not on what is **left behind**. The SPSC mailbox goes on
+publishing the slot it last published, and leaving transfer mode by `'X'`
+commits nothing and therefore reloads nothing: playback resumes with the ring
+still claiming a slot whose bytes the upload overwrote. Nothing errors. It
+just sounds wrong.
+
+Making that claim true again needs a way to say *"nothing in this ring is
+resident any more"*, and the mailbox API cannot say it — `st_stem_mbox_init()`
+requires a quiescent ring **and** asserts that one named sector is *already*
+resident and adopted, which is precisely what is false after a transfer has
+written over the pool. That reclamation waits for the unified cache, which
+carries per-slot validity and can represent "void" directly.
+
+**The loop pins can say it.** `base = -1` *is* that state, it is already part
+of the published pin protocol, and the loop's own end already uses it: *"drop
+the pin so the ring alone feeds playback again and no stale sector can ever be
+preferred over a fresh one."* So the scratch became the **last pin buffer**,
+and the invariant closes without inventing anything:
+
+1. Entering transfer drops both pins, so no valid claim on any pin buffer
+   survives.
+2. Neither thread can be mid-access — the handshake below.
+3. The streamer's pin-fill step sits *below* its own `if (g_xfer_mode)` skip,
+   so it cannot refill a pin during a transfer either.
+4. On exit, `base(-1) != want`, so the next streamer pass refills from flash —
+   the same path a re-arm takes, and playback is stopped throughout a transfer
+   anyway.
+
+The pin *depth* does not shrink. The last buffer stays a full member of its
+region; only its contents are dropped across a transfer.
 
 **The prerequisite is now built.** Everything above turns on "transfer mode
 stops playback at both ends", and until now that was a *timing* claim, not a
@@ -137,13 +172,14 @@ document originally framed them as.
 
 | | bytes | status |
 |---|---|---|
-| Stage A — verify scratch shares a ring slot | 8,192 | handshake landed in `st38`; the union itself is next |
+| Stage A — verify scratch shares a **pin** buffer | 8,192 | **DONE, `st38`** |
 | unified associative cache (16 pools → 15 live) | 8,192 | real but marginal; large change for one slot |
 | entry pin | 0 | load-bearing |
 | exit pin | 0 | load-bearing |
 
 **Realistic total: 8,192 B, or 16,384 B if the cache rework is also done.** Not
-the 57,344 B this document first claimed.
+the 57,344 B this document first claimed. Half of it is banked; the other half
+is the cache rework, which the read path at G=8/R=4 still needs.
 
 ## The part that changes the roadmap
 

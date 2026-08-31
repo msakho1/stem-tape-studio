@@ -11,6 +11,22 @@
     "into this field that is not traceable to a measurement or to",
     "src/st_latency.h."
   ],
+  "_reclaimed": {
+    "_note": [
+      "Allocations that USED to be here and are not any more. Kept as a record because 'why is this gone' and 'why did we not do the obvious thing instead' are the questions a future reclamation asks first. Not keyed by a live symbol -- nothing here is in the ELF, which is the point."
+    ],
+    "s_v11_verify_scratch": {
+      "category": "transfer",
+      "owner": "bulk upload read-back verify -- NO LONGER ITS OWN ALLOCATION",
+      "declared_in": "src/main.c (an accessor, not an array: it returns g_stem_loop_pin_bufs[ST_LOOP_PIN_SECTORS - 1])",
+      "lifetime": "one sector verify inside a transfer",
+      "writers": "the transfer command path, which runs on the streamer thread",
+      "readers": "the same",
+      "phases": "transfer only",
+      "overlaps": "IS the last loop-pin buffer. Mutually exclusive with playback by construction, not by timing: entering transfer mode clears both acknowledgement flags, drops both pins (base = -1, so nothing is resident), then raises g_xfer_mode; the audio thread acknowledges where it emits silence and the streamer where it skips its pass; and no command dispatches until both have acknowledged. The streamer's pin-fill step sits below its own g_xfer_mode skip, so it cannot refill a pin during a transfer either.",
+      "evidence": "8192 B RECLAIMED in st38. Its size was never the question -- one sector, fixed by ST11_SECTOR_BYTES -- only whether it needed an allocation of its own. THE READ-AHEAD RING WAS TRIED FIRST AND REJECTED, and that rejection still stands: aliasing a ring slot is sound on the two ends that stop, but not on what is left behind. st_stream_stop() does not clear ready_sector; the SPSC mailbox may still publish a slot whose bytes the transfer overwrote; and leaving transfer mode by 'X' commits nothing and so reloads nothing. Fixing that needs a way to say 'nothing in this ring is resident any more', and the mailbox API cannot say it: st_stem_mbox_init() requires a quiescent ring AND asserts one named sector is ALREADY resident and adopted, which is exactly what is false after a transfer. THE PINS CAN SAY IT. base = -1 is that state, it is already part of the published pin protocol, and the loop's own end already uses it ('drop the pin so the ring alone feeds playback again'). So the reclamation went to the pins instead of waiting for the unified cache, and the ring's 8192 B is still on the table for that rework. Proven structurally by .github/scripts/stemtape_player_xfer_quiesce_gate.py, whose own self-test breaks each check in turn -- including a mutant that aliases the ring instead of a pin -- and requires a rejection for every one."
+    }
+  },
   "default": {
     "category": "unclassified",
     "owner": "unattributed",
@@ -40,19 +56,8 @@
       "writers": "streamer_thread",
       "readers": "audio_thread",
       "phases": "looping only",
-      "overlaps": "read-ahead ring (both live while a loop runs); dead during idle, transfer and non-loop playback",
-      "evidence": "ST_LAT_RESIDENCY_SECTORS per region, derived from st_latency.h's guarantee. st17 shipped 3 per region against a wrong 10.15 ms bound; corrected here."
-    },
-    "s_v11_verify_scratch": {
-      "category": "transfer",
-      "owner": "bulk upload read-back verify",
-      "declared_in": "src/main.c",
-      "lifetime": "one sector verify inside a transfer",
-      "writers": "the transfer command path (main thread)",
-      "readers": "the same",
-      "phases": "transfer only",
-      "overlaps": "MUTUALLY EXCLUSIVE with playback: entering transfer mode sets g_xfer_mode (streamer stops prefetching) and g_playing=0 (audio thread stops rendering the stem path).",
-      "evidence": "one sector, fixed by ST11_SECTOR_BYTES; the question is not its size but whether it needs to be its own allocation. ALIASING WAS ATTEMPTED IN THE MEMORY-CLEANUP COMMIT AND WITHDRAWN, deliberately. Overlaying it on the sector pool is sound on the two ends that stop (producer and consumer both quiesce, and a two-block barrier makes the consumer's stop provable rather than probable) but NOT on what is left behind: st_stream_stop() does not clear ready_sector, and the SPSC mailbox may still publish a slot whose bytes the transfer overwrote. Fixing that needs a way to say 'nothing in this ring is resident any more', and the mailbox API cannot say it: st_stem_mbox_init() is documented as requiring a quiescent ring AND as asserting that one named sector is ALREADY resident and adopted -- which is precisely the claim that is false after a transfer has written over the pool. Making it true again means re-reading that sector synchronously, i.e. rebuilding the boot/reload sequence at every transfer exit. The unified sector cache carries per-slot validity, so 'void' is a state it can already represent, and the reclamation moves there rather than shipping a stale-sector race for 8192 bytes."
+      "overlaps": "read-ahead ring (both live while a loop runs); dead during idle, transfer and non-loop playback. As of st38 the LAST buffer of this pool is also the upload verify scratch (xfer_scratch()) -- safe because entering transfer mode drops both pins first, so nothing claims residency across a transfer; see that symbol's own entry.",
+      "evidence": "ST_LAT_RESIDENCY_SECTORS per region, derived from st_latency.h's guarantee. st17 shipped 3 per region against a wrong 10.15 ms bound; corrected here. The pin DEPTH is unchanged by the scratch sharing -- the last buffer stays a full member of its region, only its contents are dropped across a transfer and refilled from flash afterwards."
     },
     "g_meta": {
       "category": "classic_inherited",

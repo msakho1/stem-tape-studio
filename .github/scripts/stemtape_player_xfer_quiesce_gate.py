@@ -21,6 +21,18 @@ Checks, all structural:
   5. Command dispatch is gated on BOTH -- and gated wholesale, so a future
      command cannot forget to opt in.
   6. The gate cannot hang: it has its own timeout back to ordinary playback.
+
+AND WHAT THE HANDSHAKE IS FOR. The upload verify scratch no longer has an
+allocation of its own; it is the last loop-pin buffer. That is only sound
+while the pins carry no residency claim across a transfer, so:
+
+  7. The scratch is not a separate array any more -- if it comes back, the
+     reclamation has been silently undone and the rest of this is theatre.
+  8. xfer_scratch() really resolves into the PIN pool, not the read-ahead
+     ring: the ring keeps publishing a slot it can no longer vouch for after
+     an 'X' exit, which is why it was rejected as the donor.
+  9. Both pins are dropped BEFORE transfer mode is entered, so no pin can
+     claim bytes the upload is about to overwrite.
 """
 import re
 import sys
@@ -64,14 +76,22 @@ def main():
         fail("the streamer does not acknowledge at the point it skips its pass")
     notes.append("- the streamer acknowledges where it skips its pass")
 
-    # (4) cleared BEFORE the flag is raised, in that order.
+    # (4) cleared BEFORE the flag is raised, and (9) the pins dropped there
+    # too -- one regex, because they are one invariant and drifting apart is
+    # exactly the failure worth preventing.
     m = re.search(
         r"atomic_set\(&" + AUDIO + r", 0\);\s*\n\s*atomic_set\(&" + STREAM +
-        r", 0\);\s*\n\s*g_xfer_mode = 1;", src)
+        r", 0\);(?P<between>.*?)g_xfer_mode = 1;", src, re.S)
     if not m:
-        fail("the acknowledgements are not cleared immediately before "
-             "g_xfer_mode is raised -- a stale ack could stand in for a fresh one")
+        fail("the acknowledgements are not cleared before g_xfer_mode is "
+             "raised -- a stale ack could stand in for a fresh one")
     notes.append("- both are cleared immediately before transfer mode is entered")
+
+    if "stem_loop_pins_drop();" not in m.group("between"):
+        fail("the loop pins are not dropped before transfer mode is entered "
+             "-- the upload verify scratch IS a pin buffer, so a pin left "
+             "claiming residency claims bytes the upload is about to overwrite")
+    notes.append("- both loop pins are dropped before transfer mode is entered")
 
     # (5) dispatch is gated on both, wholesale.
     gate = src.find("if (!xfer_quiesced()) {")
@@ -96,6 +116,27 @@ def main():
         fail("the quiesce gate has no escape -- a thread that never "
              "acknowledged would strand the device in transfer mode")
     notes.append("- the gate times out back to ordinary playback rather than hanging")
+
+    # (7) the scratch is not its own allocation any more.
+    if re.search(r"static\s+uint8_t\s+s_v11_verify_scratch\s*\[", src):
+        fail("s_v11_verify_scratch is a separate 8192-byte array again -- the "
+             "reclamation the handshake exists for has been undone")
+    notes.append("- the upload verify scratch has no allocation of its own")
+
+    # (8) and it resolves into the PIN pool, not the ring.
+    sb = block_after(src, "static inline uint8_t *xfer_scratch(void)", 5)
+    if sb is None:
+        fail("xfer_scratch() is missing -- the transfer path has nowhere to "
+             "verify into")
+    if "g_stem_sector_bufs" in sb:
+        fail("xfer_scratch() aliases the READ-AHEAD RING. The mailbox keeps "
+             "publishing the slot it last published and an 'X' exit reloads "
+             "nothing, so playback resumes on bytes the upload overwrote")
+    if "g_stem_loop_pin_bufs" not in sb:
+        fail("xfer_scratch() does not resolve into the loop-pin pool, so the "
+             "pin-drop on entry does not actually protect it")
+    notes.append("- it is a loop-pin buffer, which has a 'nothing is resident' "
+                 "state; the ring, which does not, was rejected as the donor")
 
     print("PASS: the transfer-mode quiesce handshake is wired and load-bearing")
     for n in notes:
