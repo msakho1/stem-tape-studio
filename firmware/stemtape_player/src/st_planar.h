@@ -155,6 +155,29 @@ static inline uint32_t st_pl_frame_off(uint32_t frame_in_group)
 	return ST_PL_OFF_FRAMES + frame_in_group * ST_PL_FRAME_BYTES;
 }
 
+/* ---- conversion from v1.1 ---------------------------------------- */
+
+/*
+ * ONE v1.1 SECTOR -> FOUR v1.2 GROUPS, carrying the same 340 frames.
+ *
+ * This is the whole migration, expressed once: the companion performs it when
+ * encoding an upload, and the fixture test performs it to prove the audio
+ * survives. Nothing else about a song changes.
+ *
+ * The sample bytes are MOVED, NOT RECOMPUTED -- the six bytes of stem k's
+ * frame f are copied verbatim out of the v1.1 frame into group k. That is why
+ * every per-stem checksum is unaffected by the format change, and the fixture
+ * test checks exactly that against the companion's own declared values rather
+ * than against a number this code produced.
+ *
+ * Frames past the sector's own `frame_count` are left as silence, matching
+ * v1.1's short final sector.
+ *
+ * Returns false, writing nothing, if the sector's header does not parse.
+ */
+bool st_pl_from_v11_sector(const uint8_t sector[ST11_SECTOR_BYTES],
+			    uint8_t groups[ST_PL_STEMS][ST_PL_GROUP_BYTES]);
+
 /* ---- batched read plan ------------------------------------------- */
 
 /*

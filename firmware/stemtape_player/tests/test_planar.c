@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include "st_planar.h"
+#include "st_sector_v11.h"
 
 static int g_fail;
 static int g_checks;
@@ -386,6 +387,107 @@ static void case_edges(void)
 	}
 }
 
+static void case_conversion_refuses_a_malformed_sector(void)
+{
+	printf("  a v1.1 sector claiming more frames than one holds is refused\n");
+	uint8_t sector[ST11_SECTOR_BYTES];
+	uint8_t groups[ST_PL_STEMS][ST_PL_GROUP_BYTES];
+
+	/* A well-formed sector converts. Real frames, with a distinct value per
+	 * stem and channel so a converter that shuffled them could not pass. */
+	static st11_audio_frame_t frames[ST11_FRAMES_PER_SECTOR];
+
+	for (uint32_t f = 0u; f < ST11_FRAMES_PER_SECTOR; f++) {
+		for (uint32_t k = 0u; k < ST11_STEM_COUNT; k++) {
+			frames[f].stem_l[k] = (int32_t)(f * 8u + k * 2u);
+			frames[f].stem_r[k] = (int32_t)(f * 8u + k * 2u + 1u);
+		}
+	}
+	memset(sector, 0, sizeof(sector));
+	st11_sector_encode(3u, 3u * ST11_FRAMES_PER_SECTOR, ST11_FRAMES_PER_SECTOR,
+			    120u * 256u, 0u, frames, sector);
+	ck(st_pl_from_v11_sector(sector, groups), "a full, valid sector converts");
+	ck(st_pl_validate(groups[0], 0u, 3u), "and carries the sector's own index");
+
+	/* And every sample landed where it belongs -- checked against the v1.1
+	 * decoder rather than against this test's own offset arithmetic. */
+	for (uint32_t f = 0u; f < ST11_FRAMES_PER_SECTOR; f += 37u) {
+		st11_audio_frame_t got;
+
+		st11_sector_decode_frame(sector, f, &got);
+		for (uint32_t k = 0u; k < ST_PL_STEMS; k++) {
+			ck(memcmp(groups[k] + st_pl_frame_off(f),
+				   sector + ST11_SECTOR_HEADER_BYTES +
+					   f * ST11_BYTES_PER_FRAME + k * ST_PL_FRAME_BYTES,
+				   ST_PL_FRAME_BYTES) == 0,
+			   "stem bytes land in that stem's group, unchanged");
+			ck(got.stem_l[k] == (int32_t)(f * 8u + k * 2u),
+			   "the v1.1 decoder still sees what was encoded");
+		}
+	}
+
+	/*
+	 * THE GUARD THAT MATTERS. frame_count is read from the sector, and the
+	 * copy loop walks it. A value past ST11_FRAMES_PER_SECTOR would read
+	 * off the end of the 8192-byte input -- so it is refused outright
+	 * rather than clamped, because a sector claiming 400 frames is
+	 * malformed, not a sector to take 340 frames of.
+	 *
+	 * The recorded fixture cannot cover this: it contains no malformed
+	 * sector, and a mutation removing the check survived the fixture test
+	 * until this case existed.
+	 */
+	{
+		const uint32_t bad[] = { ST11_FRAMES_PER_SECTOR + 1u, 400u,
+					  1000u, 0xFFFFFFFFu };
+
+		for (size_t i = 0u; i < sizeof(bad) / sizeof(bad[0]); i++) {
+			sector[ST11_SECTOR_OFF_FRAME_COUNT + 0u] = (uint8_t)(bad[i] & 0xffu);
+			sector[ST11_SECTOR_OFF_FRAME_COUNT + 1u] = (uint8_t)((bad[i] >> 8) & 0xffu);
+			sector[ST11_SECTOR_OFF_FRAME_COUNT + 2u] = (uint8_t)((bad[i] >> 16) & 0xffu);
+			sector[ST11_SECTOR_OFF_FRAME_COUNT + 3u] = (uint8_t)((bad[i] >> 24) & 0xffu);
+			ck(!st_pl_from_v11_sector(sector, groups),
+			   "an overlong frame count is refused, not clamped");
+		}
+	}
+
+	/*
+	 * A SHORT SECTOR PADS WITH SILENCE. The destination is prefilled with
+	 * noise first: a converter that wrote only the real frames would leave
+	 * it there, and the last sector of every song is short. Caught here so
+	 * the module's own suite stands alone rather than leaning on the
+	 * recorded-fixture test for a property of this function.
+	 */
+	{
+		const uint32_t short_count = 17u;
+		uint8_t noisy[ST_PL_STEMS][ST_PL_GROUP_BYTES];
+
+		st11_sector_encode(9u, 9u * ST11_FRAMES_PER_SECTOR, short_count,
+				    120u * 256u, 0u, frames, sector);
+		memset(noisy, 0x5A, sizeof(noisy));
+		ck(st_pl_from_v11_sector(sector, noisy), "a short sector converts");
+		for (uint32_t k = 0u; k < ST_PL_STEMS; k++) {
+			bool clean = true;
+
+			for (uint32_t off = st_pl_frame_off(short_count);
+			     off < ST_PL_GROUP_BYTES; off++) {
+				if (noisy[k][off] != 0u) { clean = false; break; }
+			}
+			ck(clean, "everything past the last real frame is silence");
+			ck(memcmp(noisy[k] + st_pl_frame_off(short_count - 1u),
+				   sector + ST11_SECTOR_HEADER_BYTES +
+					   (short_count - 1u) * ST11_BYTES_PER_FRAME +
+					   k * ST_PL_FRAME_BYTES,
+				   ST_PL_FRAME_BYTES) == 0,
+			   "and the last real frame is still there");
+		}
+	}
+
+	/* And a sector with no valid magic converts to nothing at all. */
+	memset(sector, 0, sizeof(sector));
+	ck(!st_pl_from_v11_sector(sector, groups), "a sector with no magic is refused");
+}
+
 int main(void)
 {
 	printf("Stem Tape v1.2 SONG-PLANAR addressing\n");
@@ -400,8 +502,9 @@ int main(void)
 	case_cost_is_flat_in_which_stem_diverges();
 	case_batch_size_is_what_pays_for_it();
 	case_edges();
+	case_conversion_refuses_a_malformed_sector();
 
-	printf("%s -- 11 cases, %d checks%s\n", g_fail ? "FAILED" : "ok", g_checks,
+	printf("%s -- 12 cases, %d checks%s\n", g_fail ? "FAILED" : "ok", g_checks,
 	       g_fail ? "" : ", 0 failures");
 	return g_fail ? 1 : 0;
 }

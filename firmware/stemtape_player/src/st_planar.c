@@ -3,7 +3,10 @@
  * is what makes it cost nothing.
  */
 
+#include <string.h>
+
 #include "st_planar.h"
+#include "st_sector_v11.h"
 
 /*
  * THE GEOMETRY, PINNED. Every one of these is load-bearing somewhere in the
@@ -131,4 +134,43 @@ uint32_t st_pl_plan_batch(st_pl_read_t out[ST_PL_STEMS],
 		out[k].blocks      = n * ST_PL_GROUP_BLOCKS;
 	}
 	return ST_PL_STEMS;
+}
+
+bool st_pl_from_v11_sector(const uint8_t sector[ST11_SECTOR_BYTES],
+			    uint8_t groups[ST_PL_STEMS][ST_PL_GROUP_BYTES])
+{
+	st11_sector_header_t hdr;
+	uint32_t f, k;
+
+	if (!st11_sector_read_header(sector, &hdr)) {
+		return false;
+	}
+	/* A sector claiming more frames than one holds is malformed, not a
+	 * sector to copy as much of as fits. */
+	if (hdr.frame_count > ST11_FRAMES_PER_SECTOR) {
+		return false;
+	}
+
+	for (k = 0u; k < ST_PL_STEMS; k++) {
+		memset(groups[k], 0, ST_PL_GROUP_BYTES);
+		st_pl_write_header(groups[k], k, hdr.sector_index);
+	}
+
+	/*
+	 * BYTES ARE MOVED, NOT RECOMPUTED. Stem k's six bytes for frame f sit
+	 * at a fixed offset inside the v1.1 frame; they are copied verbatim.
+	 * Decoding to samples and re-encoding would be a second chance to lose
+	 * a bit, and would break the property the fixture test relies on --
+	 * that every per-stem checksum is untouched by the migration.
+	 */
+	for (f = 0u; f < hdr.frame_count; f++) {
+		const uint8_t *src = sector + ST11_SECTOR_HEADER_BYTES +
+				     f * ST11_BYTES_PER_FRAME;
+
+		for (k = 0u; k < ST_PL_STEMS; k++) {
+			memcpy(groups[k] + st_pl_frame_off(f),
+			       src + k * ST_PL_FRAME_BYTES, ST_PL_FRAME_BYTES);
+		}
+	}
+	return true;
 }
