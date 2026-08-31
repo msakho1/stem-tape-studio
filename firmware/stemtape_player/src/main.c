@@ -156,9 +156,9 @@
 #define ST_RC_SWEEP_REPS 24u
 
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st38-VOLCAL"
+#define ST_BUILD_TAG "st39-VOLCAL"
 #else
-#define ST_BUILD_TAG "st38"
+#define ST_BUILD_TAG "st39"
 #endif
 #include "st_track_hold.h"
 #include "st_ladder.h"
@@ -168,7 +168,6 @@
 #include "st_pitch.h"
 #include "st_fnplay.h"
 #include "st_readcost.h"
-#include "st_pgate.h"
 #include "st_stem_meter.h"
 #include "st_inertia.h"
 #include "st_resample.h"
@@ -1676,40 +1675,6 @@ static atomic_t g_stem_reload_req;
  * (the producer) is the sole writer of the read/corrupt counters,
  * audio_thread (the consumer) is the sole writer of the underrun
  * counter; both may be read from main()'s own diagnostic thread. */
-/*
- * PLANAR READ SIMULATION -- the v1.2 CPU-cost gate, off by default.
- *
- * The read-cost sweep proved the storage can serve four diverging tracks
- * (75.7% duty). It did NOT prove the scheduler can hand the streamer that
- * much wall clock during live playback, and this project has already been
- * bitten by exactly that: reads stretched 5073 -> 12500 us when the
- * streamer's share fell to 42%, and the song played slow and crushed.
- *
- * A percentage cannot answer it, because today the streamer only ASKS for
- * ~44% -- what it uses is not what it could get. So the streamer is made to
- * do the real thing instead: four 4-block reads per sector rather than one
- * of sixteen, which is precisely v1.2's worst case with all four tracks
- * reversed. Same sector, same bytes, bit-identical audio; only the read
- * PATTERN changes, which is the variable under test. If playback survives
- * with zero new underruns, the CPU can afford per-track reverse.
- *
- * OFF BY DEFAULT and set only by an explicit command, so the shipped
- * playback path is byte-for-byte what it was.
- */
-static atomic_t g_stem_planar_sim;
-
-/*
- * THE CONTROLLED A/B that drives g_stem_planar_sim. Owned by the diagnostic
- * pass (main's own thread); the streamer only ever reads the atomic above, so
- * nothing here is touched cross-thread.
- *
- * The first version of this gate had the operator arm a pattern and count
- * underruns, with no control window and the post-resume prime inside the
- * measurement. It produced a verdict that did not survive audit. This runs the
- * experiment instead -- settle, baseline, test, compare -- so the answer does
- * not depend on the operator's timing or on which order they did things in.
- */
-static st_pgate_t s_stem_pgate;
 
 static atomic_t g_stem_diag_bytes_total;   /* total bytes physically read (successful reads only) */
 static atomic_t g_stem_diag_read_calls;    /* total emmc_read_blocks() attempts for stem sectors, success or fail */
@@ -1998,33 +1963,6 @@ static volatile int      g_midi_stop_pending;      /* send MIDI Stop on pause */
  * ARM (volatile is not atomic), drifting any synced external gear. */
 static volatile uint32_t g_midi_clk_produced;      /* audio thread writes ONLY */
 static volatile int      g_midi_start_pending;     /* send MIDI Start on loop activation */
-
-/*
- * Advance the planar gate and publish the read pattern it wants. THE ONLY
- * WRITER of g_stem_planar_sim; the streamer is the only reader.
- *
- * CALLED FROM THE MAIN LOOP, NOT FROM controls_diag(). The diagnostic pass is
- * DTR-gated: with no console attached it does not run, and a gate ticked from
- * there would freeze mid-TEST with the streamer left diverging until reboot.
- * Here it advances whether or not anyone is watching, and the diagnostic is
- * left to do nothing but print what the gate has already decided.
- */
-static void stem_pgate_service(void)
-{
-	/* Read-and-clear: atomic_set() returns the previous value, so the
-	 * window's worst fetch is taken and reset in one operation with no
-	 * sample lost between the read and the clear. */
-	const uint32_t worst = (uint32_t)atomic_set(&g_stem_diag_read_us_win, 0);
-
-	(void)st_pgate_tick(&s_stem_pgate, (uint32_t)k_uptime_get(),
-			     g_playing != 0,
-			     (uint32_t)atomic_get(&g_stem_diag_read_calls),
-			     (uint32_t)atomic_get(&g_stem_underrun_count),
-			     (uint32_t)atomic_get(&g_stem_underrun_frames),
-			     worst);
-	atomic_set(&g_stem_planar_sim,
-		    (atomic_val_t)st_pgate_level_now(&s_stem_pgate));
-}
 
 static inline int16_t clamp16(int32_t x)
 {
@@ -4950,45 +4888,6 @@ static void xfer_service(void)
 			uint8_t h = (xfer_v11_write(blk, sec) == 0) ? (uint8_t)ST11_WRITE_ACK : (uint8_t)'E';
 			cdc_tx(&h, 1);
 		}
-	} else if (cmd == 'N') {                               /* PLANAR CPU GATE -- arm the A/B */
-		/*
-		 * Arms a CONTROLLED experiment for `level` diverging tracks, then
-		 * runs itself: settle after playback starts, measure the SHIPPED
-		 * read pattern, measure the pattern under test, compare.
-		 *
-		 * Levels walk off -> 1 -> 2 -> 3 -> 4 -> off, the level being how
-		 * many tracks diverge. The cost is very unevenly distributed --
-		 * one diverging track is about a third of four -- so where the
-		 * ceiling sits matters as much as whether four fit.
-		 *
-		 * Read-only, like the sweep: it changes how a sector is fetched,
-		 * never what is stored, and clears on reboot.
-		 */
-		const uint32_t next = (s_stem_pgate.level + 1u) % (ST_RC_STEMS + 1u);
-		uint8_t ack = next ? (uint8_t)'n' : (uint8_t)'o';
-
-		if (next == 0u) {
-			st_pgate_abort(&s_stem_pgate);
-		} else {
-			st_pgate_start(&s_stem_pgate, next,
-				        (uint32_t)k_uptime_get());
-		}
-		/* The atomic is NOT written here. stem_pgate_service() is its
-		 * only writer, and it runs on the next pass -- arming always
-		 * begins in SETTLE, whose level is 0, so there is nothing to
-		 * publish early and nothing to race. */
-		cdc_tx(&ack, 1);
-		/* Two distinct lines, because "armed rev=0" would be a lie: level
-		 * 0 is the shipped read pattern, i.e. the run abandoned. */
-		if (next == 0u) {
-			printk("STEMPGATE armed rev=0 -- disarmed\n");
-		} else {
-			printk("STEMPGATE armed rev=%u -- settle %u ms, then %u ms "
-			       "baseline and %u ms test; press PLAY\n",
-			       (unsigned)next, (unsigned)ST_PGATE_SETTLE_MS,
-			       (unsigned)ST_PGATE_WINDOW_MS,
-			       (unsigned)ST_PGATE_WINDOW_MS);
-		}
 	} else if (cmd == 'M') {                               /* READ-SIZE SWEEP -- read-only measurement */
 		/*
 		 * WHAT THIS ANSWERS, and why it is worth a command.
@@ -5414,25 +5313,7 @@ static void codec_unpack(int16_t *ring, uint32_t ring_mask, uint32_t start,
  */
 static bool stem_read_sector(uint32_t start_block, uint8_t *buf)
 {
-	st_rc_read_t plan[ST_RC_PLAN_MAX];
-	uint32_t n, i;
-
-	const uint32_t nrev = (uint32_t)atomic_get(&g_stem_planar_sim);
-
-	if (nrev == 0u) {
-		return emmc_read_blocks(start_block, buf,
-					 ST11_BLOCKS_PER_SECTOR);
-	}
-
-	n = st_readcost_plan_planar(plan, nrev);
-	for (i = 0; i < n; i++) {
-		if (!emmc_read_blocks(start_block + plan[i].block_off,
-				       buf + plan[i].buf_off,
-				       plan[i].blocks)) {
-			return false;
-		}
-	}
-	return true;
+	return emmc_read_blocks(start_block, buf, ST11_BLOCKS_PER_SECTOR);
 }
 
 static uint32_t stem_prime_read_ahead(void)
@@ -6632,70 +6513,6 @@ static void controls_diag(void)
 			       (unsigned)((mid - l_mid) * 100u / d_all),
 			       (unsigned)((mai - l_mai) * 100u / d_all));
 		}
-		/*
-		 * THE v1.2 CPU GATE, REPORTED ONLY. The gate itself is advanced
-		 * by stem_pgate_service() on the main loop, because this pass is
-		 * DTR-gated and a run must not depend on a console staying
-		 * attached. Nothing here writes gate or streamer state: it reads
-		 * the phase the experiment has already reached and prints it.
-		 */
-		{
-			static st_pgate_phase_t l_phase = ST_PGATE_IDLE;
-			static const char *const k_ph[] = {
-				"idle", "settle", "baseline", "test", "done"
-			};
-			const st_pgate_phase_t ph = s_stem_pgate.phase;
-
-			if (ph != ST_PGATE_IDLE) {
-				printk("STEMPGATE %s rev=%u lvl=%u busy=%u%%\n",
-				       k_ph[ph], (unsigned)s_stem_pgate.level,
-				       (unsigned)st_pgate_level_now(&s_stem_pgate),
-				       (unsigned)(((aud - l_aud) + (str - l_str) +
-						    (mid - l_mid) + (mai - l_mai)) *
-						   100u / (d_all ? d_all : 1u)));
-			}
-			if (ph == ST_PGATE_DONE && l_phase != ST_PGATE_DONE) {
-				/*
-				 * THE ANSWER, once, with both windows beside it
-				 * so it can be checked rather than taken on
-				 * trust. keepup is sectors fetched against
-				 * sectors playback needed: 100% is exactly
-				 * keeping up.
-				 */
-				static const char *const k_v[] = {
-					"none", "PASS", "FAIL", "INCONCLUSIVE"
-				};
-
-				printk("STEMPGATE RESULT rev=%u %s\n",
-				       (unsigned)s_stem_pgate.level,
-				       k_v[s_stem_pgate.verdict]);
-				/*
-				 * SILENCE FIRST, because it is the only field
-				 * here that says whether anything was audible.
-				 * und= counts episodes with no duration, and
-				 * keepup= assumes the transport is at 1x
-				 * forward with no loop -- both read alarmingly
-				 * on a run that sounds perfect, and once did.
-				 */
-				printk("STEMPGATE  baseline silence_frames=%u (%u ppm) "
-				       "und=%u sectors=%u keepup=%u%% worst_fetch_us=%u\n",
-				       (unsigned)s_stem_pgate.base.silence_frames,
-				       (unsigned)st_pgate_silence_ppm(&s_stem_pgate.base),
-				       (unsigned)s_stem_pgate.base.underruns,
-				       (unsigned)s_stem_pgate.base.sectors,
-				       (unsigned)st_pgate_keepup_pct(&s_stem_pgate.base),
-				       (unsigned)s_stem_pgate.base.worst_us);
-				printk("STEMPGATE  test     silence_frames=%u (%u ppm) "
-				       "und=%u sectors=%u keepup=%u%% worst_fetch_us=%u\n",
-				       (unsigned)s_stem_pgate.test.silence_frames,
-				       (unsigned)st_pgate_silence_ppm(&s_stem_pgate.test),
-				       (unsigned)s_stem_pgate.test.underruns,
-				       (unsigned)s_stem_pgate.test.sectors,
-				       (unsigned)st_pgate_keepup_pct(&s_stem_pgate.test),
-				       (unsigned)s_stem_pgate.test.worst_us);
-			}
-			l_phase = ph;
-		}
 		l_aud = aud; l_str = str; l_mid = mid; l_mai = mai; l_all = all;
 	}
 	{
@@ -6777,14 +6594,31 @@ static void controls_diag(void)
 	 * worst read duration this session (us), rate=calculated sustained
 	 * read rate (bytes/s, successful-read time only -- see stem_diag_
 	 * sustained_read_bytes_per_sec()'s own doc comment), und=buffer
-	 * underrun episode count, corr=corrupt-sector count, reloadfail=Slice
+	 * SIL= IS THE ONE THAT SAYS WHETHER ANYTHING WAS AUDIBLE. und= counts
+	 * the TRANSITION into underrun and nothing about its length, so one
+	 * stalled frame and one stalled block both count as 1 -- read as a
+	 * dropout count it is off by up to 256x, and it was: a run that sounded
+	 * perfect reported 384 "underruns", anywhere between 8 ms of inaudible
+	 * silence and 2 full seconds, with no way to tell which. sil= is frames
+	 * actually silenced, which is the quantity a listener hears. It was
+	 * previously printed only by the retired planar A/B; it lives here now
+	 * so it survives that harness.
+	 *
+	 * und=underrun episode count, corr=corrupt-sector count, reloadfail=Slice
 	 * C3 post-commit runtime reloads audio_thread's own validation
 	 * rejected (should be ~impossible in practice -- see g_stem_reload_
 	 * fail_count's own doc comment). */
-	printk("STEMIO rdby=%u rdc=%u rdus=%u rdusmx=%u rate=%uBps und=%u corr=%u reloadfail=%u\n",
+	/* READ-AND-CLEAR, so rduswin= is the worst fetch since the LAST time
+	 * this line printed rather than since boot. rdusmx= sticks at whatever
+	 * outlier boot produced and stops moving; a windowed figure is what
+	 * actually tracks whether the read path is degrading under a change. */
+	printk("STEMIO rdby=%u rdc=%u rdus=%u rdusmx=%u rduswin=%u rate=%uBps "
+	       "sil=%u und=%u corr=%u reloadfail=%u\n",
 	       (unsigned)atomic_get(&g_stem_diag_bytes_total), (unsigned)atomic_get(&g_stem_diag_read_calls),
 	       (unsigned)atomic_get(&g_stem_diag_read_us_last), (unsigned)atomic_get(&g_stem_diag_read_us_max),
-	       (unsigned)stem_diag_sustained_read_bytes_per_sec(), (unsigned)atomic_get(&g_stem_underrun_count),
+	       (unsigned)atomic_set(&g_stem_diag_read_us_win, 0),
+	       (unsigned)stem_diag_sustained_read_bytes_per_sec(),
+	       (unsigned)atomic_get(&g_stem_underrun_frames), (unsigned)atomic_get(&g_stem_underrun_count),
 	       (unsigned)atomic_get(&g_stem_corrupt_count), (unsigned)atomic_get(&g_stem_reload_fail_count));
 	/* WHERE THE LATEST SECTOR READ'S TIME WENT (see sp1_emmc.h's own
 	 * "READ-PATH PHASE BREAKDOWN"). A sector is 16 blocks = 8192 bytes =
@@ -8105,7 +7939,6 @@ int main(void)
 		 * paused there, so the gate sees !playing and correctly restarts
 		 * its settle rather than measuring a stopped transport.
 		 */
-		stem_pgate_service();
 
 		if (g_xfer_mode) {
 			led_service();
