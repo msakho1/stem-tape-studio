@@ -1,164 +1,172 @@
-# Stem Tape storage format v1.2 — stem-planar sectors
+# Stem Tape storage format v1.2 — song-planar stem streams
 
 Status: **specification, not yet implemented.** Firmware is still v1.1
 (`ST11_FORMAT_MINOR 1`); the companion is still v1.1
 (`stemTapeFormat.ts: FORMAT_MINOR = 1`).
 
-## Why the layout changes
+## The requirement this exists to meet
 
-Per-track reverse needs one stem to read from a different position in the song
-than the other three. In v1.1 all four stems are interleaved inside every
-frame, so a diverging stem cannot be fetched without fetching the whole sector
-a second time — 143% of a read engine that has 100%.
+> "I should be able to reverse ANY stem as long as I am only reversing one at
+> a time."
 
-Giving each stem its own contiguous, block-aligned plane inside the sector lets
-a diverging stem fetch only its own quarter. Measured on hardware (see
-`stem-tape-reverse-feasibility.md`): one reversed stem at 92% CPU busy against
-an 83% baseline, zero dropouts.
+That rules out the first draft of this document, which is recorded below as
+the wrong answer and why.
 
-**Nothing else about the device changes.** Same 8192-byte sector, same 16
-blocks, same 340 frames per sector, same capacity, same wire protocol, same
-STIX index. Only the arrangement of bytes inside the sector payload moves.
+## The rejected draft: sector-planar
 
-## The sector
+The first version kept v1.1's 8192-byte sector and split it into four
+2048-byte planes, one per stem. It was chosen for minimum change: same sector,
+same 340 frames, same capacity, a companion diff confined to one function.
+
+**It cannot meet the requirement, structurally.** A stem's data sits in 4
+blocks out of every 16, so a reversed stem's samples are *scattered* across the
+song. Fetching them needs its own read, and — worse — removing a middle plane
+splits the remaining three, so they stop being one read too:
 
 ```
-byte 0      2048      4096      6144      8192
-     |---------|---------|---------|---------|
-     | plane 0 | plane 1 | plane 2 | plane 3 |
-     | vocal   | drums   | bass    | instrum |
-     |---------|---------|---------|---------|
-block 0         4         8        12        16
+blocks:   0───3    4───7    8──11   12──15
+          vocal    drums    bass    instrument
+reverse vocal      -> forward = 4..15   contiguous   2 reads, 16 blocks   92% MEASURED PASS
+reverse instrument -> forward = 0..11   contiguous   2 reads, 16 blocks   92% MEASURED PASS
+reverse drums      -> forward = 0..3 + 8..15, HOLE   2 reads, 20 blocks   ~101%
+reverse bass       -> forward = 0..7 + 12..15, HOLE  2 reads, 20 blocks   ~101%
 ```
 
-Plane *k* holds stem *k* and nothing else, occupying exactly **4 blocks**
-(2048 bytes) starting at block offset `k * 4`. That alignment is the whole
-point: a single plane is independently readable with one `emmc_read_blocks()`.
+Level 2 measured 4491 us and FAILED with 742 dropouts at 99% busy; the
+cheapest middle-stem plan is 4465 us, 0.4 points away. A sector has two ends,
+so no permutation of four equal planes makes more than two stems reversible.
+The layout caps the feature at two, and the requirement is four.
 
-### Inside one plane (2048 bytes)
+## The format: song-planar
+
+Each stem's **entire timeline** is contiguous, in its own quarter of the song
+region:
+
+```
+song region
+|------------------|------------------|------------------|------------------|
+| stem 0 timeline  | stem 1 timeline  | stem 2 timeline  | stem 3 timeline  |
+|------------------|------------------|------------------|------------------|
+```
+
+A stem is now read entirely independently of the others. **Reversing a stem
+changes only the address its read goes to — never the number of reads, never
+the bytes moved, never the cost.** That is what makes any stem reversible, and
+it is why the cost is also flat in the *number* of reversed stems.
+
+### The unit: a 4-block stem group
 
 | offset | size | field |
 |---|---|---|
 | 0 | 1 | `'P'` (0x50) |
 | 1 | 1 | `'L'` (0x4C) |
-| 2 | 1 | stem index, 0-3 — must equal the plane's own position |
+| 2 | 1 | stem index, 0-3 |
 | 3 | 1 | flags, must be 0 |
-| 4 | 4 | `sectorIndex`, u32 LE |
+| 4 | 4 | `groupIndex`, u32 LE — which 340-frame span this is |
 | 8 | 2040 | 340 frames × 6 bytes: L then R, each signed 24-bit LE |
 
-`8 + 340 × 6 = 2048` exactly, and `4 × 2040 = 8160` — **the same 340 frames and
-the same 8160 audio bytes per sector as v1.1**, with the same 32 bytes of total
-overhead. Sector counts, capacity arithmetic and every STIX geometry field are
-therefore unchanged by this migration.
+`8 + 340×6 = 2048` = 4 blocks exactly. Four groups (one per stem) at the same
+`groupIndex` carry the same 340 frames of the song, so **frames per group is
+340 — identical to v1.1's frames per sector** and every STIX geometry field
+carries over unchanged.
 
-### Why a per-plane header at all
+The header makes each group self-validating from a group-only read: magic, the
+stem it claims to be, and the span it covers. That matters more here than in
+the rejected draft, because *every* read is now a group read.
 
-A reversed stem is fetched as a plane-only read from a *different* sector than
-the other three. Without a header inside the plane, that read returns bytes
-with nothing to check them against — no magic, no identity, no way to tell a
-correct fetch from a mis-addressed one. The 8 bytes make a plane-only read
-self-validating: magic, the stem it claims to be, and the sector it came from.
+### Region derivation
 
-### What v1.1's 32-byte sector header carried, and where it went
+Sub-region *k* starts at `songStartBlock + k × (songBlockCount / 4)`. No new
+STIX fields; `songBlockCount` must be a multiple of `4 × 4` blocks so each
+quarter is a whole number of groups.
 
-| v1.1 field | disposition |
-|---|---|
-| `magic` 'STSC' | replaced by the per-plane `'PL'` magic |
-| `sectorIndex` | in every plane header |
-| `firstFrame` | **dropped** — derived: `sectorIndex * 340` |
-| `frameCount` | **dropped** — derived: 340, or `frames - firstFrame` on the last sector |
-| `bpmQ8` | **dropped** — see below |
-| `downbeatFrame` | **dropped** — see below |
-| `ledReserved`, `reserved` | **dropped** — firmware-owned, never read |
+## Why this is not more expensive — the part that decides it
 
-`firstFrame` and `frameCount` are safe to drop because
-`st_stream_validate_sector()` already computes both as *expected* values from
-`sectorIndex` and the stream geometry, and compares — it never consumes the
-stored ones as data.
+Read one group per stem per span and you pay four fixed read costs where v1.1
+paid one: **5147 us, worse than the level-4 failure.** So groups are read in
+**batches of N spans**, which is legitimate precisely because a stem's timeline
+is contiguous — N spans of one stem are `4N` consecutive blocks, one read.
 
-`bpmQ8` and `downbeatFrame` are safe to drop because the STIX record is the
-authoritative timing source. The sector-0 copies are read once at boot and
-compared, and `main.c`'s own comment at that site says it plainly: *"cross-
-checked here, once, for consistency ONLY: a mismatch is logged as a boot
-diagnostic, never acted on -- the STIX record always wins."* Dropping them
-loses a diagnostic, not a function.
+Measured fit: 656.4 us fixed + 157.6 us/block.
 
-## Reading
-
-| reversed stems | plan | reads | blocks |
+| batch N | reads per span | us per span | vs today |
 |---|---|---|---|
-| none | `blk0 +16` | 1 | 16 |
-| stem 3 | `blk0 +12`, `blk12 +4` at the reverse position | 2 | 16 |
-| stem 0 | `blk4 +12`, `blk0 +4` at the reverse position | 2 | 16 |
-| stem 1 or 2 | **not offered** — 0.4 points from the level-2 run that failed | 2 | 20 |
+| 1 | 4.0 | 5147 | +1969 ❌ |
+| 2 | 2.0 | 3834 | +656 (92% — the level-1 number, measured clean) |
+| **4** | **1.0** | **3178** | **+0 — exactly today's cost** ✅ |
+| 8 | 0.5 | 2850 | −328 (cheaper than today) |
 
-Only stems at a *sector end* leave the remaining three contiguous, and level 2
-FAILED on hardware (742 dropouts, 99% busy), so the middle two are not
-offered — the cheapest middle-stem plan is 0.4 points away from that run.
+At N=4 the device moves the same 16 blocks per span and pays the same single
+fixed read cost per span that it pays now — because the same bytes are being
+fetched, just grouped by stem instead of by time. **Any stem reversed, all four
+reversed, none reversed: 3178 us either way.**
 
-**The plane order therefore decides which two tracks get reverse**, and it is a
-v1.2 choice rather than an inherited constraint: each plane header carries its
-own stem id, so any permutation of the four stems across the four plane
-positions is self-describing and checkable. The two stems placed at plane 0 and
-plane 3 are the reversible pair. **Pending decision — the order below is
-v1.1's and is a placeholder until that is made.**
+## The cost that is real: RAM
 
-## Versioning, and why old songs cannot be misread
+Sector pools today, computed from the compiled latency constants
+(`ST_LAT_READAHEAD_SECTORS 4`, `RESIDENCY 5`, `RING_SLOTS 6`):
 
-`ST11_FORMAT_MINOR` / `FORMAT_MINOR` go **1 → 2** on both sides. Two
-independent gates already exist and both require exact equality, so no new
-mechanism is needed:
+| pool | size |
+|---|---|
+| `g_stem_sector_bufs[6][8192]` | 49,152 B |
+| `g_stem_loop_pin_bufs[10][8192]` | 81,920 B |
+| `s_v11_verify_scratch[8192]` | 8,192 B |
+| **total** | **139,264 B** |
 
-- **Firmware refuses old songs.** `st_stix.c:159-160` rejects any index record
-  whose `format_major`/`format_minor` do not match the firmware's own. A v1.1
-  song therefore fails to load on v1.2 firmware rather than being replayed as
-  though its interleaved bytes were planes.
-- **Companion refuses old firmware.** `compatibility.ts` requires
-  `formatMajor === FORMAT_MAJOR && formatMinor === FORMAT_MINOR` from the STCP
-  capability reply, so a v1.2 companion will not upload planar data to v1.1
-  firmware, and a v1.1 companion will not upload interleaved data to v1.2
-  firmware.
+against 228,574 B used of 262,144 B — about 33.5 KB free, and CI fails below
+32,768 B free. There is no slack today.
 
-Both directions are already fail-closed. Existing songs must be re-uploaded,
-which is expected during development.
+Per-stem rings at the same 8-span depth cost `8 × 2048 × 4 = 65,536 B` against
+today's 49,152 B ring — **+16,384 B**, which does not fit as things stand.
+
+It is very likely findable rather than blocking: `g_stem_loop_pin_bufs` is
+81,920 B and exists, by its own comment in `main.c`, only "because the
+read-ahead ring maps sector s to slot s % SLOTS, so a window wider than the
+ring cannot hold both of its ends — an artefact of the ring's addressing, not a
+property of the problem. A unified cache with associative lookup and pinnable
+slots removes them entirely." Song-planar rings want exactly that rework
+anyway. `s_v11_verify_scratch` is another 8,192 B used only while playback is
+paused for upload.
+
+**But it is not measured, and nothing here should be read as though it were.**
+The RAM reclamation is a prerequisite, not a footnote.
+
+## Versioning
+
+Unchanged from the rejected draft, and still free: `ST11_FORMAT_MINOR` /
+`FORMAT_MINOR` go 1 → 2, and both existing gates require exact equality —
+`st_stix.c:159-160` rejects an index record whose format version differs from
+the firmware's, and `compatibility.ts` requires the STCP reply to match the
+companion's. Old songs are refused rather than misread, in both directions.
+Existing songs must be re-uploaded.
 
 ## Companion changes
 
-Confirmed against the current source, so the blast radius is known:
+Larger than the rejected draft's one function, but still contained, and the two
+facts that bounded it still hold:
 
-**`sector.ts` — `encodeSector()` and `decodeSectors()` only.** The payload fill
-loop changes from writing `dst = 32 + f*24, dst + s*6` to writing
-`dst = s*2048 + 8 + f*6`, plus the four plane headers instead of one sector
-header. `encodeSong()`, `sectorToBlocks()`, `blocksToSector()` and every caller
-are untouched.
+1. **Checksums are layout-independent** — each per-stem FNV-1a is over that
+   stem's own contiguous `pcm24` in playback order (`song.ts:210`), never over
+   assembled sector bytes. Song-planar changes neither the per-stem checksums
+   nor the song checksum.
+2. **The wire protocol does not move** — `writeSectorBulk()` sends a complete
+   8192-byte buffer to a destination block. Song-planar changes what those
+   8192 bytes contain (four consecutive groups of one stem) and which block
+   they go to, not the `'U'` command, its 17-byte header or its 14-byte reply.
 
-**`stemTapeFormat.ts`** — `FORMAT_MINOR = 2`, plus the plane constants; the
-`SECTOR_OFF` table is replaced by a plane-relative one.
-
-**Nothing else.** Two facts from the source review make this true:
-
-1. **Checksums are layout-independent.** Each per-stem FNV-1a checksum is taken
-   over that stem's own contiguous `pcm24` buffer in playback order
-   (`song.ts:210`), never over assembled sector bytes; the song checksum is over
-   the 16-byte digest of those four. Reordering bytes inside a sector changes
-   neither. The device-side verification at `transport.ts:702-713` re-derives
-   them through `decodeSectors()`, so it stays valid once that function is
-   updated — and it is exactly the test that will catch a wrong reorder.
-2. **The wire protocol does not move.** Sectors are always materialised as
-   complete 8192-byte buffers before transmission (`encodeSong()` up front,
-   `writeSectorBulk()` hard-rejecting any payload that is not exactly 8192
-   bytes), so nothing is assembled incrementally and the `'U'` bulk command,
-   its 17-byte header and its 14-byte response are unaffected.
+`encodeSong()` changes shape: instead of `ceil(frames/340)` mixed sectors it
+emits four streams of groups, each written into its own quarter.
+`decodeSectors()` inverts it. `sectorToBlocks()`, the transport state machine,
+the index builder and the capability gate are untouched.
 
 ## Fixtures
 
 `handoff/v1.1/binaries/song-sectors-four-stem.bin` (43 sectors, 352,256 bytes,
-songChecksum 3509299530) is consumed by twelve firmware tests and the CI
-workflow. It is **kept**, and gains a second job: proving a v1.1 song is
-*refused* rather than misread.
+songChecksum 3509299530) is consumed by twelve firmware tests and CI. It is
+kept, and gains a second job: proving a v1.1 song is *refused*.
 
-A v1.2 twin is generated from the same four source WAVs, so the two differ only
-in byte arrangement. The migration's strongest available test follows from
-that: decoding the v1.2 fixture must reproduce, byte for byte, the same four
-per-stem PCM streams as decoding the v1.1 fixture, and therefore the same four
-stem checksums and the same song checksum — 3509299530.
+The v1.2 twin is generated from the same four source WAVs, so the two differ
+only in byte arrangement — which gives the migration's strongest test:
+decoding the v1.2 fixture must reproduce, byte for byte, the same four per-stem
+PCM streams as decoding the v1.1 fixture, and therefore the same song checksum,
+3509299530.
