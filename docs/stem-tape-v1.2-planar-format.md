@@ -123,11 +123,12 @@ Three things pull against each other and only certain (G, R) pairs are safe:
 G=6/R=3 is the tempting one because it is RAM-neutral, and it is **not safe**:
 three spans buffered is less than one measured worst-case fetch.
 
-So the real choice is 8 KB more RAM for a 3-point CPU regression on ORDINARY
-playback, or 16 KB more for none at all. Step 3 exists to confirm ordinary
-four-stem playback is still perfect, and a knowingly-introduced 3-point
-regression sits badly against "no dropouts ever" — so G=8 is preferred unless
-the reclamation proves harder than the RAM document expects.
+**DECIDED: G=8, R=4.** 16 KB of reclamation, and ordinary playback stays at
+exactly today's 83% busy — so step 3 verifies that nothing changed, rather than
+signing off a regression that was chosen for convenience. The alternative
+(G=7, +8 KB, 86%) was rejected because "no dropouts ever" is the standing
+requirement and 3 points of ordinary-playback headroom is not the thing to
+spend to save 8 KB.
 
 Both figures are inside what `stem-tape-ram-v1.md` identifies as available:
 8,192 B from the verify scratch and 8,192 B from the unified associative

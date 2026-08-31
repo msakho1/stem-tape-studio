@@ -104,6 +104,14 @@ the exit pin guarantees and the ring cannot. **It stays.**
 The only correct thing to do with this finding is fix the misleading comment,
 not the allocation.
 
+### NO LONGER OPTIONAL
+
+The planar read path needs G=8 groups per stem, which is +16,384 B, and the
+buffered-depth floor rules out every cheaper ring (see
+`stem-tape-v1.2-planar-format.md`). Both reclamations below are therefore
+prerequisites of the read path rather than the speculative groundwork this
+document originally framed them as.
+
 ### What is actually reclaimable
 
 | | bytes | status |
