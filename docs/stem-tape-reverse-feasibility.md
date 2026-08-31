@@ -92,6 +92,40 @@ This also gives the read planner a hard bound: `st_readcost_plan_planar()` is
 only ever called with `n_reversed` of 0 or 1, so a sector fetch is one read or
 two, never four.
 
+## WHICH stem is reversed changes the cost — found before building, not after
+
+The level-1 PASS is narrower than it looks. `st_readcost_plan_planar(plan, 1)`
+diverges the **highest-numbered** plane, so the measurement was made with the
+reversed stem at one END of the sector. Removing an end plane leaves the other
+three contiguous, so they are still one read. Removing a MIDDLE plane does not.
+
+| reversed stem | plan | reads | blocks | fetch us | busy |
+|---|---|---|---|---|---|
+| 0 (vocal) or 3 (instrument) | `blk0+12`, `blk?+4` | 2 | 16 | 3834 | **92% measured** |
+| 1 (drums) or 2 (bass), whole sector + plane | `blk0+16`, `blk?+4` | 2 | 20 | 4465 | ~101% projected |
+| 1 or 2, three reads | `blk0+4`, `blk8+8`, `blk?+4` | 3 | 16 | 4491 | ~102% projected |
+
+Both middle-stem plans land at roughly **level-2 cost**, and level 2 is
+projected not to fit. So "double-click any track" is not yet established — only
+"double-click vocal or instrument" is. Reversing drums or bass is an open
+question with a projection that says no.
+
+There is no layout that fixes this by rearranging four equal planes: a sector
+has two ends, and any of the four stems can be the reversed one. Storing a
+stem twice, at both ends, would fix the reads and halve song length.
+
+**The answer needs no new code.** Gate level 2 already fetches 3 reads / 16
+blocks, which is within **0.4 points** of the cheaper middle-stem plan — a
+proxy accurate enough to decide it. Run level 2:
+
+- **Level 2 PASSES** → all four stems are reversible; build it for any track.
+- **Level 2 FAILS** → only vocal and instrument are affordable, and the feature
+  either restricts to those two or needs a different storage layout.
+
+Note that this makes level 2 worth measuring for its own sake, not as
+curiosity: it is no longer "the next level up", it is the cost of reversing two
+of the four tracks.
+
 ## Level 4 — FAIL
 
 Kept after the scope narrowed to one track, because this is the measurement
