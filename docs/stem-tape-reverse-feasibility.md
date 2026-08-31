@@ -1,12 +1,71 @@
 # Per-track reverse playback — feasibility, and what it costs
 
-Status: **STORAGE YES. CPU RESULT INCONCLUSIVE — the gate was not built well
-enough to trust.** The read-cost sweep passed and reproduced (two runs within
-1.2%), so the storage finding stands. The CPU run degraded badly, but the
-experiment had no control and several confounds, listed below. Do not treat
-"the CPU cannot do it" as established.
+Status: **STORAGE YES. CPU: FOUR TRACKS NO — measured, controlled, on
+hardware. One and two tracks are still open.**
 
-## The CPU run (firmware st33) and why it does not settle the question
+## The result (firmware st36, the controlled gate)
+
+```
+STEMPGATE RESULT rev=4 FAIL
+STEMPGATE  baseline und=0    sectors=2824 keepup=100% worst_fetch_us=21593
+STEMPGATE  test     und=1212 sectors=2445 keepup=86%  worst_fetch_us=20684
+```
+
+with `busy=83%` steady through the baseline window and `busy=99%` through the
+test window.
+
+**This one is trustworthy, and the reason is the first line.** The baseline
+window ran the shipped read pattern for the same 20 seconds on the same song
+and came out at zero underruns and 100% keep-up. The control was clean, so the
+1212 underruns in the test window belong to the read pattern rather than to
+the conditions — which is exactly the attribution the first gate could not
+make.
+
+### What the numbers say beyond pass/fail
+
+**The failure is sustained cost, not a tail.** The worst single sector fetch
+was *lower* in the test window (20684 us) than in the baseline (21593 us). The
+worst case is set by preemption, not by how the sector is fetched; what kills
+level 4 is paying an extra ~2 ms on *every* sector, not an occasional long one.
+This is the opposite of the mechanism claimed in the retracted st33 analysis,
+which built a tail-exposure story on a misread `rd_max_us`.
+
+**The baseline's own worst fetch is 21.6 ms** — a sector holding 7.08 ms of
+audio, fetched in three times that, with zero underruns. The read-ahead ring is
+already absorbing multi-sector stalls in ordinary playback. That is reassuring
+about the ring and sobering about the headroom.
+
+**Where the budget goes.** Ordinary playback already sits at 83% busy while
+the streamer's reads only account for ~45% of a sector period. The remaining
+17 points are the entire budget for anything new.
+
+### Projection to the untested levels — and its limits
+
+The second sweep refit at **665 us fixed + 156.8 us per block** (the first
+sweep: 625 + 159.3 — the card is reproducible). Each diverging track costs one
+extra read, so one extra fixed cost:
+
+| tracks reversed | reads | fetch us | storage duty | extra CPU points | projected busy |
+|---|---|---|---|---|---|
+| 0 | 1 | 3173 | 44.8% | — | 83% |
+| 1 | 2 | 3838 | 54.2% | +9.4 | **92%** |
+| 2 | 3 | 4503 | 63.6% | +18.8 | **102%** |
+| 3 | 4 | 5168 | 73.0% | +28.2 | 111% |
+| 4 | 4 | 5168 | 73.0% | +28.2 | 111% (measured: 99%, capped, keepup 86%) |
+
+**Do not read that table as a result for levels 1 and 2.** The only measured
+point is level 4, and it is *saturated* — 99% is a ceiling, so it establishes
+that level 4 needs more than 100% without establishing how much more. The
+slope is therefore modelled, not measured, and the projection inherits every
+assumption in the model (that the extra cost is exactly the extra fixed
+per-read price, and that it converts one-for-one into CPU busy). Levels 1 and 2
+are one 45-second run each. Run them.
+
+Note also that storage duty and CPU busy are different quantities: the storage
+can serve level 4 at 73% duty, and the CPU still cannot afford it. The storage
+sweep was never going to answer this question, which is why there are two.
+
+## The retracted st33 run, and why it did not settle the question
 
 ```
 STEMPLANAR sim=ON und=0  rd_max_us=11205 reads=13 busy=51% spare=49%
