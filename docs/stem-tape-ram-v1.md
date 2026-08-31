@@ -38,7 +38,7 @@ records that. What remains of the classic engine is scalars: `struct looptrk`
 The 139,264 B is not dead weight. It is live buffering, correctly sized for the
 policy it implements. **The policy is what has to change.**
 
-## Why the loop-pin pool exists, and why it is the target
+## Why the loop-pin pool exists (and why it survived scrutiny)
 
 From its own comment in `main.c`:
 
@@ -47,9 +47,14 @@ From its own comment in `main.c`:
 > not a property of the problem. A unified cache with associative lookup and
 > pinnable slots removes them entirely.
 
-That is the whole diagnosis. A modulo-addressed ring cannot hold two distant
-regions at once, so a second pool was added to hold them. 81,920 B — 36% of all
-RAM in use — is paid to work around an addressing scheme.
+A modulo-addressed ring cannot hold two distant regions at once, so a second
+pool was added to hold them. 81,920 B — 36% of all RAM in use — is paid to work
+around an addressing scheme.
+
+**That reads like the obvious target and it is not one.** Both regions turned
+out to be load-bearing; see Stage B below for the two attempts and why each
+failed. Replacing the addressing with an associative cache is still the right
+change for its own sake, but it buys one slot, not a pool.
 
 ## The reclamation, staged
 
@@ -68,56 +73,48 @@ guard**, because the failure mode if a third use site ever appears outside
 transfer mode is silent corruption of live audio, which is exactly the class of
 bug this codebase spends effort to make impossible.
 
-### Stage B — CORRECTED
+### Stage B — CORRECTED TWICE. Neither pin region is reclaimable.
 
-**The first version of this section was wrong and is kept here as the mistake
-it was.** It claimed a wrap-aware read-ahead could absorb the loop ENTRY pin
-and free 49,152 B. It cannot. Read-ahead is 4 sectors deep — about 28 ms of
-audio — and a single worst-case fetch was *measured* at 21-23 ms under load.
-Pulling five entry sectors in during the last four sectors before a wrap has no
-margin at all. The entry pin is pinned **from the moment the loop is armed**
-precisely so the wrap never depends on that race, and that is correct. It
-stays.
+This section has now been wrong twice, and both versions are recorded because
+the reasoning matters more than the conclusion.
 
-The real candidate is the **EXIT pin**, and it is stale in the most literal
-sense: it holds data for an operation that was removed.
+**First claim (wrong): a wrap-aware read-ahead absorbs the ENTRY pin, −49,152
+B.** It cannot. Read-ahead runs ~28 ms ahead and a single worst-case fetch
+measured 21-23 ms under load, so pulling five entry sectors in during the last
+four before a wrap has no margin. The entry pin is held from the arm precisely
+so the wrap never depends on that race.
 
-`ST_LOOP_PIN_EXIT` is documented in `main.c` as *"loop_end: where every exit
-seek lands"*. But the audio thread's exit handler says:
+**Second claim (also wrong): the EXIT pin is stale, −40,960 B.** Its label —
+*"loop_end: where every exit seek lands"* — IS stale wording: the exit seek was
+removed, and a release now plays forward through `loop_end` without moving the
+playhead. But the region is not stale, and `main.c`'s prefetch comment says why:
 
-> THE TRANSPORT IS NOT TOUCHED HERE EITHER. Releasing stops future wrapping and
-> nothing more: the iteration already in flight plays on through the loop end
-> and into the material that follows […] **THIS REVERSES A DOCUMENTED EARLIER
-> DECISION** […] The product ruling is that a release must not move the
-> playhead under any circumstances.
+> READ-AHEAD STAYS IN SONG ORDER, EVEN INSIDE A LOOP […] sector s and sector
+> s+SLOTS map to the SAME slot. Inside a loop both of those are live sectors, so
+> prefetching the post-wrap region evicts the pre-wrap region the playhead has
+> not reached yet. […] The wrap is covered by the PINNED sectors instead,
+> **exactly as the exit is**; the pin lives outside the ring and so cannot
+> collide with anything.
 
-There is no exit seek any more. A release is ordinary continuous playback
-carrying on past `loop_end`, which is the case ordinary read-ahead exists to
-serve. Residency depth is a property of *seek targets*, where the ring is cold —
-and this is not a seek.
+The ring's slots cycle with the loop, so whatever it once held past `loop_end`
+is evicted by later iterations. A release can arrive at any point in any
+iteration and must continue past `loop_end` with no gap — which is exactly what
+the exit pin guarantees and the ring cannot. **It stays.**
 
-| | slots | bytes |
+The only correct thing to do with this finding is fix the misleading comment,
+not the allocation.
+
+### What is actually reclaimable
+
+| | bytes | status |
 |---|---|---|
-| today: ring 6 + entry 5 + exit 5 | 16 | 131,072 |
-| after: ring 6 + entry 5 | 11 | 90,112 |
-| **freed** | **5** | **40,960** |
+| Stage A — verify scratch shares a ring slot | 8,192 | real, needs a quiesce handshake |
+| unified associative cache (16 pools → 15 live) | 8,192 | real but marginal; large change for one slot |
+| entry pin | 0 | load-bearing |
+| exit pin | 0 | load-bearing |
 
-**NOT YET PROVEN, and it must be before anything is deleted.** The claim rests
-on the ring's prefetch actually holding `loop_end+1…` while a loop runs. If the
-prefetch target is clamped or wrapped to the loop window, that material is not
-in the ring and the exit pin is still earning its place. `st_stream_required_
-sector()` is `song_frame / ST11_FRAMES_PER_SECTOR` — purely linear, no loop
-term — which is the evidence *for*; the producer's own `next_fill()` target
-selection has not been read yet, and it is the one that decides.
-
-**Stage B is a change to the continuous-playback path**, which is otherwise
-under a standing do-not-touch rule. Own commit; loop seam and transport gates
-run against it; nothing folded in.
-
-### Combined: 49,152 B (A + corrected B), against 33,570 B free today
-
-Still enough for song-planar's +16,384 B, with 32,768 B spare rather than
-40,960 B.
+**Realistic total: 8,192 B, or 16,384 B if the cache rework is also done.** Not
+the 57,344 B this document first claimed.
 
 ## The part that changes the roadmap
 
@@ -129,7 +126,7 @@ today's interleaved format that is not a RAM question, it is an impossibility:
 | today, one shared head | 131,072 B |
 | 4 independent heads, **v1.1 interleaved** | **524,288 B — 2× the entire SRAM** |
 | 4 independent heads, **song-planar v1.2** | **131,072 B — exactly today's** |
-| 4 independent heads, song-planar + Stage B | 81,920 B |
+| 4 independent heads, song-planar | 131,072 B |
 
 The reason is the same one that decides reverse. On v1.1 a head must fetch a
 whole 8,192-byte sector to obtain the 2,048 bytes of the one stem it plays —
@@ -161,18 +158,19 @@ conversation**, which is why the plan above is short.
 
 ## Order of work
 
-0. **Prove or kill the Stage B premise** — read the producer's `next_fill()`
-   target selection and settle whether the ring holds `loop_end+1…` during a
-   loop. Costs nothing, decides 40,960 B, and must happen before any deletion.
-1. **Stage B** (40,960 B, if step 0 confirms) — remove the exit pin region.
-   Touches the playback path; own commit; loop seam + transport gates must stay
-   green. Taken FIRST because its failure mode is loud (a gap on loop release,
-   which the seam gate already tests for) where Stage A's is silent.
-2. **Stage A** (8,192 B) — the verify scratch shares a ring slot. Needs a real
-   two-thread quiesce handshake, not a timing argument: entering transfer mode
-   sets the flag and returns, and nothing today *proves* the audio thread has
-   observed it before the first command lands. Silent audio corruption is the
-   failure mode, so this one waits for the handshake.
-3. **Song-planar v1.2** (+16,384 B for per-stem rings) — fits inside what
-   Stage A + B free, with 32,768 B still spare.
+1. **Song-planar v1.2 — RAM-NEUTRAL, and therefore not blocked.** At equal
+   read-ahead depth it holds the same audio regrouped: 16 spans × 2048 B × 4
+   stems = 131,072 B, exactly today's 16 sectors × 8192 B. The +16,384 B this
+   document first quoted assumed a deeper ring (18 spans) for comfortable
+   4-span batching. That is a nicety, not a requirement, and 33,570 B is free
+   today. **The RAM work is not a prerequisite for the format change.**
+2. **Fix the stale `ST_LOOP_PIN_EXIT` comment** — it describes a seek that no
+   longer exists and sent this analysis down a blind alley twice. Zero risk.
+3. **Stage A** (8,192 B) — the verify scratch shares a ring slot, once a real
+   two-thread quiesce handshake exists. Not a timing argument: entering
+   transfer mode sets the flag and returns, and nothing today *proves* the
+   audio thread observed it before the first command lands. Silent audio
+   corruption is the failure mode.
+4. **Unified associative cache** (8,192 B) — worth doing for the addressing,
+   marginal for the RAM. Not urgent while song-planar is neutral.
 4. Per-track heads, then the rest of the roadmap, on the freed budget.
