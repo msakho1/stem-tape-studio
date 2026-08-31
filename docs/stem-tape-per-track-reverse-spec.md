@@ -73,6 +73,26 @@ Checked, rather than assumed — the brief said to inspect before writing DSP:
 | the gesture binding | named in `st_loop.h`; `main.c:8552` already anticipates a double-tap |
 | storage that makes a diverging track affordable | `st_planar` (built, proven) |
 
+### One thing that does NOT already exist, found while reading the render loop
+
+`stem_render_run()` touches stored bytes through exactly three
+`st11_sector_decode_frame()` calls, which is why the format swap is contained.
+But at a **variable rate** it interpolates between the frame behind the cursor
+and the frame at it, and it keeps that previous frame in a single shared
+`s_rs_prev` / `s_rs_prev_valid` pair plus one shared `cur` cursor. That is
+correct exactly while all four stems advance together.
+
+A reversed stem does not. It has its own cursor, its own direction, and its own
+"frame behind" — which, travelling backward, is the frame at a *higher* index.
+So **`s_rs_prev`, `s_rs_prev_valid`, `cur` and `frac` all become per-stem** in
+step 4, and "the frame behind the cursor" has to be read in the direction that
+stem is actually moving.
+
+This is cheap — four small scalars, not buffers — but it is invisible until you
+look, and it is the kind of thing that otherwise surfaces as "reverse sounds
+subtly wrong only when the pitch rocker is off centre". Recorded here so step 4
+starts with it rather than discovering it.
+
 ## Order of work
 
 1. Wire the v1.2 planar read path.

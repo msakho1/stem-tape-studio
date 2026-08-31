@@ -172,7 +172,7 @@ document originally framed them as.
 
 | | bytes | status |
 |---|---|---|
-| Stage A — verify scratch shares a **pin** buffer | 8,192 | **DONE, `st38`** |
+| Stage A — verify scratch shares a **pin** buffer | **9,088 measured** | **DONE, `st38`** |
 | unified associative cache (16 pools → 15 live) | 8,192 | real but marginal; large change for one slot |
 | entry pin | 0 | load-bearing |
 | exit pin | 0 | load-bearing |
@@ -180,6 +180,32 @@ document originally framed them as.
 **Realistic total: 8,192 B, or 16,384 B if the cache rework is also done.** Not
 the 57,344 B this document first claimed. Half of it is banked; the other half
 is the cache rework, which the read path at G=8/R=4 still needs.
+
+### What Stage A actually returned — measured from the linked ELF
+
+| | before | after (`st38`) |
+|---|---:|---:|
+| RAM used | 228,574 | **219,486** |
+| RAM free of 262,144 | 33,570 | **42,658** |
+
+**9,088 B, not the 8,192 predicted** — about 900 bytes more than the array
+itself, because the padding around it went with it. Recorded as measured
+rather than as intended; every other figure in this document should be read
+the same way.
+
+**It is still not enough on its own, and the arithmetic is worth doing rather
+than eyeballing.** 42,658 free looks like plenty against a 16,384 ask, but the
+gate is a floor on what remains:
+
+| | free |
+|---|---:|
+| now | 42,658 |
+| after the planar rings (+16,384) | **26,274 — below the 32,768 floor by 6,494** |
+| plus the cache reclamation (+8,192) | **34,466 — clears it by 1,698** |
+
+So the second reclamation stays a prerequisite, exactly as chosen. The margin
+after both is 1,698 bytes, which is thin enough that the cache rework should
+not also grow anything.
 
 ## The part that changes the roadmap
 

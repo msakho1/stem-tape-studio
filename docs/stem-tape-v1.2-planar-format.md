@@ -152,13 +152,16 @@ Sector pools today, computed from the compiled latency constants
 | **total** | **131,072 B** |
 
 That last line was 139,264 B until `st38`: the upload verify scratch no longer
-has an allocation of its own, it is the last loop-pin buffer. So free went from
-about 33.5 KB to about 41.5 KB, against a CI floor of 32,768 B.
+has an allocation of its own, it is the last loop-pin buffer. Measured on the
+linked ELF, RAM used went 228,574 → **219,486** and free 33,570 → **42,658** —
+9,088 B, about 900 more than the array itself, because its padding went too.
 
-**8,192 B of the 16,384 this format needs is banked. The other 8,192 is the
-unified associative cache**, which is also what the read-ahead ring needs
-before *it* can donate anything — see `stem-tape-ram-v1.md` for why the ring
-was the wrong donor for the scratch and remains blocked on that rework.
+**Half the 16,384 is banked. The other half is still required**, and the
+arithmetic is a floor, not a total: 42,658 − 16,384 = 26,274, which is *below*
+the 32,768 CI floor by 6,494. Adding the unified associative cache's 8,192
+lands at 34,466, clearing it by 1,698. So the cache rework stays a
+prerequisite — see `stem-tape-ram-v1.md`, which also records why the ring was
+the wrong donor for the scratch and remains blocked on that same rework.
 
 Per-stem rings at the same 8-span depth cost `8 × 2048 × 4 = 65,536 B` against
 today's 49,152 B ring — **+16,384 B**, which does not fit as things stand.
