@@ -263,6 +263,82 @@ static void case_tolerates_noise(void)
 	      duty / 10000.0);
 }
 
+/* ======================================================================
+ * 7. THE REAL MEASUREMENT, from hardware.
+ *
+ *    st32's 'M' sweep on the actual card, 24 reads per size. This is the
+ *    case that settles the question; everything above only proves the
+ *    arithmetic could tell the two answers apart.
+ *
+ *    TWO THINGS LANDED DIFFERENTLY FROM THE PREDICTION, and both are
+ *    recorded here rather than quietly absorbed:
+ *
+ *    THE READS ARE MUCH FASTER than st_latency.h's ST_LAT_READ_TYP_US.
+ *    A full sector measured 3152 us uncontended, not 5073. That figure came
+ *    from a boot capture WITH contention and is not wrong -- it is a
+ *    different quantity. Nothing here overwrites it: the read-ahead depth is
+ *    sized from contended worst cases and must stay that way.
+ *
+ *    THE FIXED COST IS 649 us, NOT 150. The phase breakdown suggested only
+ *    the CMD18/CMD12 handshake was per-read, so 3% fixed was predicted; the
+ *    truth is 21%. The feature is still affordable, but for a different
+ *    reason than predicted -- not because the fixed cost is negligible, but
+ *    because the whole read is fast enough to pay it four times over.
+ * ====================================================================== */
+static void case_the_real_measurement(void)
+{
+	/* blocks, avg_us, hunt_us -- STEMRC, firmware st32 */
+	static const uint32_t blk[5]  = { 1u, 2u, 4u, 8u, 16u };
+	static const uint32_t avg[5]  = { 675u, 1040u, 1340u, 1945u, 3152u };
+	static const uint32_t hunt[5] = { 11u, 17u, 31u, 56u, 109u };
+	st_readcost_t rc;
+	uint32_t i, duty4, duty0;
+
+	g_cases++;
+	printf("\n-- THE HARDWARE ANSWER (st32 sweep, 24 reads per size)\n");
+
+	/*
+	 * THE DECIDING PROPERTY, checked directly rather than through the fit:
+	 * the start-bit hunt must scale with the read. Per block it roughly
+	 * quadruples from 4 blocks to 16; per read it would not move at all.
+	 */
+	printf("     hunt: ");
+	for (i = 0; i < 5u; i++) {
+		printf("%u blk=%u us  ", blk[i], hunt[i]);
+	}
+	printf("\n     hunt(16)/hunt(4) = %.2f\n", (double)hunt[4] / hunt[2]);
+	CHECK((double)hunt[4] / hunt[2] > 2.5,
+	      "the start-bit hunt did not scale with the read (%.2f) -- that is "
+	      "hypothesis B and per-track reverse is impossible",
+	      (double)hunt[4] / hunt[2]);
+	/* And it is not scaling super-linearly either, which would mean bigger
+	 * reads are disproportionately punished and the planar split helps even
+	 * more than claimed. Stated so the number is bounded on both sides. */
+	CHECK((double)hunt[4] / hunt[2] < 5.0,
+	      "hunt scaled %.2f across a 4x size step -- steeper than linear",
+	      (double)hunt[4] / hunt[2]);
+
+	CHECK(st_readcost_fit(blk, avg, 5u, &rc),
+	      "the real sweep failed to fit");
+	printf("     fit: %.0f us fixed + %.1f us per block\n",
+	       rc.fixed_us_q8 / 256.0, rc.per_block_us_q8 / 256.0);
+
+	duty0 = st_readcost_planar_duty_ppm(&rc, 0u);
+	duty4 = st_readcost_planar_duty_ppm(&rc, ST_RC_STEMS);
+	printf("     duty: all forward %.1f%%, all four reversed %.1f%%\n",
+	       duty0 / 10000.0, duty4 / 10000.0);
+
+	CHECK(duty4 < 1000000u,
+	      "all four reversed needs %.1f%% of the read engine", duty4 / 10000.0);
+	/* Twenty points spare is the least that could honestly be called
+	 * viable -- see the hypothesis-B note above about headroom. */
+	CHECK(st_readcost_fits(&rc, ST_RC_STEMS, 200000u),
+	      "all four reversed leaves under 20 points of headroom (%.1f%%)",
+	      duty4 / 10000.0);
+	CHECK(duty0 < duty4,
+	      "reversing tracks must cost more than not reversing them");
+}
+
 int main(void)
 {
 	printf("== Stem Tape READ-COST MODEL (per-track reverse feasibility) ==\n");
@@ -275,6 +351,7 @@ int main(void)
 	case_cost_rises_with_divergence();
 	case_refuses_bad_input();
 	case_tolerates_noise();
+	case_the_real_measurement();
 
 	printf("\n");
 	if (g_failures) {

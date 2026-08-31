@@ -1,9 +1,64 @@
 # Per-track reverse playback — feasibility, and what it costs
 
-Status: **blocked on one hardware measurement.** The arithmetic is settled and
-host-tested (`tests/test_readcost.c`); the number that decides the outcome
-must be read off the real card with the `'M'` command before any sector
-layout is touched.
+Status: **MEASURED — affordable.** The `'M'` sweep was run on real hardware
+(firmware st32). The start-bit hunt scales with read size, so a stem-planar
+layout makes per-track reverse fit. One gate remains, and it is not storage —
+see "The second gate" below.
+
+## The measurement
+
+24 reads per size, uncontended (transfer mode, playback stopped):
+
+| blocks | bytes | average | worst | hunt |
+|---|---|---|---|---|
+| 1 | 512 | 675 µs | 2585 µs | 11 µs |
+| 2 | 1024 | 1040 µs | 1402 µs | 17 µs |
+| **4** | **2048** | **1340 µs** | **1952 µs** | **31 µs** |
+| 8 | 4096 | 1945 µs | 2458 µs | 56 µs |
+| 16 | 8192 | 3152 µs | 3703 µs | 109 µs |
+
+Fitted: **649 µs fixed per read + 158.4 µs per block.**
+
+**The deciding number:** the hunt went 31 µs → 109 µs across a 4× size step,
+a ratio of **3.52**. Per-block predicts ~4.0; per-read predicts ~1.0. It is
+**hypothesis A**, and the feature is affordable.
+
+| tracks reversed | reads | µs | duty |
+|---|---|---|---|
+| 0 | 1 × 16 blk | 3152 | **44.5%** |
+| 1 | 1 × 12 blk + 1 × 4 blk | 3889 | 54.9% |
+| 2 | 1 × 8 blk + 2 × 4 blk | 4625 | 65.3% |
+| 3 or 4 | 4 × 4 blk | 5360 | **75.7%** |
+
+## Two things the measurement corrected
+
+**The reads are much faster than `ST_LAT_READ_TYP_US`.** A full sector is
+3152 µs uncontended, not 5073. That older figure came from a boot capture
+*with* contention and is a different quantity — it is **not** wrong and has
+**not** been changed here. The read-ahead depth is sized from contended
+worst cases and must stay that way.
+
+**The fixed cost is 649 µs (21%), not the predicted 150 µs (3%).** The phase
+breakdown suggested only the CMD18/CMD12 handshake was per-read; there is
+about 500 µs more per-read overhead than that accounted for. The conclusion
+survives, but for a different reason than predicted: not because the fixed
+cost is negligible, but because the whole read is fast enough to pay it four
+times over.
+
+## The second gate
+
+Every duty figure above says what fraction of wall clock **the streamer
+needs**. These reads were measured with playback stopped, so they are
+uncontended. During playback the streamer competes with the audio thread,
+the MIDI thread and the control loop, and this project has already been
+bitten by exactly that: reads stretched from 5073 µs to ~12500 µs when the
+streamer's share fell to 42%, and the song played slow and crushed.
+
+Four reversed tracks need **75.7% of wall clock for the streamer alone**,
+leaving 24% for everything else. Forward-only needs 44.5%. Whether the
+scheduler can give the streamer three quarters of the CPU is **unmeasured**,
+and it should be measured before the format change is committed to — it is
+now the only thing between here and the feature.
 
 ## The request
 
@@ -23,14 +78,16 @@ delays the problem: sustained reverse needs sustained reads of older sectors.
 With 34.5 KB free and 24 B per frame, a full-fidelity history of all four
 stems buys **~30 ms** of backward travel, which is not a musical feature.
 
-Against `st_latency.h`'s measured figures:
+Estimated before the sweep, from `st_latency.h`'s contended figures
+(**superseded** by the measurement above — the real uncontended read is 3152 µs,
+so today's duty is 44.5%, not 71.6%; the conclusion below is unchanged because
+it is about needing a *second whole stream*, not about its exact size):
 
 | | |
 |---|---|
 | audio per sector | `ST_LAT_SECTOR_US` 7083 µs |
-| typical sector read | `ST_LAT_READ_TYP_US` 5073 µs |
-| forward playback duty | 5073 / 7083 = **71.6%** |
-| headroom | 28.4% — about 0.4 of a stream |
+| sector read, contended | `ST_LAT_READ_TYP_US` 5073 µs |
+| forward playback duty | 5073 / 7083 = 71.6% |
 | one reversed track (v1.1 layout) | +71.6% → **143%** |
 
 143% does not fit in 100%. On this device a sustained read deficit does not
@@ -40,7 +97,7 @@ present as dropouts; it presents as the song playing **slow and crushed**
 **The Tape Looper has no reverse to reuse.** There is no reverse DSP anywhere
 in the firmware; `firmware/src/main.c` has never had one.
 
-## The one thing that could make it affordable
+## Background: why it was in doubt at all
 
 If each stem's samples were **contiguous in their own plane** within the
 sector, a reversed stem could fetch just its own quarter — 4 blocks instead
@@ -73,18 +130,12 @@ access hunt "every per-block bound" — which says **A**. That is a strong
 argument from source and it is **not a measurement**. A layout change
 re-encodes every stored song, so it is gated on the real card.
 
-## Cost, if A holds
+## Cost — measured
 
-| tracks reversed | reads per sector | duty |
-|---|---|---|
-| 0 | 1 | 71.6% — unchanged from today |
-| 1 | 2 | 73.7% |
-| 2 | 3 | 75.8% |
-| 3 or 4 | 4 | 77.9% |
-
-Ordinary playback is **not** taxed: with nothing diverging the four planes are
-contiguous and are still one read. The price is one read's fixed cost per
-diverging track, and it is only paid while tracks actually diverge.
+See the duty table at the top. Ordinary playback is **not** taxed: with nothing
+diverging the four planes are contiguous and are still one read, so zero
+reversed tracks costs exactly what playback costs today. The price is one
+read's fixed cost per diverging track, paid only while tracks actually diverge.
 
 ## Running the measurement
 
@@ -97,7 +148,7 @@ STEMRC blocks=1  n=24 avg_us=… worst_us=… hunt_us=… dma_us=… crc_us=…
 STEMRC blocks=2  …
 STEMRC blocks=4  …          <- the stem-plane size; this is the one that matters
 STEMRC blocks=8  …
-STEMRC blocks=16 …          <- should land near 5073
+STEMRC blocks=16 …          <- a full sector; measured 3152 us
 STEMRC sweep end
 ```
 
@@ -109,15 +160,20 @@ bandwidth from a live stream and skew its own result.
 
 **Reading the answer:** watch `hunt_us` across the sizes. If it falls roughly
 in proportion to `blocks=`, hypothesis A holds and per-track reverse is
-affordable. If it stays near 1763 µs regardless of size, B holds and no layout
-change rescues the feature. Feed the `blocks` / `avg_us` pairs through
+affordable — which is what the run above found (31 µs at 4 blocks, 109 µs at
+16). If it had stayed flat regardless of size, B would hold and no layout
+change would rescue the feature. Feed the `blocks` / `avg_us` pairs through
 `st_readcost_fit()` for the fitted split and
 `st_readcost_planar_duty_ppm()` for the duty at each level of divergence.
 
 ## What would then have to be built
 
-Confirming A does not implement the feature. It unblocks a sizeable project:
+Confirming A does not implement the feature. It unblocks a sizeable project,
+and the CPU-share gate above should be settled first — it can still stop it:
 
+0. **Measure the streamer's wall-clock share during playback.** Four reversed
+   tracks need 75.7% of it. If the scheduler cannot give that, the format
+   change would be wasted work.
 1. **Sector format v1.2** — stem-planar layout, new encoder/decoder, new
    fixtures. The frozen handoff fixtures are byte-exact contracts.
 2. **Companion re-encode** — every stored song must be re-uploaded.

@@ -47,6 +47,20 @@
  *   -- 153% duty. PER-TRACK REVERSE IS IMPOSSIBLE, and no amount of layout
  *   work changes that.
  *
+ * MEASURED, firmware st32, 24 reads per size, uncontended: the hunt went
+ * 31 us at 4 blocks to 109 us at 16 -- a ratio of 3.52 against the 4.0 that
+ * per-block predicts and the 1.0 that per-read predicts. HYPOTHESIS A HOLDS
+ * and per-track reverse is affordable at 75.7% duty with all four reversed.
+ *
+ * Two corrections the measurement forced. A full sector read is 3152 us
+ * uncontended, not the 5073 us of ST_LAT_READ_TYP_US -- that figure is from a
+ * CONTENDED boot capture, is a different quantity, and is deliberately left
+ * alone because the read-ahead depth is sized from it. And the fixed cost is
+ * 649 us, not the 150 us predicted here: there is ~500 us more per-read
+ * overhead than the phase breakdown accounted for. The verdict survives for a
+ * different reason than predicted -- not a negligible fixed cost, but a read
+ * fast enough to pay it four times.
+ *
  * sp1_emmc.c's emmc_read_blocks() puts the hunt inside its per-block loop and
  * its own comments call the 80 ms access hunt "every per-block bound", which
  * says A. That is a strong argument and it is NOT a measurement. A sector
