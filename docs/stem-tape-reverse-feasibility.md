@@ -1,7 +1,60 @@
 # Per-track reverse playback — feasibility, and what it costs
 
-Status: **STORAGE YES. CPU: FOUR TRACKS NO — measured, controlled, on
-hardware. ONE TRACK is the only level that still matters, and it is unmeasured.**
+Status: **GO, for one reversed track at a time.** Storage yes; CPU measured on
+hardware, controlled, both directions: **one track PASSES** (zero dropouts,
+92% busy against an 83% baseline), **four tracks FAIL**. One at a time is the
+requirement, so the feature is affordable — with a margin caveat recorded
+below that has not been tested and should be.
+
+## The result (firmware st36, the controlled gate)
+
+### Level 1 — PASS
+
+```
+STEMPGATE RESULT rev=1 PASS
+STEMPGATE  baseline und=0 sectors=2824 keepup=100% worst_fetch_us=21615
+STEMPGATE  test     und=0 sectors=2822 keepup=99%  worst_fetch_us=22259
+```
+
+`busy` held 83% through the baseline and 92% through the test.
+
+**The 99% is integer truncation, not a shortfall.** A 20-second window needs
+2823 sectors; the test window fetched 2822, or 99.96%, and the baseline
+fetched 2824, or 100.04%. The two windows differ by two sectors out of 2824 —
+0.07%. Both kept up.
+
+**The model is now validated against a point that can validate it.** Level 4
+measured at 99% busy, which is a *ceiling* — it establishes "needs more than
+100%" and cannot confirm a slope. Level 1 is unsaturated, so it can:
+
+| | predicted | measured |
+|---|---|---|
+| extra CPU points at level 1 | +9.3 | **+9.0** |
+| busy at level 1 | 92% | **92%** |
+
+Predicting the marginal cost of one extra read to within 0.3 points is the
+first real evidence that the cost model describes this device rather than
+merely fitting its sweep. It also means the extrapolation to level 2 (+18.6,
+~102%) is now worth something — and it says level 2 does not fit, which is
+consistent with level 4 having saturated.
+
+### The margin, which is the part still worth worrying about
+
+92% leaves **8 points**. The standing requirement is no dropouts *ever*, and
+8 points is not a comfortable margin against "ever". More importantly, the
+baseline was measured under **plain playback**: the gate isolates the read
+pattern's marginal cost, which is exactly what it was built to do, and that is
+not the same as establishing the feature is safe under everything else the
+device does at once — loop, FX, pitch, solo, LED activity.
+
+The test for that is cheap and uses the instrument that already exists: run
+level 1 again while actively working the device. If the baseline rises and the
+test window then drops audio, the answer changes. If the **baseline itself**
+starts dropping, the gate reports INCONCLUSIVE rather than blaming reverse —
+which is precisely the case the third verdict exists for.
+
+**This has not been run.** Until it is, "one track is affordable" means "under
+plain playback", and should be written that way.
 
 ## Scope: one reversed track at a time
 
@@ -33,7 +86,10 @@ and the measured failure stops being a risk the design has to live with. That
 is a decision to make when the feature is built, not an assumption to bake in
 now — recorded here so it is not lost.
 
-## The result (firmware st36, the controlled gate)
+## Level 4 — FAIL
+
+Kept after the scope narrowed to one track, because this is the measurement
+that made the ceiling real and it is what the level-1 result is read against.
 
 ```
 STEMPGATE RESULT rev=4 FAIL
@@ -69,32 +125,36 @@ about the ring and sobering about the headroom.
 the streamer's reads only account for ~45% of a sector period. The remaining
 17 points are the entire budget for anything new.
 
-### Projection to the untested levels — and its limits
+### The cost table, and how much of it is now measured
 
-The second sweep refit at **665 us fixed + 156.8 us per block** (the first
-sweep: 625 + 159.3 — the card is reproducible). Each diverging track costs one
-extra read, so one extra fixed cost:
+Three sweeps, all on the same card:
 
-| tracks reversed | reads | fetch us | storage duty | extra CPU points | projected busy |
+| sweep | fixed | per block |
+|---|---|---|
+| 1 | 625.1 us | 159.3 us |
+| 2 | 665.0 us | 156.8 us |
+| 3 | 656.4 us | 157.6 us |
+
+Each diverging track costs one extra read, so one extra fixed cost. Using
+sweep 3:
+
+| tracks reversed | reads | fetch us | storage duty | extra CPU points | busy |
 |---|---|---|---|---|---|
-| 0 | 1 | 3173 | 44.8% | — | 83% |
-| 1 | 2 | 3838 | 54.2% | +9.4 | **92%** |
-| 2 | 3 | 4503 | 63.6% | +18.8 | **102%** |
-| 3 | 4 | 5168 | 73.0% | +28.2 | 111% |
-| 4 | 4 | 5168 | 73.0% | +28.2 | 111% (measured: 99%, capped, keepup 86%) |
+| 0 | 1 | 3157 | 44.6% | — | **83% measured** |
+| 1 | 2 | 3814 | 53.8% | +9.3 predicted | **92% measured** (+9.0) |
+| 2 | 3 | 4470 | 63.1% | +18.6 predicted | ~102% projected |
+| 3 | 4 | 5127 | 72.4% | +27.8 predicted | ~111% projected |
+| 4 | 4 | 5127 | 72.4% | +27.8 predicted | 99% measured, capped, keepup 86% |
 
-**Do not read that table as a result for level 1.** The only measured point is
-level 4, and it is *saturated* — 99% is a ceiling, so it establishes that level
-4 needs more than 100% without establishing how much more. The slope is
-therefore modelled, not measured, and the projection inherits every assumption
-in the model (that the extra cost is exactly the extra fixed per-read price,
-and that it converts one-for-one into CPU busy). 92% is a plausible number, not
-a finding, and 92% against a 17-point budget is not a comfortable margin even
-if it is right. Level 1 is one 45-second run. Run it.
+**Levels 0, 1 and 4 are measured; 2 and 3 are not.** Level 4 is saturated —
+99% is a ceiling, so it bounds the cost without measuring it. Level 1 is the
+one point that both is measured and has headroom, and it agrees with the model
+to 0.3 points. That is what makes the level-2 projection worth quoting at all,
+and it says level 2 does not fit.
 
-Note also that storage duty and CPU busy are different quantities: the storage
-can serve level 4 at 73% duty, and the CPU still cannot afford it. The storage
-sweep was never going to answer this question, which is why there are two.
+Note that storage duty and CPU busy are different quantities: the storage can
+serve level 4 at 72% duty and the CPU still cannot afford it. The storage sweep
+was never going to answer this question, which is why there are two.
 
 ## The retracted st33 run, and why it did not settle the question
 
