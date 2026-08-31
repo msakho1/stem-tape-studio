@@ -1,10 +1,17 @@
 # Per-track reverse playback — feasibility, and what it costs
 
-Status: **GO, for one reversed track at a time.** Storage yes; CPU measured on
-hardware, controlled, both directions: **one track PASSES** (zero dropouts,
-92% busy against an 83% baseline), **four tracks FAIL**. One at a time is the
-requirement, so the feature is affordable — with a margin caveat recorded
-below that has not been tested and should be.
+Status: **GO, for one reversed track at a time, from a reversible PAIR.**
+Storage yes. CPU measured on hardware, controlled, at three levels: **1 PASSES**
+(zero dropouts, 92% busy against an 83% baseline), **2 FAILS** (742 dropouts,
+99%), **4 FAILS** (1212 dropouts, 99%).
+
+One reversed stem costs two reads only when the other three stay contiguous,
+which happens only when the reversed one sits at a sector END. So exactly two
+of the four stems are reversible — and since the v1.2 plane order is ours to
+define, WHICH two is a product decision, not a constraint. See "which stem is
+reversed changes the cost" below.
+
+A margin caveat recorded below has not been tested and should be.
 
 ## The result (firmware st36, the controlled gate)
 
@@ -105,10 +112,43 @@ three contiguous, so they are still one read. Removing a MIDDLE plane does not.
 | 1 (drums) or 2 (bass), whole sector + plane | `blk0+16`, `blk?+4` | 2 | 20 | 4465 | ~101% projected |
 | 1 or 2, three reads | `blk0+4`, `blk8+8`, `blk?+4` | 3 | 16 | 4491 | ~102% projected |
 
-Both middle-stem plans land at roughly **level-2 cost**, and level 2 is
-projected not to fit. So "double-click any track" is not yet established — only
-"double-click vocal or instrument" is. Reversing drums or bass is an open
-question with a projection that says no.
+Both middle-stem plans land at roughly **level-2 cost**.
+
+### Level 2 — FAIL (measured)
+
+```
+STEMPGATE RESULT rev=2 FAIL
+STEMPGATE  baseline und=0   sectors=2824 keepup=100% worst_fetch_us=21722
+STEMPGATE  test     und=742 sectors=2727 keepup=96%  worst_fetch_us=23084
+```
+
+83% busy through the baseline, 99% through the test. Predicted +18.5 points
+(101.5%); measured saturated at 99% with a 4% keep-up shortfall — consistent,
+and the third time the model has matched.
+
+The cheapest middle-stem plan costs 4465 us against this run's 4491 us — **0.4
+points apart**. There is no useful margin between them, so this result settles
+the middle stems too: **at the sector positions inherited from v1.1, drums and
+bass cannot be reversed.**
+
+### But the plane order is a v1.2 choice, not a constraint
+
+`vocal, drums, bass, instrument` is a v1.1 convention. In v1.2 the plane order
+is ours to define, and each plane header carries its own stem id, so any
+permutation is self-describing and checkable.
+
+So the real statement is: **exactly two stems are reversible, and which two is
+decided by putting them at plane 0 and plane 3.** The measurement constrains
+the count, not the identity.
+
+Whichever two are chosen, the gesture offers reverse on those and leaves the
+other two forward — which is also what makes the one-at-a-time rule
+enforceable: at most one reversed stem, and only from the reversible pair.
+
+The remaining escape from "exactly two" is a lower baseline. Playback sits at
+83% busy while its reads account for ~45% of a sector period; if that came
+down, middle stems would fit. That is a separate optimisation with no evidence
+behind it yet, and it is not on this project's path.
 
 There is no layout that fixes this by rearranging four equal planes: a sector
 has two ends, and any of the four stems can be the reversed one. Storing a
