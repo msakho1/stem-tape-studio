@@ -4795,10 +4795,17 @@ static void xfer_service(void)
 		 * begins in SETTLE, whose level is 0, so there is nothing to
 		 * publish early and nothing to race. */
 		cdc_tx(&ack, 1);
-		printk("STEMPGATE armed rev=%u -- settle %u ms, then %u ms baseline "
-		       "and %u ms test; press PLAY\n",
-		       (unsigned)next, (unsigned)ST_PGATE_SETTLE_MS,
-		       (unsigned)ST_PGATE_WINDOW_MS, (unsigned)ST_PGATE_WINDOW_MS);
+		/* Two distinct lines, because "armed rev=0" would be a lie: level
+		 * 0 is the shipped read pattern, i.e. the run abandoned. */
+		if (next == 0u) {
+			printk("STEMPGATE armed rev=0 -- disarmed\n");
+		} else {
+			printk("STEMPGATE armed rev=%u -- settle %u ms, then %u ms "
+			       "baseline and %u ms test; press PLAY\n",
+			       (unsigned)next, (unsigned)ST_PGATE_SETTLE_MS,
+			       (unsigned)ST_PGATE_WINDOW_MS,
+			       (unsigned)ST_PGATE_WINDOW_MS);
+		}
 	} else if (cmd == 'M') {                               /* READ-SIZE SWEEP -- read-only measurement */
 		/*
 		 * WHAT THIS ANSWERS, and why it is worth a command.
