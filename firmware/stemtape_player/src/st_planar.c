@@ -1,0 +1,134 @@
+/*
+ * st_planar.c -- see st_planar.h for why the layout changes and why batching
+ * is what makes it cost nothing.
+ */
+
+#include "st_planar.h"
+
+/*
+ * THE GEOMETRY, PINNED. Every one of these is load-bearing somewhere in the
+ * header's argument, and a silent change to any would make a v1.2 song a
+ * different length from the v1.1 song it was converted from -- which the STIX
+ * geometry fields would then describe wrongly.
+ */
+_Static_assert(ST_PL_HEADER_BYTES + ST_PL_FRAMES_PER_GROUP * ST_PL_FRAME_BYTES ==
+		       ST_PL_GROUP_BYTES,
+	       "a group must be exactly its header plus its frames");
+_Static_assert(ST_PL_GROUP_BYTES == 2048u, "a group is 4 physical blocks");
+_Static_assert(ST_PL_BLOCKS_PER_GROUP_ALL == ST11_BLOCKS_PER_SECTOR,
+	       "one group index across four stems must cost what a v1.1 sector cost");
+_Static_assert(ST_PL_FRAMES_PER_GROUP == ST11_FRAMES_PER_SECTOR,
+	       "frames per group must equal v1.1 frames per sector");
+_Static_assert(ST_PL_STEMS * ST_PL_FRAME_BYTES == ST11_BYTES_PER_FRAME,
+	       "four stems of one frame must be a v1.1 frame");
+_Static_assert(ST_PL_OFF_FRAMES == ST_PL_HEADER_BYTES, "frames follow the header");
+
+uint32_t st_pl_group_block(uint32_t song_start_block, uint32_t groups,
+			    uint32_t stem, uint32_t group_index)
+{
+	return song_start_block +
+	       (stem * groups + group_index) * ST_PL_GROUP_BLOCKS;
+}
+
+void st_pl_write_header(uint8_t group[ST_PL_GROUP_BYTES], uint32_t stem,
+			 uint32_t group_index)
+{
+	group[ST_PL_OFF_MAGIC_0] = ST_PL_MAGIC_0;
+	group[ST_PL_OFF_MAGIC_1] = ST_PL_MAGIC_1;
+	group[ST_PL_OFF_STEM]    = (uint8_t)stem;
+	group[ST_PL_OFF_FLAGS]   = 0u;
+	group[ST_PL_OFF_GROUP + 0u] = (uint8_t)(group_index & 0xffu);
+	group[ST_PL_OFF_GROUP + 1u] = (uint8_t)((group_index >> 8) & 0xffu);
+	group[ST_PL_OFF_GROUP + 2u] = (uint8_t)((group_index >> 16) & 0xffu);
+	group[ST_PL_OFF_GROUP + 3u] = (uint8_t)((group_index >> 24) & 0xffu);
+}
+
+bool st_pl_read_header(const uint8_t group[ST_PL_GROUP_BYTES],
+			st_pl_header_t *out)
+{
+	if (group[ST_PL_OFF_MAGIC_0] != ST_PL_MAGIC_0 ||
+	    group[ST_PL_OFF_MAGIC_1] != ST_PL_MAGIC_1) {
+		return false;
+	}
+	out->stem  = group[ST_PL_OFF_STEM];
+	out->flags = group[ST_PL_OFF_FLAGS];
+	out->group_index = (uint32_t)group[ST_PL_OFF_GROUP + 0u] |
+			   ((uint32_t)group[ST_PL_OFF_GROUP + 1u] << 8) |
+			   ((uint32_t)group[ST_PL_OFF_GROUP + 2u] << 16) |
+			   ((uint32_t)group[ST_PL_OFF_GROUP + 3u] << 24);
+	/* A stem index outside the four that exist is a malformed group, not a
+	 * group belonging to some other stem -- reject rather than let it
+	 * compare unequal and read as an ordinary miss. */
+	if (out->stem >= ST_PL_STEMS) {
+		return false;
+	}
+	/* Flags are reserved and must be zero. A future format that sets one
+	 * is a format this build does not understand, and playing it as though
+	 * the byte meant nothing is exactly the silent misread the version
+	 * gates exist to prevent. */
+	if (out->flags != 0u) {
+		return false;
+	}
+	return true;
+}
+
+bool st_pl_validate(const uint8_t group[ST_PL_GROUP_BYTES], uint32_t want_stem,
+		     uint32_t want_group)
+{
+	st_pl_header_t h;
+
+	if (!st_pl_read_header(group, &h)) {
+		return false;
+	}
+	return h.stem == want_stem && h.group_index == want_group;
+}
+
+uint32_t st_pl_plan_batch(st_pl_read_t out[ST_PL_STEMS],
+			   uint32_t song_start_block, uint32_t groups,
+			   const uint32_t head_group[ST_PL_STEMS],
+			   const st_pl_dir_t dir[ST_PL_STEMS],
+			   uint32_t groups_per_batch)
+{
+	uint32_t k;
+
+	for (k = 0u; k < ST_PL_STEMS; k++) {
+		uint32_t head = head_group[k];
+		uint32_t first, n;
+
+		if (groups_per_batch == 0u || groups == 0u || head >= groups) {
+			out[k].stem = k;
+			out[k].first_group = 0u;
+			out[k].groups = 0u;
+			out[k].block = song_start_block;
+			out[k].blocks = 0u;
+			continue;
+		}
+
+		if (dir[k] == ST_PL_REV) {
+			/*
+			 * A REVERSED STEM STILL READS ASCENDING. Its next N
+			 * groups to PLAY are head, head-1, ... head-N+1, which
+			 * as an address range is [head-N+1, head]. Reading it
+			 * back-to-front would turn one contiguous run into N
+			 * separate reads and give away the entire saving.
+			 */
+			n = (head + 1u < groups_per_batch) ? (head + 1u)
+							    : groups_per_batch;
+			first = head + 1u - n;
+		} else {
+			first = head;
+			n = groups - head;
+			if (n > groups_per_batch) {
+				n = groups_per_batch;
+			}
+		}
+
+		out[k].stem        = k;
+		out[k].first_group = first;
+		out[k].groups      = n;
+		out[k].block       = st_pl_group_block(song_start_block, groups,
+						        k, first);
+		out[k].blocks      = n * ST_PL_GROUP_BLOCKS;
+	}
+	return ST_PL_STEMS;
+}

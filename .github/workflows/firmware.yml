@@ -2207,6 +2207,55 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Stem Tape v1.2 SONG-PLANAR addressing (pure; no production wiring yet)
+        # THE FORMAT'S WHOLE JUSTIFICATION, as an executable claim. v1.1 weaves
+        # all four stems into every frame, so a stem playing from a different
+        # point costs a whole extra sector -- and WHICH stem it is decides how
+        # much, because removing a middle plane also splits the remaining
+        # three. Both were measured on hardware: a stem at a sector END ran
+        # clean at 92% busy, a middle one cost about what two do and failed
+        # with 742 dropouts at 99%.
+        #
+        # Song-planar gives each stem its own contiguous quarter, so reversing
+        # one changes only the ADDRESS of its read. The test that matters is
+        # 'cost does not depend on which stem, which direction, or how many
+        # diverge' -- if that ever stops holding, the format change has no
+        # reason to exist and this step must fail rather than quietly pass.
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          cc -std=c11 -Wall -Wextra -Werror -Ifirmware/stemtape_player/src \
+            firmware/stemtape_player/src/st_planar.c \
+            firmware/stemtape_player/tests/test_planar.c \
+            -o audit/test_planar
+          ./audit/test_planar | tee audit/planar-selftest.txt
+
+          # Each of these is a property the format is FOR. A test file that
+          # stops exercising one would still pass; this step would not.
+          grep -q 'THE REASON THE FORMAT EXISTS' audit/planar-selftest.txt
+          grep -q 'a song is the same length as v1.1' audit/planar-selftest.txt
+          grep -q 'no gap, no overlap' audit/planar-selftest.txt
+          grep -q 'still one ascending run' audit/planar-selftest.txt
+          grep -q 'WRONG address is refused' audit/planar-selftest.txt
+
+          # NOT WIRED YET, and that is deliberate: this commit adds the pure
+          # addressing only. Playback still reads v1.1 sectors, so the format
+          # version must NOT have moved.
+          grep -q '#define ST11_FORMAT_MINOR   1u' \
+            firmware/stemtape_player/src/st_v11_format.h || {
+            echo "  the format version moved before the read path was converted"
+            exit 1; }
+          test "$(grep -c 'st_planar.h' firmware/stemtape_player/src/main.c)" = "0" || {
+            echo "  main.c already includes st_planar.h -- this step's claim of"
+            echo "  'no production wiring' is stale and must be rewritten"
+            exit 1; }
+          {
+            echo '### Stem Tape v1.2 song-planar addressing'
+            echo '```text'
+            cat audit/planar-selftest.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Stem Tape PLANAR CPU GATE -- a controlled A/B, not a toggle
         # THE INSTRUMENT, after the first one produced a verdict that did not
         # survive audit. That version armed a read pattern and counted
