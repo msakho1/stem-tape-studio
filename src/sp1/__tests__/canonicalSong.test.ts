@@ -12,8 +12,17 @@ import {
 } from "../song";
 import { evaluate, parseCapabilities, readOnlyVerdict, READ_ONLY_NOTICE } from "../compatibility";
 import { ReadOnlyDeviceError, StemTapeTransport } from "../transport";
-import { CAP_FLAG, FRAMES_PER_SECTOR, REQUIRED_CAP_FLAGS, SECTOR_BYTES, sectorsForFrames } from "../stemTapeFormat";
-import { blocksToSector, decodeSectors, encodeSong, readSectorHeader, sectorToBlocks } from "../sector";
+import {
+  CAP_FLAG,
+  FRAMES_PER_SECTOR,
+  GROUP_BYTES,
+  GROUP_HEADER_BYTES,
+  REQUIRED_CAP_FLAGS,
+  SECTOR_BYTES,
+  groupsForFrames,
+  sectorsForFrames,
+} from "../stemTapeFormat";
+import { blocksToSector, decodeSectors, encodeSong, readGroupHeader, sectorToBlocks, sectorToGroups } from "../sector";
 
 const STEMS = ["vocal", "drums", "bass", "instrument"] as const;
 
@@ -140,10 +149,36 @@ describe("logical 8 KiB sector mapping", () => {
     for (let t = 0; t < 4; t++) {
       expect(checksum32(decodedSong.stems[t]!)).toBe(song.stems[t]!.checksum);
     }
-    const h = readSectorHeader(sectors[2]!);
-    expect(h.firstFrame).toBe(FRAMES_PER_SECTOR * 2);
-    expect(h.frameCount).toBe(7);
-    expect(decodedSong.bpm).toBeCloseTo(120, 6);
+    // v1.2 planar: three groups per stem, laid out stem-major. Global group
+    // stream index g maps to stem = floor(g/3), groupIndex = g % 3.
+    const groups = groupsForFrames(song.frames);
+    expect(groups).toBe(3);
+    const all = sectors.flatMap((s) => sectorToGroups(s));
+    expect(all).toHaveLength(4 * groups);
+    all.forEach((g, i) => {
+      const h = readGroupHeader(g);
+      expect(g.length).toBe(GROUP_BYTES);
+      expect(h.magicOk).toBe(true);
+      expect(h.flags).toBe(0);
+      expect(h.stemIndex).toBe(Math.floor(i / groups));
+      expect(h.groupIndex).toBe(i % groups);
+    });
+
+    // Every stem's last group is partial (7 of 340 frames) and zero-padded.
+    for (let stem = 0; stem < 4; stem++) {
+      const last = all[stem * groups + (groups - 1)]!;
+      const tail = last.subarray(GROUP_HEADER_BYTES + 7 * 6);
+      expect(tail.every((b) => b === 0)).toBe(true);
+    }
+
+    // A stem's timeline is contiguous: its quarter is exactly groups*2048 B.
+    for (let stem = 0; stem < 4; stem++) {
+      const flat = new Uint8Array(groups * (GROUP_BYTES - GROUP_HEADER_BYTES));
+      for (let g = 0; g < groups; g++) {
+        flat.set(all[stem * groups + g]!.subarray(GROUP_HEADER_BYTES), g * (GROUP_BYTES - GROUP_HEADER_BYTES));
+      }
+      expect(Array.from(flat.subarray(0, song.frames * 6))).toEqual(Array.from(song.stems[stem]!.pcm24));
+    }
   });
 });
 

@@ -22,6 +22,7 @@ import {
   CRC_ZEROED,
   FORMAT_MAJOR,
   FORMAT_MINOR,
+  FORMAT_MINOR_V11,
   FRAMES_PER_SECTOR,
   INDEX_RECORD_BYTES,
   IX_OFF,
@@ -47,7 +48,8 @@ const bin = (name: string) => new Uint8Array(readFileSync(`handoff/v1.1/binaries
 
 describe("published contract matches the implementation", () => {
   it("contains the generated numeric appendix verbatim", () => {
-    const appendix = buildAppendix();
+    // The published v1.1 document is frozen; it is regenerated at its own version.
+    const appendix = buildAppendix(FORMAT_MINOR_V11);
     // Point at the first divergent line instead of dumping the whole appendix.
     const want = appendix.split("\n");
     if (!doc.includes(appendix)) {
@@ -98,7 +100,7 @@ describe("published contract matches the implementation", () => {
     expect(raw.length).toBe(4 + CAPS_BYTES);
     const caps = parseCapabilities(raw.slice(4));
     expect(caps.formatMajor).toBe(FORMAT_MAJOR);
-    expect(caps.formatMinor).toBe(FORMAT_MINOR);
+    expect(caps.formatMinor).toBe(FORMAT_MINOR_V11); // frozen v1.1 fixture
     expect(caps.stixVersion).toBe(STIX_VERSION);
     expect(caps.sampleRate).toBe(SAMPLE_RATE);
     expect(caps.blockSize).toBe(PHYSICAL_BLOCK_BYTES);
@@ -124,7 +126,7 @@ describe("published contract matches the implementation", () => {
       const rec = parseIndexRecord(b);
       expect(rec.indexVersion).toBe(STIX_VERSION);
       expect(rec.formatMajor).toBe(FORMAT_MAJOR);
-      expect(rec.formatMinor).toBe(FORMAT_MINOR);
+      expect(rec.formatMinor).toBe(FORMAT_MINOR_V11); // frozen v1.1 fixture
       expect(rec.sampleRate).toBe(SAMPLE_RATE);
       expect(rec.channels).toBe(CHANNELS);
       expect(rec.bitDepth).toBe(PCM_BIT_DEPTH);

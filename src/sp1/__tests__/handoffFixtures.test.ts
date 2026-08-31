@@ -11,7 +11,7 @@ import { describe, expect, it } from "vitest";
 import { parseCapabilities } from "../compatibility";
 import { parseIndexRecord, validateIndexRecord } from "../stemIndex";
 import { readSlot, selectActiveIndex } from "../activeIndex";
-import { decodeSectors } from "../sector";
+import { decodeSectorsV11 } from "../sector";
 import { checksum32 } from "../song";
 import { crc32 } from "../crc32";
 import {
@@ -63,7 +63,7 @@ describe("frozen v1.1 handoff bundle", () => {
     const img = bin("storage-initialized-empty.bin");
     const a = img.subarray(0, 512);
     const b = img.subarray(512, 1024);
-    const lib = selectActiveIndex(readSlot(SLOT_A, a, regions), readSlot(SLOT_B, b, regions));
+    const lib = selectActiveIndex(readSlot(SLOT_A, a, regions, 1), readSlot(SLOT_B, b, regions, 1));
     expect(lib.requiresInitialization).toBe(false);
     expect(lib.activeIndexSlot).toBe(SLOT_A);
     expect(lib.generation).toBe(1);
@@ -74,8 +74,8 @@ describe("frozen v1.1 handoff bundle", () => {
   it("index A and index B fixtures are both valid and select the newer generation", () => {
     const a = bin("index-a-valid.bin");
     const b = bin("index-b-valid.bin");
-    const ra = readSlot(SLOT_A, a, regions);
-    const rb = readSlot(SLOT_B, b, regions);
+    const ra = readSlot(SLOT_A, a, regions, 1);
+    const rb = readSlot(SLOT_B, b, regions, 1);
     expect(ra.validation.valid).toBe(true);
     expect(rb.validation.valid).toBe(true);
     const lib = selectActiveIndex(ra, rb);
@@ -89,11 +89,11 @@ describe("frozen v1.1 handoff bundle", () => {
     const slot = json("index-uncommitted.json").decoded.record.slotIdentity as 0 | 1;
 
     expect(parseIndexRecord(un).committed).toBe(false);
-    expect(validateIndexRecord(parseIndexRecord(un), slot, regions).valid).toBe(false);
+    expect(validateIndexRecord(parseIndexRecord(un), slot, regions, 1).valid).toBe(false);
 
     const rec = parseIndexRecord(magic);
     expect(rec.committed).toBe(true);
-    expect(validateIndexRecord(rec, slot, regions).valid).toBe(true);
+    expect(validateIndexRecord(rec, slot, regions, 1).valid).toBe(true);
     expect(rec.crc).toBe(rec.crcComputed);
 
     const diff: number[] = [];
@@ -113,7 +113,7 @@ describe("frozen v1.1 handoff bundle", () => {
     expect(img.length).toBe(meta.sectorCount * SECTOR_BYTES);
     const sectors: Uint8Array[] = [];
     for (let i = 0; i < meta.sectorCount; i++) sectors.push(img.subarray(i * SECTOR_BYTES, (i + 1) * SECTOR_BYTES));
-    const decoded = decodeSectors(sectors, meta.frames);
+    const decoded = decodeSectorsV11(sectors, meta.frames);
     const sums = decoded.stems.map((s) => checksum32(s));
     expect(sums).toEqual(meta.stems.map((s: { checksum: number }) => s.checksum));
   });

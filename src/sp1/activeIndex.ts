@@ -67,13 +67,19 @@ function isBlank(bytes: Uint8Array): boolean {
   return bytes.every((b) => b === 0);
 }
 
-export function readSlot(slot: AbSlot, bytes: Uint8Array, regions: RegionContext): SlotReading {
+export function readSlot(
+  slot: AbSlot,
+  bytes: Uint8Array,
+  regions: RegionContext,
+  /** Frozen-bundle audits pass 1 to read a historical v1.1 record. */
+  expectFormatMinor?: number,
+): SlotReading {
   const record = parseIndexRecord(bytes);
   return {
     slot,
     bytes: bytes.slice(0),
     record,
-    validation: validateIndexRecord(record, slot, regions),
+    validation: validateIndexRecord(record, slot, regions, expectFormatMinor),
     blank: isBlank(bytes),
   };
 }
