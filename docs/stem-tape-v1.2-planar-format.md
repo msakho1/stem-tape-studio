@@ -101,6 +101,43 @@ fixed read cost per span that it pays now — because the same bytes are being
 fetched, just grouped by stem instead of by time. **Any stem reversed, all four
 reversed, none reversed: 3178 us either way.**
 
+## Buffering: ring size, refill size, and the depth that must not shrink
+
+The read path needs a per-stem ring of G groups, refilled R groups at a time.
+Three things pull against each other and only certain (G, R) pairs are safe:
+
+- **RAM** = `4 stems x G x 2048`.
+- **CPU** = one read per stem per refill: `4 x read(4R) / R` per span.
+- **DEPTH** = `G - R` spans always buffered. This is the one with a hard
+  floor: a single worst-case fetch was MEASURED at 21.6-23.6 ms under load, and
+  a span is 7.083 ms, so **fewer than 4 spans buffered is thinner than one
+  observed stall**.
+
+| G | R | RAM | vs today | depth | us/span | busy |
+|---|---|---|---|---|---|---|
+| 6 | 3 | 49,152 | +0 | **3 spans — too thin** | 3397 | 86% |
+| 6 | 2 | 49,152 | +0 | 4 spans | 3834 | 92% |
+| **7** | **3** | 57,344 | **+8,192** | 4 spans | 3397 | **86%** |
+| **8** | **4** | 65,536 | **+16,384** | 4 spans | 3178 | **83% — today's** |
+
+G=6/R=3 is the tempting one because it is RAM-neutral, and it is **not safe**:
+three spans buffered is less than one measured worst-case fetch.
+
+So the real choice is 8 KB more RAM for a 3-point CPU regression on ORDINARY
+playback, or 16 KB more for none at all. Step 3 exists to confirm ordinary
+four-stem playback is still perfect, and a knowingly-introduced 3-point
+regression sits badly against "no dropouts ever" — so G=8 is preferred unless
+the reclamation proves harder than the RAM document expects.
+
+Both figures are inside what `stem-tape-ram-v1.md` identifies as available:
+8,192 B from the verify scratch and 8,192 B from the unified associative
+cache, 16,384 B in total. **The RAM work is therefore no longer speculative
+groundwork — it is a prerequisite of the read path**, which is a different
+thing from the earlier framing where nothing depended on it.
+
+G and R are compile-time constants so this is one line to revisit once the
+reclamation lands.
+
 ## The cost that is real: RAM
 
 Sector pools today, computed from the compiled latency constants
