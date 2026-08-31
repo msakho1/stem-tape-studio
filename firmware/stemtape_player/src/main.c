@@ -151,9 +151,9 @@
  * failure that cost several rounds before the shipped/calibration tags were
  * split apart. The tag is the only thing the operator can read. */
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st29-VOLCAL"
+#define ST_BUILD_TAG "st30-VOLCAL"
 #else
-#define ST_BUILD_TAG "st29"
+#define ST_BUILD_TAG "st30"
 #endif
 #include "st_track_hold.h"
 #include "st_ladder.h"
@@ -161,6 +161,7 @@
 #include "st_latency.h"
 #include "st_seam.h"
 #include "st_pitch.h"
+#include "st_fnplay.h"
 #include "st_stem_meter.h"
 #include "st_inertia.h"
 #include "st_resample.h"
@@ -1971,6 +1972,48 @@ static st_pitch_t s_stem_pitch;
 static atomic_t g_stem_slow_req;
 static uint32_t s_stem_slow_q16 = ST_PITCH_ONE;   /* audio-thread-only */
 
+/* The FUNCTION + PLAY tap gesture (x1 slow, x2 snap home). Control-thread
+ * only: it never touches audio state, it only decides which of the two
+ * actions below to call. */
+static st_fnplay_t s_stem_fnplay;
+
+/*
+ * THE TWO FUNCTION + PLAY OUTCOMES, in one place so they cannot drift apart.
+ *
+ * Both are CONTROL-THREAD writes to a request the audio thread reads; neither
+ * touches s_stem_slow_q16, which is the audio thread's own glide state. That
+ * is what keeps the transition smooth without any cross-thread handshake: the
+ * control side moves a boolean, the audio side glides toward it.
+ */
+static void stem_slow_toggle(void)
+{
+	const bool want = atomic_get(&g_stem_slow_req) == 0;
+
+	atomic_set(&g_stem_slow_req, want ? 1 : 0);
+	printk("STEMTAPE slow: %s (FUNCTION+PLAY x1)\n",
+	       want ? "ON, half speed" : "OFF");
+}
+
+/*
+ * x2 -- "tap to match, double-tap to come home". Everything the player has
+ * done to the transport speed is undone at once: the rocker's semitones AND
+ * slow playback, because in a varispeed both of those ARE the speed.
+ *
+ * The classic tape speed is reset too. It is not what the stem transport
+ * reads -- st_pitch owns that now -- but g_play_speed_q16 still drives the
+ * inherited engine's own ramp, and leaving the two disagreeing would be a
+ * trap for whoever reads this next.
+ */
+static void stem_snap_home(void)
+{
+	st_pitch_reset(&s_stem_pitch);
+	atomic_set(&g_stem_slow_req, 0);
+	g_play_speed_q16 = 65536u;
+	g_play_bpm       = 80;
+	printk("STEMTAPE snap home: 0.0 st, slow OFF (FUNCTION+PLAY x2)\n");
+}
+
+
 static st11_audio_frame_t s_rs_prev;
 static bool               s_rs_prev_valid;
 static uint32_t           s_stem_rate_frac;   /* cursor fraction, Q16 [0,1) */
@@ -3052,6 +3095,7 @@ static void looper_audio_block(int16_t *s)
 		 * semitone offset across a reload would silently transpose
 		 * something the player never adjusted. */
 		st_pitch_reset(&s_stem_pitch);
+		st_fnplay_reset(&s_stem_fnplay);
 		atomic_set(&g_stem_slow_req, 0);
 		s_stem_slow_q16 = ST_PITCH_ONE;
 		atomic_set(&g_stem_song_selected, reload_ok ? 1 : 0);
@@ -6867,58 +6911,26 @@ static void stem_ctl_apply(void)
 
 	/* ---- the transport, from the ONLY PLAY owner ---------------------
 	 *
-	 * FX + PLAY IS A DIFFERENT GESTURE, and it is claimed here rather than
-	 * in the dispatcher because this is already the single place a PLAY tap
-	 * turns into an action. With the FX overlay open a PLAY TAP toggles slow
-	 * playback and MUST NOT also toggle the transport -- one press, one
-	 * meaning, which is what the brief asks for.
+	 * A BARE PLAY TAP, and nothing else, toggles the transport.
 	 *
-	 * A TAP, not the whole button. PLAY's other gesture in this mode is the
-	 * HOLD that arms a loop, and that still works untouched: st_ctl_service()
-	 * only reports play_tap for a press that never crossed the hold
-	 * threshold, so claiming the tap here cannot cost the loop. Being able to
-	 * loop while in FX mode was itself a requested correction and is not
-	 * given back.
+	 * Slow playback used to be claimed here, on FX + PLAY. It moved to
+	 * FUNCTION + PLAY to match the companion's own spec (src/input/
+	 * gestures.ts), and with it went the cost of that placement: FX is a
+	 * LATCHED mode rather than a held button, so claiming PLAY inside it
+	 * meant the transport could not be stopped while the overlay was open.
+	 * FUNCTION is a real held modifier, so the qualified and unqualified
+	 * gestures separate cleanly and this branch is back to doing one thing.
 	 *
-	 * Nothing else contends for it: PLAY is not one of the four Track buttons
-	 * the overlay turns into effects, so this cannot fire an effect either.
-	 * Nor can it fire an FX command in the other direction -- fx_open is a
-	 * LATCHED MODE, toggled by the Volume chord (st_fx_ctl.h) and not a held
-	 * button, so reading it here consumes nothing and the overlay neither
-	 * opens nor closes on a PLAY press.
-	 *
-	 * AND ONLY WHILE SOMETHING IS PLAYING. The brief defines this as toggling
-	 * "the playing song" between normal and slow, and that qualifier decides
-	 * the arbitration: with the transport stopped there is no song to slow,
-	 * so the slow toggle has nothing to mean and PLAY keeps its ordinary job.
-	 *
-	 * That is not a technicality, it is the difference between FX mode being
-	 * usable and not. Claiming the tap unconditionally would mean the
-	 * transport could not be STARTED at all while the overlay is open, and
-	 * since the overlay is a latched mode rather than a held button, the
-	 * player would have to leave FX entirely just to press play. Gating on
-	 * g_playing costs nothing and gives that back.
-	 *
-	 * What is still true, and is a real consequence rather than an oversight:
-	 * a playing song cannot be STOPPED from inside FX mode, because its PLAY
-	 * tap now means slow. Closing the overlay (the same Volume chord that
-	 * opened it) restores it immediately. The alternative would be inventing
-	 * a second PLAY gesture for stop, which the brief did not ask for.
+	 * The FUNCTION-qualified tap never reaches here at all: the FUNCTION
+	 * branch in main()'s control loop owns the button while FUNCTION is
+	 * down and continues before the ladder decode that produces play_tap.
 	 */
 	if (o->play_tap) {
-		if (g_stem_fx_out.fx_open && g_playing) {
-			const bool want = atomic_get(&g_stem_slow_req) == 0;
-
-			atomic_set(&g_stem_slow_req, want ? 1 : 0);
-			printk("STEMTAPE slow: %s (FX+PLAY)\n",
-			       want ? "ON, half speed" : "OFF");
+		g_playing = !g_playing;
+		if (g_playing) {
+			g_midi_start_pending = 1;
 		} else {
-			g_playing = !g_playing;
-			if (g_playing) {
-				g_midi_start_pending = 1;
-			} else {
-				g_midi_stop_pending = 1;
-			}
+			g_midi_stop_pending = 1;
 		}
 	}
 
@@ -7528,7 +7540,6 @@ int main(void)
 	enum trk_btn bj_cand = TRK_NONE; /* FUNCTION+Track bank jump: sticky candidate band */
 	int bj_cnt = 0;                  /*   consecutive passes the candidate has held     */
 	int bj_fired = -1;               /*   band already jumped during this FUNCTION press */
-	int64_t fnp_edge = -1;           /* FUNCTION+PLAY dim toggle: last PLAY press edge */
 	enum vol_btn cp_cand = VOL_NONE; /* FUNCTION+rocker/Vol chop: sticky candidate */
 	int cp_cnt = 0;                  /*   consecutive passes it has held */
 	int cp_dcl_band = -1;            /*   last committed rocker band (double-click) */
@@ -7627,6 +7638,20 @@ int main(void)
 		 * and function_down was therefore a structural constant false --
 		 * which is exactly why holding FUNCTION could not latch a loop on
 		 * real hardware. */
+		/* FUNCTION + PLAY's deferred single tap, committed here.
+		 *
+		 * ABOVE THE FUNCTION BRANCH FOR THE SAME REASON THE ARBITRATION
+		 * IS: that branch ends every path in `continue`, so a tick below
+		 * it would only ever run when FUNCTION was NOT held -- and the
+		 * window it is waiting out is 450 ms, far longer than anyone
+		 * keeps FUNCTION down after tapping PLAY. Placed here it runs on
+		 * every pass, held or not, which is what lets a single tap
+		 * commit after the player has let go of both buttons. */
+		if (st_fnplay_tick(&s_stem_fnplay, (uint32_t)k_uptime_get()) ==
+		    ST_FNPLAY_ACT_SLOW) {
+			stem_slow_toggle();
+		}
+
 		int  st_trk_raw = ladder_read(&adc_ladder[LAD_TRACKS]);
 		int  st_vol_raw = ladder_read(&adc_ladder[LAD_VOL]);
 		enum vol_btn st_vraw = st_vol_decode(st_vol_raw);
@@ -7814,24 +7839,37 @@ int main(void)
 				combo_seen = 1;
 				if (combo_start < 0) {           /* fresh PLAY press edge */
 					int64_t fnp_now = k_uptime_get();
-					/* FUNCTION + PLAY DOUBLE-TAP = snap to 1.0x. A
-					 * second PLAY press edge within 450 ms fires it
-					 * and blocks the hold tiers for this press so one
-					 * gesture can't do two things. */
-					if (fnp_edge >= 0 && fnp_now - fnp_edge <= 450 &&
-					    !combo_fired) {
-						/* M8c: SNAP TO 1.0x — instant return to
-						 * native speed/pitch after beatmatching or
-						 * rocker wandering ("tap to match,
-						 * double-tap to come home"). Replaces the
-						 * dim toggle: the device is always-dim now;
-						 * full brightness lives on the transfer
-						 * page (led_full byte, adopted below). */
-						g_play_speed_q16 = 65536u;
-						g_play_bpm = 80;
+
+					/* THE TAP GESTURE, x1 slow / x2 snap home,
+					 * arbitrated by st_fnplay (host-tested in
+					 * tests/test_fnplay.c). The 450 ms double-tap
+					 * window that used to be spelled out here is
+					 * now the module's own ST_FNPLAY_DOUBLE_MS --
+					 * the same figure, moved rather than changed,
+					 * so the gesture feels identical.
+					 *
+					 * x2 still fires IMMEDIATELY on the second
+					 * press edge, exactly as before, and still
+					 * blocks the hold tiers for this press so one
+					 * gesture cannot do two things. x1 is the new
+					 * half: it is DEFERRED to the tick above,
+					 * because firing it optimistically would dive
+					 * the song an octave before snapping home. */
+					if (st_fnplay_press(&s_stem_fnplay,
+							     (uint32_t)fnp_now) ==
+					    ST_FNPLAY_ACT_SNAP && !combo_fired) {
+						/* M8c: SNAP HOME — instant return to
+						 * native speed/pitch after beatmatching
+						 * or rocker wandering ("tap to match,
+						 * double-tap to come home"). Now clears
+						 * the STEM transport's own semitones and
+						 * slow mode, which is what the player
+						 * actually hears; before it only wrote
+						 * the classic speed, which the stem
+						 * transport does not read. */
+						stem_snap_home();
 						combo_fired = 1;
 					}
-					fnp_edge = fnp_now;
 					combo_start = fnp_now;
 				}
 				if (!combo_fired &&
@@ -7845,6 +7883,13 @@ int main(void)
 					g_meta.led_full = g_led_dim ? 0u : 1u;
 					g_meta_save_req = 1;
 					combo_fired = 1;
+					/* This press is spent on the light. Its
+					 * release must not also be read as a tap
+					 * -- st_fnplay_release() would drop it on
+					 * duration anyway, but saying so here
+					 * means the brightness tier does not
+					 * depend on that ceiling to be safe. */
+					st_fnplay_cancel(&s_stem_fnplay);
 				}
 				k_msleep(25);
 				continue;                /* combo owns the button */
@@ -7856,6 +7901,14 @@ int main(void)
 				 * takes ~7 s"). Only 3 consecutive low passes count as
 				 * a real release. */
 				if (++fnp_low < 3) { k_msleep(25); continue; }
+				/* THE TAP'S RELEASE EDGE. st_fnplay decides for
+				 * itself whether this was short enough to be a
+				 * tap; a longer press belongs to the mode or
+				 * brightness tier below and the module drops it,
+				 * so one press can never arm the slow toggle AND
+				 * flip the mode. */
+				st_fnplay_release(&s_stem_fnplay,
+						   (uint32_t)k_uptime_get());
 				if (!combo_fired) {
 					int64_t fnp_held = k_uptime_get() - combo_start;
 					if (fnp_held >= 350 && fnp_held < 5000)
@@ -8033,6 +8086,15 @@ int main(void)
 			 * release-toggle; before, only a PLAY-first release did,
 			 * so the gesture silently aborted most of the time (user:
 			 * "mode takes ~4 s" = retries until a lucky stagger). */
+			if (combo_start >= 0) {
+				/* FUNCTION let go first, which ends the gesture
+				 * just as surely as releasing PLAY. The tap edge
+				 * has to be reported on THIS path too, or a
+				 * player who lifts FUNCTION first would never get
+				 * their slow toggle. */
+				st_fnplay_release(&s_stem_fnplay,
+						   (uint32_t)k_uptime_get());
+			}
 			if (combo_start >= 0 && !combo_fired) {
 				int64_t fnp_held2 = k_uptime_get() - combo_start;
 				if (fnp_held2 >= 350 && fnp_held2 < 5000)
@@ -8120,7 +8182,7 @@ int main(void)
 		combo_start = -1;
 		combo_fired = 0;
 		combo_seen  = 0;
-		bj_cand = TRK_NONE; bj_cnt = 0; bj_fired = -1; fnp_edge = -1;
+		bj_cand = TRK_NONE; bj_cnt = 0; bj_fired = -1;
 		cp_cand = VOL_NONE; cp_cnt = 0; cp_dcl_band = -1;
 
 		/* ---- looper controls + LEDs ---- */

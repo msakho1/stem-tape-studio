@@ -185,6 +185,7 @@ target_sources(app PRIVATE
 	src/st_fx_ctl.c
 	src/st_inertia.c
 	src/st_pitch.c
+	src/st_fnplay.c
 	src/st_beat_phase.c
 	src/st_stem_meter.c
 	src/st_led_mvp.c

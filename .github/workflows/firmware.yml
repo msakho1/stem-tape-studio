@@ -1976,6 +1976,19 @@ jobs:
             -lm -o audit/test_pitch
           ./audit/test_pitch | tee audit/pitch-selftest.txt
 
+          # THE GESTURE THAT REACHES IT. st_fnplay arbitrates FUNCTION + PLAY
+          # x1 (slow) against x2 (snap home); the property under test is that
+          # a double NEVER also emits the single, checked at every press-to-
+          # press gap across the window rather than at one convenient value.
+          cc -std=c11 -Wall -Wextra -Werror -Ifirmware/stemtape_player/src \
+            firmware/stemtape_player/src/st_fnplay.c \
+            firmware/stemtape_player/tests/test_fnplay.c \
+            -o audit/test_fnplay
+          ./audit/test_fnplay | tee audit/fnplay-selftest.txt
+          grep -q 'a double never dips through slow' audit/fnplay-selftest.txt
+          grep -q "the decision window is the firmware's own" \
+            audit/fnplay-selftest.txt
+
           # THE GATE MUST KEEP MEASURING. If the Looper cross-check or the
           # accumulation trace stops being printed, the harness has stopped
           # asking the brief's questions.
@@ -2036,13 +2049,45 @@ jobs:
           grep -q 'BLK_FRAMES, I2S_TRUE_HZ' "$M" || {
             echo "  the slow glide is not advanced on the audio clock"
             fail=1; }
-          # ONE GESTURE, ONE MEANING. With the overlay open and the transport
-          # running, a PLAY TAP must toggle slow INSTEAD OF the transport --
-          # the brief: "pressing PLAY as part of this combination does NOT
-          # also trigger the normal PLAY action". An if/else is what makes
-          # that exclusive; two independent ifs would do both.
-          grep -q 'if (g_stem_fx_out.fx_open && g_playing) {' "$M" || {
-            echo "  FX+PLAY does not exclusively claim the PLAY tap"; fail=1; }
+          # THE GESTURE IS FUNCTION + PLAY, matching the companion's own
+          # spec (src/input/gestures.ts: x1 half-speed, x2 snap to 1.0x).
+          # Arbitrated by st_fnplay so "a double never also fires the single"
+          # is host-testable rather than a timing coincidence in main().
+          grep -q 'st_fnplay_press(&s_stem_fnplay' "$M" || {
+            echo "  the FUNCTION+PLAY press edge never reaches the gesture"
+            fail=1; }
+          grep -q 'st_fnplay_release(&s_stem_fnplay' "$M" || {
+            echo "  the tap release edge is never reported"; fail=1; }
+          # THE DEFERRED SINGLE MUST BE TICKED, and above the FUNCTION branch
+          # -- that branch ends every path in `continue`, so a tick below it
+          # would never run while FUNCTION was held and most single taps
+          # would be silently lost.
+          grep -q 'st_fnplay_tick(&s_stem_fnplay' "$M" || {
+            echo "  the deferred single tap is never committed"; fail=1; }
+          # ...and it must be ABOVE that branch in the file. Line numbers,
+          # not a heredoc: an indented here-document terminator does not
+          # close the document, which silently swallows the rest of the step.
+          tick_ln=$(grep -n 'st_fnplay_tick(&s_stem_fnplay' "$M" | head -1 | cut -d: -f1)
+          fn_ln=$(grep -n 'if (pwr_pressed() && !g_stem_ctl_out.function_consumed)' \
+                    "$M" | head -1 | cut -d: -f1)
+          if [ -z "$tick_ln" ] || [ -z "$fn_ln" ]; then
+            echo "  could not locate the tick or the FUNCTION branch"; fail=1
+          elif [ "$tick_ln" -ge "$fn_ln" ]; then
+            echo "  the fnplay tick (line $tick_ln) is BELOW the FUNCTION branch"
+            echo "  (line $fn_ln), which ends every path in continue -- single"
+            echo "  taps would be silently lost"
+            fail=1
+          fi
+          # x2 SNAPS THE STEM TRANSPORT, not just the classic speed the stem
+          # engine does not read. This was the bug the move exposed.
+          grep -q 'st_pitch_reset(&s_stem_pitch);' "$M" || {
+            echo "  snap home does not clear the semitones"; fail=1; }
+          # AND FX + PLAY IS GONE. The old binding must not linger: with FX a
+          # latched mode rather than a held button, it made the transport
+          # unstoppable while the overlay was open.
+          if grep -q 'fx_open && g_playing' "$M"; then
+            echo "  the retired FX+PLAY slow binding is still present"; fail=1
+          fi
           # AND SLOW IS PER-SONG. Loading a different song must not leave the
           # previous song's slow state engaged.
           grep -q 's_stem_slow_q16 = ST_PITCH_ONE;' "$M" || {
@@ -2711,6 +2756,11 @@ jobs:
           # and a build that linked the toggle but not the glide would step a
           # whole octave in one block.
           check st_pitch_slow_glide
+          # The FUNCTION + PLAY tap arbitration. Linked, not merely present:
+          # an unlinked gesture is a control the player cannot reach.
+          check st_fnplay_press
+          check st_fnplay_release
+          check st_fnplay_tick
           # physical control scanner (button/fader ladder read) + LED output
           check ladder_read
           check led_service
