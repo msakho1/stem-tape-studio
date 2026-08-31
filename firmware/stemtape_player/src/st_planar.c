@@ -174,3 +174,32 @@ bool st_pl_from_v11_sector(const uint8_t sector[ST11_SECTOR_BYTES],
 	}
 	return true;
 }
+
+/* Byte-for-byte the sign extension st_sector_v11.c's own get_i24le() performs.
+ * Duplicated rather than exported because the two codecs are deliberately
+ * separate types (see st_sector_v11.h), and a test pins the two decoders equal
+ * on real recorded audio rather than trusting this comment. */
+static int32_t pl_i24le(const uint8_t *in, uint32_t off)
+{
+	uint32_t v = (uint32_t)in[off + 0] | ((uint32_t)in[off + 1] << 8) |
+		     ((uint32_t)in[off + 2] << 16);
+
+	if (v & 0x800000u) {
+		v |= 0xFF000000u;
+	}
+	return (int32_t)v;
+}
+
+void st_pl_decode_frame(const uint8_t *const groups[ST_PL_STEMS],
+			 const uint32_t frame_in_group[ST_PL_STEMS],
+			 st11_audio_frame_t *out)
+{
+	uint32_t k;
+
+	for (k = 0u; k < ST_PL_STEMS; k++) {
+		const uint32_t off = st_pl_frame_off(frame_in_group[k]);
+
+		out->stem_l[k] = pl_i24le(groups[k], off);
+		out->stem_r[k] = pl_i24le(groups[k], off + ST11_BYTES_PER_SAMPLE);
+	}
+}

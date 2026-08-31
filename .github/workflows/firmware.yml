@@ -2251,6 +2251,15 @@ jobs:
             audit/planar-fixture.txt
           grep -q 'audio bytes themselves are identical' audit/planar-fixture.txt
           grep -q 'pads with silence, not with stale bytes' audit/planar-fixture.txt
+          # THE DECODE EQUIVALENCE, which is what step 3 ("ordinary playback is
+          # still perfect") rests on: the planar decoder must return the same
+          # samples the v1.1 decoder returns, on every frame of the recorded
+          # song. And the per-stem index must be real -- four heads at four
+          # different frames is exactly what per-track reverse is, and it
+          # cannot be expressed against a shared-index decoder at all.
+          grep -q 'AGREES, sample for sample, with the v1.1 decoder' \
+            audit/planar-fixture.txt
+          grep -q 'each head reads INDEPENDENTLY' audit/planar-fixture.txt
 
           # Each of these is a property the format is FOR. A test file that
           # stops exercising one would still pass; this step would not.

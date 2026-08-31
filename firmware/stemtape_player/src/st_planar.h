@@ -60,6 +60,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "st_sector_v11.h"
 #include "st_v11_format.h"
 
 #define ST_PL_STEMS            ST11_STEM_COUNT              /* 4 */
@@ -154,6 +155,32 @@ static inline uint32_t st_pl_frame_off(uint32_t frame_in_group)
 {
 	return ST_PL_OFF_FRAMES + frame_in_group * ST_PL_FRAME_BYTES;
 }
+
+/* ---- decode -------------------------------------------------------- */
+
+/*
+ * ONE FRAME, FROM FOUR GROUPS, EACH AT ITS OWN POSITION.
+ *
+ * `frame_in_group[k]` is where stem k is reading, independently of the other
+ * three. With all four equal this is bit-identical to
+ * st11_sector_decode_frame() on the sector those groups came from, which a
+ * test pins against the recorded song.
+ *
+ * PER-STEM INDICES FROM THE START, DELIBERATELY. Nothing in the v1.2 read path
+ * needs them to differ -- all four stems stay together until reverse exists.
+ * But per-track reverse is precisely "one stem's head is somewhere else", so
+ * an interface taking a single shared index would have to be torn open again
+ * to add it. This one does not change when reverse arrives; only its callers
+ * start passing different numbers.
+ *
+ * The caller is responsible for each index being < ST_PL_FRAMES_PER_GROUP and
+ * for each group holding the span that stem is actually reading. Bounds are
+ * not re-checked here: this runs once per frame at 48 kHz, and the group
+ * headers were validated when the group was fetched.
+ */
+void st_pl_decode_frame(const uint8_t *const groups[ST_PL_STEMS],
+			 const uint32_t frame_in_group[ST_PL_STEMS],
+			 st11_audio_frame_t *out);
 
 /* ---- conversion from v1.1 ---------------------------------------- */
 

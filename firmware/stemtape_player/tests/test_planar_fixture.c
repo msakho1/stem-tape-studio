@@ -184,6 +184,85 @@ int main(int argc, char **argv)
 		}
 	}
 
+	printf("  THE DECODER AGREES, sample for sample, with the v1.1 decoder\n");
+	for (s = 0u; s < FIX_SECTORS; s++) {
+		const uint8_t *sector = song + (size_t)s * ST11_SECTOR_BYTES;
+		uint8_t groups[ST_PL_STEMS][ST_PL_GROUP_BYTES];
+		const uint8_t *gp[ST_PL_STEMS];
+		st11_sector_header_t hdr;
+		uint32_t f;
+
+		(void)st11_sector_read_header(sector, &hdr);
+		(void)st_pl_from_v11_sector(sector, groups);
+		for (k = 0u; k < ST_PL_STEMS; k++) {
+			gp[k] = groups[k];
+		}
+		for (f = 0u; f < hdr.frame_count; f++) {
+			/* All four heads together, which is what ordinary
+			 * playback does and what step 3 has to keep perfect. */
+			const uint32_t at[ST_PL_STEMS] = { f, f, f, f };
+			st11_audio_frame_t v11, pl;
+
+			st11_sector_decode_frame(sector, f, &v11);
+			st_pl_decode_frame(gp, at, &pl);
+			for (k = 0u; k < ST_PL_STEMS; k++) {
+				if (v11.stem_l[k] != pl.stem_l[k] ||
+				    v11.stem_r[k] != pl.stem_r[k]) {
+					printf("    sector %u frame %u stem %u: "
+					       "v1.1 (%d,%d) planar (%d,%d)\n",
+					       s, f, k, v11.stem_l[k], v11.stem_r[k],
+					       pl.stem_l[k], pl.stem_r[k]);
+					g_fail++;
+				}
+				g_checks++;
+			}
+		}
+	}
+
+	printf("  and each head reads INDEPENDENTLY -- the property reverse needs\n");
+	{
+		const uint8_t *sector = song;   /* sector 0, a full 340 frames */
+		uint8_t groups[ST_PL_STEMS][ST_PL_GROUP_BYTES];
+		const uint8_t *gp[ST_PL_STEMS];
+		st11_audio_frame_t pl, ref;
+
+		(void)st_pl_from_v11_sector(sector, groups);
+		for (k = 0u; k < ST_PL_STEMS; k++) {
+			gp[k] = groups[k];
+		}
+		/*
+		 * Four heads at four DIFFERENT frames. Each stem must come back
+		 * with the sample the v1.1 decoder gives for ITS OWN frame --
+		 * which is exactly per-track reverse's requirement, and is
+		 * impossible to express against a shared-index decoder.
+		 */
+		{
+			const uint32_t at[ST_PL_STEMS] = { 0u, 100u, 200u, 339u };
+
+			st_pl_decode_frame(gp, at, &pl);
+			for (k = 0u; k < ST_PL_STEMS; k++) {
+				st11_sector_decode_frame(sector, at[k], &ref);
+				ck(pl.stem_l[k] == ref.stem_l[k],
+				   "each stem reads at its own frame (L)");
+				ck(pl.stem_r[k] == ref.stem_r[k],
+				   "each stem reads at its own frame (R)");
+			}
+		}
+		/* One stem moved backwards while the others stand still, which
+		 * is the shape of the real feature. */
+		for (uint32_t back = 0u; back < 40u; back++) {
+			const uint32_t at[ST_PL_STEMS] = { 100u, 100u - back, 100u, 100u };
+
+			st_pl_decode_frame(gp, at, &pl);
+			st11_sector_decode_frame(sector, 100u - back, &ref);
+			ck(pl.stem_l[1] == ref.stem_l[1],
+			   "a stem walking backward reads its own earlier frames");
+			st11_sector_decode_frame(sector, 100u, &ref);
+			ck(pl.stem_l[0] == ref.stem_l[0],
+			   "and its neighbours are completely unaffected");
+		}
+	}
+
 	printf("  the short final sector pads with silence, not with stale bytes\n");
 	{
 		const uint8_t *last = song + (size_t)(FIX_SECTORS - 1u) * ST11_SECTOR_BYTES;
