@@ -2683,8 +2683,10 @@ jobs:
         #
         # It has already happened once, exactly this way: the post-commit
         # reload called stem_prime_group0(), which lives ~1000 lines further
-        # down with the rest of the flash path. Runs BEFORE the build, so the
-        # answer arrives in seconds rather than after a toolchain setup.
+        # down with the rest of the flash path. It is a text scan with no
+        # toolchain, so it answers in seconds; it is placed after the build
+        # step so that when both fail, the compiler's own diagnostic is the
+        # one the log leads with and this step explains it.
         working-directory: ${{ github.workspace }}/project
         run: |
           set -euo pipefail
@@ -2699,7 +2701,8 @@ jobs:
         # advance_frame()/st_stem_mbox_try_acquire()/st_stem_mbox_set_
         # requested_sector()/st11_sector_decode_frame()/st_stem_mix_
         # frame(), streamer_thread() (the mailbox producer) calling
-        # st_stream_init()/st_stream_validate_sector()/st_stem_mbox_
+        # st_stream_init()/st_pl_validate() (v1.2's per-GROUP header check,
+        # which replaced v1.1's st_stream_validate_sector())/st_stem_mbox_
         # init()/st_stem_mbox_producer_next_fill()/st_stem_mbox_
         # publish_ready()/st11_sector_read_header(), AND (new in slice
         # 3C) audio_thread() calling looper_audio_block()/i2s_write() --
@@ -3208,7 +3211,25 @@ jobs:
           check_any g_stem_fx
           check st_stream_init
           check st_stream_required_sector
-          check st_stream_validate_sector
+          # v1.2 song-planar RETIRED st_stream_validate_sector(). Not a
+          # weakened check -- a stronger one, and this line records why the
+          # symbol it used to require is now legitimately absent from the
+          # ELF. A v1.1 STSC sector header could say "I am sector 7"; it
+          # could not say WHICH STEM it was, because one sector held all
+          # four. A v1.2 group header names the stem AND the span, so
+          # st_pl_validate() rejects a read that landed in another stem's
+          # quarter of the song region -- a failure mode v1.1 could not
+          # even express. Every group of every fetch is validated, not just
+          # the first. The three st_pl_* entries below are the replacement,
+          # and they are cross-TU (src/st_planar.c), so unlike the static
+          # main.c fetch helpers they cannot be inlined away.
+          check st_pl_group_block
+          check st_pl_validate
+          check st_pl_decode_frame
+          # The batched producer. R groups per read is what pays for four
+          # independent per-stem streams; requiring it here stops a revert
+          # to one-group-per-read from linking silently green.
+          check st_stem_mbox_producer_next_run
           check st_stream_sector_ready
           # The RUN form is what the audio path calls now; the
           # per-frame st_stream_advance_frame() remains part of the pure
