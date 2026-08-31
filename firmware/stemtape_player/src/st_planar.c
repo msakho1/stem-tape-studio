@@ -190,6 +190,15 @@ static int32_t pl_i24le(const uint8_t *in, uint32_t off)
 	return (int32_t)v;
 }
 
+void st_pl_decode_stem(const uint8_t *group, uint32_t frame_in_group,
+			int32_t *out_l, int32_t *out_r)
+{
+	const uint32_t off = st_pl_frame_off(frame_in_group);
+
+	*out_l = pl_i24le(group, off);
+	*out_r = pl_i24le(group, off + ST11_BYTES_PER_SAMPLE);
+}
+
 void st_pl_decode_frame(const uint8_t *const groups[ST_PL_STEMS],
 			 const uint32_t frame_in_group[ST_PL_STEMS],
 			 st11_audio_frame_t *out)
@@ -197,9 +206,7 @@ void st_pl_decode_frame(const uint8_t *const groups[ST_PL_STEMS],
 	uint32_t k;
 
 	for (k = 0u; k < ST_PL_STEMS; k++) {
-		const uint32_t off = st_pl_frame_off(frame_in_group[k]);
-
-		out->stem_l[k] = pl_i24le(groups[k], off);
-		out->stem_r[k] = pl_i24le(groups[k], off + ST11_BYTES_PER_SAMPLE);
+		st_pl_decode_stem(groups[k], frame_in_group[k], &out->stem_l[k],
+				   &out->stem_r[k]);
 	}
 }

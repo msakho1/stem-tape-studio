@@ -2391,9 +2391,13 @@ jobs:
             echo "  the spin-down would be silence, i.e. a mute"; fail=1; }
           # AND THE RATE MUST REACH THE READ. An envelope that never becomes
           # a read position is a fade waiting to happen.
-          grep -q 'rate_q16, &s_stem_rate_frac' "$M" || {
+          # The cursor fraction became PER STEM when the resampler's carried
+          # state did, so these two match the array rather than the scalar.
+          # The question they ask is unchanged: the rate must reach the read,
+          # and the source/output domain conversion must be applied.
+          grep -q 'rate_q16, s_stem_rate_frac, run' "$M" || {
             echo "  the renderer is not given the transport rate"; fail=1; }
-          grep -q 'st_rs_out_frames(run, s_stem_rate_frac, rate_q16)' "$M" || {
+          grep -q 'st_rs_out_frames(run, s_stem_rate_frac\[0\], rate_q16)' "$M" || {
             echo "  the source/output domain conversion is not applied"; fail=1; }
           [ "$fail" = 0 ] || exit 1
           echo "inertia wiring: PLAY/STOP move the reel, and the reel moves the tape"

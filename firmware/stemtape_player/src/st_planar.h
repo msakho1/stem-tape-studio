@@ -178,6 +178,24 @@ static inline uint32_t st_pl_frame_off(uint32_t frame_in_group)
  * not re-checked here: this runs once per frame at 48 kHz, and the group
  * headers were validated when the group was fetched.
  */
+/*
+ * ONE STEM, ONE FRAME, out of that stem's own group.
+ *
+ * st_pl_decode_frame() below is four of these. This exists because the
+ * resampler's "frame behind the cursor" is genuinely per-stem: when one stem
+ * crosses a source frame the other three may not have, and once directions
+ * differ the frame behind a reversed stem is the one at a HIGHER index.
+ * Decoding all four there would be three stems' work thrown away, and three
+ * stems read at a position that is not theirs.
+ *
+ * Same bounds contract as st_pl_decode_frame(): `frame_in_group` must be
+ * < ST_PL_FRAMES_PER_GROUP and `group` must hold the span this stem is
+ * reading. Not re-checked -- this runs inside the 48 kHz loop, and the group
+ * header was validated when the group was fetched.
+ */
+void st_pl_decode_stem(const uint8_t *group, uint32_t frame_in_group,
+			int32_t *out_l, int32_t *out_r);
+
 void st_pl_decode_frame(const uint8_t *const groups[ST_PL_STEMS],
 			 const uint32_t frame_in_group[ST_PL_STEMS],
 			 st11_audio_frame_t *out);

@@ -2178,9 +2178,59 @@ static void stem_snap_home(void)
 }
 
 
+/*
+ * THE RESAMPLER'S CARRIED STATE, PER STEM.
+ *
+ * s_rs_prev holds, for each stem, the source frame immediately BEHIND that
+ * stem's cursor -- the other half of every variable-rate blend. It was always
+ * a four-stem frame; what is new is that the four halves no longer have to
+ * have come from the same source index.
+ *
+ * That is the whole reason these are per-stem. Per-track reverse gives one
+ * stem its own cursor and its own direction, so "the frame behind the cursor"
+ * is a different frame for it than for the other three -- and travelling
+ * backward it is the frame at a HIGHER index. A single shared prev/frac pair
+ * is correct exactly while all four stems advance together, and silently
+ * wrong the moment one does not. It would not sound like an error either: it
+ * would sound like reverse being subtly off only when the pitch rocker is
+ * away from centre, which is the hardest kind of bug to attribute.
+ *
+ * Cost is four small scalars per stem, not buffers. Ordinary four-forward
+ * playback still takes the unity fast path in stem_render_run(), which never
+ * touches any of this -- the full-playback gate's output hash is the proof.
+ */
 static st11_audio_frame_t s_rs_prev;
-static bool               s_rs_prev_valid;
-static uint32_t           s_stem_rate_frac;   /* cursor fraction, Q16 [0,1) */
+static bool               s_rs_prev_valid[ST11_STEM_COUNT];
+static uint32_t           s_stem_rate_frac[ST11_STEM_COUNT]; /* cursor fraction, Q16 [0,1) */
+
+/* THE ONE PLACE the carried state is dropped. Five call sites drop it -- a
+ * seek, a loop wrap, the wrap backstop, a song reload and a stop -- and each
+ * one is a case where the frame behind the cursor belongs to a position the
+ * playhead no longer occupies. Now that these are arrays, forgetting one stem
+ * at one of those sites would blend one stem across a join the other three
+ * ducked; a single function makes that unrepresentable. */
+static void stem_rs_drop(void)
+{
+	uint32_t k;
+
+	for (k = 0; k < ST11_STEM_COUNT; k++) {
+		s_rs_prev_valid[k]  = false;
+		s_stem_rate_frac[k] = 0u;
+	}
+}
+
+/* True while every stem's cursor sits exactly on a source frame. */
+static bool stem_rs_all_aligned(void)
+{
+	uint32_t k;
+
+	for (k = 0; k < ST11_STEM_COUNT; k++) {
+		if (s_stem_rate_frac[k] != 0u) {
+			return false;
+		}
+	}
+	return true;
+}
 static st_inertia_t       s_stem_inertia;
 
 /*
@@ -2212,15 +2262,16 @@ static uint8_t   s_stem_jump_pend;   /* 0 none, else ST_SEAM_JUMP_* */
  * symbol gate requires this name exactly, and an anchored nm grep does not
  * match a .constprop/.isra clone suffix. */
 __attribute__((optimize("O2"), noinline, noclone))
-static uint32_t stem_render_run(const uint8_t *const grp[ST_PL_STEMS],
+static void stem_render_run(const uint8_t *const grp[ST_PL_STEMS],
 			     uint32_t frame_in_group,
 			     const st_stem_mix_prepared_t *prep,
 			     int32_t m0, int32_t md, int32_t mv,
 			     uint32_t f0, uint32_t n, int16_t *s,
 			     uint32_t peak[ST11_STEM_COUNT],
 			     st_seam_t *seam, uint32_t song_frame,
-			     uint32_t rate_q16, uint32_t *frac_io,
-			     uint32_t src_avail)
+			     uint32_t rate_q16, uint32_t frac_io[ST_PL_STEMS],
+			     uint32_t src_avail,
+			     uint32_t used_out[ST_PL_STEMS])
 {
 	/* Hoisted out of the 48 kHz loop: with the overlay never opened this is
 	 * false and the whole rack costs one test per block. */
@@ -2233,9 +2284,27 @@ static uint32_t stem_render_run(const uint8_t *const grp[ST_PL_STEMS],
 	 * ordinary playback is bit-identical to a build without inertia and the
 	 * full-playback gate's output hash still holds.
 	 */
-	const bool unity = (rate_q16 == ST_RS_ONE) && (*frac_io == 0u);
-	uint32_t frac = *frac_io;
-	uint32_t cur = 0u;              /* source frames consumed within this run */
+	const bool unity = (rate_q16 == ST_RS_ONE) && stem_rs_all_aligned();
+	/*
+	 * PER-STEM CURSORS. All four still move together here -- one rate, one
+	 * direction -- so every element of each array holds the same value and
+	 * the arithmetic below is what it always was. What changed is that
+	 * nothing in the loop now REQUIRES them to agree, which is the whole
+	 * prerequisite for one stem reading the other way.
+	 *
+	 * The unity fast path above is untouched and is what ordinary
+	 * four-forward playback takes, so this costs nothing until a rate is
+	 * actually bent.
+	 */
+	uint32_t frac[ST_PL_STEMS];
+	uint32_t cur[ST_PL_STEMS];      /* source frames consumed within this run */
+	uint32_t idx[ST_PL_STEMS];      /* where each stem reads, inside its group */
+	uint32_t sp;
+
+	for (sp = 0; sp < ST_PL_STEMS; sp++) {
+		frac[sp] = frac_io[sp];
+		cur[sp]  = 0u;
+	}
 
 	for (uint32_t k = 0; k < n; k++) {
 		const uint32_t f = f0 + k;
@@ -2244,7 +2313,10 @@ static uint32_t stem_render_run(const uint8_t *const grp[ST_PL_STEMS],
 
 		if (unity) {
 			st_pl_decode_frame_shared(grp, frame_in_group + k, &frame);
-			cur = k;   /* at 1x source and output are the same count */
+			/* at 1x source and output are the same count */
+			for (sp = 0; sp < ST_PL_STEMS; sp++) {
+				cur[sp] = k;
+			}
 		} else {
 			/*
 			 * VARIABLE RATE. The output frame sits between the
@@ -2262,33 +2334,42 @@ static uint32_t stem_render_run(const uint8_t *const grp[ST_PL_STEMS],
 			 * time-stretch anywhere in this path.
 			 */
 			st11_audio_frame_t nxt;
-			uint32_t idx = cur;
 
 			/* THE HARD BOUND. st_rs_out_frames() floors at one
 			 * output frame, and above 1x that single forced frame
 			 * can ask for a source frame the run does not contain.
 			 * Holding the last available frame is a degenerate
 			 * corner measured in single frames; reading past the
-			 * sector buffer is memory corruption in a real-time
+			 * group buffer is memory corruption in a real-time
 			 * thread. */
-			if (idx >= src_avail) {
-				idx = src_avail - 1u;
+			for (sp = 0; sp < ST_PL_STEMS; sp++) {
+				idx[sp] = (cur[sp] >= src_avail) ? (src_avail - 1u)
+								 : cur[sp];
+				idx[sp] += frame_in_group;
 			}
-			st_pl_decode_frame_shared(grp, frame_in_group + idx, &nxt);
-			if (!s_rs_prev_valid) {
-				s_rs_prev = nxt;
-				s_rs_prev_valid = true;
+			/* THE ARRAY FORM, one index per stem. Bit-identical to
+			 * st_pl_decode_frame_shared() when all four indices are
+			 * equal -- which a test in tests/test_planar.c asserts
+			 * rather than this comment claiming it -- so today's
+			 * output is unchanged. */
+			st_pl_decode_frame(grp, idx, &nxt);
+			for (sp = 0; sp < ST_PL_STEMS; sp++) {
+				if (!s_rs_prev_valid[sp]) {
+					s_rs_prev.stem_l[sp] = nxt.stem_l[sp];
+					s_rs_prev.stem_r[sp] = nxt.stem_r[sp];
+					s_rs_prev_valid[sp] = true;
+				}
 			}
-			for (uint32_t sp = 0; sp < ST11_STEM_COUNT; sp++) {
+			for (sp = 0; sp < ST11_STEM_COUNT; sp++) {
 				const int32_t pl = s_rs_prev.stem_l[sp];
 				const int32_t pr = s_rs_prev.stem_r[sp];
 
 				frame.stem_l[sp] = pl +
 					(int32_t)(((int64_t)(nxt.stem_l[sp] - pl) *
-						    (int32_t)frac) >> 16);
+						    (int32_t)frac[sp]) >> 16);
 				frame.stem_r[sp] = pr +
 					(int32_t)(((int64_t)(nxt.stem_r[sp] - pr) *
-						    (int32_t)frac) >> 16);
+						    (int32_t)frac[sp]) >> 16);
 			}
 			/*
 			 * Advance the cursor by one output frame's worth of
@@ -2299,42 +2380,59 @@ static uint32_t stem_render_run(const uint8_t *const grp[ST_PL_STEMS],
 			 * gap it never looked at. Below 1x the loop runs at
 			 * most once and this is what it always was.
 			 */
-			frac += rate_q16;
-			while (frac >= ST_RS_ONE) {
-				frac -= ST_RS_ONE;
-				cur++;
-				if (cur >= src_avail) {
-					/*
-					 * OUT OF RUN. Reachable only from the
-					 * floored corner in st_rs_out_frames()
-					 * -- one forced output frame that at a
-					 * rate above 1x wants more source than
-					 * the run holds.
-					 *
-					 * The whole frames the rate asked for
-					 * beyond the run are not there, so they
-					 * are dropped; the SUB-FRAME phase is
-					 * kept, because throwing it away would
-					 * be a position step and leaving frac
-					 * above 1.0 would make the next blend
-					 * extrapolate past both its samples.
-					 * ST_RS_ONE is a power of two, so the
-					 * mask is exactly "the fractional part".
-					 */
-					cur = src_avail;
-					s_rs_prev = nxt;
-					frac &= (ST_RS_ONE - 1u);
-					break;
-				}
-				{
-					uint32_t pidx = cur - 1u;
-
-					if (pidx >= src_avail) {
-						pidx = src_avail - 1u;
+			for (sp = 0; sp < ST_PL_STEMS; sp++) {
+				frac[sp] += rate_q16;
+				while (frac[sp] >= ST_RS_ONE) {
+					frac[sp] -= ST_RS_ONE;
+					cur[sp]++;
+					if (cur[sp] >= src_avail) {
+						/*
+						 * OUT OF RUN. Reachable only
+						 * from the floored corner in
+						 * st_rs_out_frames() -- one
+						 * forced output frame that at a
+						 * rate above 1x wants more
+						 * source than the run holds.
+						 *
+						 * The whole frames the rate
+						 * asked for beyond the run are
+						 * not there, so they are
+						 * dropped; the SUB-FRAME phase
+						 * is kept, because throwing it
+						 * away would be a position step
+						 * and leaving frac above 1.0
+						 * would make the next blend
+						 * extrapolate past both its
+						 * samples. ST_RS_ONE is a power
+						 * of two, so the mask is
+						 * exactly "the fractional
+						 * part".
+						 */
+						cur[sp] = src_avail;
+						s_rs_prev.stem_l[sp] = nxt.stem_l[sp];
+						s_rs_prev.stem_r[sp] = nxt.stem_r[sp];
+						frac[sp] &= (ST_RS_ONE - 1u);
+						break;
 					}
-					st_pl_decode_frame_shared(
-						grp, frame_in_group + pidx,
-						&s_rs_prev);
+					{
+						/* ONE STEM'S frame behind its
+						 * OWN new cursor. Decoding all
+						 * four here would be three
+						 * stems' work thrown away and,
+						 * once directions differ, three
+						 * stems read at a position that
+						 * is not theirs. */
+						uint32_t pidx = cur[sp] - 1u;
+
+						if (pidx >= src_avail) {
+							pidx = src_avail - 1u;
+						}
+						st_pl_decode_stem(
+							grp[sp],
+							frame_in_group + pidx,
+							&s_rs_prev.stem_l[sp],
+							&s_rs_prev.stem_r[sp]);
+					}
 				}
 			}
 		}
@@ -2350,7 +2448,13 @@ static uint32_t stem_render_run(const uint8_t *const grp[ST_PL_STEMS],
 			int32_t fl = frame.stem_l[s_fx_target];
 			int32_t fr = frame.stem_r[s_fx_target];
 
-			st_fx_process(&g_stem_fx, &fl, &fr, song_frame + cur);
+			/* THE RACK'S TIME INDEX IS ITS TARGET'S OWN POSITION.
+			 * STEM scope processes exactly one stem, so the echo's
+			 * clock is that stem's cursor -- which is the right
+			 * answer whether or not it is the one running
+			 * backwards, and was indistinguishable from the shared
+			 * cursor while all four moved together. */
+			st_fx_process(&g_stem_fx, &fl, &fr, song_frame + cur[s_fx_target]);
 			frame.stem_l[s_fx_target] = fl;
 			frame.stem_r[s_fx_target] = fr;
 		}
@@ -2404,7 +2508,12 @@ static uint32_t stem_render_run(const uint8_t *const grp[ST_PL_STEMS],
 			int32_t gl = (int32_t)stem_l << 8;
 			int32_t gr = (int32_t)stem_r << 8;
 
-			st_fx_process(&g_stem_fx, &gl, &gr, song_frame + cur);
+			/* GLOBAL scope carries the whole mix, so its clock is
+			 * the TRANSPORT's own position -- stem 0's cursor,
+			 * which is the transport's until a stem is reversed and
+			 * stays the transport's after, because a reversed stem
+			 * does not drag the song's clock backwards with it. */
+			st_fx_process(&g_stem_fx, &gl, &gr, song_frame + cur[0]);
 			gl >>= 8;
 			gr >>= 8;
 			if (gl > INT16_MAX) gl = INT16_MAX;
@@ -2431,16 +2540,27 @@ static uint32_t stem_render_run(const uint8_t *const grp[ST_PL_STEMS],
 		st_seam_tick(seam);
 	}
 
-	/* The SOURCE frames this run actually consumed, which is what the
-	 * stream must be advanced by. Reported rather than recomputed by the
-	 * caller: two derivations of the same count is exactly how a playhead
-	 * and the audio it reads drift apart. */
+	/* The SOURCE frames this run actually consumed, PER STEM, which is what
+	 * each stream must be advanced by. Reported rather than recomputed by
+	 * the caller: two derivations of the same count is exactly how a
+	 * playhead and the audio it reads drift apart -- and once the four
+	 * counts can differ, re-deriving them outside this loop would mean
+	 * re-deriving the direction and rate logic too.
+	 *
+	 * All four are equal today. The caller may still rely on that; what it
+	 * may not do is compute the number itself. */
 	if (unity) {
-		return n;
+		for (sp = 0; sp < ST_PL_STEMS; sp++) {
+			used_out[sp] = n;
+		}
+		return;
 	}
-	*frac_io = frac;
-	/* Never report more than the run held, whatever the arithmetic did. */
-	return (cur > src_avail) ? src_avail : cur;
+	for (sp = 0; sp < ST_PL_STEMS; sp++) {
+		frac_io[sp] = frac[sp];
+		/* Never report more than the run held, whatever the arithmetic
+		 * did. */
+		used_out[sp] = (cur[sp] > src_avail) ? src_avail : cur[sp];
+	}
 }
 #endif /* SP1_XFER_ENABLE */
 
@@ -2723,9 +2843,8 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 	 * once-per-PLAY sub-sample step this is for. */
 	if (st_inertia_at_unity(&s_stem_inertia) &&
 	    st_pitch_is_unity(&s_stem_pitch) &&
-	    s_stem_slow_q16 == ST_PITCH_ONE && s_stem_rate_frac != 0u) {
-		s_stem_rate_frac = 0u;
-		s_rs_prev_valid  = false;
+	    s_stem_slow_q16 == ST_PITCH_ONE && !stem_rs_all_aligned()) {
+		stem_rs_drop();
 	}
 
 	/* The envelope advances on the audio clock, once per block, by the
@@ -2741,7 +2860,13 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 
 	while (f < BLK_FRAMES) {
 		uint32_t needed;
-		uint32_t fis, run, left_in_song, want, out_n, used;
+		uint32_t fis, run, left_in_song, want, out_n;
+		/* Per-stem source consumption, filled by stem_render_run().
+		 * Every element is `used` today; the array exists so that when
+		 * one stem diverges, the four streams are advanced by the four
+		 * numbers the render loop actually produced rather than by one
+		 * the caller re-derived. */
+		uint32_t stem_used[ST_PL_STEMS];
 		uint32_t pin_idx;
 		bool from_pin = false;
 		/* The loop window, sampled ONCE per iteration. `active` is read
@@ -2893,8 +3018,7 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 			 * behind the cursor is now a frame from somewhere
 			 * else in the song, and blending across that join is
 			 * the discontinuity the duck exists to prevent. */
-			s_rs_prev_valid  = false;
-			s_stem_rate_frac = 0u;
+			stem_rs_drop();
 			if (st_stream_seek(&g_stem_stream, s_stem_jump_to)) {
 				atomic_inc(&g_stem_loop_wraps);
 			}
@@ -3131,7 +3255,12 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 		 * same number and everything below reduces to what shipped;
 		 * during a ramp it is more, because the tape is passing more
 		 * slowly than the output is being produced. */
-		out_n = st_rs_out_frames(run, s_stem_rate_frac, rate_q16);
+		/* One rate, one direction, so every stem's cursor fraction is
+		 * the same and stem 0's is the transport's. When a stem can
+		 * diverge, the run has to be sized by the stem that will
+		 * consume the MOST source, which is a decision this line will
+		 * have to make explicitly rather than inherit. */
+		out_n = st_rs_out_frames(run, s_stem_rate_frac[0], rate_q16);
 
 		/* ---- A FIFTH BOUND, IN THE OUTPUT DOMAIN: this block ----- */
 		if (out_n > BLK_FRAMES - f) {
@@ -3186,11 +3315,11 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 				  ? g_stem_loop_pin_bufs[gk][pin_idx]
 				  : g_stem_group_bufs[gk][g_stem_active_slot_local[gk]];
 		}
-		used = stem_render_run(grp,
-				       fis, &stem_prepared, m0, md, mv,
-				       f, out_n, s, stem_peak, &s_stem_seam,
-				       g_stem_stream.song_frame,
-				       rate_q16, &s_stem_rate_frac, run);
+		stem_render_run(grp, fis, &stem_prepared, m0, md, mv,
+				 f, out_n, s, stem_peak, &s_stem_seam,
+				 g_stem_stream.song_frame,
+				 rate_q16, s_stem_rate_frac, run,
+				 stem_used);
 		f += out_n;
 		/* THE PLAYHEAD ADVANCES BY WHAT WAS ACTUALLY READ, which is
 		 * `out_n * rate` rounded down to whole frames -- the
@@ -3198,7 +3327,9 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 		 * carried into the next run, so nothing is lost or repeated
 		 * across a run boundary. At 1x this is out_n exactly. */
 		}
-		(void)st_stream_advance_frames(&g_stem_stream, used);
+		/* ONE stream, so it advances by the transport stem's count.
+		 * stem_used[] carries all four for when there are four. */
+		(void)st_stream_advance_frames(&g_stem_stream, stem_used[0]);
 
 		/* ---- THE WRAP BACKSTOP ------------------------------------
 		 * The ducked wrap above is the normal path, and after it the
@@ -3228,8 +3359,7 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 		 * pin exists: without it every wrap would race the streamer. */
 		if (lp_on && s_stem_jump_pend != ST_SEAM_JUMP_WRAP &&
 		    g_stem_stream.song_frame >= lp_end && lp_end > lp_lo) {
-			s_rs_prev_valid  = false;   /* moved, not advanced */
-			s_stem_rate_frac = 0u;
+			stem_rs_drop();   /* moved, not advanced */
 			if (st_stream_seek(&g_stem_stream, lp_lo)) {
 				atomic_inc(&g_stem_loop_wraps);
 			}
@@ -3325,8 +3455,7 @@ static void looper_audio_block(int16_t *s)
 		st_seam_reset(&s_stem_seam);
 		/* A new song under the same playhead: the carried frame belongs
 		 * to the song being replaced, and the reel starts from rest. */
-		s_rs_prev_valid  = false;
-		s_stem_rate_frac = 0u;
+		stem_rs_drop();
 		st_inertia_reset(&s_stem_inertia);
 		/* A NEW SONG STARTS AT ITS OWN PITCH. Carrying the last song's
 		 * semitone offset across a reload would silently transpose
@@ -3394,8 +3523,7 @@ static void looper_audio_block(int16_t *s)
 	 * minutes. The resampler's carried frame belongs to that stopped
 	 * playhead too. */
 	st_inertia_reset(&s_stem_inertia);
-	s_rs_prev_valid  = false;
-	s_stem_rate_frac = 0u;
+	stem_rs_drop();
 	for (uint32_t sp = 0; sp < ST11_STEM_COUNT; sp++) {
 		atomic_set(&g_stem_peak_pub[sp], 0);
 	}
