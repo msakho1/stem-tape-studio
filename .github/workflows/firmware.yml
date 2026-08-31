@@ -1982,6 +1982,12 @@ jobs:
           grep -q 'the half-step grid contains' audit/pitch-selftest.txt
           grep -q 'accumulation: +0.5 -> +1.5 -> +1.0 -> +0.0' \
             audit/pitch-selftest.txt
+          # The slow toggle's own measurements, for the same reason: a gate
+          # that stopped printing the layering trace or the glide duration
+          # would still exit 0 while having stopped asking.
+          grep -q 'slow playback multiplies the varispeed' audit/pitch-selftest.txt
+          grep -q 'exactly one octave down' audit/pitch-selftest.txt
+          grep -q 'same glide at 64/256/1024-frame blocks' audit/pitch-selftest.txt
 
           # AND THE PRODUCTION PATH MUST USE IT.
           M=firmware/stemtape_player/src/main.c
@@ -1991,7 +1997,13 @@ jobs:
           # THE PITCH IS THE REQUESTED RATE, and inertia multiplies OVER it.
           # A build that replaced one with the other would still compile and
           # would silently drop either the pitch or the tape spin-up.
-          grep -q 'st_pitch_ratio_q16(&s_stem_pitch)' "$M" || {
+          #
+          # The rate is now a THREE-FACTOR product -- semitones x slow x
+          # inertia -- and the first two are combined by st_pitch_effective_q16
+          # so that the layering itself is host-testable rather than being an
+          # inline multiply no test can reach. Requiring the call by name is
+          # what stops it being flattened back into main.c.
+          grep -q 'st_pitch_effective_q16(&s_stem_pitch, s_stem_slow_q16)' "$M" || {
             echo "  the pitch never reaches the transport rate"; fail=1; }
           grep -q 'st_inertia_env_q16(&s_stem_inertia)) >> 16' "$M" || {
             echo "  inertia no longer multiplies the requested rate"; fail=1; }
@@ -2005,8 +2017,51 @@ jobs:
           grep -q 'pitch_owns_rocker' "$M" || {
             echo "  the classic tempo path is not fenced off in stem mode"
             fail=1; }
+
+          # ---- FX + PLAY SLOW PLAYBACK ---------------------------------
+          # A SECOND FACTOR, NOT A SECOND ENGINE. The brief: "reuse Stem
+          # Tape's existing varispeed implementation. Do NOT build a separate
+          # slow-playback engine." These greps are what makes that structural:
+          # the only thing the control thread may publish is a request flag,
+          # and the only thing that consumes it is the same rate product the
+          # rocker already feeds.
+          grep -q 'atomic_set(&g_stem_slow_req' "$M" || {
+            echo "  FX+PLAY never publishes a slow request"; fail=1; }
+          grep -q 'st_pitch_slow_glide(s_stem_slow_q16' "$M" || {
+            echo "  the slow request never becomes a glided multiplier"
+            fail=1; }
+          # THE GLIDE IS ON THE AUDIO CLOCK, advanced in frames beside the
+          # inertia envelope. A control-thread or timer-driven glide would
+          # drift against the audio it is bending.
+          grep -q 'BLK_FRAMES, I2S_TRUE_HZ' "$M" || {
+            echo "  the slow glide is not advanced on the audio clock"
+            fail=1; }
+          # ONE GESTURE, ONE MEANING. With the overlay open and the transport
+          # running, a PLAY TAP must toggle slow INSTEAD OF the transport --
+          # the brief: "pressing PLAY as part of this combination does NOT
+          # also trigger the normal PLAY action". An if/else is what makes
+          # that exclusive; two independent ifs would do both.
+          grep -q 'if (g_stem_fx_out.fx_open && g_playing) {' "$M" || {
+            echo "  FX+PLAY does not exclusively claim the PLAY tap"; fail=1; }
+          # AND SLOW IS PER-SONG. Loading a different song must not leave the
+          # previous song's slow state engaged.
+          grep -q 's_stem_slow_q16 = ST_PITCH_ONE;' "$M" || {
+            echo "  the slow multiplier is never reset on song change"
+            fail=1; }
+          # NO SEPARATE ENGINE. The ONLY thing slow does is scale the rate
+          # that already exists, so no second stretcher/resampler/clock may
+          # appear. Matched as IDENTIFIERS, not as prose: this file's comments
+          # discuss time-stretching at length precisely to say it is not done
+          # here, and a bare word match would fire on the documentation of the
+          # very property it is checking.
+          if grep -nE '\b(time_stretch|slow_engine|slow_resample|slow_rate_q16)\b' \
+               "$M"; then
+            echo "  a separate slow-playback path appeared in main.c"; fail=1
+          fi
+
           [ "$fail" = 0 ] || exit 1
           echo "pitch wiring: rocker -> semitones -> one transport -> four stems"
+          echo "slow wiring: FX+PLAY -> request -> glide -> the SAME rate product"
           {
             echo '### Stem Tape rocker semitone control'
             echo '```text'
@@ -2068,6 +2123,11 @@ jobs:
           # silent pass would be worth nothing.
           grep -q 'level held at' audit/inertia-transport-gate.txt
           grep -q 'STOP drops the pitch and keeps the level' \
+            audit/inertia-transport-gate.txt
+          # The slow toggle measured through the SAME rig: the period must
+          # double, which is the audible difference between tape slow and a
+          # time stretch. A gate that stopped printing it stopped asking.
+          grep -q 'FX+PLAY slow halves the rendered pitch' \
             audit/inertia-transport-gate.txt
 
           # AND THE PRODUCTION PATH MUST ACTUALLY USE IT. The modules above
@@ -2645,6 +2705,12 @@ jobs:
           check st_pitch_ratio_q16
           check st_pitch_click
           check st_pitch_tick
+          # FX+PLAY SLOW PLAYBACK. The glide is the only non-inline part of
+          # the slow path (st_pitch_effective_q16 is a static inline and has
+          # no symbol -- the rocker step above proves its use by source grep),
+          # and a build that linked the toggle but not the glide would step a
+          # whole octave in one block.
+          check st_pitch_slow_glide
           # physical control scanner (button/fader ladder read) + LED output
           check ladder_read
           check led_service

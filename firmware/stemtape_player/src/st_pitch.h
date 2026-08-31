@@ -111,6 +111,69 @@
 /* The Looper's own double-click window, reused verbatim. */
 #define ST_PITCH_DOUBLE_MS 350u
 
+/*
+ * ======================================================================
+ * SLOW PLAYBACK: A SECOND, INDEPENDENT FACTOR
+ * ======================================================================
+ * The FX+PLAY toggle drops the transport to half speed. It is a MULTIPLIER
+ * over the rocker's semitone setting, never a replacement for it:
+ *
+ *     effective rate = 2^(semitones/12) * slow_multiplier
+ *
+ * so a song the player has pitched to +2 semitones slows RELATIVE TO +2, and
+ * turning slow off returns to +2 rather than to 1.0x. Nothing here writes the
+ * semitone value, which is why changing the rocker while slow is engaged
+ * behaves correctly with no special case: the product simply follows, and
+ * exiting slow lands on whatever the player has since chosen.
+ *
+ * THE RATIO IS NOT INVENTED. src/machine/surface.ts implements this same
+ * toggle for the companion -- `const rate = Math.abs(next.speed - 0.5) <
+ * 1e-6 ? 1 : 0.5` -- so the stock value is exactly HALF SPEED, one octave
+ * down, and that is what is used here rather than something chosen by ear.
+ *
+ * ONE DIFFERENCE FROM THE COMPANION, deliberate: it OVERWRITES its speed
+ * field (`next = { ...next, speed: rate }`), so engaging half speed there
+ * discards any varispeed the player had set and leaving it snaps to 1.0x.
+ * Layering instead of overwriting is what keeps the two controls independent.
+ */
+
+/* Half speed, in the same Q16 as everything else. From surface.ts. */
+#define ST_PITCH_SLOW_Q16 (ST_PITCH_ONE / 2u)
+
+/*
+ * How long the transport takes to glide between normal and slow, in ms.
+ *
+ * NOT the tape-start/stop inertia, which is a different feature with its own
+ * much longer, shaped envelope (st_inertia.h: 350 ms up, 600 ms down). This is
+ * a speed TOGGLE, and the brief is explicit that it should not become a
+ * transport start.
+ *
+ * It also is not zero, and that IS a departure from the rocker's semitone
+ * steps, which land instantly and are documented as click-free because the
+ * read cursor stays continuous. The same argument still holds here -- an
+ * instant change would not click either -- but half speed is a WHOLE OCTAVE,
+ * where the rocker's smallest step is a twelfth of one. An octave arriving in
+ * a single block is a lurch even when it is not a click, so it is glided;
+ * 120 ms is short enough to read as a switch rather than as a tape spinning
+ * down.
+ */
+#define ST_PITCH_SLOW_GLIDE_MS 120u
+
+/*
+ * Move `cur_q16` one step toward normal (ST_PITCH_ONE) or slow
+ * (ST_PITCH_SLOW_Q16), covering the whole distance in ST_PITCH_SLOW_GLIDE_MS
+ * however many steps that takes. Linear in rate and deterministic: it ARRIVES
+ * at the target rather than approaching it asymptotically, so there is no
+ * residue to threshold away and no "nearly slow" state to reason about.
+ *
+ * Pure, and advanced in FRAMES from the audio clock, so the glide cannot drift
+ * against the audio it is bending. The caller owns `cur_q16`; there is no
+ * hidden state, which is what lets the audio thread run this without sharing
+ * anything mutable with the control thread but a single boolean.
+ */
+uint32_t st_pitch_slow_glide(uint32_t cur_q16, bool want_slow, uint32_t frames,
+			      uint32_t sample_rate);
+
 typedef enum {
 	ST_PITCH_ACT_NONE = 0,
 	ST_PITCH_ACT_SINGLE_UP,
@@ -154,6 +217,33 @@ st_pitch_action_t st_pitch_tick(st_pitch_t *p, uint32_t now_ms);
  * transport advances the playhead at it, so time and pitch move together.
  */
 uint32_t st_pitch_ratio_q16(const st_pitch_t *p);
+
+/*
+ * THE PRODUCT: the transport rate the two controls ask for together, which is
+ * the whole of "slow layers over the varispeed".
+ *
+ * It lives here rather than at the call site precisely so it can be host
+ * tested. Written out at the caller it would be an untestable uint64 multiply
+ * inside a 48 kHz block function -- and the brief's two hardest requirements,
+ * "do not overwrite the underlying user semitone value" and "do not restore a
+ * stale value from before slow mode", are properties of exactly this
+ * expression. Both hold STRUCTURALLY here rather than by discipline: `p` is
+ * const, so engaging slow cannot write the semitone state, and there is
+ * nowhere for a stale copy to live because nothing is copied. Leaving slow is
+ * not a restore at all, it is this same product with slow_q16 back at one.
+ *
+ * `slow_q16` is the GLIDE'S CURRENT POSITION, not a boolean, so a part-way
+ * glide scales the pitched rate exactly as the two endpoints do and the
+ * transition needs no separate blend path.
+ *
+ * The product cannot overflow: both factors are bounded well inside 32 bits
+ * and the arithmetic is done in 64.
+ */
+static inline uint32_t st_pitch_effective_q16(const st_pitch_t *p,
+					       uint32_t slow_q16)
+{
+	return (uint32_t)(((uint64_t)st_pitch_ratio_q16(p) * slow_q16) >> 16);
+}
 
 /* Cents, for diagnostics and display. +1 half-step == +50 cents exactly. */
 static inline int st_pitch_cents(const st_pitch_t *p)

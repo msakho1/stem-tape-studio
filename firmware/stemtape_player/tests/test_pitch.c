@@ -48,6 +48,18 @@ static int g_cases, g_checks, g_failures;
 		}                                                              \
 	} while (0)
 
+/* A silent check for use inside long loops, where one CHECK per iteration
+ * would bury the output. Counts only failures. */
+#define CHECK_QUIET(cond)                                                      \
+	do {                                                                   \
+		if (!(cond)) {                                                 \
+			g_checks++;                                            \
+			g_failures++;                                          \
+			printf("  FAIL %s:%d: quiet check\n", __FILE__,        \
+			       __LINE__);                                      \
+		}                                                              \
+	} while (0)
+
 /* The pitch in semitones, for messages that read like the brief. */
 static double st(const st_pitch_t *p) { return (double)p->half * 0.5; }
 
@@ -426,6 +438,298 @@ static void case_ticking_alone_does_nothing(void)
 	      st(&p));
 }
 
+/* ======================================================================
+ * 8. SLOW PLAYBACK LAYERS OVER THE VARISPEED, it does not replace it.
+ *
+ *    The brief's whole state requirement in one case: "Do not overwrite the
+ *    underlying user semitone/varispeed value when entering slow mode." So
+ *    this checks the SEMITONE FIELD directly, not just the resulting rate --
+ *    an implementation that stashed the old value and restored it would give
+ *    the right rate back and still be wrong, because the next thing it does
+ *    with a stale copy is get it wrong.
+ *
+ *    EVERY RATE BELOW COMES OUT OF st_pitch_effective_q16(), the same call
+ *    the audio block makes. An earlier draft of this case did the multiply
+ *    itself, which proved only that this file can multiply; the layering it
+ *    was meant to test lived at the call site where no host test could reach
+ *    it. Moving the product into the module is what makes the case real.
+ * ====================================================================== */
+static void case_slow_layers_over_varispeed(void)
+{
+	st_pitch_t p;
+	uint32_t at_2, slow_2, back_2;
+
+	g_cases++;
+	printf("\n-- slow playback multiplies the varispeed, never replaces it\n");
+
+	/* +2 semitones, the brief's own example. */
+	st_pitch_reset(&p);
+	p.half = 4;
+	at_2 = st_pitch_effective_q16(&p, ST_PITCH_ONE);
+	CHECK(at_2 == st_pitch_ratio_q16(&p),
+	      "with slow off the effective rate must be the plain pitch rate "
+	      "(%u vs %u)", at_2, st_pitch_ratio_q16(&p));
+
+	/* Engaging slow must not touch the semitone state at all. */
+	slow_2 = st_pitch_effective_q16(&p, ST_PITCH_SLOW_Q16);
+	CHECK(p.half == 4,
+	      "engaging slow changed the stored semitones to %+.1f", st(&p));
+	back_2 = st_pitch_effective_q16(&p, ST_PITCH_ONE);
+
+	printf("     +2.0 st: %u -> slow %u -> back %u (%.4fx -> %.4fx)\n",
+	       at_2, slow_2, back_2, at_2 / 65536.0, slow_2 / 65536.0);
+	CHECK(back_2 == at_2,
+	      "leaving slow must return to the +2 rate exactly (%u vs %u)",
+	      back_2, at_2);
+	/* Half speed of the +2 rate, not half speed of 1.0x. */
+	CHECK(slow_2 == at_2 / 2u,
+	      "slow at +2 semitones must be half of the +2 rate (%u), not half "
+	      "of unity (%u)", at_2 / 2u, ST_PITCH_ONE / 2u);
+	CHECK(slow_2 != ST_PITCH_SLOW_Q16,
+	      "slow collapsed to a flat 0.5x -- the varispeed was discarded");
+
+	/*
+	 * AND AT EVERY OTHER SETTING, not just the brief's example. Half of
+	 * the pitched rate at all 30 half-steps, so an implementation that
+	 * special-cased one of them, or that layered only near unity, fails
+	 * here rather than in someone's ears.
+	 */
+	{
+		int k, off = 0;
+
+		for (k = ST_PITCH_MIN_HALF; k <= ST_PITCH_MAX_HALF; k++) {
+			uint32_t norm, slow;
+
+			p.half = (int16_t)k;
+			norm = st_pitch_effective_q16(&p, ST_PITCH_ONE);
+			slow = st_pitch_effective_q16(&p, ST_PITCH_SLOW_Q16);
+			if (slow != norm / 2u || p.half != (int16_t)k) {
+				off++;
+			}
+		}
+		CHECK(off == 0,
+		      "%d of %d half-steps did not slow to exactly half their "
+		      "own rate", off, ST_PITCH_MAX_HALF - ST_PITCH_MIN_HALF + 1);
+	}
+
+	/*
+	 * A PART-WAY GLIDE SCALES THE PITCHED RATE TOO. The multiplier is a
+	 * position, not a switch, so mid-transition must sit strictly between
+	 * the two endpoints -- at the PITCHED endpoints, not at 1.0x and 0.5x.
+	 */
+	{
+		const uint32_t midway = (ST_PITCH_ONE + ST_PITCH_SLOW_Q16) / 2u;
+		uint32_t mid;
+
+		p.half = 4;
+		mid = st_pitch_effective_q16(&p, midway);
+		CHECK(mid > slow_2 && mid < at_2,
+		      "a half-completed glide at +2 gave %u, outside the "
+		      "pitched endpoints %u..%u", mid, slow_2, at_2);
+		/*
+		 * And it is three quarters OF THE PITCHED RATE, not three
+		 * quarters of unity. Being between the endpoints is not enough
+		 * to prove that: 0.75x itself (49152) also sits between them,
+		 * which is exactly what a glide applied to the wrong base
+		 * would return.
+		 */
+		CHECK(mid == (at_2 * 3u) / 4u,
+		      "a 75%%-of-the-way glide at +2 gave %u, not three "
+		      "quarters of the +2 rate (%u) -- it is scaling the wrong "
+		      "base", mid, (at_2 * 3u) / 4u);
+	}
+
+	/*
+	 * CHANGING THE ROCKER WHILE SLOW IS ENGAGED. The brief: leaving slow
+	 * must resume at the NEW setting, not at a stale one from before. With
+	 * the two kept as independent factors this needs no code at all, which
+	 * is the point of the case -- it would catch a save/restore design.
+	 */
+	{
+		uint32_t slow_new, back_new;
+
+		p.half = 2;                            /* +1.0 while still slow */
+		slow_new = st_pitch_effective_q16(&p, ST_PITCH_SLOW_Q16);
+		back_new = st_pitch_effective_q16(&p, ST_PITCH_ONE);
+		printf("     changed to +1.0 while slow: slow %u, resumed %u\n",
+		       slow_new, back_new);
+		CHECK(slow_new != slow_2,
+		      "the slow rate did not follow the new semitone setting");
+		CHECK(back_new == st_pitch_ratio_q16(&p),
+		      "resuming must use the CURRENT setting, not a stale copy");
+		CHECK(back_new != at_2,
+		      "resuming returned to the OLD +2 rate -- a stale value was "
+		      "restored");
+	}
+}
+
+/*
+ * Run one whole glide from `from` to the `want_slow` endpoint at a given block
+ * size and sample rate. Returns the ELAPSED MILLISECONDS, which is the only
+ * figure that should be the same across every (blk, rate) pair; the step COUNT
+ * deliberately is not. Reports monotonicity and the largest single step by
+ * reference.
+ */
+static double ramp_ms(uint32_t from, bool want_slow, uint32_t blk,
+		      uint32_t rate_hz, uint32_t *worst_step, uint32_t *landed)
+{
+	uint32_t cur = from, prev = from, steps = 0;
+
+	if (worst_step) {
+		*worst_step = 0u;
+	}
+	while (steps < 100000u) {
+		uint32_t nxt = st_pitch_slow_glide(cur, want_slow, blk, rate_hz);
+		uint32_t d = (nxt > cur) ? (nxt - cur) : (cur - nxt);
+
+		if (nxt == cur) {
+			break;                      /* arrived, or stalled */
+		}
+		if (worst_step && d > *worst_step) {
+			*worst_step = d;
+		}
+		/* Monotone: a glide that wobbles is a wobble in the pitch. */
+		CHECK_QUIET(want_slow ? (nxt < prev) : (nxt > prev));
+		prev = cur = nxt;
+		steps++;
+	}
+	if (landed) {
+		*landed = cur;
+	}
+	return steps * 1000.0 * blk / rate_hz;
+}
+
+/* ======================================================================
+ * 9. THE GLIDE: smooth, bounded, symmetric, and it ARRIVES.
+ * ====================================================================== */
+static void case_slow_glide(void)
+{
+	uint32_t worst = 0, landed = 0;
+	double down_ms, up_ms;
+
+	g_cases++;
+	printf("\n-- the slow toggle glides, and lands exactly\n");
+
+	/* Into slow. */
+	down_ms = ramp_ms(ST_PITCH_ONE, true, 256u, 48000u, &worst, &landed);
+	printf("     normal -> slow in %.0f ms, largest step %u/65536\n",
+	       down_ms, worst);
+	CHECK(landed == ST_PITCH_SLOW_Q16,
+	      "the glide must ARRIVE at half speed, not approach it (got %u)",
+	      landed);
+	CHECK(down_ms > ST_PITCH_SLOW_GLIDE_MS * 0.7 &&
+	      down_ms < ST_PITCH_SLOW_GLIDE_MS * 1.4,
+	      "the glide took %.0f ms against a %u ms constant", down_ms,
+	      ST_PITCH_SLOW_GLIDE_MS);
+	/* NOT the inertia envelope: that is a transport start, this is a speed
+	 * toggle, and the brief separates them explicitly. */
+	CHECK(down_ms < 250.0,
+	      "%.0f ms is long enough to read as a tape spinning down rather "
+	      "than a speed switch", down_ms);
+
+	/* And back out, to exactly unity, in the same time. */
+	up_ms = ramp_ms(ST_PITCH_SLOW_Q16, false, 256u, 48000u, NULL, &landed);
+	CHECK(landed == ST_PITCH_ONE,
+	      "the glide back must land on exactly 1.0x (got %u)", landed);
+	/*
+	 * SYMMETRY. Nothing in the brief makes entering slow and leaving it
+	 * different, and an exit that snaps while the entry glides is exactly
+	 * the asymmetry a "restore the old value" implementation produces.
+	 */
+	CHECK(up_ms > down_ms * 0.9 && up_ms < down_ms * 1.1,
+	      "leaving slow took %.0f ms against %.0f ms to enter -- the two "
+	      "directions must be the same glide", up_ms, down_ms);
+
+	/*
+	 * THE GLIDE IS ON THE AUDIO CLOCK, NOT ON A BLOCK COUNT.
+	 *
+	 * `frames` is what makes that true, so it has to be varied: measured
+	 * only at one block size, a glide that stepped by a hardcoded 256
+	 * would be indistinguishable from a correct one. Same wall-clock
+	 * duration at a quarter of the block size and at a different sample
+	 * rate; the STEP COUNT differs by design, the TIME does not.
+	 */
+	{
+		const double tiny = ramp_ms(ST_PITCH_ONE, true, 64u, 48000u,
+					    NULL, &landed);
+		const double big  = ramp_ms(ST_PITCH_ONE, true, 1024u, 48000u,
+					    NULL, NULL);
+		const double slow_clock = ramp_ms(ST_PITCH_ONE, true, 256u,
+						  16000u, NULL, NULL);
+
+		printf("     same glide at 64/256/1024-frame blocks: "
+		       "%.0f / %.0f / %.0f ms; at 16 kHz: %.0f ms\n",
+		       tiny, down_ms, big, slow_clock);
+		CHECK(landed == ST_PITCH_SLOW_Q16,
+		      "the glide must arrive at half speed at a 64-frame block "
+		      "too (got %u)", landed);
+		CHECK(tiny > down_ms * 0.8 && tiny < down_ms * 1.2,
+		      "a 64-frame block glided in %.0f ms against %.0f ms at "
+		      "256 -- the glide is counting blocks, not frames",
+		      tiny, down_ms);
+		CHECK(big > down_ms * 0.8 && big < down_ms * 1.25,
+		      "a 1024-frame block glided in %.0f ms against %.0f ms at "
+		      "256 -- the glide is counting blocks, not frames",
+		      big, down_ms);
+		CHECK(slow_clock > down_ms * 0.8 && slow_clock < down_ms * 1.2,
+		      "at 16 kHz the glide took %.0f ms against %.0f ms at 48 "
+		      "kHz -- the sample rate is being ignored",
+		      slow_clock, down_ms);
+	}
+
+	/* Already there: a no-op, not a wander. */
+	CHECK(st_pitch_slow_glide(ST_PITCH_ONE, false, 256u, 48000u) ==
+	      ST_PITCH_ONE, "gliding to where it already is must not move");
+	CHECK(st_pitch_slow_glide(ST_PITCH_SLOW_Q16, true, 256u, 48000u) ==
+	      ST_PITCH_SLOW_Q16, "and the same at the slow end");
+
+	/*
+	 * A REVERSAL MID-GLIDE MUST TURN ROUND, NOT JUMP.
+	 *
+	 * Measured from DEEP in the glide, not one step in. One step in, "step
+	 * back" and "snap to unity" land on the same number, so the check
+	 * passes either way and constrains nothing -- which is precisely how
+	 * an earlier version of this case let a snapping implementation
+	 * through.
+	 */
+	{
+		uint32_t deep = ST_PITCH_ONE;
+		uint32_t rev;
+		int i;
+
+		for (i = 0; i < 10; i++) {
+			deep = st_pitch_slow_glide(deep, true, 256u, 48000u);
+		}
+		rev = st_pitch_slow_glide(deep, false, 256u, 48000u);
+		printf("     reversal 10 blocks in: %u -> %u\n", deep, rev);
+		CHECK(rev > deep,
+		      "reversing mid-glide must move back toward unity "
+		      "(%u -> %u)", deep, rev);
+		CHECK(rev < ST_PITCH_ONE,
+		      "reversing mid-glide jumped straight to unity (%u) from "
+		      "%u -- that is a snap, not a glide", rev, deep);
+		CHECK(rev - deep <= worst,
+		      "the reversal step (%u) is larger than the largest "
+		      "forward step (%u)", rev - deep, worst);
+	}
+}
+
+/* ======================================================================
+ * 10. THE STOCK RATIO IS THE COMPANION'S.
+ * ====================================================================== */
+static void case_slow_ratio_is_stock(void)
+{
+	g_cases++;
+	printf("\n-- the slow ratio is the companion's half speed\n");
+
+	/* src/machine/surface.ts: `const rate = ... ? 1 : 0.5`. */
+	CHECK(ST_PITCH_SLOW_Q16 == ST_PITCH_ONE / 2u,
+	      "the slow ratio is %u/65536, not the companion's exact 0.5x",
+	      ST_PITCH_SLOW_Q16);
+	printf("     %u/65536 = %.4fx, exactly one octave down\n",
+	       ST_PITCH_SLOW_Q16, ST_PITCH_SLOW_Q16 / 65536.0);
+}
+
 int main(void)
 {
 	printf("== Stem Tape ROCKER SEMITONE CONTROL ==\n");
@@ -441,6 +745,9 @@ int main(void)
 	case_ratios_are_equal_tempered();
 	case_range_is_clamped();
 	case_ticking_alone_does_nothing();
+	case_slow_layers_over_varispeed();
+	case_slow_glide();
+	case_slow_ratio_is_stock();
 
 	printf("\n");
 	if (g_failures) {

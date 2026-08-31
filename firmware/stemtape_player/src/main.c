@@ -151,9 +151,9 @@
  * failure that cost several rounds before the shipped/calibration tags were
  * split apart. The tag is the only thing the operator can read. */
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st28-VOLCAL"
+#define ST_BUILD_TAG "st29-VOLCAL"
 #else
-#define ST_BUILD_TAG "st28"
+#define ST_BUILD_TAG "st29"
 #endif
 #include "st_track_hold.h"
 #include "st_ladder.h"
@@ -1953,6 +1953,24 @@ static st_seam_t s_stem_seam;
  */
 static st_pitch_t s_stem_pitch;
 
+/*
+ * SLOW PLAYBACK (FX + PLAY), split across the two threads on purpose.
+ *
+ * The REQUEST is a single atomic boolean written by the control thread. The
+ * GLIDE is a Q16 multiplier owned entirely by the audio thread, advanced from
+ * the audio clock so it cannot drift against the audio it is bending. That
+ * split is the same one tape inertia uses, and it means the only thing the two
+ * threads share is one bool -- no torn multi-word state, and nothing for the
+ * audio thread to lock.
+ *
+ * The multiplier is SEPARATE from s_stem_pitch and never written into it. That
+ * is what makes the two controls independent: the player's semitone setting
+ * survives the slow toggle untouched, and changing the rocker while slow is
+ * engaged just moves the other factor of the product.
+ */
+static atomic_t g_stem_slow_req;
+static uint32_t s_stem_slow_q16 = ST_PITCH_ONE;   /* audio-thread-only */
+
 static st11_audio_frame_t s_rs_prev;
 static bool               s_rs_prev_valid;
 static uint32_t           s_stem_rate_frac;   /* cursor fraction, Q16 [0,1) */
@@ -2463,8 +2481,10 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 	 *   multiply is the "one-line change" the previous revision of this
 	 *   comment promised; it is now made.
 	 */
+	const uint32_t pitch_q16 =
+		st_pitch_effective_q16(&s_stem_pitch, s_stem_slow_q16);
 	const uint32_t rate_q16 = st_rs_rate_clamp(
-		(uint32_t)(((uint64_t)st_pitch_ratio_q16(&s_stem_pitch) *
+		(uint32_t)(((uint64_t)pitch_q16 *
 			     st_inertia_env_q16(&s_stem_inertia)) >> 16));
 	/* The seam's duck length converted from output frames into the tape
 	 * the playhead covers while it runs. See the arm clamp below. */
@@ -2492,7 +2512,8 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 	 * and snapping it would be a position jump per block rather than the
 	 * once-per-PLAY sub-sample step this is for. */
 	if (st_inertia_at_unity(&s_stem_inertia) &&
-	    st_pitch_is_unity(&s_stem_pitch) && s_stem_rate_frac != 0u) {
+	    st_pitch_is_unity(&s_stem_pitch) &&
+	    s_stem_slow_q16 == ST_PITCH_ONE && s_stem_rate_frac != 0u) {
 		s_stem_rate_frac = 0u;
 		s_rs_prev_valid  = false;
 	}
@@ -2501,6 +2522,12 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 	 * frames this block will produce. Same clock as the playhead, so the
 	 * ramp cannot drift against the audio it is bending. */
 	st_inertia_advance(&s_stem_inertia, BLK_FRAMES);
+	/* The slow toggle's glide, on the same clock and in the same place, so
+	 * the two speed modifiers advance together and neither can lag the
+	 * other by a block. */
+	s_stem_slow_q16 = st_pitch_slow_glide(s_stem_slow_q16,
+					       atomic_get(&g_stem_slow_req) != 0,
+					       BLK_FRAMES, I2S_TRUE_HZ);
 
 	while (f < BLK_FRAMES) {
 		uint32_t needed;
@@ -3025,6 +3052,8 @@ static void looper_audio_block(int16_t *s)
 		 * semitone offset across a reload would silently transpose
 		 * something the player never adjusted. */
 		st_pitch_reset(&s_stem_pitch);
+		atomic_set(&g_stem_slow_req, 0);
+		s_stem_slow_q16 = ST_PITCH_ONE;
 		atomic_set(&g_stem_song_selected, reload_ok ? 1 : 0);
 		atomic_set(&g_stem_reload_req, 0);
 	}
@@ -6836,13 +6865,60 @@ static void stem_ctl_apply(void)
 		atomic_set(&g_stem_loop_pin_want[ST_LOOP_PIN_EXIT], -1);
 	}
 
-	/* ---- the transport, from the ONLY PLAY owner --------------------- */
+	/* ---- the transport, from the ONLY PLAY owner ---------------------
+	 *
+	 * FX + PLAY IS A DIFFERENT GESTURE, and it is claimed here rather than
+	 * in the dispatcher because this is already the single place a PLAY tap
+	 * turns into an action. With the FX overlay open a PLAY TAP toggles slow
+	 * playback and MUST NOT also toggle the transport -- one press, one
+	 * meaning, which is what the brief asks for.
+	 *
+	 * A TAP, not the whole button. PLAY's other gesture in this mode is the
+	 * HOLD that arms a loop, and that still works untouched: st_ctl_service()
+	 * only reports play_tap for a press that never crossed the hold
+	 * threshold, so claiming the tap here cannot cost the loop. Being able to
+	 * loop while in FX mode was itself a requested correction and is not
+	 * given back.
+	 *
+	 * Nothing else contends for it: PLAY is not one of the four Track buttons
+	 * the overlay turns into effects, so this cannot fire an effect either.
+	 * Nor can it fire an FX command in the other direction -- fx_open is a
+	 * LATCHED MODE, toggled by the Volume chord (st_fx_ctl.h) and not a held
+	 * button, so reading it here consumes nothing and the overlay neither
+	 * opens nor closes on a PLAY press.
+	 *
+	 * AND ONLY WHILE SOMETHING IS PLAYING. The brief defines this as toggling
+	 * "the playing song" between normal and slow, and that qualifier decides
+	 * the arbitration: with the transport stopped there is no song to slow,
+	 * so the slow toggle has nothing to mean and PLAY keeps its ordinary job.
+	 *
+	 * That is not a technicality, it is the difference between FX mode being
+	 * usable and not. Claiming the tap unconditionally would mean the
+	 * transport could not be STARTED at all while the overlay is open, and
+	 * since the overlay is a latched mode rather than a held button, the
+	 * player would have to leave FX entirely just to press play. Gating on
+	 * g_playing costs nothing and gives that back.
+	 *
+	 * What is still true, and is a real consequence rather than an oversight:
+	 * a playing song cannot be STOPPED from inside FX mode, because its PLAY
+	 * tap now means slow. Closing the overlay (the same Volume chord that
+	 * opened it) restores it immediately. The alternative would be inventing
+	 * a second PLAY gesture for stop, which the brief did not ask for.
+	 */
 	if (o->play_tap) {
-		g_playing = !g_playing;
-		if (g_playing) {
-			g_midi_start_pending = 1;
+		if (g_stem_fx_out.fx_open && g_playing) {
+			const bool want = atomic_get(&g_stem_slow_req) == 0;
+
+			atomic_set(&g_stem_slow_req, want ? 1 : 0);
+			printk("STEMTAPE slow: %s (FX+PLAY)\n",
+			       want ? "ON, half speed" : "OFF");
 		} else {
-			g_midi_stop_pending = 1;
+			g_playing = !g_playing;
+			if (g_playing) {
+				g_midi_start_pending = 1;
+			} else {
+				g_midi_stop_pending = 1;
+			}
 		}
 	}
 

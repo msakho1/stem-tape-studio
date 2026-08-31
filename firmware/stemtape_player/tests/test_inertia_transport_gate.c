@@ -735,6 +735,96 @@ static void case_semitones_reach_the_tape(void)
 }
 
 /* ======================================================================
+ * 5d. THE FX+PLAY SLOW TOGGLE, AS HEARD.
+ *
+ * The companion form of 5c, and the last link in the slow-playback chain.
+ * st_pitch's own test proves the product layers; this proves the product is
+ * what the tape is actually read at, and that the result is TAPE SLOW rather
+ * than a time stretch: at the same semitone setting, engaging slow must halve
+ * the rendered frequency, i.e. DOUBLE the measured period. A time-stretching
+ * implementation would leave the period where it was, and fails here.
+ *
+ * Measured at several semitone settings on purpose. Half the period at every
+ * one of them is the audible statement of "slow is relative to the varispeed":
+ * an implementation that dropped to a flat 0.5x would produce the SAME period
+ * at every setting instead of one that tracks the pitch.
+ * ====================================================================== */
+static void case_slow_playback_reaches_the_tape(void)
+{
+	static const int steps[] = { -12, -4, 0, 4 };
+	uint32_t i;
+
+	g_cases++;
+	printf("\n-- FX+PLAY slow halves the rendered pitch, at every setting\n");
+	printf("     semitones   normal    slow     ratio\n");
+
+	for (i = 0; i < sizeof(steps) / sizeof(steps[0]); i++) {
+		st_pitch_t p;
+		rig_t r;
+		uint32_t b;
+		double fast_period, slow_period, amp_f, amp_s, ratio;
+
+		st_pitch_reset(&p);
+		p.half = (int16_t)steps[i];
+
+		/* Normal, then slow, from the same starting position. */
+		rig_init(&r, 0u);
+		g_nout = 0;
+		for (b = 0; b < 32u; b++) {
+			rig_block(&r, st_pitch_effective_q16(&p, ST_PITCH_ONE));
+		}
+		measure(g_nout / 8u, g_nout, &fast_period, &amp_f);
+
+		rig_init(&r, 0u);
+		g_nout = 0;
+		for (b = 0; b < 32u; b++) {
+			rig_block(&r,
+				  st_pitch_effective_q16(&p, ST_PITCH_SLOW_Q16));
+		}
+		measure(g_nout / 8u, g_nout, &slow_period, &amp_s);
+
+		ratio = (fast_period > 0.0) ? slow_period / fast_period : 0.0;
+		printf("     %+5.1f      %7.1f  %7.1f   %.4f\n",
+		       steps[i] * 0.5, fast_period, slow_period, ratio);
+
+		CHECK(fast_period > 0.0 && slow_period > 0.0,
+		      "no cycles measured at %+.1f semitones", steps[i] * 0.5);
+		CHECK(fabs(ratio - 2.0) < 0.04,
+		      "slow at %+.1f semitones gave a period ratio of %.4f, not "
+		      "2.0 -- the pitch did not drop with the speed",
+		      steps[i] * 0.5, ratio);
+		/* Slow is a transport rate, not a fade. */
+		CHECK(amp_s > 1900000.0,
+		      "the level fell to %.0f in slow mode at %+.1f semitones "
+		      "-- slow must not touch gain", amp_s, steps[i] * 0.5);
+	}
+
+	/*
+	 * AND THE STATE SURVIVES IT. The brief is explicit that engaging slow
+	 * must not overwrite the semitone value; here that is checked after a
+	 * full render rather than in isolation, because the render is the one
+	 * place the value is read on a hot path and therefore the one place a
+	 * cached or scribbled copy would show up.
+	 */
+	{
+		st_pitch_t p;
+		rig_t r;
+		uint32_t b;
+
+		st_pitch_reset(&p);
+		p.half = 4;
+		rig_init(&r, 0u);
+		for (b = 0; b < 32u; b++) {
+			rig_block(&r,
+				  st_pitch_effective_q16(&p, ST_PITCH_SLOW_Q16));
+		}
+		CHECK(p.half == 4,
+		      "rendering a slow block left the semitone state at %+.1f, "
+		      "not +2.0", p.half * 0.5);
+	}
+}
+
+/* ======================================================================
  * 6. ONE PLAYHEAD, FOUR STEMS. The stems are interleaved in the same
  *    frame and read at one index, so phase lock is structural rather than
  *    maintained -- but a future edit could give a stem its own cursor,
@@ -862,6 +952,7 @@ int main(void)
 	case_spinup_rises_to_pitch();
 	case_the_blend_actually_interpolates();
 	case_semitones_reach_the_tape();
+	case_slow_playback_reaches_the_tape();
 	case_stems_share_one_playhead();
 	case_unity_is_one_to_one();
 	case_seam_arm_distance_follows_rate();

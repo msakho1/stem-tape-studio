@@ -128,3 +128,38 @@ uint32_t st_pitch_ratio_q16(const st_pitch_t *p)
 	}
 	return k_pitch_q16[idx];
 }
+
+uint32_t st_pitch_slow_glide(uint32_t cur_q16, bool want_slow, uint32_t frames,
+			      uint32_t sample_rate)
+{
+	const uint32_t target = want_slow ? ST_PITCH_SLOW_Q16 : ST_PITCH_ONE;
+	const uint32_t span   = ST_PITCH_ONE - ST_PITCH_SLOW_Q16;
+	uint32_t total, step;
+
+	if (cur_q16 == target) {
+		return target;
+	}
+
+	/* Frames the whole glide takes. Guarded against a degenerate sample
+	 * rate or a zero glide time, either of which should mean "arrive now"
+	 * rather than divide by nothing. */
+	total = (uint32_t)(((uint64_t)ST_PITCH_SLOW_GLIDE_MS * sample_rate) /
+			    1000u);
+	if (total == 0u) {
+		return target;
+	}
+
+	step = (uint32_t)(((uint64_t)span * frames) / total);
+	if (step == 0u) {
+		/* A step shorter than one Q16 count would stall the glide
+		 * forever; move by the smallest amount that still makes
+		 * progress. */
+		step = 1u;
+	}
+
+	if (target > cur_q16) {
+		cur_q16 += step;
+		return (cur_q16 > target) ? target : cur_q16;
+	}
+	return ((cur_q16 - target) <= step) ? target : (cur_q16 - step);
+}
