@@ -81,6 +81,16 @@ typedef struct {
 	bool acc_valid;       /* false once anything broke the strict, gapless order */
 	uint32_t acc_sectors; /* how many sectors have been accumulated, from 0 upward */
 	uint32_t acc_stem_hash[ST11_STEM_COUNT];
+	/* The v1.2 song-planar group scan's position: which (stem, group) the
+	 * next group read must be, in the stem-major order the layout defines.
+	 * acc_groups_per_stem is 0 until the first stem transition TEACHES it
+	 * the song's group count -- nothing declares that before the upload
+	 * finishes -- after which every later transition must match it, and
+	 * st_ab_session_verify_accumulated() checks the learned number against
+	 * the record that finally arrives. */
+	uint32_t acc_next_stem;
+	uint32_t acc_next_group;
+	uint32_t acc_groups_per_stem;
 } st_ab_session_t;
 
 typedef enum {
@@ -220,13 +230,22 @@ void st_ab_session_mark_song_verified(st_ab_session_t *s);
  * `sector` must be the READ-BACK bytes for `sector_index` (what storage
  * returned), never the bytes as received from the host. Sectors must
  * arrive strictly in order with no gaps, starting at 0: a sector_index
- * that skips ahead, or a sector whose own STSC header disagrees with
- * sector_index, permanently invalidates the accumulation (acc_valid
- * false) so st_ab_session_verify_accumulated() then refuses and the
- * caller must fall back to the full re-read. A sector_index BELOW the
- * running count is treated as a harmless duplicate (an idempotent retry
- * of an already-accumulated sector) and is ignored rather than
- * invalidating. No-op unless this is an open, unclosed REPLACE session.
+ * that skips ahead, or a sector whose four v1.2 GROUP HEADERS do not
+ * continue the stem-major scan (stem 0 counting up from group 0, then one
+ * step to stem 1 group 0, and so on, every stem the same length),
+ * permanently invalidates the accumulation (acc_valid false) so
+ * st_ab_session_verify_accumulated() then refuses and the caller must fall
+ * back to the full re-read. A sector_index BELOW the running count is
+ * treated as a harmless duplicate (an idempotent retry of an
+ * already-accumulated sector) and is ignored rather than invalidating.
+ * No-op unless this is an open, unclosed REPLACE session.
+ *
+ * v1.2 ONLY, deliberately. This is the fast path for the layout the
+ * firmware actually stores. v1.1 INTERLEAVED read-back bytes are not
+ * accumulable here -- they invalidate, and the fallback above carries the
+ * commit, because st_ab_session_verify_song_before_commit() dispatches on
+ * the version the RECORD declares and can still verify them. Guessing at a
+ * layout would be the one thing this module must never do.
  */
 void st_ab_session_accumulate_sector(st_ab_session_t *s, uint32_t sector_index,
 				      const uint8_t sector[ST11_SECTOR_BYTES]);

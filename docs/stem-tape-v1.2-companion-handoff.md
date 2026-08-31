@@ -5,6 +5,12 @@ companion is currently unable to upload anything the SP-1 will accept. This
 document is the complete specification for closing that, written to be pasted
 to Lovable with no other context.
 
+The firmware's **upload** side is ready too: `st_ab_session`'s commit
+verification dispatches on the format version the index record declares, so a
+record saying v1.2 is verified as planar groups and one saying v1.1 as
+interleaved sectors. Nothing needs to land on the device in a particular
+order relative to this change.
+
 Everything here is derived from the firmware implementation that is already
 merged and CI-green (`firmware/stemtape_player/src/st_planar.{h,c}`), not from
 a plan. Where this document and that code disagree, the code is right.
@@ -78,6 +84,21 @@ If the song's frame count is not a multiple of 340, the last group of each stem
 is partially filled. **Zero-pad the remainder** — write silence, not stale
 bytes. The firmware pads the same way and a test asserts it.
 
+### Upload order — please keep it ascending
+
+Keep uploading sectors in ascending `seq`, from 0, exactly as today. Under
+v1.2 that means sector `s` carries the four consecutive groups whose flat
+stem-major ordinals are `4s .. 4s+3` — so the device sees stem 0's groups in
+order, then stem 1's, and so on.
+
+This is not cosmetic. The firmware folds the commit checksums in as each
+read-back sector arrives, which is what makes the commit itself instant; on a
+248.5 MiB song the alternative is re-reading half a million blocks inside the
+single wire command that carries the commit record. That incremental path
+needs the groups in order. Out-of-order sectors still *work* — the firmware
+falls back to a full re-read and the upload is correct either way — they are
+just slow.
+
 ### Version
 
 `stemTapeFormat.ts`: `FORMAT_MINOR = 1` → `FORMAT_MINOR = 2`.
@@ -97,9 +118,19 @@ mix rather than like an error.
    song checksum. If a checksum moves, something is wrong.
 2. **The wire protocol.** `writeSectorBulk()` still sends a complete 8192-byte
    buffer to a destination block. What changes is what those 8192 bytes
-   contain (four consecutive groups **of one stem**) and which block they go
-   to. The `'U'` command, its 17-byte header and its 14-byte reply are all
-   untouched.
+   contain and which block they go to. The `'U'` command, its 17-byte header
+   and its 14-byte reply are all untouched.
+
+   Note the sector boundaries do **not** line up with stem boundaries in
+   general. The song region is a flat array of `4 * groups` groups in
+   stem-major order — ordinal `q = stem * groups + groupIndex` at block
+   `songStartBlock + q * 4` — and sector `s` is ordinals `4s .. 4s+3`. For the
+   43-group reference song, sector 10 carries stem 0's groups 40, 41 and 42
+   and then stem 1's group 0. That is correct and expected: each group names
+   its own stem, so nothing has to infer it from the sector, and the song
+   stays exactly `groups * 16` blocks. **Please do not pad a stem's quarter up
+   to a multiple of 4 groups** to make sectors align — that would change the
+   song's size and break every STIX geometry field.
 3. `sectorToBlocks()`, the transport state machine, the index builder and the
    capability gate.
 

@@ -157,9 +157,9 @@
 #define ST_RC_SWEEP_REPS 24u
 
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st39-VOLCAL"
+#define ST_BUILD_TAG "st40-VOLCAL"
 #else
-#define ST_BUILD_TAG "st39"
+#define ST_BUILD_TAG "st40"
 #endif
 #include "st_track_hold.h"
 #include "st_ladder.h"

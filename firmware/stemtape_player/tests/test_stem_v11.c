@@ -26,6 +26,7 @@
 #include "st_ab_session.h"
 #include "st_checksum32.h"
 #include "st_crc32.h"
+#include "st_planar.h"
 #include "st_sector_v11.h"
 #include "st_stcp.h"
 #include "st_stix.h"
@@ -866,11 +867,12 @@ static int mock_read_block(uint32_t block, uint8_t out[ST11_PHYSICAL_BLOCK_BYTES
  * bytes. `song_present == false` leaves every song/audio field at its
  * required-zero value (matching st_stix_validate_fields_only()'s
  * SONG_METADATA rule for an empty record). */
-static void build_stix_block(uint8_t out[ST11_PHYSICAL_BLOCK_BYTES], uint32_t magic, uint8_t slot_identity,
-			      uint8_t song_slot, bool song_present, uint64_t generation,
-			      uint32_t song_start_block, uint32_t song_block_count, uint32_t frames,
-			      uint32_t sector_count, const uint32_t stem_checksums[ST11_STEM_COUNT],
-			      uint32_t song_checksum, st_stix_record_t *record_out)
+static void build_stix_block_minor(uint8_t out[ST11_PHYSICAL_BLOCK_BYTES], uint8_t format_minor,
+				    uint32_t magic, uint8_t slot_identity,
+				    uint8_t song_slot, bool song_present, uint64_t generation,
+				    uint32_t song_start_block, uint32_t song_block_count, uint32_t frames,
+				    uint32_t sector_count, const uint32_t stem_checksums[ST11_STEM_COUNT],
+				    uint32_t song_checksum, st_stix_record_t *record_out)
 {
 	st_stix_record_t r;
 	uint32_t s;
@@ -879,7 +881,7 @@ static void build_stix_block(uint8_t out[ST11_PHYSICAL_BLOCK_BYTES], uint32_t ma
 	r.magic = magic;
 	r.index_version = ST11_STIX_VERSION;
 	r.format_major = ST11_FORMAT_MAJOR;
-	r.format_minor = ST11_FORMAT_MINOR;
+	r.format_minor = format_minor;
 	r.slot_identity = slot_identity;
 	r.song_slot = song_slot;
 	r.flags = song_present ? ST11_IX_FLAG_SONG_PRESENT : 0u;
@@ -913,6 +915,21 @@ static void build_stix_block(uint8_t out[ST11_PHYSICAL_BLOCK_BYTES], uint32_t ma
 	}
 }
 
+/* The same builder at this translation unit's own format version. Every
+ * pre-existing caller wants that one; only the v1.2 planar test below needs to
+ * name a different minor, and it says so explicitly rather than by redefining
+ * a macro under the rest of the file. */
+static void build_stix_block(uint8_t out[ST11_PHYSICAL_BLOCK_BYTES], uint32_t magic, uint8_t slot_identity,
+			      uint8_t song_slot, bool song_present, uint64_t generation,
+			      uint32_t song_start_block, uint32_t song_block_count, uint32_t frames,
+			      uint32_t sector_count, const uint32_t stem_checksums[ST11_STEM_COUNT],
+			      uint32_t song_checksum, st_stix_record_t *record_out)
+{
+	build_stix_block_minor(out, (uint8_t)ST11_FORMAT_MINOR, magic, slot_identity, song_slot, song_present,
+				generation, song_start_block, song_block_count, frames, sector_count,
+				stem_checksums, song_checksum, record_out);
+}
+
 /* Encodes a single, deterministic ST11_SECTOR_BYTES sector (sectorIndex=0,
  * firstFrame=0, `frame_count` real frames, no padding needed since one
  * sector covers the whole song) via the real st11_sector_encode(), and
@@ -920,7 +937,12 @@ static void build_stix_block(uint8_t out[ST11_PHYSICAL_BLOCK_BYTES], uint32_t ma
  * test_song_sectors_fixture() proves matches the companion's own real
  * fixture checksums -- so a session-gate test that later corrupts one
  * declared checksum is corrupting a value proven correct in the first
- * place, not merely asserting whatever the code happens to produce. */
+ * place, not merely asserting whatever the code happens to produce.
+ *
+ * This is the v1.1 INTERLEAVED layout. The v1.2 planar equivalent, and the
+ * proof that the checksums below are identical in both, is
+ * planarize_song()/test_ab_session_v12_planar_verification() near the end of
+ * this file. */
 static void build_one_sector_song(uint8_t sector_out[ST11_SECTOR_BYTES], uint32_t frame_count,
 				   uint32_t stem_checksum_out[ST11_STEM_COUNT], uint32_t *song_checksum_out)
 {
@@ -1134,16 +1156,25 @@ static void test_ab_session_open_and_negative_writes(void)
 	      "verify_song_before_commit: a candidate with one declared stem checksum tampered "
 	      "does NOT verify against the real device bytes -- false");
 
-	/* ---- incremental accumulation must agree with the full re-read ----
+	/* ---- the incremental fast path is v1.2-only, deliberately ----
 	 *
 	 * The bulk upload path reads every sector back off the media as it
 	 * writes it, so it can fold the commit checksums in as it goes and make
-	 * the commit itself instant. That is only legitimate if it produces
-	 * BYTE-IDENTICAL results to the full re-read above -- these checks are
-	 * what prove it, against the same real mock-device bytes the full path
-	 * just used. (Before this existed, a real 248.5 MiB commit re-read
-	 * 509,024 blocks inside one wire command, overrunning both the host's
-	 * acknowledgement timeout and the 4000ms hardware watchdog.) */
+	 * the commit itself instant. (Before that existed, a real 248.5 MiB
+	 * commit re-read 509,024 blocks inside one wire command, overrunning
+	 * both the host's acknowledgement timeout and the 4000ms hardware
+	 * watchdog.)
+	 *
+	 * It exists for the layout this firmware actually stores, and the bytes
+	 * here are v1.1 INTERLEAVED. The accumulator cannot read them, says so
+	 * by invalidating, and the caller's documented fallback -- the full
+	 * re-read, which DOES dispatch on the record's declared version and
+	 * which verified this very record a few lines above -- is what carries
+	 * the commit. That is the contract, checked here rather than assumed.
+	 *
+	 * The positive incremental coverage (agreement with the full re-read,
+	 * idempotent retries, gap invalidation) lives with the layout it
+	 * applies to, in test_ab_session_v12_planar_verification() below. */
 	uint8_t acc_sector[ST11_SECTOR_BYTES];
 	uint32_t acc_k;
 
@@ -1156,30 +1187,9 @@ static void test_ab_session_open_and_negative_writes(void)
 	      "verify_accumulated: with nothing accumulated yet, refuses (never passes vacuously) -- false");
 
 	st_ab_session_accumulate_sector(&s, 0u, acc_sector);
-	CHECK(st_ab_session_verify_accumulated(&s, &candidate),
-	      "verify_accumulated: the SAME real device bytes, folded in one sector at a time during the "
-	      "upload, reproduce the full re-read's verdict exactly -- true");
-
-	CHECK(!st_ab_session_verify_accumulated(&s, &corrupted_candidate),
-	      "verify_accumulated: the tampered-checksum candidate is rejected here too, so the fast path "
-	      "is not a weaker check than the full re-read -- false");
-
-	/* A duplicate sector (an idempotent bulk retry re-sending one already
-	 * accumulated) must be ignored, not double-counted: double-counting
-	 * would silently corrupt the running hashes. */
-	st_ab_session_accumulate_sector(&s, 0u, acc_sector);
-	CHECK(st_ab_session_verify_accumulated(&s, &candidate),
-	      "verify_accumulated: re-accumulating an already-accumulated sector (a retry) is ignored, "
-	      "not double-counted -- still true");
-
-	/* A gap must permanently invalidate rather than silently verify a song
-	 * that was never fully read back. */
-	st_ab_session_t gap_s = s;
-
-	st_ab_session_accumulate_sector(&gap_s, 7u, acc_sector); /* skips 1..6 */
-	CHECK(!st_ab_session_verify_accumulated(&gap_s, &candidate),
-	      "verify_accumulated: a sector arriving out of order leaves a gap, permanently invalidating "
-	      "the accumulation so the caller must fall back to the full re-read -- false");
+	CHECK(!st_ab_session_verify_accumulated(&s, &candidate),
+	      "verify_accumulated: v1.1 INTERLEAVED bytes are not accumulable by the v1.2 fast path -- it "
+	      "invalidates instead of guessing, and the full re-read is what verified this record -- false");
 
 	st_ab_session_mark_song_verified(&s);
 	CHECK(st_ab_session_check_write(&s, 1u, commit_block) == ST_AB_WRITE_OK,
@@ -1568,6 +1578,243 @@ static void test_ab_session_open_errors(void)
 	      "real capacity -- CAPACITY");
 }
 
+/* ========================================================================
+ * v1.2 SONG-PLANAR commit verification.
+ *
+ * Everything above verifies the v1.1 INTERLEAVED layout, because this
+ * translation unit is compiled at ST11_FORMAT_MINOR=1 so the frozen companion
+ * fixtures parse. v1.2 is the layout the firmware actually stores, and it is
+ * the reason a record now says which of the two it is: the session gate
+ * dispatches on the version the RECORD declares, so a v1.1 recording still
+ * replays byte-for-byte while a v1.2 upload verifies in its own layout.
+ * ======================================================================== */
+
+/* One v1.1 sector -> the four groups that same 340-frame span occupies under
+ * v1.2, laid end to end in stem order. That is exactly one 8192-byte sector's
+ * worth (4 * 2048), so a one-group-per-stem song is still a one-sector song
+ * and every address in this file's synthetic device is unchanged.
+ *
+ * Goes through the real st_pl_from_v11_sector() -- the same one function the
+ * companion's encoder and the read path's fixture test use -- rather than a
+ * second hand-rolled copy of the migration. */
+static void planarize_song(const uint8_t v11_sector[ST11_SECTOR_BYTES],
+			    uint8_t planar_out[ST11_SECTOR_BYTES])
+{
+	uint8_t groups[ST_PL_STEMS][ST_PL_GROUP_BYTES];
+	uint32_t k;
+
+	if (!st_pl_from_v11_sector(v11_sector, groups)) {
+		fprintf(stderr, "FATAL: st_pl_from_v11_sector refused a sector this file just encoded\n");
+		exit(2);
+	}
+	for (k = 0; k < ST_PL_STEMS; k++) {
+		memcpy(planar_out + (size_t)k * ST_PL_GROUP_BYTES, groups[k], ST_PL_GROUP_BYTES);
+	}
+}
+
+static void test_ab_session_v12_planar_verification(void)
+{
+	memset(g_mock_device, 0, sizeof(g_mock_device));
+
+	st11_region_layout_t layout;
+
+	CHECK(st11_storage_layout_compute(0u, 272u, &layout), "v1.2: layout computation succeeds");
+
+	/* The FNV prime's inverse, which is what lets the accumulator fold whole
+	 * 340-frame groups and take the tail padding back off once a record
+	 * finally declares the frame count. Asserted, not trusted: a wrong
+	 * constant here would silently produce wrong checksums for every song
+	 * whose length is not a multiple of 340 -- which is nearly all of them. */
+	CHECK((uint32_t)(0x01000193u * ST_CHECKSUM32_PRIME_INV) == 1u,
+	      "v1.2: ST_CHECKSUM32_PRIME_INV is the real modular inverse of the FNV prime mod 2^32");
+	{
+		uint8_t zeros[64];
+		uint32_t folded;
+
+		memset(zeros, 0, sizeof(zeros));
+		folded = st_checksum32_update(0xdeadbeefu, zeros, sizeof(zeros));
+		CHECK(st_checksum32_unfold_zeros(folded, sizeof(zeros)) == 0xdeadbeefu,
+		      "v1.2: unfolding 64 zero bytes exactly undoes folding them");
+	}
+
+	/* An ACTIVE library to replace: index A, generation 5, song in region B.
+	 * Its own song stays v1.1 -- this session is not reading it, and a
+	 * device really can hold a pre-upgrade song in the region it is about
+	 * to overwrite. */
+	uint32_t active_stem[ST11_STEM_COUNT];
+	uint32_t active_song;
+	uint8_t active_sector[ST11_SECTOR_BYTES];
+
+	build_one_sector_song(active_sector, 100u, active_stem, &active_song);
+	memcpy(g_mock_device + (size_t)FIXTURE_SONG_B_START * ST11_PHYSICAL_BLOCK_BYTES, active_sector,
+	       ST11_SECTOR_BYTES);
+
+	uint8_t block_a[ST11_PHYSICAL_BLOCK_BYTES];
+	uint8_t block_b[ST11_PHYSICAL_BLOCK_BYTES];
+
+	build_stix_block(block_a, ST11_INDEX_MAGIC, ST11_SLOT_A, ST11_SLOT_B, true, 5u, FIXTURE_SONG_B_START,
+			  ST11_BLOCKS_PER_SECTOR, 100u, 1u, active_stem, active_song, NULL);
+	memset(block_b, 0, sizeof(block_b));
+	memcpy(g_mock_device + 0u, block_a, ST11_PHYSICAL_BLOCK_BYTES);
+	memcpy(g_mock_device + (size_t)1u * ST11_PHYSICAL_BLOCK_BYTES, block_b, ST11_PHYSICAL_BLOCK_BYTES);
+
+	st_ab_session_t s;
+
+	CHECK(st_ab_session_open_replace(&s, block_a, block_b, &layout, ST11_BLOCKS_PER_SECTOR) == ST_AB_OPEN_OK,
+	      "v1.2: open_replace succeeds; frozen destination is song A / index B");
+
+	/* THE NEW SONG, uploaded as v1.2 planar. 300 frames, NOT a multiple of
+	 * 340, so the tail of every stem's only group is zero padding -- the
+	 * case the un-fold exists for. The checksums are the ones
+	 * build_one_sector_song() derived from the SAMPLES; that they verify
+	 * against planar bytes without being recomputed is the whole claim of
+	 * the format change. */
+	uint32_t new_stem[ST11_STEM_COUNT];
+	uint32_t new_song;
+	uint8_t v11_sector[ST11_SECTOR_BYTES];
+	uint8_t planar_sector[ST11_SECTOR_BYTES];
+
+	build_one_sector_song(v11_sector, 300u, new_stem, &new_song);
+	planarize_song(v11_sector, planar_sector);
+	memcpy(g_mock_device + (size_t)FIXTURE_SONG_A_START * ST11_PHYSICAL_BLOCK_BYTES, planar_sector,
+	       ST11_SECTOR_BYTES);
+
+	uint8_t draft[ST11_PHYSICAL_BLOCK_BYTES];
+	st_stix_record_t candidate;
+
+	build_stix_block_minor(draft, 2u, 0u, ST11_SLOT_B, ST11_SLOT_A, true, 6u, FIXTURE_SONG_A_START,
+				ST11_BLOCKS_PER_SECTOR, 300u, 1u, new_stem, new_song, &candidate);
+
+	uint8_t scratch[ST11_SECTOR_BYTES];
+
+	CHECK(st_ab_session_verify_song_before_commit(&s, &candidate, mock_read_block, NULL, scratch),
+	      "v1.2: the full re-read verifies PLANAR media against the SAME per-stem checksums the v1.1 "
+	      "layout produced -- the format change moves no checksum");
+
+	/* The padding really is being removed, not ignored: a record claiming
+	 * the group is full (340 frames) describes different audio and must
+	 * not verify against the same bytes. */
+	st_stix_record_t full_group = candidate;
+
+	full_group.frames = ST_PL_FRAMES_PER_GROUP;
+	CHECK(!st_ab_session_verify_song_before_commit(&s, &full_group, mock_read_block, NULL, scratch),
+	      "v1.2: the same media with a record claiming 340 frames instead of 300 does NOT verify -- "
+	      "the tail padding is un-folded by frame count, not guessed");
+
+	st_stix_record_t tampered = candidate;
+
+	tampered.stem_checksums[2] += 1u;
+	CHECK(!st_ab_session_verify_song_before_commit(&s, &tampered, mock_read_block, NULL, scratch),
+	      "v1.2: one tampered declared stem checksum does not verify against the real planar bytes");
+
+	/* THE FAST PATH must reach the identical verdict from the read-back
+	 * bytes the bulk upload already has in hand. */
+	CHECK(!st_ab_session_verify_accumulated(&s, &candidate),
+	      "v1.2: verify_accumulated with nothing accumulated refuses (never passes vacuously)");
+
+	st_ab_session_accumulate_sector(&s, 0u, planar_sector);
+	CHECK(st_ab_session_verify_accumulated(&s, &candidate),
+	      "v1.2: the same planar bytes folded one sector at a time reproduce the full re-read's "
+	      "verdict exactly");
+	CHECK(!st_ab_session_verify_accumulated(&s, &tampered),
+	      "v1.2: the tampered candidate is rejected by the fast path too -- not a weaker check");
+
+	st_ab_session_accumulate_sector(&s, 0u, planar_sector);
+	CHECK(st_ab_session_verify_accumulated(&s, &candidate),
+	      "v1.2: re-accumulating an already-accumulated sector (an idempotent bulk retry) is ignored, "
+	      "not double-counted -- still true");
+
+	{
+		st_ab_session_t gap = s;
+
+		st_ab_session_accumulate_sector(&gap, 7u, planar_sector); /* skips 1..6 */
+		CHECK(!st_ab_session_verify_accumulated(&gap, &candidate),
+		      "v1.2: a sector arriving out of order leaves a gap and permanently invalidates the "
+		      "accumulation, so the caller falls back to the full re-read");
+	}
+
+	/* THE CHECK v1.1 COULD NOT EXPRESS. A v1.1 STSC header could say "I am
+	 * sector 7"; it could not say WHICH STEM it was, because one sector held
+	 * all four. Here the four groups of the region are well-formed and carry
+	 * the right audio -- but two of them claim the same stem, so the region
+	 * is not the song it describes. */
+	{
+		uint8_t swapped[ST11_SECTOR_BYTES];
+		st_ab_session_t fresh;
+
+		memcpy(swapped, planar_sector, sizeof(swapped));
+		/* group 2 relabelled as stem 1 */
+		swapped[2u * ST_PL_GROUP_BYTES + 2u] = 1u;
+		memcpy(g_mock_device + (size_t)FIXTURE_SONG_A_START * ST11_PHYSICAL_BLOCK_BYTES, swapped,
+		       ST11_SECTOR_BYTES);
+
+		CHECK(st_ab_session_open_replace(&fresh, block_a, block_b, &layout, ST11_BLOCKS_PER_SECTOR) ==
+			      ST_AB_OPEN_OK,
+		      "v1.2: a fresh session opens over the mislabelled region");
+		CHECK(!st_ab_session_verify_song_before_commit(&fresh, &candidate, mock_read_block, NULL,
+								scratch),
+		      "v1.2: a group carrying the right bytes under the WRONG stem label is refused -- the "
+		      "failure mode a v1.1 sector header could not even express");
+
+		st_ab_session_accumulate_sector(&fresh, 0u, swapped);
+		CHECK(!st_ab_session_verify_accumulated(&fresh, &candidate),
+		      "v1.2: the fast path refuses the mislabelled region too");
+	}
+
+	/* A group whose reserved flags byte is set is a format this build does
+	 * not understand; reading it as though the byte meant nothing is the
+	 * silent misread the version gates exist to prevent. */
+	{
+		uint8_t flagged[ST11_SECTOR_BYTES];
+		st_ab_session_t fresh;
+
+		memcpy(flagged, planar_sector, sizeof(flagged));
+		flagged[3u] = 0x01u; /* group 0's reserved flags byte */
+		memcpy(g_mock_device + (size_t)FIXTURE_SONG_A_START * ST11_PHYSICAL_BLOCK_BYTES, flagged,
+		       ST11_SECTOR_BYTES);
+
+		CHECK(st_ab_session_open_replace(&fresh, block_a, block_b, &layout, ST11_BLOCKS_PER_SECTOR) ==
+			      ST_AB_OPEN_OK,
+		      "v1.2: a fresh session opens over the flagged region");
+		CHECK(!st_ab_session_verify_song_before_commit(&fresh, &candidate, mock_read_block, NULL,
+								scratch),
+		      "v1.2: a group with a non-zero reserved flags byte is refused, not read anyway");
+	}
+
+	/* THE DISPATCH ITSELF, both ways round: each layout verifies only under
+	 * the version its record declares. Without this, one of the two paths
+	 * could quietly become the only one that ever runs. */
+	{
+		st_ab_session_t fresh;
+		st_stix_record_t as_v11 = candidate;
+
+		memcpy(g_mock_device + (size_t)FIXTURE_SONG_A_START * ST11_PHYSICAL_BLOCK_BYTES, planar_sector,
+		       ST11_SECTOR_BYTES);
+		as_v11.format_minor = 1u;
+		CHECK(st_ab_session_open_replace(&fresh, block_a, block_b, &layout, ST11_BLOCKS_PER_SECTOR) ==
+			      ST_AB_OPEN_OK,
+		      "v1.2: a fresh session opens for the dispatch checks");
+		CHECK(!st_ab_session_verify_song_before_commit(&fresh, &as_v11, mock_read_block, NULL, scratch),
+		      "dispatch: PLANAR media under a record declaring v1.1 does not verify");
+
+		memcpy(g_mock_device + (size_t)FIXTURE_SONG_A_START * ST11_PHYSICAL_BLOCK_BYTES, v11_sector,
+		       ST11_SECTOR_BYTES);
+		CHECK(st_ab_session_verify_song_before_commit(&fresh, &as_v11, mock_read_block, NULL, scratch),
+		      "dispatch: the SAME song as v1.1 media under the same v1.1 record verifies -- the two "
+		      "layouts carry identical checksums, so only the layout differs");
+		CHECK(!st_ab_session_verify_song_before_commit(&fresh, &candidate, mock_read_block, NULL,
+								scratch),
+		      "dispatch: v1.1 media under a record declaring v1.2 does not verify");
+
+		st_stix_record_t as_v99 = candidate;
+
+		as_v99.format_minor = 99u;
+		CHECK(!st_ab_session_verify_song_before_commit(&fresh, &as_v99, mock_read_block, NULL, scratch),
+		      "dispatch: a record declaring a minor version this build has never heard of is refused "
+		      "outright, not guessed at");
+	}
+}
+
 int main(void)
 {
 	RUN(test_song_sectors_fixture);
@@ -1590,6 +1837,7 @@ int main(void)
 	RUN(test_ab_session_ceiling_allows_smaller_song);
 	RUN(test_successive_replacement_matches_fixture);
 	RUN(test_ab_session_open_errors);
+	RUN(test_ab_session_v12_planar_verification);
 
 	printf("\n");
 	printf("%d distinct test cases, %d assertion checks\n", g_test_cases, g_checks);

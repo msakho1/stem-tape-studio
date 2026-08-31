@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "st_checksum32.h"
+#include "st_planar.h"
 #include "st_sector_v11.h"
 
 static uint32_t get_u32le(const uint8_t *in, uint32_t off)
@@ -34,8 +35,14 @@ static uint32_t region_blocks_of_slot(const st11_region_layout_t *layout, uint32
  * so both verification paths share one derivation. */
 static bool stem_hashes_match_candidate(const uint32_t stem_hash[ST11_STEM_COUNT],
 					 const st_stix_record_t *candidate);
-static bool accumulate_one_sector(uint32_t stem_hash[ST11_STEM_COUNT], uint32_t sector_index,
-				   const uint8_t sector[ST11_SECTOR_BYTES]);
+static bool accumulate_one_sector_v11(uint32_t stem_hash[ST11_STEM_COUNT], uint32_t sector_index,
+				       const uint8_t sector[ST11_SECTOR_BYTES]);
+static bool accumulate_one_sector_planar(uint32_t stem_hash[ST11_STEM_COUNT],
+					  const uint8_t sector[ST11_SECTOR_BYTES],
+					  uint32_t *next_stem, uint32_t *next_group,
+					  uint32_t *groups_per_stem);
+static bool finish_stem_hashes(uint32_t stem_hash[ST11_STEM_COUNT], uint32_t groups,
+				uint32_t frames);
 
 /* The incremental accumulator's real starting state. Both open_*() paths
  * memset the session to zero first, but zero is NOT a valid FNV-1a seed --
@@ -49,6 +56,9 @@ static void accumulator_reset(st_ab_session_t *s)
 
 	s->acc_valid = true;
 	s->acc_sectors = 0;
+	s->acc_next_stem = 0;
+	s->acc_next_group = 0;
+	s->acc_groups_per_stem = 0;
 	for (si = 0; si < ST11_STEM_COUNT; si++) {
 		s->acc_stem_hash[si] = ST_CHECKSUM32_INIT;
 	}
@@ -263,6 +273,26 @@ bool st_ab_session_verify_song_before_commit(const st_ab_session_t *s, const st_
 		return false;
 	}
 
+	/*
+	 * THE LAYOUT IS THE ONE THE RECORD DECLARES. See
+	 * accumulate_one_sector_v11()'s own comment for why this layer reads
+	 * the format version rather than enforcing a policy about it: an
+	 * unrecognised version is refused here, but a recognised one is
+	 * verified in its own layout, which is what keeps this function a
+	 * total check on "do these bytes hash to this record".
+	 */
+	bool planar;
+
+	if (candidate->format_major != ST11_FORMAT_MAJOR) {
+		return false;
+	} else if (candidate->format_minor == 2u) {
+		planar = true;
+	} else if (candidate->format_minor == 1u) {
+		planar = false;
+	} else {
+		return false;
+	}
+
 	uint32_t region_start = region_start_of_slot(&s->layout, s->inactive_song_slot);
 	uint32_t stem_hash[ST11_STEM_COUNT];
 	uint32_t si;
@@ -271,6 +301,14 @@ bool st_ab_session_verify_song_before_commit(const st_ab_session_t *s, const st_
 		stem_hash[si] = ST_CHECKSUM32_INIT;
 	}
 
+	/* Deliberately NOT seeded from candidate->sector_count. This path could
+	 * start the scan already knowing the geometry, and then it would be
+	 * checking the media against a number it had assumed rather than one it
+	 * had read. It learns the group count the same way the incremental path
+	 * has to, and the two are compared afterwards. */
+	uint32_t next_stem = 0;
+	uint32_t next_group = 0;
+	uint32_t groups_per_stem = 0;
 	uint32_t sector;
 
 	for (sector = 0; sector < candidate->sector_count; sector++) {
@@ -288,7 +326,27 @@ bool st_ab_session_verify_song_before_commit(const st_ab_session_t *s, const st_
 		 * re-read hash and an accumulated one are equal by
 		 * construction rather than by two copies of this logic
 		 * happening to agree. */
-		if (!accumulate_one_sector(stem_hash, sector, scratch_sector)) {
+		bool ok = planar ? accumulate_one_sector_planar(stem_hash, scratch_sector, &next_stem,
+								 &next_group, &groups_per_stem)
+				 : accumulate_one_sector_v11(stem_hash, sector, scratch_sector);
+
+		if (!ok) {
+			return false;
+		}
+	}
+
+	if (planar) {
+		/* The scan walked stem 0 group 0 through stem 3's last group,
+		 * so a complete song leaves it one past the end of the LAST
+		 * stem, and the group count it learned along the way has to be
+		 * the one the record declares. A region holding the right
+		 * NUMBER of well-formed groups arranged as some other geometry
+		 * fails here. */
+		if (next_stem != ST_PL_STEMS - 1u || next_group != candidate->sector_count ||
+		    groups_per_stem != candidate->sector_count) {
+			return false;
+		}
+		if (!finish_stem_hashes(stem_hash, candidate->sector_count, candidate->frames)) {
 			return false;
 		}
 	}
@@ -326,12 +384,26 @@ static bool stem_hashes_match_candidate(const uint32_t stem_hash[ST11_STEM_COUNT
 	return st_checksum32_compute(digest, sizeof(digest)) == candidate->song_checksum;
 }
 
-/* The ONE per-sector accumulation step, shared by both verification paths
- * so an incrementally accumulated hash and a fully re-read one are the
- * same value by construction rather than by two parallel implementations
- * agreeing today and drifting tomorrow. */
-static bool accumulate_one_sector(uint32_t stem_hash[ST11_STEM_COUNT], uint32_t sector_index,
-				   const uint8_t sector[ST11_SECTOR_BYTES])
+/*
+ * v1.1 INTERLEAVED, the retired layout: one sector is 340 frames of all four
+ * stems, and its STSC header declares how many of those frames are real.
+ *
+ * KEPT, DELIBERATELY, and reached only through the format_minor dispatch in
+ * st_ab_session_verify_song_before_commit(). This module is the STORAGE-SAFETY
+ * layer: its whole job is to refuse any commit whose media bytes do not hash
+ * to the record being committed. A record carries its own format version, so
+ * verifying it in the layout it declares is what makes that check total rather
+ * than accidentally version-coupled.
+ *
+ * Version POLICY -- "this device will not accept or play a v1.1 song" -- is
+ * enforced where it already lives and is already tested: the STCP capability
+ * exchange refuses a companion whose format version differs, and the boot
+ * library check refuses a v1.1 library outright. Making the hash verifier a
+ * SECOND, implicit version gate would put one policy in two places, one of
+ * them by accident.
+ */
+static bool accumulate_one_sector_v11(uint32_t stem_hash[ST11_STEM_COUNT], uint32_t sector_index,
+				       const uint8_t sector[ST11_SECTOR_BYTES])
 {
 	st11_sector_header_t h;
 
@@ -364,6 +436,115 @@ static bool accumulate_one_sector(uint32_t stem_hash[ST11_STEM_COUNT], uint32_t 
 	return true;
 }
 
+/*
+ * THE ONE PER-SECTOR v1.2 ACCUMULATION STEP, shared by both v1.2 verification
+ * paths so an incrementally accumulated hash and a fully re-read one are the
+ * same value by construction rather than by two parallel implementations
+ * agreeing today and drifting tomorrow.
+ *
+ * v1.2 SONG-PLANAR. A sector is no longer 340 frames of all four stems; it is
+ * four consecutive 2048-byte GROUPS, each belonging to exactly one stem, laid
+ * out stem-major across the whole song region:
+ *
+ *     | stem 0 timeline | stem 1 timeline | stem 2 timeline | stem 3 |
+ *
+ * so the flat group ordinal 4*sector_index + i walks stem 0's groups in order,
+ * then stem 1's, and so on. Each stem's own bytes therefore still arrive in
+ * playback order, which is what makes its FNV-1a checksum identical to the one
+ * the companion computed over that stem's contiguous PCM -- unchanged from
+ * v1.1, and the reason this format migration moves no checksum at all.
+ *
+ * WHAT THIS VALIDATES, AND WHY IT NEEDS NO GEOMETRY. Every group names the
+ * stem and span it belongs to in its own header. The scan below requires them
+ * to arrive in exactly the stem-major order above: stem 0 counting up from
+ * group 0, then a single step to stem 1 group 0, and so on. The first stem
+ * transition also TEACHES it how many groups a stem has, and every later
+ * transition must then happen at exactly that count. So it needs no frame
+ * count, no sector count and no index record -- which matters, because during
+ * a bulk upload none of those have been written yet. The commit check
+ * cross-examines the number it learned against the record that finally arrives.
+ *
+ * THE PADDING. A group is always 340 frames, so the tail of each stem's LAST
+ * group is zero padding, and a group header deliberately carries identity
+ * rather than timing -- there is nothing here that says where the real audio
+ * stops. Every group is therefore folded WHOLE, and finish_stem_hashes() below
+ * takes the padding back off once a record supplies the frame count.
+ */
+static bool accumulate_one_sector_planar(uint32_t stem_hash[ST11_STEM_COUNT],
+					  const uint8_t sector[ST11_SECTOR_BYTES],
+					  uint32_t *next_stem, uint32_t *next_group,
+					  uint32_t *groups_per_stem)
+{
+	uint32_t i;
+
+	for (i = 0; i < ST_PL_GROUPS_PER_SECTOR; i++) {
+		const uint8_t *group = sector + (size_t)i * ST_PL_GROUP_BYTES;
+		st_pl_header_t h;
+
+		if (!st_pl_read_header(group, &h)) {
+			return false;
+		}
+
+		if (h.stem == *next_stem && h.group_index == *next_group) {
+			/* the run continues inside this stem */
+			(*next_group)++;
+		} else if (h.stem == *next_stem + 1u && h.group_index == 0u && *next_group > 0u &&
+			   (*groups_per_stem == 0u || *groups_per_stem == *next_group)) {
+			/* one step to the next stem, at the group count this
+			 * song uses. The first such step establishes that
+			 * count; every later one has to match it. */
+			*groups_per_stem = *next_group;
+			*next_stem = h.stem;
+			*next_group = 1u;
+		} else {
+			return false;
+		}
+
+		uint32_t f;
+
+		for (f = 0; f < ST_PL_FRAMES_PER_GROUP; f++) {
+			const uint8_t *frame = group + st_pl_frame_off(f);
+
+			/* The six stored bytes ARE the checksummed bytes: L
+			 * then R, signed 24-bit little-endian, exactly the
+			 * order src/sp1/song.ts hashes them in. Decoding to
+			 * int32 and re-encoding would be the same six bytes
+			 * back again. */
+			stem_hash[h.stem] = st_checksum32_update(stem_hash[h.stem], frame,
+								   ST_PL_FRAME_BYTES);
+		}
+	}
+
+	return true;
+}
+
+/*
+ * THE SHARED FINISH, for the same reason accumulate_one_sector() is shared.
+ * Removes the zero padding at the tail of every stem's last group, which is
+ * the last thing folded into that stem's hash because the layout is
+ * stem-major. Exact, not approximate -- see st_checksum32_unfold_zeros().
+ *
+ * Returns false if `candidate`'s own geometry is not self-consistent, so a
+ * record claiming a frame count its sector count cannot hold is refused here
+ * rather than silently producing some other song's checksums.
+ */
+static bool finish_stem_hashes(uint32_t stem_hash[ST11_STEM_COUNT], uint32_t groups,
+				uint32_t frames)
+{
+	if (groups == 0u || frames == 0u || st_pl_groups_for_frames(frames) != groups) {
+		return false;
+	}
+
+	uint32_t pad_frames = groups * ST_PL_FRAMES_PER_GROUP - frames;
+	size_t pad_bytes = (size_t)pad_frames * ST_PL_FRAME_BYTES;
+	uint32_t si;
+
+	for (si = 0; si < ST11_STEM_COUNT; si++) {
+		stem_hash[si] = st_checksum32_unfold_zeros(stem_hash[si], pad_bytes);
+	}
+	return true;
+}
+
 void st_ab_session_accumulate_sector(st_ab_session_t *s, uint32_t sector_index,
 				      const uint8_t sector[ST11_SECTOR_BYTES])
 {
@@ -380,7 +561,8 @@ void st_ab_session_accumulate_sector(st_ab_session_t *s, uint32_t sector_index,
 		s->acc_valid = false; /* a gap: the accumulation can no longer be complete */
 		return;
 	}
-	if (!accumulate_one_sector(s->acc_stem_hash, sector_index, sector)) {
+	if (!accumulate_one_sector_planar(s->acc_stem_hash, sector, &s->acc_next_stem,
+					   &s->acc_next_group, &s->acc_groups_per_stem)) {
 		s->acc_valid = false;
 		return;
 	}
@@ -395,8 +577,35 @@ bool st_ab_session_verify_accumulated(const st_ab_session_t *s, const st_stix_re
 	/* Exactly the declared song: a shortfall means part of it was never
 	 * read back at all, and an overshoot means the accumulation does not
 	 * describe THIS record. Neither may pass. */
+	/* The fast path exists only for the layout this firmware actually
+	 * stores. A record declaring anything else is not a failure here --
+	 * it is simply not accumulable, and the caller's documented fallback
+	 * (the full re-read, which does dispatch on the declared version)
+	 * handles it. */
+	if (candidate->format_major != ST11_FORMAT_MAJOR || candidate->format_minor != 2u) {
+		return false;
+	}
 	if (candidate->sector_count == 0u || s->acc_sectors != candidate->sector_count) {
 		return false;
 	}
-	return stem_hashes_match_candidate(s->acc_stem_hash, candidate);
+	/* Same end-of-scan position check the full re-read makes, against the
+	 * SAME record: the group count the scan learned off the media must be
+	 * the one the record declares, and the scan must have ended one past
+	 * the last stem's last group. */
+	if (s->acc_next_stem != ST_PL_STEMS - 1u || s->acc_next_group != candidate->sector_count ||
+	    s->acc_groups_per_stem != candidate->sector_count) {
+		return false;
+	}
+
+	uint32_t stem_hash[ST11_STEM_COUNT];
+	uint32_t si;
+
+	for (si = 0; si < ST11_STEM_COUNT; si++) {
+		stem_hash[si] = s->acc_stem_hash[si];
+	}
+	if (!finish_stem_hashes(stem_hash, candidate->sector_count, candidate->frames)) {
+		return false;
+	}
+
+	return stem_hashes_match_candidate(stem_hash, candidate);
 }

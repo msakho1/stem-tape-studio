@@ -967,6 +967,7 @@ jobs:
             firmware/stemtape_player/src/st_sector_v11.c \
             firmware/stemtape_player/src/st_stix.c \
             firmware/stemtape_player/src/st_stcp.c \
+            firmware/stemtape_player/src/st_planar.c \
             firmware/stemtape_player/src/st_ab_session.c \
             -DST11_FORMAT_MINOR=1u \
             firmware/stemtape_player/tests/test_stem_v11.c \
@@ -1025,6 +1026,7 @@ jobs:
             firmware/stemtape_player/src/st_sector_v11.c \
             firmware/stemtape_player/src/st_stix.c \
             firmware/stemtape_player/src/st_stcp.c \
+            firmware/stemtape_player/src/st_planar.c \
             firmware/stemtape_player/src/st_ab_session.c \
             firmware/stemtape_player/src/st_bulk_xfer.c \
             firmware/stemtape_player/tests/test_bulk_xfer_walk.c \
@@ -1121,6 +1123,7 @@ jobs:
             firmware/stemtape_player/src/st_sector_v11.c \
             firmware/stemtape_player/src/st_stix.c \
             firmware/stemtape_player/src/st_stcp.c \
+            firmware/stemtape_player/src/st_planar.c \
             firmware/stemtape_player/src/st_ab_session.c \
             -DST11_FORMAT_MINOR=1u \
             firmware/stemtape_player/tests/test_stem_v11_transcripts.c \
@@ -3184,6 +3187,14 @@ jobs:
           check st_ab_session_open_init
           check st_ab_session_check_write
           check st_ab_session_verify_song_before_commit
+          # The v1.2 commit check's arithmetic. A group is always 340 frames,
+          # so the tail of every stem's last group is zero padding, and the
+          # incremental accumulator sees those bytes long before any record
+          # declares the frame count -- it folds whole groups and this takes
+          # the padding back off. Required because losing it would not fail
+          # loudly: every song whose length IS a multiple of 340 would still
+          # commit, and only the others would stop verifying.
+          check st_checksum32_unfold_zeros
           check st_stix_deserialize
           # Phase 2 slice 2/3B/3B.1: the stored four-stem playback data
           # path -- looper_audio_block() (real-time, RAM-only, the

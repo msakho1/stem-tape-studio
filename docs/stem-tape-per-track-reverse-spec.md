@@ -97,7 +97,11 @@ starts with it rather than discovering it.
 
 1. ~~Wire the v1.2 planar read path.~~ **DONE** — four per-stem group rings,
    RAM-neutral, output hash unchanged at `0xe9650dda`.
-2. Companion uploads v1.2 planar songs. **NEXT.**
+2. Companion uploads v1.2 planar songs. **NEXT — and the firmware half of it
+   is done:** `st_ab_session`'s commit verification now dispatches on the
+   format version the index record declares, so a v1.2 upload is verified as
+   planar groups. What remains is the companion emitting them, which is a
+   Lovable change (`docs/stem-tape-v1.2-companion-handoff.md`).
 3. **Verify ordinary four-stem playback is still perfect.** Half of this is
    already banked: CI proves the decoded audio is bit-identical to v1.1 over
    the whole recorded song. What it cannot prove is the part that matters

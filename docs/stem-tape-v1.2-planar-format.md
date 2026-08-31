@@ -234,6 +234,53 @@ the firmware's, and `compatibility.ts` requires the STCP reply to match the
 companion's. Old songs are refused rather than misread, in both directions.
 Existing songs must be re-uploaded.
 
+## Upload: the commit check reads the layout the RECORD declares
+
+`st_ab_session` is the storage-safety layer. Its job is to refuse any commit
+whose media bytes do not hash to the record being committed — so it dispatches
+on that record's own `format_minor`: 2 is verified as planar groups, 1 as
+interleaved sectors, anything else is refused outright.
+
+That is deliberately not a second version gate. Version *policy* — this device
+will not accept or play a v1.1 song — already lives in the two places named
+above, both tested. Putting it inside the hash verifier as well would mean one
+policy enforced in two places, one of them by accident, and would make the
+verifier's answer depend on something other than "do these bytes hash to this
+record". It also keeps the frozen v1.1 wire transcripts replaying byte for
+byte: 1,186 recorded-wire assertions that would otherwise have had to be
+rewritten into something that is no longer a recording.
+
+**The padding, and why the group header does not carry a frame count.** A
+group is always 340 frames, so the tail of each stem's last group is zero
+padding. The header names the stem and the span — identity — and deliberately
+not timing, because the index record is the one place a song's frame count
+lives and two copies could disagree. But the incremental accumulator sees
+read-back bytes long before any index record exists, so it cannot know where
+the real audio stops.
+
+It therefore folds every group WHOLE, and the commit check — which does have
+the record — takes the padding back off with `st_checksum32_unfold_zeros()`.
+FNV-1a's step is invertible mod 2^32 (the prime is odd, so it has a modular
+inverse), and because the layout is stem-major the padding is the last thing
+folded into each stem's hash. The recovery is exact, not approximate. If the
+padding on the media were not zero the recovered value simply would not match
+the record and the commit would be refused — fail-closed, in the direction
+that rejects a bad upload.
+
+**What the scan proves without being told any geometry.** The accumulator
+requires the groups to arrive in exactly the stem-major order the layout
+defines: stem 0 counting up from group 0, then a single step to stem 1 group
+0, and so on. The first stem transition *teaches* it how many groups a stem
+has, and every later transition must match that count. So it needs no frame
+count, no sector count and no record — which matters, because during a bulk
+upload none of those have been written yet — and the commit check then
+cross-examines the number it learned against the record that finally arrives.
+
+This is strictly stronger than what v1.1 could check. A v1.1 STSC header could
+say "I am sector 7"; it could not say which stem it was, because one sector
+held all four. A group carrying the right audio under the wrong stem label is
+a failure v1.1 could not express, and a test now pins that it is refused.
+
 ## Companion changes
 
 Larger than the rejected draft's one function, but still contained, and the two
@@ -245,8 +292,19 @@ facts that bounded it still hold:
    nor the song checksum.
 2. **The wire protocol does not move** — `writeSectorBulk()` sends a complete
    8192-byte buffer to a destination block. Song-planar changes what those
-   8192 bytes contain (four consecutive groups of one stem) and which block
-   they go to, not the `'U'` command, its 17-byte header or its 14-byte reply.
+   8192 bytes contain and which block they go to, not the `'U'` command, its
+   17-byte header or its 14-byte reply.
+
+   Precisely: the song region is a flat array of `4 * groups` groups in
+   stem-major order, group ordinal `q = stem * groups + g` at block
+   `songStartBlock + q * 4`. Sector `s` is ordinals `4s .. 4s+3`. Those four
+   groups belong to ONE stem only when `groups` is a multiple of 4 — for the
+   43-group reference song, sector 10 carries stem 0's groups 40, 41, 42 and
+   then stem 1's group 0. That straddle is fine and is what keeps a song
+   exactly `groups * 16` blocks, unchanged from v1.1; each group says which
+   stem it is, so nothing has to infer it from the sector. A companion that
+   instead padded each stem's quarter up to a multiple of 4 groups would
+   change the song's size and break every STIX geometry field.
 
 `encodeSong()` changes shape: instead of `ceil(frames/340)` mixed sectors it
 emits four streams of groups, each written into its own quarter.
