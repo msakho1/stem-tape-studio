@@ -289,6 +289,74 @@ int main(int argc, char **argv)
 		}
 	}
 
+	/*
+	 * THE WHOLE IMAGE, AT THE REAL ADDRESSES -- the one thing everything
+	 * above cannot check.
+	 *
+	 * Every check so far validates a group's CONTENT and its own header.
+	 * None of them places a group where st_pl_group_block() says it goes,
+	 * so none of them would notice an addressing change. Neither would the
+	 * five per-stem/song checksums: each is computed over that stem's
+	 * contiguous PCM in playback order, which is layout-independent BY
+	 * CONSTRUCTION. That is a deliberate property of the format -- it is
+	 * what lets the migration claim "no checksum moved" -- and the exact
+	 * reason those five numbers are worthless as evidence about layout.
+	 *
+	 * So: assemble the entire song region the way a real upload lands it,
+	 * and pin one checksum over the result. This is also the number the
+	 * COMPANION's encoder must reproduce, which is the only independent
+	 * check that the two implementations of this format agree on where
+	 * bytes go rather than merely on what they contain.
+	 */
+	printf("  THE LAYOUT: the assembled song region, at st_pl_group_block()'s own addresses\n");
+	{
+		static uint8_t image[FIX_SECTORS * 4u * ST_PL_GROUP_BYTES];
+		const uint32_t groups_per_stem = FIX_SECTORS;
+
+		memset(image, 0xA5, sizeof(image));   /* nothing may stay unwritten */
+		for (s = 0u; s < FIX_SECTORS; s++) {
+			uint8_t groups[ST_PL_STEMS][ST_PL_GROUP_BYTES];
+
+			(void)st_pl_from_v11_sector(song + (size_t)s * ST11_SECTOR_BYTES, groups);
+			for (k = 0u; k < ST_PL_STEMS; k++) {
+				uint32_t blk = st_pl_group_block(0u, groups_per_stem, k, s);
+
+				memcpy(image + (size_t)blk * ST11_PHYSICAL_BLOCK_BYTES,
+				       groups[k], ST_PL_GROUP_BYTES);
+			}
+		}
+
+		/*
+		 * THE STRADDLE, asserted rather than assumed. 43 is not a
+		 * multiple of 4, so sector 10 spans ordinals 40..43 -- stem 0's
+		 * last three groups and then stem 1's first. A companion that
+		 * "tidied" the layout by padding each stem's quarter up to a
+		 * multiple of four groups would produce a song of a different
+		 * size and break every STIX geometry field, and this is the
+		 * cheapest place to catch it.
+		 */
+		{
+			const uint8_t *sec10 = image + (size_t)10u * ST11_SECTOR_BYTES;
+			const uint8_t expect_stem[4]  = { 0u, 0u, 0u, 1u };
+			const uint32_t expect_index[4] = { 40u, 41u, 42u, 0u };
+
+			for (k = 0u; k < 4u; k++) {
+				ck(st_pl_validate(sec10 + (size_t)k * ST_PL_GROUP_BYTES,
+						   expect_stem[k], expect_index[k]),
+				   "sector 10 straddles the stem boundary exactly as the layout says");
+			}
+		}
+
+		ck(st_checksum32_compute(image, sizeof(image)) == 7497902u,
+		   "the assembled v1.2 song region is byte-for-byte what it was");
+		if (st_checksum32_compute(image, sizeof(image)) != 7497902u) {
+			printf("    assembled image checksum: got %u, expected 7497902\n",
+			       st_checksum32_compute(image, sizeof(image)));
+		}
+		printf("    assembled image: %u bytes, checksum %u\n",
+		       (unsigned)sizeof(image), st_checksum32_compute(image, sizeof(image)));
+	}
+
 	printf("  a stem that ran short is padded, and it is the LATER stems\n");
 	for (k = 1u; k < ST_PL_STEMS; k++) {
 		ck(k_original_frames[k] <= k_original_frames[k - 1u],

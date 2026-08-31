@@ -181,3 +181,40 @@ against the recorded reference song before anything is uploaded to hardware.
    real evidence rather than a shared assumption.
 3. Only then is step 3 (verify ordinary four-stem playback on hardware)
    meaningful, because only then can the device be given a song it accepts.
+
+### THE FIVE CHECKSUMS CANNOT VERIFY THE LAYOUT
+
+Worth stating plainly, because it is easy to read a clean five-for-five as a
+green light for the whole change. Each per-stem FNV-1a is computed over that
+stem's own contiguous PCM in playback order, and the song checksum is derived
+from those four. All five are therefore **layout-independent by
+construction** — that is precisely the property that lets this migration claim
+"no checksum moved", and precisely why they cannot detect a group written to
+the wrong address, a wrong header byte, or a stem's quarter padded to a
+different size. An encoder that put every group in the wrong place would
+still report all five correctly.
+
+Step 2 above is the check that closes that gap, and it reduces to one number.
+
+### The reference: the assembled song region
+
+The firmware derives the whole v1.2 image from the frozen v1.1 recording,
+placing each group at `st_pl_group_block()`'s own address. For
+`handoff/v1.1/binaries/song-sectors-four-stem.bin` (SHA-256
+`b1e67148…`, 43 groups per stem, 352,256 bytes):
+
+| | value |
+|---|---|
+| size | 352256 bytes |
+| SHA-256 | `efd80d52351d04f00c206cb9ff2978bf4f720082c3db52e178e25a41af954ddf` |
+| FNV-1a (the format's own checksum32) | 7497902 |
+
+`tests/test_planar_fixture.c` pins the FNV-1a, so this number is now
+regression-protected rather than a figure someone once computed.
+
+**Ask the companion for the SHA-256 of `encodeSong()`'s output** for the same
+song, concatenated in sector order. If it matches, the two implementations
+agree on addressing, header bytes and padding — everything the checksums
+cannot see. If it does not, the same file's own straddle assertion localises
+it: with 43 groups per stem, sector 10 must carry stem 0's groups 40, 41 and
+42 and then stem 1's group 0.
