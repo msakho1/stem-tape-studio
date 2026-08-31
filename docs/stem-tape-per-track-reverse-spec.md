@@ -93,6 +93,62 @@ look, and it is the kind of thing that otherwise surfaces as "reverse sounds
 subtly wrong only when the pitch rocker is off centre". Recorded here so step 4
 starts with it rather than discovering it.
 
+**DONE**, as step 4 part 1, with the decoded audio bit-identical
+(`0xe9650dda`) over the whole recorded song.
+
+### The larger half, found by reading the block rather than estimating it
+
+```
+main.c:1677   static st_stream_t g_stem_stream;     <- ONE playhead
+```
+
+Four heads means four of these. The struct makes that cheap — the geometry
+above the line (`song_start_block`, `song_block_count`, `frames`,
+`sector_count`, `loop_enabled`) is identical for every stem, and only four
+fields below it are mutable (`state`, `song_frame`, `ready_sector`,
+`underrun_count`). Four streams is on the order of 128 bytes, not a redesign.
+
+What is *not* cheap is `looper_audio_block()`'s PASS C, which is written
+around that one position. Per block iteration it currently:
+
+1. derives the needed sector from `g_stem_stream.song_frame`;
+2. acquires that one sector for all four stems, all-or-none;
+3. publishes one `requested_sector` to all four mailboxes;
+4. declares underrun if `ready_sector != needed`;
+5. derives `fis` and `run` from the single position;
+6. bounds `out_n`, renders, advances the one stream;
+7. runs the loop-wrap backstop against the one position.
+
+Steps 1–5 and 6–7 all become per-stem. Three consequences worth naming before
+writing any of it:
+
+- **`run` is per-stem, and `out_n` is bounded by the minimum.** Each head has
+  its own frames-remaining inside its own resident group. The block can only
+  render as many output frames as the *worst-supplied* stem can feed, or the
+  reversed stem starves while the other three run on.
+- **Acquire stops being all-or-none across stems.** It has to stay
+  all-or-none *per stem*: a stem whose group is not resident is the one that
+  underruns, and today's shared check would silence all four for it.
+- **The transport clock is not "stem 0".** Loop window, seam, beat phase and
+  the published song frame belong to the *transport*, and a reversed head must
+  not drag the song's clock backwards with it. The transport is whichever head
+  is still going forward — there are always at least three, since only one
+  track reverses at a time.
+
+The storage side needs nothing: the mailbox, the active-slot array and the
+read-ahead ring are already per-stem, and `st_pl_plan_batch()` already takes
+per-stem heads *and* per-stem directions and already costs the same read
+whichever way each is going. That was designed in when the format was.
+
+Two further prerequisites, both small:
+
+- `src/st_scrub.c` joins the build — but only in the commit that first calls
+  it. It is deliberately unlinked until then; the link-closure gate lists it
+  among the files present-but-unlinked, and adding dead weight to the image is
+  what the symbol gate's own comments argue against.
+- The double-tap TRACK binding extends the existing click/double-click
+  arbitration. No second gesture detector.
+
 ## Order of work
 
 1. ~~Wire the v1.2 planar read path.~~ **DONE** — four per-stem group rings,
@@ -107,6 +163,11 @@ starts with it rather than discovering it.
    the whole recorded song. What it cannot prove is the part that matters
    most — that the SP-1 keeps up at 92% busy — which is what step 5 is for.
 4. Build one-track-at-a-time reverse.
+   - **part 1 DONE** — the resampler's carried state is per-stem, audio
+     bit-identical at `0xe9650dda`.
+   - part 2 — four playheads, and PASS C reworked around them (see above).
+   - part 3 — the double-tap gesture, `st_scrub`'s signed-rate crossing, the
+     backward loop wrap and the clamp at the start of the song.
 5. Flash; physical test.
 6. Instrument and measure the REAL implementation. `sil=` (frames actually
    silenced) and `rduswin=` (worst fetch since the last print) are in the
