@@ -9,10 +9,11 @@ Every number below is computed from the compiled constants
 (`ST_LAT_READAHEAD_SECTORS 4`, `ST_LAT_RESIDENCY_SECTORS 5`,
 `ST_LAT_RING_SLOTS 6`), not estimated.
 
-**Status: Stage A is done (`st38`), and it was the only stage needed.** The
-planar read path was re-sized to G=7/R=3 and now fits inside what Stage A
-returned. The figures below are as they stood when this analysis started;
-"What Stage A actually returned" has the measured after.
+**Status: Stage A is done (`st38`), and the read path turned out not to need
+it.** Song-planar settled on G=6/R=2, which is RAM-neutral, so the 9,088 B
+Stage A returned is banked for the roadmap instead of spent. The figures below
+are as they stood when this analysis started; "What Stage A actually returned"
+has the measured after.
 
 ## Where the RAM actually is
 
@@ -165,12 +166,17 @@ the exit pin guarantees and the ring cannot. **It stays.**
 The only correct thing to do with this finding is fix the misleading comment,
 not the allocation.
 
-### STAGE A WAS THE ONLY ONE NEEDED
+### STAGE A WASN'T NEEDED FOR THE READ PATH AT ALL — AND IS THEREFORE BANKED
 
-The planar read path needs +8,192 B at the adopted G=7/R=3, and Stage A
-returned 9,088. **The cache rework is not a prerequisite of anything** — see
-`stem-tape-v1.2-planar-format.md` for the decision and why it reversed an
-earlier G=8/R=4 choice.
+The planar read path was re-sized twice. It settled on **G=6/R=2, which is
+RAM-neutral**: `4 stems × 6 groups × 2048 B = 49,152 B`, byte-for-byte today's
+ring, reshaped rather than grown.
+
+So Stage A's 9,088 B is **not spent**. It stays available for the roadmap this
+document was written for — per-track scrub heads, multi-song, heads mode, MIDI
+cue. See `stem-tape-v1.2-planar-format.md` for the sizing, including the rule
+(`R` must divide `G`) that the first two attempts at that table missed and that
+this document's "NO LONGER OPTIONAL" framing was built on.
 
 ### What is actually reclaimable
 
@@ -191,7 +197,8 @@ keeps the audio thread **wait-free** because sector `s` always lives in slot
 a scan. An associative cache makes the audio thread search. Spending that to
 buy 3 points of ordinary-playback headroom means rewriting the primitive that
 guarantees no dropouts in order to reduce the chance of dropouts, which is the
-wrong direction. It stays available if 86% proves uncomfortable on hardware.
+wrong direction. It stays available if 92% proves uncomfortable on hardware,
+where it is the step up to G=8/R=4 and 83%.
 
 ### What Stage A actually returned — measured from the linked ELF
 
@@ -206,20 +213,20 @@ rather than as intended; every other figure in this document should be read
 the same way.
 
 **And the arithmetic is a floor, not a total — worth doing rather than
-eyeballing.** 42,658 free looks like plenty against a 16,384 ask, but the gate
-constrains what *remains*:
+eyeballing.** The floor constrains what *remains*, which is what forced the
+ring size to be re-decided twice:
 
-| | free |
-|---|---:|
-| now | 42,658 |
-| at G=8/R=4 (+16,384) | 26,274 — **below the 32,768 floor by 6,494** |
-| **at G=7/R=3 (+8,192)** | **34,466 — clears it by 1,698** |
+| ring | free after | verdict |
+|---|---:|---|
+| now, before the read path | 42,658 | — |
+| G=8/R=4 (+16,384) | 26,274 | **below the 32,768 floor by 6,494** |
+| G=7/R=3 (+8,192) | 34,466 | clears it, but 3 ∤ 7 so batches wrap: 89.4%, not the 86% modelled |
+| **G=6/R=2 (+0)** | **42,658** | **adopted — RAM-neutral, depth 4, 92%** |
 
-That is what forced the ring size to be re-decided. G=8 could only be afforded
-by also taking the cache's 8,192, and the two together land at exactly the same
-34,466 as G=7 alone — so the extra 3 points of headroom cost a rewrite of the
-mailbox and bought no RAM at all. **G=7/R=3 adopted; margin 1,698 B**, thin
-enough that nothing else should grow without re-checking this table.
+**G=6/R=2 adopted. The read path costs no RAM at all**, so the whole margin
+stays free. See `stem-tape-v1.2-planar-format.md` for the `R | G` rule that
+invalidated the G=7 row and for why 92% is a measured operating point rather
+than an extrapolation.
 
 ## The part that changes the roadmap
 
@@ -274,11 +281,12 @@ Rewritten to what actually happened, rather than what was planned.
 2. **Fix the stale `ST_LOOP_PIN_EXIT` comment** — it describes a seek that no
    longer exists and sent this analysis down a blind alley twice. Zero risk,
    still outstanding.
-3. **Song-planar v1.2 at G=7/R=3** — +8,192 B, which Stage A already paid for.
-   Ordinary playback moves from 83% to 86% busy; buffered depth is unchanged
-   at 4 spans.
+3. **Song-planar v1.2 at G=6/R=2** — **+0 B**. `4 × 6 × 2048 = 49,152` is
+   byte-for-byte today's ring, reshaped from `[6][8192]` to `[4][6][2048]`.
+   Ordinary playback moves from 83% to 92% busy; buffered depth is unchanged
+   at 4 spans. Stage A's 9,088 B is therefore banked, not spent.
 4. **Unified associative cache — DECLINED, not deferred.** Worth doing for the
    addressing; the RAM is marginal and the cost is that the audio thread stops
-   being wait-free. Revisit only if 86% proves uncomfortable on hardware, when
-   it is the thing that buys the 3 points back.
+   being wait-free. Revisit only if 92% proves uncomfortable on hardware, when
+   it is what makes G=8/R=4 and 83% affordable.
 5. Per-track heads, then the rest of the roadmap, on the remaining budget.

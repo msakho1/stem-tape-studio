@@ -104,67 +104,75 @@ reversed, none reversed: 3178 us either way.**
 ## Buffering: ring size, refill size, and the depth that must not shrink
 
 The read path needs a per-stem ring of G groups, refilled R groups at a time.
-Three things pull against each other and only certain (G, R) pairs are safe:
+FOUR things pull against each other, and the fourth was missed on the first
+pass through this table:
 
 - **RAM** = `4 stems x G x 2048`.
 - **CPU** = one read per stem per refill: `4 x read(4R) / R` per span.
-- **DEPTH** = `G - R` spans always buffered. This is the one with a hard
-  floor: a single worst-case fetch was MEASURED at 21.6-23.6 ms under load, and
-  a span is 7.083 ms, so **fewer than 4 spans buffered is thinner than one
-  observed stall**.
+- **DEPTH** = `G - R` spans always buffered. Hard floor: a single worst-case
+  fetch was MEASURED at 21.6-23.6 ms under load and a span is 7.083 ms, so
+  **fewer than 4 spans buffered is thinner than one observed stall**.
+- **R MUST DIVIDE G.** See below. This is not a tidiness preference; it
+  decides whether the CPU column above is true at all.
 
-| G | R | RAM | vs today | depth | us/span | busy |
-|---|---|---|---|---|---|---|
-| 6 | 3 | 49,152 | +0 | **3 spans — too thin** | 3397 | 86% |
-| 6 | 2 | 49,152 | +0 | 4 spans | 3834 | 92% |
-| **7** | **3** | 57,344 | **+8,192** | 4 spans | 3397 | **86%** |
-| **8** | **4** | 65,536 | **+16,384** | 4 spans | 3178 | **83% — today's** |
+### The rule this table originally got wrong
 
-G=6/R=3 is the tempting one because it is RAM-neutral, and it is **not safe**:
-three spans buffered is less than one measured worst-case fetch.
+`emmc_read_blocks()` reads consecutive blocks into **one contiguous buffer**.
+A batch of R groups is therefore one read only if those R groups occupy R
+contiguous slots -- and slot is `group % G`, so a run that crosses the end of
+the ring does not. When `R | G`, runs aligned to a multiple of R never cross
+it and every refill is exactly one read. When it does not divide, refills wrap
+and split.
 
-**DECIDED: G=7, R=3.** This reverses an earlier decision, and the reason it
-reversed is worth keeping, because the *first* decision was not wrong on its
-own terms.
+G=7/R=3 is the case that exposed it. Batch sizes cycle **3, 3, 1**: one refill
+in three pays a second fixed read cost for a single group.
 
-G=8/R=4 was chosen first: it holds ordinary playback at exactly today's 83%
-busy, so step 3 verifies that nothing changed rather than signing off a
-regression chosen for convenience. G=7 was rejected then because "no dropouts
-ever" is the standing requirement and 3 points of headroom is not the thing to
-spend to save 8 KB.
+| | modelled | actual |
+|---|---:|---:|
+| G=7/R=3, us/span | 3397 | **3647** |
+| G=7/R=3, busy | 86% | **89.4%** |
 
-**What changed is what the 8 KB actually costs.** Stage A returned 9,088 B
-(measured), leaving 42,658 free. G=8 needs 16,384, which lands at 26,274 —
-*below* the 32,768 floor. The only remaining source of the difference is the
-unified associative cache, and that means replacing the SPSC mailbox, whose
-central property is stated in its own header:
+The first version of this table quoted 3397/86% for G=7/R=3, and a ring-size
+decision was made twice on that number. It assumed a clean `read(4R)/R` for
+every pair, which only holds when `R | G`.
 
-> sector s always lives in slot (s % SLOTS). This is what keeps the consumer
-> **wait-free**: to find out whether the one sector it needs is resident it
-> computes a single index and does a single atomic load — never a scan, never
-> a search.
+| G | R | R divides G | RAM | vs today | depth | us/span | busy |
+|---|---|---|---|---|---|---|---|
+| 6 | 3 | yes | 49,152 | +0 | **3 spans — too thin** | 3397 | 86% |
+| **6** | **2** | **yes** | **49,152** | **+0** | **4 spans** | **3834** | **92%** |
+| 7 | 3 | **NO — wraps** | 57,344 | +8,192 | 4 spans | 3647 | 89.4% |
+| 7 | 1 | yes | 57,344 | +8,192 | 6 spans | 5147 | 110% |
+| 8 | 4 | yes | 65,536 | +16,384 | 4 spans | 3178 | 83% |
+| 5 | 1 | yes | 40,960 | −8,192 | 4 spans | 5147 | 110% |
 
-An associative cache makes the audio thread *search*. So the choice was never
-"83% vs 86%" — it was "83% and a rewrite of the formally specified,
-ThreadSanitizer-verified primitive that guarantees no dropouts" against "86%
-and that primitive untouched". Both land at exactly 34,466 B free.
+Applying all four constraints at once — `R | G`, depth ≥ 4, and free RAM ≥ the
+32,768 B floor (which caps G at 7) — leaves **exactly one viable pair**.
 
-The standing requirement decided it in the other direction the second time:
-the surest way to cause a dropout is to rewrite the thing that prevents them.
-Modulo addressing stays everywhere — four per-stem rings, each still one index
-computation, plus the pins unchanged.
+## DECIDED: G=6, R=2
 
-| | G=8 + cache rework | **G=7, no rework** |
-|---|---|---|
-| free after | 34,466 | **34,466** |
-| ordinary playback | 83% | **86%** |
-| buffered depth | 4 spans | **4 spans** |
-| SPSC mailbox | replaced, loses wait-free lookup | **untouched beyond the planar port** |
-| loop pins | folded into the cache | **untouched** |
+- **RAM-neutral.** `4 × 6 × 2048 = 49,152` is byte-for-byte today's ring. The
+  read path is reshaped from `[6][8192]` to `[4][6][2048]`, not grown.
+- **Aligned batches.** 2 divides 6, so every refill is exactly 2 groups, 8
+  blocks, one read. No split-batch handling anywhere.
+- **Depth 4 spans**, unchanged.
+- **The mailbox and the pins are untouched.** `ST_STEM_MBOX_SLOTS` is already
+  `ST_LAT_RING_SLOTS` = 6, so even the ring constant does not move — four
+  instances of the same struct, each still one index computation, still
+  wait-free.
 
-G and R are compile-time constants, so if 86% proves uncomfortable on hardware
-this is one line to revisit — with the cache rework as the thing that buys the
-3 points back, rather than a prerequisite of shipping at all.
+The cost is **92% busy against today's 83%**. That is the highest of the three
+candidates, and it is an operating point the SP-1 has already run: the level-1
+reverse test measured 92% busy with **zero silence frames**. It is a measured
+operating point, not an extrapolation.
+
+**What this buys back:** the 9,088 B Stage A reclaimed is no longer spent on
+the read path at all. It stays banked for per-track scrub heads, multi-song,
+heads mode and MIDI cue — the roadmap this document's RAM analysis was written
+for.
+
+If 92% proves uncomfortable on hardware, the ladder up is G=8/R=4 at 83%,
+which needs the unified associative cache to fit — the same trade already
+declined once, and now worth 9 points rather than 3.
 
 ## The cost that is real: RAM
 
