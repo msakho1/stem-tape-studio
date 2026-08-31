@@ -1,8 +1,18 @@
 # Stem Tape storage format v1.2 — song-planar stem streams
 
-Status: **specification, not yet implemented.** Firmware is still v1.1
-(`ST11_FORMAT_MINOR 1`); the companion is still v1.1
-(`stemTapeFormat.ts: FORMAT_MINOR = 1`).
+Status: **implemented in firmware; the companion has not caught up.** The read
+path is planar and `ST11_FORMAT_MINOR` is 2; the companion still emits v1.1
+(`stemTapeFormat.ts: FORMAT_MINOR = 1`), so the device currently refuses every
+song it can be sent. That is the intended intermediate state — the version
+gates refuse rather than misread — and step 2 closes it.
+
+**The evidence that the audio survived the change**, before any of it reaches
+hardware: the full two-thread playback gate runs the planar read path over a
+v1.2 image derived from the recorded v1.1 song and produces deterministic hash
+`0xe9650dda`, the same value the v1.1 path produced and the same value the
+single-threaded walk established independently. CI asserts that literal, so an
+edit that changes the decoded audio fails the step rather than printing a
+different number.
 
 ## The requirement this exists to meet
 

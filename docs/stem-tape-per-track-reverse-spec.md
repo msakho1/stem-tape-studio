@@ -95,12 +95,18 @@ starts with it rather than discovering it.
 
 ## Order of work
 
-1. Wire the v1.2 planar read path.
-2. Companion uploads v1.2 planar songs.
-3. **Verify ordinary four-stem playback is still perfect.**
+1. ~~Wire the v1.2 planar read path.~~ **DONE** — four per-stem group rings,
+   RAM-neutral, output hash unchanged at `0xe9650dda`.
+2. Companion uploads v1.2 planar songs. **NEXT.**
+3. **Verify ordinary four-stem playback is still perfect.** Half of this is
+   already banked: CI proves the decoded audio is bit-identical to v1.1 over
+   the whole recorded song. What it cannot prove is the part that matters
+   most — that the SP-1 keeps up at 92% busy — which is what step 5 is for.
 4. Build one-track-at-a-time reverse.
 5. Flash; physical test.
-6. Instrument and measure the REAL implementation.
+6. Instrument and measure the REAL implementation. `sil=` (frames actually
+   silenced) and `rduswin=` (worst fetch since the last print) are in the
+   ordinary `STEMIO` diagnostic for exactly this.
 
 ## Acceptance
 
