@@ -80,11 +80,17 @@ st_readcost_plan_planar(plan, 1) -> blk12+4   the reversed stem's plane
 That is +665 us per sector over today's single read — one extra fixed per-read
 cost — against +1995 us for four. A third of the price.
 
-**And it suggests enforcing the limit in the gesture layer.** If reversing a
-second track un-reverses the first, the device cannot reach levels 2-4 at all,
-and the measured failure stops being a risk the design has to live with. That
-is a decision to make when the feature is built, not an assumption to bake in
-now — recorded here so it is not lost.
+**The limit is enforced in the gesture layer. DECIDED: reversing a second
+track un-reverses the first.** At most one stem is ever reversed, so the
+device cannot reach levels 2-4 at all and the measured level-4 failure stops
+being a risk the design has to survive — it becomes a state that cannot be
+entered. The alternative considered and rejected was ignoring the second
+double-click, which would have left the first track reversed with no feedback
+about why the second did nothing.
+
+This also gives the read planner a hard bound: `st_readcost_plan_planar()` is
+only ever called with `n_reversed` of 0 or 1, so a sector fetch is one read or
+two, never four.
 
 ## Level 4 — FAIL
 
