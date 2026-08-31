@@ -37,16 +37,16 @@
     "evidence": "NOT MEASURED"
   },
   "symbols": {
-    "g_stem_sector_bufs": {
+    "g_stem_group_bufs": {
       "category": "sector_pool",
-      "owner": "read-ahead ring (st_stem_bufmbox)",
+      "owner": "read-ahead ring, four of them, one per stem (st_stem_bufmbox)",
       "declared_in": "src/main.c",
       "lifetime": "whole session; filled by streamer_thread, drained by audio_thread",
       "writers": "streamer_thread",
       "readers": "audio_thread",
       "phases": "playback, looping",
       "overlaps": "loop pins (both live while a loop runs)",
-      "evidence": "depth 12 predates st_latency.h and was chosen against a since-disproven claim that 11 sectors cover the driver's 80 ms allowance. Required read-ahead per st_latency.h is ST_LAT_READAHEAD_SECTORS. OVERSIZED, pending the unified-cache rework."
+      "evidence": "v1.2 song-planar renamed this from g_stem_sector_bufs and reshaped it from ONE ring of 12 whole 8192-byte sectors into FOUR per-stem rings of ST_STEM_MBOX_SLOTS 2048-byte groups. It is the same allocation to the byte -- 4 * 6 * 2048 = 49152 = 12 * 8192 -- and a _Static_assert in main.c holds it there, which is why the linked ELF's RAM figure did not move at all across the format change. G=6 slots at R=2 groups per read leaves depth G-R = 4 spans of read-ahead. R must DIVIDE G: emmc_read_blocks() fills one contiguous buffer, so a run crossing the ring's end would silently become two reads and the batching would not pay for itself. G=6/R=2 is a measured operating point (92% streamer busy with zero silenced frames in the level-1 load test), not an estimate. The oversizing note this entry used to carry described the 12-sector ring and is retired with it."
     },
     "g_stem_loop_pin_bufs": {
       "category": "sector_pool",
