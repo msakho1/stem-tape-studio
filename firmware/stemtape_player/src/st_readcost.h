@@ -173,8 +173,11 @@ typedef struct {
  * Fills `out` with the plan for `n_reversed` diverging tracks and returns how
  * many reads it contains.
  *
- * PARAMETERISED BECAUSE THE WORST CASE FAILED. Four diverging tracks measured
- * 32 and 41 underruns on hardware with the CPU at 99%. That does not
+ * PARAMETERISED BECAUSE THE WORST CASE LOOKED BAD. Four diverging tracks
+ * produced 32 and 41 underruns on hardware with the CPU at 99% -- but that run
+ * had no control, included the post-resume prime, and its two repeats
+ * disagreed, so it is SUGGESTIVE, NOT CONCLUSIVE (see
+ * docs/stem-tape-reverse-feasibility.md). Either way it does not
  * condemn every level of divergence: four reversed costs +31.8 CPU points
  * over today, ONE reversed costs +10.6, and where between them the ceiling
  * actually sits is a measurement, not an inference -- so the plan takes the

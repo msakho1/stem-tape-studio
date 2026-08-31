@@ -1,11 +1,12 @@
 # Per-track reverse playback — feasibility, and what it costs
 
-Status: **STORAGE YES, CPU NO at four tracks.** The read-cost sweep passed
-and reproduced (two runs within 1.2%). The CPU gate **failed**: four diverging
-tracks produced 32 and 41 underruns with the processor at 99%. Whether fewer
-diverging tracks fit is now the open question — the gate walks levels 1..4.
+Status: **STORAGE YES. CPU RESULT INCONCLUSIVE — the gate was not built well
+enough to trust.** The read-cost sweep passed and reproduced (two runs within
+1.2%), so the storage finding stands. The CPU run degraded badly, but the
+experiment had no control and several confounds, listed below. Do not treat
+"the CPU cannot do it" as established.
 
-## The CPU gate result (firmware st33)
+## The CPU run (firmware st33) and why it does not settle the question
 
 ```
 STEMPLANAR sim=ON und=0  rd_max_us=11205 reads=13 busy=51% spare=49%
@@ -13,16 +14,47 @@ STEMPLANAR sim=ON und=32 rd_max_us=32239 reads=73 busy=99% spare=1%     <- run 1
 STEMPLANAR sim=ON und=41 rd_max_us=13552 reads=30 busy=77% spare=23%    <- run 2
 ```
 
-**Why it failed is more specific than "too slow".** The worst single read
-stretched to **32.2 ms** — 24x its uncontended 1347 µs, **2.0x** the documented
-`ST_LAT_READ_WORST_US` (16100 µs), and **1.5x the entire 21.2 ms of producer
-silence the read-ahead is designed to cover**. One such stall empties the ring
-outright.
+**What it does support:** under `sim=ON` the CPU saturated (99%) and the
+streamer fell behind — 60 sectors fetched in a window needing ~71. That is
+consistent with the planar pattern being too expensive.
 
-Four reads per sector means **four times the exposure to that tail**, not just
-four times the average work. The tail is what kills it, and averages never
-showed it: uncontended, four planes cost 5388 µs against a 7083 µs budget and
-looked comfortable.
+**Why that is not a finding yet:**
+
+1. **No control.** `sim=OFF` was never measured under the same conditions
+   (same song, same duration, same USB console attached). Without a baseline
+   the underruns cannot be attributed to the read pattern.
+2. **The resume transient is inside the numbers.** `X` sets
+   `g_slot_switch_req`, so leaving transfer mode RELOADS the song and the
+   read-ahead ring restarts empty. Counters are cleared at arm time, before
+   the `X`. The first window shows 13 sectors against ~71 needed — that is
+   priming, not failure, and it is counted.
+3. **Counters are cumulative, never per-window.** There is no way to tell
+   whether the 32 underruns happened in the settling second or throughout.
+4. **The two runs disagree.** 73 sectors/32 underruns/99% busy versus 30
+   sectors/41 underruns/77% busy — more underruns from fewer sectors. That
+   inconsistency is itself evidence the experiment is uncontrolled.
+5. **Sustained playback was never confirmed.** The companion tool reported
+   `PLAYING FOR 0:00` for the second run, meaning it never observed a PLAY
+   state.
+
+**A correction to the first analysis of this data.** `rd_max_us` times the
+whole `stem_read_sector()` call — all four reads PLUS any preemption between
+them — not one read. It was compared against `ST_LAT_READ_WORST_US`, a
+single-read figure, and a "24x, 2x the documented worst case, tail exposure"
+mechanism was built on that comparison. The comparison was wrong. Against the
+right baseline (four reads = 5388 us uncontended) the worst observed fetch is
+a ~6x stretch, and the average stretch across the bad window is ~1.55x.
+
+## What the gate needs before it can answer
+
+- a **settle period** so the post-resume prime is excluded
+- **per-window deltas** rather than cumulative counters
+- a **real baseline** — level 0 measured identically, for comparison
+- a **keep-up ratio** (sectors fetched vs sectors needed), the direct question
+- **gating on actually playing**, so a stopped transport cannot pollute it
+- **per-read timing** kept distinct from per-sector-fetch timing
+
+## Cost model (unchanged, from the storage sweep)
 
 | tracks reversed | read work / sector | vs today |
 |---|---|---|

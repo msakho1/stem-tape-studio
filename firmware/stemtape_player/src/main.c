@@ -4742,9 +4742,11 @@ static void xfer_service(void)
 		 * level is HOW MANY TRACKS DIVERGE.
 		 *
 		 * A toggle was enough while the question was "can the CPU do
-		 * this at all". Hardware answered that: four diverging tracks
-		 * produced 32 and 41 underruns with the CPU at 99%. The useful
-		 * question now is where between one and four the ceiling sits,
+		 * this at all". The first hardware run at four diverging tracks
+		 * produced 32 and 41 underruns with the CPU at 99% -- an
+		 * UNCONTROLLED result that also counted the post-resume prime,
+		 * so it is not yet a verdict. The useful question either way is
+		 * where between one and four the ceiling sits,
 		 * because one reversed track costs +10.6 CPU points against
 		 * four's +31.8, and a player who can reverse ONE track still
 		 * has the feature.
