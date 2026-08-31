@@ -3,11 +3,16 @@
 `main.c` has referenced this document for some time; it did not exist. Written
 now because the roadmap (per-track scrub heads, multi-song, heads mode, MIDI
 cue) needs headroom that does not currently exist, and because song-planar
-v1.2 needs +16 KB before it can be built at all.
+v1.2 needed RAM it did not have.
 
 Every number below is computed from the compiled constants
 (`ST_LAT_READAHEAD_SECTORS 4`, `ST_LAT_RESIDENCY_SECTORS 5`,
 `ST_LAT_RING_SLOTS 6`), not estimated.
+
+**Status: Stage A is done (`st38`), and it was the only stage needed.** The
+planar read path was re-sized to G=7/R=3 and now fits inside what Stage A
+returned. The figures below are as they stood when this analysis started;
+"What Stage A actually returned" has the measured after.
 
 ## Where the RAM actually is
 
@@ -17,7 +22,7 @@ Every number below is computed from the compiled constants
 |---|---|---|---|
 | `g_stem_sector_bufs` | 6 × 8192 | 49,152 | read-ahead ring |
 | `g_stem_loop_pin_bufs` | 10 × 8192 | 81,920 | loop entry + exit residency |
-| `s_v11_verify_scratch` | 1 × 8192 | 8,192 | upload read-back verify |
+| `s_v11_verify_scratch` | 1 × 8192 | 8,192 | upload read-back verify — **since reclaimed** |
 | | **16 sectors** | **139,264** | |
 
 Everything else in the firmware — every control struct, every LED table, every
@@ -58,7 +63,7 @@ change for its own sake, but it buys one slot, not a pool.
 
 ## The reclamation, staged
 
-### Stage A — the verify scratch stops being its own allocation (8,192 B) — **DONE, st38**
+### Stage A — the verify scratch stops being its own allocation — **DONE, `st38`, 9,088 B measured**
 
 `s_v11_verify_scratch` has exactly two use sites, `xfer_v11_write()` and the
 `'U'` bulk-sector handler. Both are transfer-mode only, and transfer mode stops
@@ -125,9 +130,9 @@ the ordinary idle timeout is therefore unreachable.
 
 Two CI scripts, not one: `stemtape_player_xfer_quiesce_gate.py` proves the
 handshake is wired, and `..._gate_selftest.py` proves that gate is not vacuous
-by breaking each of its checks in turn — nine mutants, including a gate that is
-entirely correct but sits *after* the command byte is consumed — and requiring
-a rejection for every one.
+by breaking each of its checks in turn — thirteen mutants, including a gate
+that is entirely correct but sits *after* the command byte is consumed, and one
+that aliases the ring instead of a pin — and requiring a rejection for each.
 
 ### Stage B — CORRECTED TWICE. Neither pin region is reclaimable.
 
@@ -160,26 +165,33 @@ the exit pin guarantees and the ring cannot. **It stays.**
 The only correct thing to do with this finding is fix the misleading comment,
 not the allocation.
 
-### NO LONGER OPTIONAL
+### STAGE A WAS THE ONLY ONE NEEDED
 
-The planar read path needs G=8 groups per stem, which is +16,384 B, and the
-buffered-depth floor rules out every cheaper ring (see
-`stem-tape-v1.2-planar-format.md`). Both reclamations below are therefore
-prerequisites of the read path rather than the speculative groundwork this
-document originally framed them as.
+The planar read path needs +8,192 B at the adopted G=7/R=3, and Stage A
+returned 9,088. **The cache rework is not a prerequisite of anything** — see
+`stem-tape-v1.2-planar-format.md` for the decision and why it reversed an
+earlier G=8/R=4 choice.
 
 ### What is actually reclaimable
 
 | | bytes | status |
 |---|---|---|
 | Stage A — verify scratch shares a **pin** buffer | **9,088 measured** | **DONE, `st38`** |
-| unified associative cache (16 pools → 15 live) | 8,192 | real but marginal; large change for one slot |
+| unified associative cache (16 pools → 15 live) | 8,192 | **deliberately not taken** — see below |
 | entry pin | 0 | load-bearing |
 | exit pin | 0 | load-bearing |
 
-**Realistic total: 8,192 B, or 16,384 B if the cache rework is also done.** Not
-the 57,344 B this document first claimed. Half of it is banked; the other half
-is the cache rework, which the read path at G=8/R=4 still needs.
+**Realistic total: 9,088 B taken, 8,192 B left on the table on purpose.** Not
+the 57,344 B this document first claimed.
+
+The cache rework is the last 8,192, and it is declined rather than pending.
+Its cost is not the code churn, it is what the code does: the SPSC mailbox
+keeps the audio thread **wait-free** because sector `s` always lives in slot
+`s % SLOTS`, so residency is one index computation and one atomic load, never
+a scan. An associative cache makes the audio thread search. Spending that to
+buy 3 points of ordinary-playback headroom means rewriting the primitive that
+guarantees no dropouts in order to reduce the chance of dropouts, which is the
+wrong direction. It stays available if 86% proves uncomfortable on hardware.
 
 ### What Stage A actually returned — measured from the linked ELF
 
@@ -193,19 +205,21 @@ itself, because the padding around it went with it. Recorded as measured
 rather than as intended; every other figure in this document should be read
 the same way.
 
-**It is still not enough on its own, and the arithmetic is worth doing rather
-than eyeballing.** 42,658 free looks like plenty against a 16,384 ask, but the
-gate is a floor on what remains:
+**And the arithmetic is a floor, not a total — worth doing rather than
+eyeballing.** 42,658 free looks like plenty against a 16,384 ask, but the gate
+constrains what *remains*:
 
 | | free |
 |---|---:|
 | now | 42,658 |
-| after the planar rings (+16,384) | **26,274 — below the 32,768 floor by 6,494** |
-| plus the cache reclamation (+8,192) | **34,466 — clears it by 1,698** |
+| at G=8/R=4 (+16,384) | 26,274 — **below the 32,768 floor by 6,494** |
+| **at G=7/R=3 (+8,192)** | **34,466 — clears it by 1,698** |
 
-So the second reclamation stays a prerequisite, exactly as chosen. The margin
-after both is 1,698 bytes, which is thin enough that the cache rework should
-not also grow anything.
+That is what forced the ring size to be re-decided. G=8 could only be afforded
+by also taking the cache's 8,192, and the two together land at exactly the same
+34,466 as G=7 alone — so the extra 3 points of headroom cost a rewrite of the
+mailbox and bought no RAM at all. **G=7/R=3 adopted; margin 1,698 B**, thin
+enough that nothing else should grow without re-checking this table.
 
 ## The part that changes the roadmap
 
@@ -249,20 +263,22 @@ conversation**, which is why the plan above is short.
 
 ## Order of work
 
-1. **Song-planar v1.2 — RAM-NEUTRAL, and therefore not blocked.** At equal
-   read-ahead depth it holds the same audio regrouped: 16 spans × 2048 B × 4
-   stems = 131,072 B, exactly today's 16 sectors × 8192 B. The +16,384 B this
-   document first quoted assumed a deeper ring (18 spans) for comfortable
-   4-span batching. That is a nicety, not a requirement, and 33,570 B is free
-   today. **The RAM work is not a prerequisite for the format change.**
+Rewritten to what actually happened, rather than what was planned.
+
+1. **Stage A — DONE (`st38`).** The verify scratch has no allocation of its
+   own; it is the last loop-pin buffer, behind a real two-thread quiesce
+   handshake. Not a timing argument: entering transfer mode used to set the
+   flag and return, with nothing proving the audio thread had observed it
+   before the first command landed. Silent audio corruption was the failure
+   mode. **9,088 B measured.**
 2. **Fix the stale `ST_LOOP_PIN_EXIT` comment** — it describes a seek that no
-   longer exists and sent this analysis down a blind alley twice. Zero risk.
-3. **Stage A** (8,192 B) — the verify scratch shares a ring slot, once a real
-   two-thread quiesce handshake exists. Not a timing argument: entering
-   transfer mode sets the flag and returns, and nothing today *proves* the
-   audio thread observed it before the first command lands. Silent audio
-   corruption is the failure mode. **The handshake is built (`st38`); the
-   union is the remaining half.**
-4. **Unified associative cache** (8,192 B) — worth doing for the addressing,
-   marginal for the RAM. Not urgent while song-planar is neutral.
-4. Per-track heads, then the rest of the roadmap, on the freed budget.
+   longer exists and sent this analysis down a blind alley twice. Zero risk,
+   still outstanding.
+3. **Song-planar v1.2 at G=7/R=3** — +8,192 B, which Stage A already paid for.
+   Ordinary playback moves from 83% to 86% busy; buffered depth is unchanged
+   at 4 spans.
+4. **Unified associative cache — DECLINED, not deferred.** Worth doing for the
+   addressing; the RAM is marginal and the cost is that the audio thread stops
+   being wait-free. Revisit only if 86% proves uncomfortable on hardware, when
+   it is the thing that buys the 3 points back.
+5. Per-track heads, then the rest of the roadmap, on the remaining budget.

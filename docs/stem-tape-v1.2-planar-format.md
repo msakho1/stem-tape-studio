@@ -123,21 +123,48 @@ Three things pull against each other and only certain (G, R) pairs are safe:
 G=6/R=3 is the tempting one because it is RAM-neutral, and it is **not safe**:
 three spans buffered is less than one measured worst-case fetch.
 
-**DECIDED: G=8, R=4.** 16 KB of reclamation, and ordinary playback stays at
-exactly today's 83% busy — so step 3 verifies that nothing changed, rather than
-signing off a regression that was chosen for convenience. The alternative
-(G=7, +8 KB, 86%) was rejected because "no dropouts ever" is the standing
-requirement and 3 points of ordinary-playback headroom is not the thing to
+**DECIDED: G=7, R=3.** This reverses an earlier decision, and the reason it
+reversed is worth keeping, because the *first* decision was not wrong on its
+own terms.
+
+G=8/R=4 was chosen first: it holds ordinary playback at exactly today's 83%
+busy, so step 3 verifies that nothing changed rather than signing off a
+regression chosen for convenience. G=7 was rejected then because "no dropouts
+ever" is the standing requirement and 3 points of headroom is not the thing to
 spend to save 8 KB.
 
-Both figures are inside what `stem-tape-ram-v1.md` identifies as available:
-8,192 B from the verify scratch and 8,192 B from the unified associative
-cache, 16,384 B in total. **The RAM work is therefore no longer speculative
-groundwork — it is a prerequisite of the read path**, which is a different
-thing from the earlier framing where nothing depended on it.
+**What changed is what the 8 KB actually costs.** Stage A returned 9,088 B
+(measured), leaving 42,658 free. G=8 needs 16,384, which lands at 26,274 —
+*below* the 32,768 floor. The only remaining source of the difference is the
+unified associative cache, and that means replacing the SPSC mailbox, whose
+central property is stated in its own header:
 
-G and R are compile-time constants so this is one line to revisit once the
-reclamation lands.
+> sector s always lives in slot (s % SLOTS). This is what keeps the consumer
+> **wait-free**: to find out whether the one sector it needs is resident it
+> computes a single index and does a single atomic load — never a scan, never
+> a search.
+
+An associative cache makes the audio thread *search*. So the choice was never
+"83% vs 86%" — it was "83% and a rewrite of the formally specified,
+ThreadSanitizer-verified primitive that guarantees no dropouts" against "86%
+and that primitive untouched". Both land at exactly 34,466 B free.
+
+The standing requirement decided it in the other direction the second time:
+the surest way to cause a dropout is to rewrite the thing that prevents them.
+Modulo addressing stays everywhere — four per-stem rings, each still one index
+computation, plus the pins unchanged.
+
+| | G=8 + cache rework | **G=7, no rework** |
+|---|---|---|
+| free after | 34,466 | **34,466** |
+| ordinary playback | 83% | **86%** |
+| buffered depth | 4 spans | **4 spans** |
+| SPSC mailbox | replaced, loses wait-free lookup | **untouched beyond the planar port** |
+| loop pins | folded into the cache | **untouched** |
+
+G and R are compile-time constants, so if 86% proves uncomfortable on hardware
+this is one line to revisit — with the cache rework as the thing that buys the
+3 points back, rather than a prerequisite of shipping at all.
 
 ## The cost that is real: RAM
 
@@ -156,12 +183,14 @@ has an allocation of its own, it is the last loop-pin buffer. Measured on the
 linked ELF, RAM used went 228,574 → **219,486** and free 33,570 → **42,658** —
 9,088 B, about 900 more than the array itself, because its padding went too.
 
-**Half the 16,384 is banked. The other half is still required**, and the
-arithmetic is a floor, not a total: 42,658 − 16,384 = 26,274, which is *below*
-the 32,768 CI floor by 6,494. Adding the unified associative cache's 8,192
-lands at 34,466, clearing it by 1,698. So the cache rework stays a
-prerequisite — see `stem-tape-ram-v1.md`, which also records why the ring was
-the wrong donor for the scratch and remains blocked on that same rework.
+**That is the whole budget, at G=7.** 42,658 − 8,192 = 34,466, clearing the
+32,768 floor by 1,698. **The unified associative cache is no longer a
+prerequisite of anything** — see the decision above, and `stem-tape-ram-v1.md`
+for why the ring was the wrong donor for the scratch and stays blocked on that
+same rework.
+
+Note the arithmetic is a floor, not a total: at G=8 the same 42,658 would land
+at 26,274, *below* the floor, which is what forced the decision.
 
 Per-stem rings at the same 8-span depth cost `8 × 2048 × 4 = 65,536 B` against
 today's 49,152 B ring — **+16,384 B**, which does not fit as things stand.
