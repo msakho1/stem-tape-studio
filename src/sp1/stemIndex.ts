@@ -249,6 +249,8 @@ export function validateIndexRecord(
   rec: StemTapeIndexRecord,
   slot: AbSlot,
   regions: RegionContext,
+  /** Frozen-bundle audits pass 1 to validate a historical v1.1 record. */
+  expectFormatMinor: number = FORMAT_MINOR,
 ): IndexValidation {
   const bad = (reason: string): IndexValidation => ({ valid: false, reason });
   if (!rec.committed) return bad("validity magic absent (uncommitted record)");
@@ -257,7 +259,7 @@ export function validateIndexRecord(
   }
   if (rec.indexVersion !== STIX_VERSION) return bad(`unsupported STIX index version ${rec.indexVersion}`);
   if (rec.formatMajor !== FORMAT_MAJOR) return bad(`unsupported format major ${rec.formatMajor}`);
-  if (rec.formatMinor !== FORMAT_MINOR) return bad(`unsupported format minor ${rec.formatMinor}`);
+  if (rec.formatMinor !== expectFormatMinor) return bad(`unsupported format minor ${rec.formatMinor}`);
   if (rec.slotIdentity !== slot) return bad(`slot identity ${rec.slotIdentity} does not match index slot ${slot}`);
   if (rec.generation < 1) return bad("generation must be >= 1");
   if (!Number.isSafeInteger(rec.generation)) return bad("generation is not a safe integer");

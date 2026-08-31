@@ -48,6 +48,10 @@ export const SECTOR_HEADER_BYTES = 32;
 export const SECTOR_PAYLOAD_BYTES = SECTOR_BYTES - SECTOR_HEADER_BYTES; // 8160
 export const FRAMES_PER_SECTOR = SECTOR_PAYLOAD_BYTES / BYTES_PER_FRAME; // 340
 
+/**
+ * v1.1 mixed-sector magic. Retained ONLY so the frozen v1.1 handoff bundle can
+ * still be decoded and audited; v1.2 song data never carries it.
+ */
 export const SECTOR_MAGIC = 0x53545343; // 'STSC'
 export const SECTOR_OFF = {
   magic: 0,
@@ -64,14 +68,69 @@ export function sectorsForFrames(frames: number): number {
   return Math.ceil(frames / FRAMES_PER_SECTOR);
 }
 
+/* ---------- v1.2 planar stem groups ---------- */
+
+/**
+ * v1.2 stores each stem's whole timeline contiguously in its own quarter of
+ * the song region. The addressable unit is a 2,048-byte GROUP = exactly four
+ * 512-byte blocks = 340 frames of ONE stem:
+ *
+ *   0   u8    'P'
+ *   1   u8    'L'
+ *   2   u8    stem index 0..3
+ *   3   u8    flags, must be 0
+ *   4   u32   groupIndex, little-endian
+ *   8   2040  340 frames x 6 bytes (L,R signed 24-bit LE)
+ *
+ * 8 + 340*6 = 2048. Every v1.2 read is a group read, so the header makes a
+ * group-only read self-validating.
+ */
+export const GROUP_BYTES = 2048;
+export const GROUP_HEADER_BYTES = 8;
+export const GROUP_PAYLOAD_BYTES = GROUP_BYTES - GROUP_HEADER_BYTES; // 2040
+/** One stem, one frame: L,R signed 24-bit LE. */
+export const BYTES_PER_STEM_FRAME = CHANNELS * BYTES_PER_SAMPLE; // 6
+export const FRAMES_PER_GROUP = GROUP_PAYLOAD_BYTES / BYTES_PER_STEM_FRAME; // 340
+export const BLOCKS_PER_GROUP = GROUP_BYTES / PHYSICAL_BLOCK_BYTES; // 4
+export const GROUPS_PER_SECTOR = SECTOR_BYTES / GROUP_BYTES; // 4
+
+export const GROUP_MAGIC_0 = 0x50; // 'P'
+export const GROUP_MAGIC_1 = 0x4c; // 'L'
+export const GROUP_OFF = {
+  magic0: 0,
+  magic1: 1,
+  stemIndex: 2,
+  flags: 3,
+  groupIndex: 4,
+  payload: 8,
+} as const;
+
+/** Groups per stem. Identical to v1.1's sectorCount — 340 frames either way. */
+export function groupsForFrames(frames: number): number {
+  return Math.ceil(frames / FRAMES_PER_GROUP);
+}
+
+/** Absolute block address of one stem's group inside a song region. */
+export function planarBlockOf(
+  songStartBlock: number,
+  stem: number,
+  groupIndex: number,
+  groupsPerStem: number,
+): number {
+  return songStartBlock + (stem * groupsPerStem + groupIndex) * BLOCKS_PER_GROUP;
+}
+
 /* ---------- versions ---------- */
 
 export const PROTOCOL_MAJOR = 1;
 /** Minimum protocol minor that carries the A/B capability structure. */
 export const PROTOCOL_MINOR = 1;
 export const FORMAT_MAJOR = 1;
-/** 1.1 = A/B song + index storage. 1.0 (single index) is refused. */
-export const FORMAT_MINOR = 1;
+/** 1.2 = A/B storage with PLANAR per-stem groups. 1.1 (mixed frames) and
+ *  1.0 (single index) are both refused, in both directions. */
+export const FORMAT_MINOR = 2;
+/** The v1.1 mixed-frame layout, kept only to audit the frozen v1.1 bundle. */
+export const FORMAT_MINOR_V11 = 1;
 /** STIX index record version. v1 (the unsafe array index) is refused. */
 export const STIX_VERSION = 2;
 

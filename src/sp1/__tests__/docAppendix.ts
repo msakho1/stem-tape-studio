@@ -104,7 +104,9 @@ const IX_WIDTH: Record<keyof typeof IX_OFF, number> = {
   crc32: 4,
 };
 
-export function buildAppendix(): string {
+/** `formatMinor` is a parameter so the frozen v1.1 contract can still be
+ *  regenerated verbatim after the companion moved to v1.2 (planar groups). */
+export function buildAppendix(formatMinor: number = FORMAT_MINOR): string {
   const L: string[] = [];
   L.push(
     "## 12. Generated numeric appendix",
@@ -135,7 +137,7 @@ export function buildAppendix(): string {
     "| --- | --- |",
     `| firmware id | ${hex(STEM_TAPE_FIRMWARE_ID)} \`STFW\` |`,
     `| protocol | ${PROTOCOL_MAJOR}.${PROTOCOL_MINOR} |`,
-    `| format | ${FORMAT_MAJOR}.${FORMAT_MINOR} |`,
+    `| format | ${FORMAT_MAJOR}.${formatMinor} |`,
     `| STIX index version | ${STIX_VERSION} |`,
     `| index magic | ${hex(INDEX_MAGIC)} \`STIX\` |`,
     `| slot A / slot B | ${SLOT_A} / ${SLOT_B} |`,
