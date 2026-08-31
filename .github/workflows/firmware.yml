@@ -2160,12 +2160,18 @@ jobs:
           grep -q 'static atomic_t g_stem_planar_sim;' "$M" || {
             echo "  the planar sim flag is missing or has a nonzero default"
             exit 1; }
-          test "$(grep -c 'atomic_set(&g_stem_planar_sim' "$M")" = "1" || {
-            echo "  g_stem_planar_sim is written from more than one place"
-            exit 1; }
           # LEVEL 0 IS OFF, and off must still be the single full-sector read.
           grep -q 'if (nrev == 0u) {' "$M" || {
             echo "  the sim no longer has an explicit off level"; exit 1; }
+          grep -q 'st_pgate_level_now(&s_stem_pgate)' "$M" || {
+            echo "  the streamer's pattern is not driven by the gate"; exit 1; }
+          # THE GATE IS A CONTROLLED A/B, and it must be advanced somewhere it
+          # can actually finish. Structural, so a SCRIPT rather than greps: the
+          # tick was once in controls_diag(), which is DTR-gated, and a build is
+          # blind to the difference. It also subsumes the single-writer check
+          # that used to be a bare grep -c here.
+          python3 .github/scripts/stemtape_player_pgate_wiring_gate.py \
+            "$M" audit/pgate-wiring-gate.md
           # The unarmed path must still be the plain full-sector read.
           grep -q 'return emmc_read_blocks(start_block, buf,' "$M" || {
             echo "  the unarmed read is no longer one full-sector read"
@@ -2199,6 +2205,47 @@ jobs:
             echo '```text'
             cat audit/readcost-selftest.txt
             echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Stem Tape PLANAR CPU GATE -- a controlled A/B, not a toggle
+        # THE INSTRUMENT, after the first one produced a verdict that did not
+        # survive audit. That version armed a read pattern and counted
+        # underruns with NO CONTROL WINDOW, the post-resume ring prime inside
+        # the measurement, cumulative counters that could not separate
+        # settling from steady state, and no way to notice playback never
+        # started. It reported "the CPU cannot keep up" on that basis.
+        #
+        # This runs an experiment: settle, measure the SHIPPED pattern,
+        # measure the pattern under test, compare. Its most important
+        # property is the third outcome -- if the BASELINE underruns the
+        # answer is INCONCLUSIVE, never FAIL, because a device that was
+        # already struggling says nothing about the pattern under test.
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          cc -std=c11 -Wall -Wextra -Werror -Ifirmware/stemtape_player/src \
+            firmware/stemtape_player/src/st_pgate.c \
+            firmware/stemtape_player/tests/test_pgate.c \
+            -o audit/test_pgate
+          ./audit/test_pgate | tee audit/pgate-selftest.txt
+
+          # THE GATE MUST KEEP ASKING. Each of these is a flaw the previous
+          # instrument had; if the case stops being exercised the flaw can
+          # come back silently.
+          grep -q 'underrunning BASELINE -> INCONCLUSIVE, never FAIL' \
+            audit/pgate-selftest.txt
+          grep -q 'the post-resume prime is not counted' audit/pgate-selftest.txt
+          grep -q 'a run where nothing plays reaches no verdict' \
+            audit/pgate-selftest.txt
+          grep -q 'only the test window diverges' audit/pgate-selftest.txt
+          grep -q 'a verdict survives stopping and restarting the song' \
+            audit/pgate-selftest.txt
+          {
+            echo '### Stem Tape planar CPU gate'
+            echo '```text'
+            cat audit/pgate-selftest.txt
+            echo '```'
+            cat audit/pgate-wiring-gate.md
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Stem Tape TRANSPORT INERTIA -- the reel has mass, and it is a pitch drop

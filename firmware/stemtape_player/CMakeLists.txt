@@ -187,6 +187,7 @@ target_sources(app PRIVATE
 	src/st_pitch.c
 	src/st_fnplay.c
 	src/st_readcost.c
+	src/st_pgate.c
 	src/st_beat_phase.c
 	src/st_stem_meter.c
 	src/st_led_mvp.c

@@ -156,9 +156,9 @@
 #define ST_RC_SWEEP_REPS 24u
 
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st34-VOLCAL"
+#define ST_BUILD_TAG "st36-VOLCAL"
 #else
-#define ST_BUILD_TAG "st34"
+#define ST_BUILD_TAG "st36"
 #endif
 #include "st_track_hold.h"
 #include "st_ladder.h"
@@ -168,6 +168,7 @@
 #include "st_pitch.h"
 #include "st_fnplay.h"
 #include "st_readcost.h"
+#include "st_pgate.h"
 #include "st_stem_meter.h"
 #include "st_inertia.h"
 #include "st_resample.h"
@@ -1598,10 +1599,28 @@ static atomic_t g_stem_reload_req;
  */
 static atomic_t g_stem_planar_sim;
 
+/*
+ * THE CONTROLLED A/B that drives g_stem_planar_sim. Owned by the diagnostic
+ * pass (main's own thread); the streamer only ever reads the atomic above, so
+ * nothing here is touched cross-thread.
+ *
+ * The first version of this gate had the operator arm a pattern and count
+ * underruns, with no control window and the post-resume prime inside the
+ * measurement. It produced a verdict that did not survive audit. This runs the
+ * experiment instead -- settle, baseline, test, compare -- so the answer does
+ * not depend on the operator's timing or on which order they did things in.
+ */
+static st_pgate_t s_stem_pgate;
+
 static atomic_t g_stem_diag_bytes_total;   /* total bytes physically read (successful reads only) */
 static atomic_t g_stem_diag_read_calls;    /* total emmc_read_blocks() attempts for stem sectors, success or fail */
 static atomic_t g_stem_diag_read_us_last;  /* most recent read attempt's wall time, us (DWT, any outcome) */
 static atomic_t g_stem_diag_read_us_max;   /* worst read attempt's wall time this session, us */
+/* The same quantity, but READ-AND-CLEARED by the planar gate each pass so it
+ * can attribute a worst fetch to the window it happened in. Separate from the
+ * session max above precisely so clearing it cannot quietly change what the
+ * STEMIO rdusmx= line has always meant. */
+static atomic_t g_stem_diag_read_us_win;
 static atomic_t g_stem_diag_read_us_total; /* cumulative wall time of SUCCESSFUL reads only, us -- paired with
 					     * g_stem_diag_bytes_total for the sustained-rate calculation below */
 static atomic_t g_stem_underrun_count;     /* mirrors g_stem_stream.underrun_count, atomically, for cross-thread
@@ -1871,6 +1890,32 @@ static volatile int      g_midi_stop_pending;      /* send MIDI Stop on pause */
  * ARM (volatile is not atomic), drifting any synced external gear. */
 static volatile uint32_t g_midi_clk_produced;      /* audio thread writes ONLY */
 static volatile int      g_midi_start_pending;     /* send MIDI Start on loop activation */
+
+/*
+ * Advance the planar gate and publish the read pattern it wants. THE ONLY
+ * WRITER of g_stem_planar_sim; the streamer is the only reader.
+ *
+ * CALLED FROM THE MAIN LOOP, NOT FROM controls_diag(). The diagnostic pass is
+ * DTR-gated: with no console attached it does not run, and a gate ticked from
+ * there would freeze mid-TEST with the streamer left diverging until reboot.
+ * Here it advances whether or not anyone is watching, and the diagnostic is
+ * left to do nothing but print what the gate has already decided.
+ */
+static void stem_pgate_service(void)
+{
+	/* Read-and-clear: atomic_set() returns the previous value, so the
+	 * window's worst fetch is taken and reset in one operation with no
+	 * sample lost between the read and the clear. */
+	const uint32_t worst = (uint32_t)atomic_set(&g_stem_diag_read_us_win, 0);
+
+	(void)st_pgate_tick(&s_stem_pgate, (uint32_t)k_uptime_get(),
+			     g_playing != 0,
+			     (uint32_t)atomic_get(&g_stem_diag_read_calls),
+			     (uint32_t)atomic_get(&g_stem_underrun_count),
+			     worst);
+	atomic_set(&g_stem_planar_sim,
+		    (atomic_val_t)st_pgate_level_now(&s_stem_pgate));
+}
 
 static inline int16_t clamp16(int32_t x)
 {
@@ -4722,51 +4767,38 @@ static void xfer_service(void)
 			uint8_t h = (xfer_v11_write(blk, sec) == 0) ? (uint8_t)ST11_WRITE_ACK : (uint8_t)'E';
 			cdc_tx(&h, 1);
 		}
-	} else if (cmd == 'N') {                               /* PLANAR READ SIMULATION -- arm/disarm */
+	} else if (cmd == 'N') {                               /* PLANAR CPU GATE -- arm the A/B */
 		/*
-		 * Arms the v1.2 read pattern on the sustained prefetch. Set it
-		 * here, then leave transfer mode with 'X' and play a song: the
-		 * streamer now pays v1.2's worst-case read cost while the audio
-		 * path is otherwise untouched.
+		 * Arms a CONTROLLED experiment for `level` diverging tracks, then
+		 * runs itself: settle after playback starts, measure the SHIPPED
+		 * read pattern, measure the pattern under test, compare.
 		 *
-		 * A TOGGLE RATHER THAN A DURATION, because the thing being
-		 * measured is sustained behaviour -- an underrun that only
-		 * appears after a minute of playing is exactly the failure this
-		 * is looking for, and a timed run could end before it.
+		 * Levels walk off -> 1 -> 2 -> 3 -> 4 -> off, the level being how
+		 * many tracks diverge. The cost is very unevenly distributed --
+		 * one diverging track is about a third of four -- so where the
+		 * ceiling sits matters as much as whether four fit.
 		 *
-		 * Reads only; it changes how a sector is fetched, never what is
-		 * stored. Cleared on reboot, so it cannot be left armed.
+		 * Read-only, like the sweep: it changes how a sector is fetched,
+		 * never what is stored, and clears on reboot.
 		 */
-		/*
-		 * WALKS THE LEVELS: off -> 1 -> 2 -> 3 -> 4 -> off, where the
-		 * level is HOW MANY TRACKS DIVERGE.
-		 *
-		 * A toggle was enough while the question was "can the CPU do
-		 * this at all". The first hardware run at four diverging tracks
-		 * produced 32 and 41 underruns with the CPU at 99% -- an
-		 * UNCONTROLLED result that also counted the post-resume prime,
-		 * so it is not yet a verdict. The useful question either way is
-		 * where between one and four the ceiling sits,
-		 * because one reversed track costs +10.6 CPU points against
-		 * four's +31.8, and a player who can reverse ONE track still
-		 * has the feature.
-		 */
-		const uint32_t next = ((uint32_t)atomic_get(&g_stem_planar_sim) + 1u) %
-				       (ST_RC_STEMS + 1u);
-		const bool want = next != 0u;
-		uint8_t ack = want ? (uint8_t)'n' : (uint8_t)'o';
+		const uint32_t next = (s_stem_pgate.level + 1u) % (ST_RC_STEMS + 1u);
+		uint8_t ack = next ? (uint8_t)'n' : (uint8_t)'o';
 
-		atomic_set(&g_stem_planar_sim, (atomic_val_t)next);
-		/* Zero the counters so the window that follows is attributable to
-		 * the pattern just selected, not to whatever came before it. */
-		atomic_set(&g_stem_underrun_count, 0);
-		atomic_set(&g_stem_diag_read_us_max, 0);
-		atomic_set(&g_stem_diag_read_calls, 0);
+		if (next == 0u) {
+			st_pgate_abort(&s_stem_pgate);
+		} else {
+			st_pgate_start(&s_stem_pgate, next,
+				        (uint32_t)k_uptime_get());
+		}
+		/* The atomic is NOT written here. stem_pgate_service() is its
+		 * only writer, and it runs on the next pass -- arming always
+		 * begins in SETTLE, whose level is 0, so there is nothing to
+		 * publish early and nothing to race. */
 		cdc_tx(&ack, 1);
-		printk("STEMPLANAR sim=%s rev=%u -- %u read(s) per sector; "
-		       "counters cleared\n",
-		       want ? "ON" : "OFF", (unsigned)next,
-		       (unsigned)(next + (next < ST_RC_STEMS ? 1u : 0u)));
+		printk("STEMPGATE armed rev=%u -- settle %u ms, then %u ms baseline "
+		       "and %u ms test; press PLAY\n",
+		       (unsigned)next, (unsigned)ST_PGATE_SETTLE_MS,
+		       (unsigned)ST_PGATE_WINDOW_MS, (unsigned)ST_PGATE_WINDOW_MS);
 	} else if (cmd == 'M') {                               /* READ-SIZE SWEEP -- read-only measurement */
 		/*
 		 * WHAT THIS ANSWERS, and why it is worth a command.
@@ -5726,6 +5758,9 @@ static void streamer_thread(void *a, void *b, void *c)
 				if (read_us > (uint32_t)atomic_get(&g_stem_diag_read_us_max)) {
 					atomic_set(&g_stem_diag_read_us_max, (atomic_val_t)read_us);
 				}
+				if (read_us > (uint32_t)atomic_get(&g_stem_diag_read_us_win)) {
+					atomic_set(&g_stem_diag_read_us_win, (atomic_val_t)read_us);
+				}
 
 				if (read_ok) {
 					st11_sector_header_t hdr;
@@ -6402,30 +6437,56 @@ static void controls_diag(void)
 			       (unsigned)((mai - l_mai) * 100u / d_all));
 		}
 		/*
-		 * THE v1.2 CPU GATE, stated so it needs no arithmetic to read.
-		 * und= is the whole answer: zero across sustained playback with
-		 * sim=ON means the scheduler can afford four diverging tracks.
-		 * Anything else means it cannot, and no storage layout fixes
-		 * that.
-		 *
-		 * COMPUTED BEFORE the l_* baselines are rolled forward. Written
-		 * after them the deltas are all zero and busy= reads 0%, which
-		 * looks like an idle machine rather than a broken print.
+		 * THE v1.2 CPU GATE, REPORTED ONLY. The gate itself is advanced
+		 * by stem_pgate_service() on the main loop, because this pass is
+		 * DTR-gated and a run must not depend on a console staying
+		 * attached. Nothing here writes gate or streamer state: it reads
+		 * the phase the experiment has already reached and prints it.
 		 */
-		if (d_all) {
-			const unsigned busy =
-				(unsigned)(((aud - l_aud) + (str - l_str) +
-					     (mid - l_mid) + (mai - l_mai)) *
-					    100u / d_all);
+		{
+			static st_pgate_phase_t l_phase = ST_PGATE_IDLE;
+			static const char *const k_ph[] = {
+				"idle", "settle", "baseline", "test", "done"
+			};
+			const st_pgate_phase_t ph = s_stem_pgate.phase;
 
-			printk("STEMPLANAR sim=%s rev=%u und=%u rd_max_us=%u reads=%u "
-			       "busy=%u%% spare=%u%%\n",
-			       atomic_get(&g_stem_planar_sim) ? "ON" : "OFF",
-			       (unsigned)atomic_get(&g_stem_planar_sim),
-			       (unsigned)atomic_get(&g_stem_underrun_count),
-			       (unsigned)atomic_get(&g_stem_diag_read_us_max),
-			       (unsigned)atomic_get(&g_stem_diag_read_calls),
-			       busy, busy <= 100u ? 100u - busy : 0u);
+			if (ph != ST_PGATE_IDLE) {
+				printk("STEMPGATE %s rev=%u lvl=%u busy=%u%%\n",
+				       k_ph[ph], (unsigned)s_stem_pgate.level,
+				       (unsigned)st_pgate_level_now(&s_stem_pgate),
+				       (unsigned)(((aud - l_aud) + (str - l_str) +
+						    (mid - l_mid) + (mai - l_mai)) *
+						   100u / (d_all ? d_all : 1u)));
+			}
+			if (ph == ST_PGATE_DONE && l_phase != ST_PGATE_DONE) {
+				/*
+				 * THE ANSWER, once, with both windows beside it
+				 * so it can be checked rather than taken on
+				 * trust. keepup is sectors fetched against
+				 * sectors playback needed: 100% is exactly
+				 * keeping up.
+				 */
+				static const char *const k_v[] = {
+					"none", "PASS", "FAIL", "INCONCLUSIVE"
+				};
+
+				printk("STEMPGATE RESULT rev=%u %s\n",
+				       (unsigned)s_stem_pgate.level,
+				       k_v[s_stem_pgate.verdict]);
+				printk("STEMPGATE  baseline und=%u sectors=%u "
+				       "keepup=%u%% worst_fetch_us=%u\n",
+				       (unsigned)s_stem_pgate.base.underruns,
+				       (unsigned)s_stem_pgate.base.sectors,
+				       (unsigned)st_pgate_keepup_pct(&s_stem_pgate.base),
+				       (unsigned)s_stem_pgate.base.worst_us);
+				printk("STEMPGATE  test     und=%u sectors=%u "
+				       "keepup=%u%% worst_fetch_us=%u\n",
+				       (unsigned)s_stem_pgate.test.underruns,
+				       (unsigned)s_stem_pgate.test.sectors,
+				       (unsigned)st_pgate_keepup_pct(&s_stem_pgate.test),
+				       (unsigned)s_stem_pgate.test.worst_us);
+			}
+			l_phase = ph;
 		}
 		l_aud = aud; l_str = str; l_mid = mid; l_mai = mai; l_all = all;
 	}
@@ -7820,6 +7881,24 @@ int main(void)
 		 * and applies the blink as an overlay on a frame computed from LIVE
 		 * state, so the transfer cannot strand any LED and normal state
 		 * returns on the very next pass with nothing to restore. */
+		/*
+		 * THE PLANAR GATE ADVANCES ON EVERY PASS, before anything that
+		 * can `continue` past it and WITHOUT the diagnostic's DTR gate.
+		 *
+		 * controls_diag() only runs with a serial monitor attached. If
+		 * the gate were advanced there, unplugging the console mid-run
+		 * would freeze it mid-TEST and leave the streamer paying the
+		 * divergent read cost on every sector until reboot. Advancing
+		 * here means the experiment finishes, and disarms itself, with
+		 * or without anyone watching; the printing stays in the diag,
+		 * where it belongs.
+		 *
+		 * Running it inside transfer mode too is deliberate: playback is
+		 * paused there, so the gate sees !playing and correctly restarts
+		 * its settle rather than measuring a stopped transport.
+		 */
+		stem_pgate_service();
+
 		if (g_xfer_mode) {
 			led_service();
 			ctl_flush = 1;
