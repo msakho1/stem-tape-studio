@@ -90,12 +90,18 @@ loses a diagnostic, not a function.
 | none | `blk0 +16` | 1 | 16 |
 | stem 3 | `blk0 +12`, `blk12 +4` at the reverse position | 2 | 16 |
 | stem 0 | `blk4 +12`, `blk0 +4` at the reverse position | 2 | 16 |
-| stem 1 or 2 | see the feasibility doc — costs more, and is **not yet measured** | 2 | 20 |
+| stem 1 or 2 | **not offered** — 0.4 points from the level-2 run that failed | 2 | 20 |
 
-Only stems at a *sector end* leave the remaining three contiguous. This does
-not affect the format — every stem has its own plane either way — but it does
-decide which tracks the gesture may offer. That is gated on the level-2
-measurement, not on this document.
+Only stems at a *sector end* leave the remaining three contiguous, and level 2
+FAILED on hardware (742 dropouts, 99% busy), so the middle two are not
+offered — the cheapest middle-stem plan is 0.4 points away from that run.
+
+**The plane order therefore decides which two tracks get reverse**, and it is a
+v1.2 choice rather than an inherited constraint: each plane header carries its
+own stem id, so any permutation of the four stems across the four plane
+positions is self-describing and checkable. The two stems placed at plane 0 and
+plane 3 are the reversible pair. **Pending decision — the order below is
+v1.1's and is a placeholder until that is made.**
 
 ## Versioning, and why old songs cannot be misread
 
