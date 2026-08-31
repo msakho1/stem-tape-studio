@@ -2652,6 +2652,25 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: main.c called-before-declared (catches an ARM-only failure without ARM)
+        # main.c can only be compiled by the Zephyr ARM toolchain, so every
+        # ordinary C mistake in it costs a full CI round-trip to find. That is
+        # fine for genuinely target-specific errors and pure waste for what is
+        # not -- and a call to a file-local static above its own definition is
+        # not: C99 makes it an implicit declaration and then a hard
+        # "conflicting types" error, so it always fails the build, always for
+        # the same reason.
+        #
+        # It has already happened once, exactly this way: the post-commit
+        # reload called stem_prime_group0(), which lives ~1000 lines further
+        # down with the rest of the flash path. Runs BEFORE the build, so the
+        # answer arrives in seconds rather than after a toolchain setup.
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/stemtape_player_decl_before_use.py \
+            firmware/stemtape_player/src/main.c
+
       - name: Stem Tape v1.1 stored four-stem playback wiring check (fail-closed)
         # Phase 2 slice 3C: proves the real production call sequence for
         # CONTINUOUS streaming, handed off through the real atomic mailbox

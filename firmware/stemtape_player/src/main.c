@@ -4424,6 +4424,18 @@ static int xfer_v11_write(uint32_t block, const uint8_t data[ST11_PHYSICAL_BLOCK
  * or corrupt post-commit reload can degrade to "keep playing the OLD
  * song" but never to a torn/partial new one.
  */
+/*
+ * FORWARD DECLARATIONS -- the planar read helpers are defined down with the
+ * streamer, where the rest of the flash path lives, but the post-commit
+ * reload below runs on that same thread and needs group 0 of every stem
+ * before it may publish a song. Declaring rather than moving keeps the read
+ * path in one place.
+ */
+static bool stem_read_groups(uint32_t song_start_block, uint32_t groups,
+			      uint32_t stem, uint32_t first_group,
+			      uint32_t slot, uint32_t n);
+static bool stem_prime_group0(uint32_t song_start_block, uint32_t groups);
+
 static void stem_song_post_commit_reload(void)
 {
 	if (!g_v11_layout_ready) {
