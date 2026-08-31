@@ -1,7 +1,37 @@
 # Per-track reverse playback — feasibility, and what it costs
 
 Status: **STORAGE YES. CPU: FOUR TRACKS NO — measured, controlled, on
-hardware. One and two tracks are still open.**
+hardware. ONE TRACK is the only level that still matters, and it is unmeasured.**
+
+## Scope: one reversed track at a time
+
+The requirement is one track reversed at a time, not four at once. That is not
+a workaround for the level-4 failure — it is what the feature was for — but it
+does change which measurement decides the project, and it makes the expensive
+regime something the firmware can refuse to enter rather than something it has
+to survive.
+
+**It does not change the storage format.** Any one of the four stems might be
+the reversed one, so every stem still needs its own contiguous plane. The v1.2
+planar layout is unchanged by this narrowing.
+
+**It does change the read plan to the cheapest non-trivial case.** With one
+stem diverging, the other three are still contiguous, so a sector costs two
+reads rather than four:
+
+```
+st_readcost_plan_planar(plan, 1) -> blk12+4   the reversed stem's plane
+                                    blk0+12   the other three, still one read
+```
+
+That is +665 us per sector over today's single read — one extra fixed per-read
+cost — against +1995 us for four. A third of the price.
+
+**And it suggests enforcing the limit in the gesture layer.** If reversing a
+second track un-reverses the first, the device cannot reach levels 2-4 at all,
+and the measured failure stops being a risk the design has to live with. That
+is a decision to make when the feature is built, not an assumption to bake in
+now — recorded here so it is not lost.
 
 ## The result (firmware st36, the controlled gate)
 
@@ -53,13 +83,14 @@ extra read, so one extra fixed cost:
 | 3 | 4 | 5168 | 73.0% | +28.2 | 111% |
 | 4 | 4 | 5168 | 73.0% | +28.2 | 111% (measured: 99%, capped, keepup 86%) |
 
-**Do not read that table as a result for levels 1 and 2.** The only measured
-point is level 4, and it is *saturated* — 99% is a ceiling, so it establishes
-that level 4 needs more than 100% without establishing how much more. The
-slope is therefore modelled, not measured, and the projection inherits every
-assumption in the model (that the extra cost is exactly the extra fixed
-per-read price, and that it converts one-for-one into CPU busy). Levels 1 and 2
-are one 45-second run each. Run them.
+**Do not read that table as a result for level 1.** The only measured point is
+level 4, and it is *saturated* — 99% is a ceiling, so it establishes that level
+4 needs more than 100% without establishing how much more. The slope is
+therefore modelled, not measured, and the projection inherits every assumption
+in the model (that the extra cost is exactly the extra fixed per-read price,
+and that it converts one-for-one into CPU busy). 92% is a plausible number, not
+a finding, and 92% against a 17-point budget is not a comfortable margin even
+if it is right. Level 1 is one 45-second run. Run it.
 
 Note also that storage duty and CPU busy are different quantities: the storage
 can serve level 4 at 73% duty, and the CPU still cannot afford it. The storage
