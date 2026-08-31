@@ -45,6 +45,11 @@ typedef struct {
 	uint32_t   now;
 	uint32_t   sectors;       /* free-running, as in firmware */
 	uint32_t   underruns;
+	/* Frames of silence, free-running like the firmware counter. The rig
+	 * bumps it with every underrun episode because that is what a real
+	 * stall does -- and the VERDICT is taken from this, not from the
+	 * episode count, since an episode carries no duration. */
+	uint32_t   silence;
 	uint32_t   phase_seen[5]; /* passes spent in each phase */
 } rig_t;
 
@@ -82,11 +87,12 @@ static void play(rig_t *r, uint32_t ms, bool playing, uint32_t und_per_win,
 				 * boundaries hide. */
 				if ((i % (per / (und_per_win < per ? und_per_win : per))) == 0u) {
 					r->underruns++;
+					r->silence += 256u;   /* one whole block */
 				}
 			}
 		}
 		r->phase_seen[st_pgate_tick(&r->g, r->now, playing, r->sectors,
-					     r->underruns, 1500u)]++;
+					     r->underruns, r->silence, 1500u)]++;
 	}
 }
 
@@ -212,7 +218,7 @@ static void case_settle_excludes_the_prime(void)
 			r.now += PASS_MS;
 			r.underruns += 5u;      /* the ring is empty */
 			(void)st_pgate_tick(&r.g, r.now, true, r.sectors,
-					     r.underruns, 30000u);
+					     r.underruns, r.silence, 30000u);
 		}
 	}
 	during_settle = r.underruns;
@@ -319,7 +325,7 @@ static void case_level_applies_only_to_the_test(void)
 
 		r.now += PASS_MS;
 		r.sectors += (need_per_win() + 40u) / (ST_PGATE_WINDOW_MS / PASS_MS);
-		(void)st_pgate_tick(&r.g, r.now, true, r.sectors, r.underruns, 1500u);
+		(void)st_pgate_tick(&r.g, r.now, true, r.sectors, r.underruns, r.silence, 1500u);
 	}
 	printf("     divergent passes: settle=%u baseline=%u, test passes at "
 	       "level 3=%u\n", seen_settle, seen_base, seen_test);

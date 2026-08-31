@@ -156,9 +156,9 @@
 #define ST_RC_SWEEP_REPS 24u
 
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st36-VOLCAL"
+#define ST_BUILD_TAG "st37-VOLCAL"
 #else
-#define ST_BUILD_TAG "st36"
+#define ST_BUILD_TAG "st37"
 #endif
 #include "st_track_hold.h"
 #include "st_ladder.h"
@@ -1623,6 +1623,15 @@ static atomic_t g_stem_diag_read_us_max;   /* worst read attempt's wall time thi
 static atomic_t g_stem_diag_read_us_win;
 static atomic_t g_stem_diag_read_us_total; /* cumulative wall time of SUCCESSFUL reads only, us -- paired with
 					     * g_stem_diag_bytes_total for the sustained-rate calculation below */
+/*
+ * FRAMES SILENCED BY UNDERRUNS, which is the number that says whether a
+ * listener can hear anything. g_stem_underrun_count above records episodes --
+ * once on the transition, nothing about duration -- so it cannot distinguish
+ * 21 us from 5.3 ms and must never be reported as a dropout count on its own.
+ * Written only by the audio thread at its one underrun site.
+ */
+static atomic_t g_stem_underrun_frames;
+
 static atomic_t g_stem_underrun_count;     /* mirrors g_stem_stream.underrun_count, atomically, for cross-thread
 					     * reads (g_stem_stream itself is audio-thread-exclusive -- see above) */
 static atomic_t g_stem_corrupt_count;      /* validated-but-wrong sectors (st_stream_validate_sector() == false);
@@ -1912,6 +1921,7 @@ static void stem_pgate_service(void)
 			     g_playing != 0,
 			     (uint32_t)atomic_get(&g_stem_diag_read_calls),
 			     (uint32_t)atomic_get(&g_stem_underrun_count),
+			     (uint32_t)atomic_get(&g_stem_underrun_frames),
 			     worst);
 	atomic_set(&g_stem_planar_sim,
 		    (atomic_val_t)st_pgate_level_now(&s_stem_pgate));
@@ -2892,6 +2902,24 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 		if (g_stem_stream.ready_sector != needed) {
 			/* UNDERRUN: silence for the remainder of the
 			 * block, then stop polling until the next block. */
+			/*
+			 * HOW MUCH SILENCE, not how many episodes.
+			 *
+			 * g_stem_underrun_count records the TRANSITION into
+			 * underrun and nothing about its length, so one stalled
+			 * frame and one stalled block both count as exactly 1.
+			 * Read as a dropout count it is off by up to 256x, and
+			 * it was: a run that sounded perfect reported 384
+			 * "underruns" -- somewhere between 8 ms of inaudible
+			 * silence across 20 seconds and 2 full seconds, with no
+			 * way to tell which.
+			 *
+			 * Frames silenced is the quantity that decides whether
+			 * anyone can hear it. Audio-thread-exclusive increment,
+			 * atomic only so a diagnostic reader never tears it.
+			 */
+			(void)atomic_add(&g_stem_underrun_frames,
+					  (atomic_val_t)(BLK_FRAMES - f));
 			st_seam_advance(&s_stem_seam, BLK_FRAMES - f);
 			for (; f < BLK_FRAMES; f++) {
 				s[2 * f]     = 0;
@@ -6480,14 +6508,26 @@ static void controls_diag(void)
 				printk("STEMPGATE RESULT rev=%u %s\n",
 				       (unsigned)s_stem_pgate.level,
 				       k_v[s_stem_pgate.verdict]);
-				printk("STEMPGATE  baseline und=%u sectors=%u "
-				       "keepup=%u%% worst_fetch_us=%u\n",
+				/*
+				 * SILENCE FIRST, because it is the only field
+				 * here that says whether anything was audible.
+				 * und= counts episodes with no duration, and
+				 * keepup= assumes the transport is at 1x
+				 * forward with no loop -- both read alarmingly
+				 * on a run that sounds perfect, and once did.
+				 */
+				printk("STEMPGATE  baseline silence_frames=%u (%u ppm) "
+				       "und=%u sectors=%u keepup=%u%% worst_fetch_us=%u\n",
+				       (unsigned)s_stem_pgate.base.silence_frames,
+				       (unsigned)st_pgate_silence_ppm(&s_stem_pgate.base),
 				       (unsigned)s_stem_pgate.base.underruns,
 				       (unsigned)s_stem_pgate.base.sectors,
 				       (unsigned)st_pgate_keepup_pct(&s_stem_pgate.base),
 				       (unsigned)s_stem_pgate.base.worst_us);
-				printk("STEMPGATE  test     und=%u sectors=%u "
-				       "keepup=%u%% worst_fetch_us=%u\n",
+				printk("STEMPGATE  test     silence_frames=%u (%u ppm) "
+				       "und=%u sectors=%u keepup=%u%% worst_fetch_us=%u\n",
+				       (unsigned)s_stem_pgate.test.silence_frames,
+				       (unsigned)st_pgate_silence_ppm(&s_stem_pgate.test),
 				       (unsigned)s_stem_pgate.test.underruns,
 				       (unsigned)s_stem_pgate.test.sectors,
 				       (unsigned)st_pgate_keepup_pct(&s_stem_pgate.test),

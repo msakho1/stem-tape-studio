@@ -94,7 +94,16 @@ typedef enum {
 typedef struct {
 	uint32_t ms;         /* how long the window actually ran */
 	uint32_t sectors;    /* sectors fetched during it */
-	uint32_t underruns;  /* underrun episodes during it */
+	uint32_t underruns;  /* underrun EPISODES -- see below, not a dropout count */
+	/*
+	 * FRAMES OF SILENCE, and the only one of these that decides whether a
+	 * listener hears anything. `underruns` counts transitions and records
+	 * no duration, so one stalled frame and one stalled block both add 1.
+	 * A run that sounded perfect once reported 384 of them, which is
+	 * anywhere from 8 ms across 20 seconds to 2 whole seconds. The verdict
+	 * is taken from THIS field for exactly that reason.
+	 */
+	uint32_t silence_frames;
 	uint32_t worst_us;   /* worst single sector FETCH (all its reads) */
 } st_pgate_win_t;
 
@@ -103,7 +112,7 @@ typedef struct {
 	st_pgate_verdict_t verdict;
 	uint32_t level;          /* tracks diverging in the TEST window, 1..4 */
 	uint32_t phase_ms;       /* when the current phase began */
-	uint32_t s0, u0;         /* counter snapshots at phase entry */
+	uint32_t s0, u0, f0;     /* counter snapshots at phase entry */
 	uint32_t worst_us;       /* worst fetch seen in the current phase */
 	bool     was_playing;
 	st_pgate_win_t base, test;
@@ -133,7 +142,7 @@ void st_pgate_abort(st_pgate_t *g);
  */
 st_pgate_phase_t st_pgate_tick(st_pgate_t *g, uint32_t now_ms, bool playing,
 			        uint32_t sectors, uint32_t underruns,
-			        uint32_t worst_us);
+			        uint32_t silence_frames, uint32_t worst_us);
 
 /*
  * WHICH READ PATTERN THE STREAMER MUST USE RIGHT NOW: 0 (the shipped
@@ -148,12 +157,31 @@ static inline uint32_t st_pgate_sectors_needed(uint32_t ms)
 	return (uint32_t)(((uint64_t)ms * 1000u) / ST_PGATE_SECTOR_US);
 }
 
-/* Keep-up in percent: 100 means the streamer exactly matched playback. */
+/*
+ * Keep-up in percent, AND ITS ASSUMPTION, which is load-bearing: it divides
+ * sectors fetched by sectors a window needs AT EXACTLY 1x, FORWARD, NO LOOP.
+ * Pitch the tape down, engage slow mode or run a loop and the transport
+ * legitimately consumes fewer sectors per real second, so this reads low with
+ * nothing wrong -- 63% is simply what it reports at 0.63x. It is a diagnostic
+ * for a transport known to be at unity, never evidence of starvation on its
+ * own. Silence frames is the number that carries that meaning.
+ */
 static inline uint32_t st_pgate_keepup_pct(const st_pgate_win_t *w)
 {
 	const uint32_t need = st_pgate_sectors_needed(w->ms);
 
 	return need ? (uint32_t)(((uint64_t)w->sectors * 100u) / need) : 0u;
+}
+
+/* Silence as parts-per-million of the window, at 48 kHz -- the audible
+ * quantity, independent of how the episodes were grouped. */
+static inline uint32_t st_pgate_silence_ppm(const st_pgate_win_t *w)
+{
+	if (w->ms == 0u) {
+		return 0u;
+	}
+	return (uint32_t)(((uint64_t)w->silence_frames * 1000000u) /
+			   ((uint64_t)w->ms * 48u));
 }
 
 #endif /* STEMTAPE_PLAYER_PGATE_H_ */
