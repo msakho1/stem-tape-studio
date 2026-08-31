@@ -150,21 +150,9 @@ The remaining escape from "exactly two" is a lower baseline. Playback sits at
 down, middle stems would fit. That is a separate optimisation with no evidence
 behind it yet, and it is not on this project's path.
 
-There is no layout that fixes this by rearranging four equal planes: a sector
-has two ends, and any of the four stems can be the reversed one. Storing a
+No arrangement of four equal planes makes all four reversible: a sector has two
+ends, and only a stem at an end leaves the other three contiguous. Storing a
 stem twice, at both ends, would fix the reads and halve song length.
-
-**The answer needs no new code.** Gate level 2 already fetches 3 reads / 16
-blocks, which is within **0.4 points** of the cheaper middle-stem plan — a
-proxy accurate enough to decide it. Run level 2:
-
-- **Level 2 PASSES** → all four stems are reversible; build it for any track.
-- **Level 2 FAILS** → only vocal and instrument are affordable, and the feature
-  either restricts to those two or needs a different storage layout.
-
-Note that this makes level 2 worth measuring for its own sake, not as
-curiosity: it is no longer "the next level up", it is the cost of reversing two
-of the four tracks.
 
 ## Level 4 — FAIL
 
