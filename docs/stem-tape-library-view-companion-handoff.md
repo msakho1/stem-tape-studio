@@ -1,4 +1,13 @@
-# Library view and capacity — the companion change, as a handoff to Lovable
+# Library view and capacity — SUPERSEDED
+
+> **Superseded by `stem-tape-companion-device-screen.md`.** This document
+> described an interim, developer-grade view. The decision since is to build
+> the device screen once, at final quality, with a data model shaped for the
+> v1.3 multi-song library — so that v1.3 extends the screen instead of
+> replacing it. Use the newer document; this one is kept only for the wire
+> offsets and the reasoning about what the firmware cannot support, both of
+> which it carries over.
+
 
 Four things were asked for: see what songs are on the SP-1, see how much room
 is left, reorder a playlist, and delete songs.
