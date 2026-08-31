@@ -182,6 +182,66 @@ void st_pl_decode_frame(const uint8_t *const groups[ST_PL_STEMS],
 			 const uint32_t frame_in_group[ST_PL_STEMS],
 			 st11_audio_frame_t *out);
 
+/*
+ * THE SAME DECODE WHEN ALL FOUR HEADS ARE TOGETHER -- which is every frame
+ * until reverse exists.
+ *
+ * Not a convenience: building a four-element index array per frame, three
+ * times per frame, inside a 48 kHz loop is real work spent representing a
+ * distinction that does not exist yet. This takes the one index the caller
+ * actually has.
+ *
+ * Bit-identical to st_pl_decode_frame() with all four indices equal, which is
+ * what the tests assert rather than assume. When reverse arrives, the reversed
+ * stem's caller moves to the array form and the other three can keep using
+ * this.
+ */
+static inline void st_pl_decode_frame_shared(const uint8_t *const groups[ST_PL_STEMS],
+					      uint32_t frame_in_group,
+					      st11_audio_frame_t *out)
+{
+	const uint32_t idx[ST_PL_STEMS] = {
+		frame_in_group, frame_in_group, frame_in_group, frame_in_group
+	};
+
+	st_pl_decode_frame(groups, idx, out);
+}
+
+/* ---- the read-ahead ring's geometry ------------------------------- */
+
+/*
+ * G AND R, THE TWO NUMBERS THE READ PATH IS SIZED BY. See
+ * docs/stem-tape-v1.2-planar-format.md for the derivation; the short version:
+ *
+ *   RAM     = 4 stems x G x 2048. At G=6 that is 49,152 B -- byte for byte
+ *             what the v1.1 sector ring cost, so the format change is
+ *             RAM-NEUTRAL and reshapes [6][8192] into [4][6][2048].
+ *   DEPTH   = G - R spans always buffered. A single worst-case fetch was
+ *             MEASURED at 21.6-23.6 ms under load against a 7.083 ms span, so
+ *             fewer than 4 buffered is thinner than one observed stall.
+ *   COST    = one read per stem per refill, 3834 us/span at R=2. 92% busy
+ *             against today's 83%, and 92% is an operating point this device
+ *             has already run with zero silence frames.
+ *   R | G   = REQUIRED, and the rule that decided these values. A batch is one
+ *             emmc_read_blocks() only while its destination groups are
+ *             contiguous, and slot is group % G, so a run that crosses the end
+ *             of the ring is two reads. When R divides G, runs aligned to a
+ *             multiple of R never cross it. G=7/R=3 looked 3 points cheaper
+ *             and is not: its batches cycle 3,3,1.
+ *
+ * G is not free to differ from the mailbox's own depth -- the mailbox IS the
+ * ring -- so it is taken from there rather than restated, and asserted below.
+ */
+#define ST_PL_REFILL_GROUPS 2u
+
+/* How many groups tile one v1.1 sector's worth of bytes -- four, one per
+ * stem. Used where something still needs 8192 contiguous bytes out of a
+ * group-shaped pool. */
+#define ST_PL_GROUPS_PER_SECTOR (ST11_SECTOR_BYTES / ST_PL_GROUP_BYTES)
+
+_Static_assert(ST_PL_FRAMES_PER_GROUP == ST11_FRAMES_PER_SECTOR,
+		"a group spans exactly what a v1.1 sector spanned");
+
 /* ---- conversion from v1.1 ---------------------------------------- */
 
 /*

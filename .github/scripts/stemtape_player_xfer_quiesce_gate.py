@@ -128,7 +128,7 @@ def main():
     if sb is None:
         fail("xfer_scratch() is missing -- the transfer path has nowhere to "
              "verify into")
-    if "g_stem_sector_bufs" in sb:
+    if "g_stem_group_bufs" in sb:
         fail("xfer_scratch() aliases the READ-AHEAD RING. The mailbox keeps "
              "publishing the slot it last published and an 'X' exit reloads "
              "nothing, so playback resumes on bytes the upload overwrote")

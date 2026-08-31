@@ -109,7 +109,28 @@ _Static_assert(ST11_SECTOR_HEADER_BYTES + ST11_FRAMES_PER_SECTOR * ST11_BYTES_PE
 #define ST11_PROTOCOL_MAJOR 1u
 #define ST11_PROTOCOL_MINOR 1u
 #define ST11_FORMAT_MAJOR   1u
-#define ST11_FORMAT_MINOR   1u
+/*
+ * THE STORAGE FORMAT VERSION, AND WHY IT IS OVERRIDABLE.
+ *
+ * 2 = song-planar (v1.2): each stem's whole timeline contiguous in its own
+ * quarter of the song region. 1 = the interleaved sector layout it replaced.
+ *
+ * st_stix.c refuses an index record whose format version differs from this,
+ * and compatibility.ts requires the STCP reply to match the companion's, so a
+ * v1.1 song is REFUSED by v1.2 firmware rather than misread -- which matters
+ * more here than in most version bumps, because a v1.1 sector read as four
+ * planar groups is not garbage, it is one stem's timeline played as all four.
+ *
+ * OVERRIDABLE FOR ONE REASON ONLY: the frozen handoff fixtures in handoff/v1.1
+ * are a byte-exact record of the v1.1 CONTRACT, and testing that contract
+ * means testing it at its own version. Those tests compile with
+ * -DST11_FORMAT_MINOR=1u and keep proving what they always proved; the
+ * shipped firmware's value is asserted separately in CI so this cannot be
+ * used to quietly ship the wrong one.
+ */
+#ifndef ST11_FORMAT_MINOR
+#define ST11_FORMAT_MINOR   2u
+#endif
 #define ST11_STIX_VERSION   2u
 #define ST11_INDEX_MAGIC    0x53544958u /* 'STIX', written LAST -- the sole commit point */
 #define ST11_SLOT_A         0u

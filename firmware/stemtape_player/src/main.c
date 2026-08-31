@@ -103,6 +103,7 @@
 #include "st_stcp.h"
 #include "st_beat_phase.h"
 #include "st_stem_bufmbox.h"
+#include "st_planar.h"
 #include "st_stem_mix.h"
 #include "st_stem_stream.h"
 #include "st_led_mvp.h"
@@ -1355,11 +1356,34 @@ static bool g_v11_commit_pending;
  * would. See st_latency.h for what the firmware does guarantee, and
  * tests/test_stem_playback_gate.c for the continuous-playback proof at
  * this depth: bit-identical output hash, zero underruns. */
-static uint8_t g_stem_sector_bufs[ST_STEM_MBOX_SLOTS][ST11_SECTOR_BYTES];
+static uint8_t g_stem_group_bufs[ST_PL_STEMS][ST_STEM_MBOX_SLOTS][ST_PL_GROUP_BYTES];
+
+/* RAM-NEUTRAL, and that is the whole reason G is 6. 4 x 6 x 2048 = 49,152 is
+ * byte for byte what [ST_STEM_MBOX_SLOTS][ST11_SECTOR_BYTES] cost -- the ring
+ * is RESHAPED by the format change, not grown. */
+_Static_assert(sizeof(g_stem_group_bufs) ==
+		ST_STEM_MBOX_SLOTS * ST11_SECTOR_BYTES,
+		"the per-stem ring costs exactly what the v1.1 sector ring did");
+_Static_assert((ST_STEM_MBOX_SLOTS % ST_PL_REFILL_GROUPS) == 0u,
+		"R must divide G or a refill batch straddles the ring's end and "
+		"becomes two reads -- see st_stem_mbox_producer_next_run()");
+_Static_assert(ST_STEM_MBOX_SLOTS - ST_PL_REFILL_GROUPS >= 4u,
+		"fewer than 4 spans buffered is thinner than one MEASURED "
+		"worst-case fetch (21.6-23.6 ms against a 7.083 ms span)");
 
 /* The lock-free SPSC handoff (st_stem_bufmbox.h) -- see this block's own
  * comment above for the producer/consumer role split. */
-static st_stem_mbox_t g_stem_mbox;
+/* ONE PER STEM. Each stem's timeline is its own contiguous region on storage
+ * and its own ring in RAM, so each gets its own mailbox -- four instances of
+ * the same struct, 32 bytes each. The protocol is untouched: every instance
+ * still maps group g to slot g % SLOTS, so the consumer is still wait-free at
+ * one index computation per stem.
+ *
+ * Until reverse exists all four track the SAME group, so they fill and drain
+ * in lockstep. They are separate instances rather than one shared one because
+ * per-track reverse is exactly "one stem's head is elsewhere", and that is a
+ * change of the numbers passed in, not of this structure. */
+static st_stem_mbox_t g_stem_mbox[ST_PL_STEMS];
 
 /* ===================================================================
  * THE LOOP KIT: ST_LAT_RESIDENCY_SECTORS pinned at each of the window's ends.
@@ -1471,7 +1495,16 @@ static const uint8_t st_loop_pin_depth[ST_LOOP_PIN_REGIONS] = {
 	ST_LOOP_PIN_ENTRY_SECTORS, ST_LOOP_PIN_EXIT_SECTORS
 };
 
-static uint8_t g_stem_loop_pin_bufs[ST_LOOP_PIN_SECTORS][ST11_SECTOR_BYTES];
+/* STEM-MAJOR, and the order matters. A pinned REGION is st_loop_pin_depth[]
+ * consecutive spans, so with the stem index outermost one stem's whole region
+ * is contiguous both on storage and in RAM -- one read per stem per region, 8
+ * reads to arm a loop where the v1.1 layout took 10. Span-major would have
+ * made it 4 reads per span, 40 in total. */
+static uint8_t g_stem_loop_pin_bufs[ST_PL_STEMS][ST_LOOP_PIN_SECTORS][ST_PL_GROUP_BYTES];
+
+_Static_assert(sizeof(g_stem_loop_pin_bufs) ==
+		ST_LOOP_PIN_SECTORS * ST11_SECTOR_BYTES,
+		"the pins cost exactly what they did before the format change");
 /* First pinned sector index per region, or negative when it holds nothing. */
 static atomic_t g_stem_loop_pin_base[ST_LOOP_PIN_REGIONS] = {
 	ATOMIC_INIT(-1), ATOMIC_INIT(-1)
@@ -1568,11 +1601,22 @@ static void stem_loop_pins_drop(void)
  * region -- the pin depth does not shrink, only its contents are dropped
  * across a transfer.
  */
-#define ST_XFER_SCRATCH_PIN (ST_LOOP_PIN_SECTORS - 1u)
+#define ST_XFER_SCRATCH_STEM  (ST_PL_STEMS - 1u)
+#define ST_XFER_SCRATCH_GROUP (ST_LOOP_PIN_SECTORS - ST_PL_GROUPS_PER_SECTOR)
+
+/* Under the stem-major pool the last ST_PL_GROUPS_PER_SECTOR groups of the
+ * LAST stem are 8192 contiguous bytes, which is exactly what the upload
+ * verify path needs. Four groups of one stem rather than one span of four,
+ * but the safety argument is unchanged and does not depend on which: entering
+ * transfer mode drops BOTH regions, so no pin buffer carries a residency
+ * claim across a transfer. */
+_Static_assert(ST_LOOP_PIN_SECTORS >= ST_PL_GROUPS_PER_SECTOR,
+		"the pin pool must be able to spare one sector's worth of "
+		"contiguous bytes for the upload verify scratch");
 
 static inline uint8_t *xfer_scratch(void)
 {
-	return g_stem_loop_pin_bufs[ST_XFER_SCRATCH_PIN];
+	return &g_stem_loop_pin_bufs[ST_XFER_SCRATCH_STEM][ST_XFER_SCRATCH_GROUP][0];
 }
 
 /* ===================================================================
@@ -1633,7 +1677,7 @@ static st_ctl_out_t g_stem_ctl_out;
 static st_stream_t g_stem_stream;
 
 /* Set at boot, by streamer_thread(), only after g_stem_stream above is
- * validly initialized AND g_stem_sector_bufs[0]/g_stem_mbox both hold a real,
+ * validly initialized AND g_stem_group_bufs[..][0]/g_stem_mbox[] all hold a real,
  * header-validated sector 0 -- the same "one-shot release fence" idiom
  * this file already uses for g_v11_layout_ready/g_meta_loaded, now a
  * real atomic (Slice 3B.1) rather than a `volatile` flag, since it is
@@ -1663,7 +1707,7 @@ static atomic_t g_stem_song_selected;
  * safe specifically because g_playing is already 0 for the WHOLE duration
  * of any transfer session (set the instant the SP1XFER! magic is
  * detected), so stem_active is already false and audio_thread is already
- * not touching g_stem_sector_bufs[]/the mailbox for the entire window a reload
+ * not touching g_stem_group_bufs[]/the mailboxes for the entire window a reload
  * can ever be pending in -- confirmed by inspection, not merely assumed. */
 static st_stix_record_t g_stem_reload_pending;
 static atomic_t g_stem_reload_req;
@@ -2013,7 +2057,7 @@ __attribute__((optimize("O2")))
  *
  * Here there are no volatiles at all, nothing global, and few enough live
  * values to stay in registers -- and the same -O2 precedent already applied
- * to st_stem_mix_frame_prepared(), st11_sector_decode_frame() and
+ * to st_stem_mix_frame_prepared(), st_pl_decode_frame_shared() and
  * sp1_emmc.c's crc16().
  *
  * WHAT IT IS ALLOWED TO ASSUME (the caller establishes all of it before
@@ -2168,7 +2212,8 @@ static uint8_t   s_stem_jump_pend;   /* 0 none, else ST_SEAM_JUMP_* */
  * symbol gate requires this name exactly, and an anchored nm grep does not
  * match a .constprop/.isra clone suffix. */
 __attribute__((optimize("O2"), noinline, noclone))
-static uint32_t stem_render_run(const uint8_t *buf, uint32_t frame_in_sector,
+static uint32_t stem_render_run(const uint8_t *const grp[ST_PL_STEMS],
+			     uint32_t frame_in_group,
 			     const st_stem_mix_prepared_t *prep,
 			     int32_t m0, int32_t md, int32_t mv,
 			     uint32_t f0, uint32_t n, int16_t *s,
@@ -2198,7 +2243,7 @@ static uint32_t stem_render_run(const uint8_t *buf, uint32_t frame_in_sector,
 		int16_t stem_l, stem_r;
 
 		if (unity) {
-			st11_sector_decode_frame(buf, frame_in_sector + k, &frame);
+			st_pl_decode_frame_shared(grp, frame_in_group + k, &frame);
 			cur = k;   /* at 1x source and output are the same count */
 		} else {
 			/*
@@ -2229,7 +2274,7 @@ static uint32_t stem_render_run(const uint8_t *buf, uint32_t frame_in_sector,
 			if (idx >= src_avail) {
 				idx = src_avail - 1u;
 			}
-			st11_sector_decode_frame(buf, frame_in_sector + idx, &nxt);
+			st_pl_decode_frame_shared(grp, frame_in_group + idx, &nxt);
 			if (!s_rs_prev_valid) {
 				s_rs_prev = nxt;
 				s_rs_prev_valid = true;
@@ -2287,8 +2332,8 @@ static uint32_t stem_render_run(const uint8_t *buf, uint32_t frame_in_sector,
 					if (pidx >= src_avail) {
 						pidx = src_avail - 1u;
 					}
-					st11_sector_decode_frame(
-						buf, frame_in_sector + pidx,
+					st_pl_decode_frame_shared(
+						grp, frame_in_group + pidx,
 						&s_rs_prev);
 				}
 			}
@@ -2542,7 +2587,9 @@ static void stem_audio_block(int16_t *s, int32_t m0, int32_t md, int32_t mv)
 	 * told the mailbox I hold nothing" latch, and a shadow of
 	 * underrun_count so the atomic mirror is only touched on a real
 	 * change. */
-	static uint8_t g_stem_active_buf_idx_local;
+	/* ONE SLOT PER STEM. Four rings, four mailboxes, four acquires -- and
+	 * all four name the same span until reverse exists. */
+	static uint8_t g_stem_active_slot_local[ST_PL_STEMS];
 	static bool s_stem_released;
 	static uint32_t s_stem_underrun_shadow;
 
@@ -2871,11 +2918,30 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 			 * looked. Wait-free: one acquire load, and on
 			 * success one release store. */
 			uint32_t acquired_slot;
+			uint32_t got = 0u;
+			uint32_t k;
 
-			if (st_stem_mbox_try_acquire(&g_stem_mbox, needed, &acquired_slot)) {
-				g_stem_active_buf_idx_local = (uint8_t)acquired_slot;
+			/* ALL FOUR OR NONE. A span is playable only when every
+			 * stem's group for it is resident; a partial acquire
+			 * would render three stems and silence one. The four
+			 * mailboxes track the same group and fill in lockstep,
+			 * so this is normally four hits or four misses.
+			 *
+			 * A partial acquire leaves the stems that DID hit with
+			 * their held_sector advanced, which is harmless -- it
+			 * only makes their producer more conservative for one
+			 * pass -- and the release below clears all four. */
+			for (k = 0; k < ST_PL_STEMS; k++) {
+				if (!st_stem_mbox_try_acquire(&g_stem_mbox[k], needed,
+							       &acquired_slot)) {
+					break;
+				}
+				g_stem_active_slot_local[k] = (uint8_t)acquired_slot;
+				got++;
+			}
+			if (got == ST_PL_STEMS) {
 				st_stream_sector_ready(&g_stem_stream, needed);
-				s_stem_released = false;   /* holding a buffer again */
+				s_stem_released = false;   /* holding buffers again */
 			} else if (!s_stem_released) {
 				/* Genuinely reading nothing: say so, so the
 				 * producer may fill every slot including the
@@ -2883,7 +2949,9 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 				 * st_stem_mbox_release()'s own doc comment for
 				 * the loop-wrap stall this prevents. Latched,
 				 * so it happens once per starvation episode. */
-				st_stem_mbox_release(&g_stem_mbox);
+				for (k = 0; k < ST_PL_STEMS; k++) {
+					st_stem_mbox_release(&g_stem_mbox[k]);
+				}
 				s_stem_released = true;
 			}
 		}
@@ -2934,7 +3002,13 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 			 * ring and so cannot collide with anything. */
 			want = ahead;
 		}
-		st_stem_mbox_set_requested_sector(&g_stem_mbox, want);
+		{
+			uint32_t k;
+
+			for (k = 0; k < ST_PL_STEMS; k++) {
+				st_stem_mbox_set_requested_sector(&g_stem_mbox[k], want);
+			}
+		}
 
 		if (g_stem_stream.ready_sector != needed) {
 			/* UNDERRUN: silence for the remainder of the
@@ -3096,10 +3170,23 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 		}
 
 		/* RAM-ONLY: decodes out of whichever resident buffer
-		 * g_stem_active_buf_idx_local (audio-thread-exclusive)
+		 * g_stem_active_slot_local[] (audio-thread-exclusive)
 		 * names -- this real-time thread never touches flash. */
-		used = stem_render_run(from_pin ? g_stem_loop_pin_bufs[pin_idx]
-						: g_stem_sector_bufs[g_stem_active_buf_idx_local],
+		{
+		const uint8_t *grp[ST_PL_STEMS];
+		uint32_t gk;
+
+		/* FOUR POINTERS, ONE PER STEM, resolved the same way the single
+		 * sector pointer was: from the pin if this span is pinned, from
+		 * each stem's own ring otherwise. All four still name the same
+		 * span -- reverse is what makes them diverge, and that changes
+		 * only the numbers, not this shape. */
+		for (gk = 0; gk < ST_PL_STEMS; gk++) {
+			grp[gk] = from_pin
+				  ? g_stem_loop_pin_bufs[gk][pin_idx]
+				  : g_stem_group_bufs[gk][g_stem_active_slot_local[gk]];
+		}
+		used = stem_render_run(grp,
 				       fis, &stem_prepared, m0, md, mv,
 				       f, out_n, s, stem_peak, &s_stem_seam,
 				       g_stem_stream.song_frame,
@@ -3110,6 +3197,7 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 		 * fractional remainder stays in s_stem_rate_frac and is
 		 * carried into the next run, so nothing is lost or repeated
 		 * across a run boundary. At 1x this is out_n exactly. */
+		}
 		(void)st_stream_advance_frames(&g_stem_stream, used);
 
 		/* ---- THE WRAP BACKSTOP ------------------------------------
@@ -3205,14 +3293,25 @@ static void looper_audio_block(int16_t *s)
 		if (st_stream_init(&g_stem_stream, g_stem_reload_pending.song_start_block,
 				    g_stem_reload_pending.song_block_count, g_stem_reload_pending.frames,
 				    g_stem_reload_pending.sector_count, /*loop_enabled=*/true)) {
-			st11_sector_header_t hdr;
-
-			if (st11_sector_read_header(g_stem_sector_bufs[0], &hdr) &&
-			    st_stream_validate_sector(&g_stem_stream, 0u, &hdr)) {
+			/* Group 0 of all four stems was read AND validated by the
+			 * streamer before it published the reload (see stem_song_
+			 * post_commit_reload()), against the stem and span each
+			 * group was asked for. The independent second check this
+			 * site has always performed is now st_stream_init() above,
+			 * which is the geometry half; the identity half a v1.1
+			 * sector header used to provide is what the group header
+			 * does better, and earlier. */
+			{
 				(void)st_beat_timing_init(&g_stem_beat_timing, g_stem_reload_pending.bpm_q8,
 							   g_stem_reload_pending.downbeat_frame,
 							   g_stem_reload_pending.sample_rate);
-				st_stem_mbox_init(&g_stem_mbox, 0u);
+				{
+					uint32_t mk;
+
+					for (mk = 0; mk < ST_PL_STEMS; mk++) {
+						st_stem_mbox_init(&g_stem_mbox[mk], 0u);
+					}
+				}
 				reload_ok = true;
 			}
 		}
@@ -4300,7 +4399,7 @@ static int xfer_v11_write(uint32_t block, const uint8_t data[ST11_PHYSICAL_BLOCK
  * trusting the write that was just performed.
  *
  * If the newly selected record names a song, reads its real sector 0 into
- * g_stem_sector_bufs[0] (this thread's own job -- the only thread that ever
+ * group 0 of every stem (this thread's own job -- the only thread that ever
  * touches flash) and validates it through a LOCAL, throwaway st_stream_t
  * instance -- never g_stem_stream itself, which stays audio-thread-
  * exclusive at every moment (see that struct's own doc comment) -- before
@@ -4311,7 +4410,7 @@ static int xfer_v11_write(uint32_t block, const uint8_t data[ST11_PHYSICAL_BLOCK
  * construct the real g_stem_stream (see g_stem_reload_req's own doc
  * comment for the full handoff and why it is safe: g_playing is already 0
  * for the whole duration of any transfer session, so audio_thread is
- * provably not touching g_stem_sector_bufs[]/the mailbox anywhere in the window
+ * provably not touching g_stem_group_bufs[]/the mailboxes anywhere in the window
  * this function can ever run).
  *
  * Only on successful validation does this fill g_stem_reload_pending and
@@ -4359,15 +4458,22 @@ static void stem_song_post_commit_reload(void)
 			     lib.active.frames, lib.active.sector_count, /*loop_enabled=*/true)) {
 		return;
 	}
-	if (!emmc_read_blocks(lib.active.song_start_block, g_stem_sector_bufs[0], ST11_BLOCKS_PER_SECTOR)) {
+	/* GROUP 0 OF ALL FOUR STEMS, and that IS the validation now.
+	 *
+	 * v1.1 read sector 0 and checked its 32-byte STSC header against the
+	 * stream geometry. A v1.2 group header is eight bytes -- magic, the
+	 * stem it claims to be, the span it covers -- and carries no timing at
+	 * all, because timing was never sector data in the first place: the
+	 * STIX record has always been the authoritative source and always won
+	 * a disagreement. What the group header does carry is IDENTITY, which
+	 * the sector header could not: stem_prime_group0() validates each of
+	 * the four groups against the stem and span it was ASKED for, so a
+	 * region miscomputed from the STIX geometry fails here rather than
+	 * playing as another stem's audio. */
+	if (!stem_prime_group0(lib.active.song_start_block, lib.active.sector_count)) {
 		return;
 	}
-
-	st11_sector_header_t hdr;
-
-	if (!st11_sector_read_header(g_stem_sector_bufs[0], &hdr) || !st_stream_validate_sector(&local_check, 0u, &hdr)) {
-		return;
-	}
+	(void)local_check;
 
 	/* All real validation passed -- hand off to audio_thread. Plain-field
 	 * write BEFORE the atomic release fences, matching g_stem_beat_
@@ -5299,47 +5405,98 @@ static void codec_unpack(int16_t *ring, uint32_t ring_mask, uint32_t start,
  * shorter than the ring simply primes fewer.
  */
 /*
- * ONE SECTOR INTO ONE BUFFER, either as the single 16-block read playback
- * has always used, or -- when the planar simulation is armed -- as the four
- * 4-block reads v1.2 would need with every track diverging.
+ * ONE STEM, `n` CONSECUTIVE GROUPS, ONE READ.
  *
- * Both paths deliver the SAME 8192 bytes to the same buffer, so nothing
- * downstream can tell them apart; the decoded audio is bit-identical. What
- * differs is only what it COST to get there, which is the whole point.
+ * This is the whole economy of song-planar in one function. A stem's timeline
+ * is contiguous on storage, so n groups of stem k are 4n consecutive blocks;
+ * and the caller has already established via st_stem_mbox_producer_next_run()
+ * that the n destination slots are consecutive with no wrap. So a batch is a
+ * single emmc_read_blocks() -- which is what makes four per-stem rings cost
+ * about what one shared sector ring cost, instead of four times as much.
  *
- * With the flag clear this is exactly the call site it replaced -- one
- * emmc_read_blocks() of ST11_BLOCKS_PER_SECTOR -- so the shipped path is
- * unchanged.
+ * EVERY GROUP IS VALIDATED, not just the first. A group carries its own
+ * header naming the stem and the span it holds, and under v1.2 every read is
+ * a group read, so a misaddressed batch has to be caught here rather than
+ * heard later. Validation is against the stem and group the caller ASKED for,
+ * so a read that silently landed in another stem's region fails.
  */
-static bool stem_read_sector(uint32_t start_block, uint8_t *buf)
+static bool stem_read_groups(uint32_t song_start_block, uint32_t groups,
+			      uint32_t stem, uint32_t first_group,
+			      uint32_t slot, uint32_t n)
 {
-	return emmc_read_blocks(start_block, buf, ST11_BLOCKS_PER_SECTOR);
+	const uint32_t blk = st_pl_group_block(song_start_block, groups,
+						stem, first_group);
+	uint32_t i;
+
+	if (!emmc_read_blocks(blk, &g_stem_group_bufs[stem][slot][0],
+			       n * ST_PL_GROUP_BLOCKS)) {
+		return false;
+	}
+	for (i = 0; i < n; i++) {
+		if (!st_pl_validate(g_stem_group_bufs[stem][slot + i],
+				     stem, first_group + i)) {
+			return false;
+		}
+	}
+	return true;
 }
 
+/*
+ * GROUP 0 OF ALL FOUR STEMS, synchronously, into slot 0 of each ring.
+ *
+ * The v1.1 equivalent was a single sector-0 read, and it served the same two
+ * callers: boot selection and the post-commit reload. Both need the first span
+ * resident and adopted before either thread's steady-state loop starts, which
+ * is exactly what st_stem_mbox_init() asserts about the sector it is given.
+ */
+static bool stem_prime_group0(uint32_t song_start_block, uint32_t groups)
+{
+	uint32_t k;
+
+	for (k = 0; k < ST_PL_STEMS; k++) {
+		if (!stem_read_groups(song_start_block, groups, k, 0u, 0u, 1u)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+/*
+ * Fill the rest of every stem's ring before playback starts, so the first
+ * sector boundary is not also the first underrun. Group 0 is already resident
+ * and adopted in all four (stem_prime_group0 + st_stem_mbox_init).
+ *
+ * Returns the number of spans resident, which is the smallest across the four
+ * stems -- a span is only playable when ALL FOUR of its groups are there.
+ */
 static uint32_t stem_prime_read_ahead(void)
 {
-	uint32_t primed = 1u;   /* sector 0: already read, validated and published */
+	uint32_t worst = ST_STEM_MBOX_SLOTS;
+	uint32_t k;
 
-	for (uint32_t sec = 1u; sec < ST_STEM_MBOX_SLOTS; sec++) {
-		uint32_t slot = st_stem_mbox_slot_of(sec);
-		st11_sector_header_t hdr;
-		uint32_t blk;
+	for (k = 0; k < ST_PL_STEMS; k++) {
+		uint32_t primed = 1u;   /* group 0: read, validated, published */
+		uint32_t g;
 
-		if (sec >= g_stem_stream.sector_count) {
-			break;          /* song shorter than the ring */
+		for (g = 1u; g < ST_STEM_MBOX_SLOTS; g++) {
+			const uint32_t slot = st_stem_mbox_slot_of(g);
+
+			if (g >= g_stem_stream.sector_count) {
+				break;          /* song shorter than the ring */
+			}
+			if (!stem_read_groups(g_stem_stream.song_start_block,
+					       g_stem_stream.sector_count,
+					       k, g, slot, 1u)) {
+				break;
+			}
+			st_stem_mbox_publish_ready(&g_stem_mbox[k], g, slot);
+			primed++;
 		}
-		blk = g_stem_stream.song_start_block + sec * ST11_BLOCKS_PER_SECTOR;
-		if (!emmc_read_blocks(blk, g_stem_sector_bufs[slot], ST11_BLOCKS_PER_SECTOR)) {
-			break;
+		if (primed < worst) {
+			worst = primed;
 		}
-		if (!st11_sector_read_header(g_stem_sector_bufs[slot], &hdr) ||
-		    !st_stream_validate_sector(&g_stem_stream, sec, &hdr)) {
-			break;
-		}
-		st_stem_mbox_publish_ready(&g_stem_mbox, sec, slot);
-		primed++;
 	}
-	return primed;
+	return worst;
 }
 #endif /* SP1_XFER_ENABLE */
 
@@ -5475,7 +5632,7 @@ static void streamer_thread(void *a, void *b, void *c)
 	 * at cold boot and logs the result. As of Phase 2 slice 3B, this IS
 	 * consumed downstream: if a song is present, its geometry seeds the
 	 * pure streaming state machine and its own sector 0 is read here
-	 * (see the block below) into g_stem_sector_bufs[0], which looper_audio_
+	 * (see the block below) into g_stem_group_bufs[..][0], which looper_audio_
 	 * block()'s own PASS C plays back; streamer_thread's own per-pass
 	 * prefetch step (below the main while(1) loop's top) keeps the
 	 * OTHER buffer filled ahead of the playhead for the rest of the
@@ -5511,7 +5668,7 @@ static void streamer_thread(void *a, void *b, void *c)
 				 * one bounded, one-time flash read, here in
 				 * streamer_thread (the only thread that ever touches
 				 * flash; audio_thread only ever reads the resulting
-				 * g_stem_sector_bufs[] from RAM, see looper_audio_block()'s
+				 * g_stem_group_bufs[] from RAM, see looper_audio_block()'s
 				 * own PASS C). Real geometry + header validation
 				 * (st_stream_init()/st_stream_validate_sector()) --
 				 * both read-only-geometry-safe to call here, see
@@ -5533,45 +5690,41 @@ static void streamer_thread(void *a, void *b, void *c)
 					if (st_stream_init(&g_stem_stream, lib.active.song_start_block,
 							    lib.active.song_block_count, lib.active.frames,
 							    lib.active.sector_count, /*loop_enabled=*/true)) {
-						if (emmc_read_blocks(lib.active.song_start_block, g_stem_sector_bufs[0],
-								      ST11_BLOCKS_PER_SECTOR)) {
-							st11_sector_header_t hdr;
-
-							if (st11_sector_read_header(g_stem_sector_bufs[0], &hdr) &&
-							    st_stream_validate_sector(&g_stem_stream, 0u, &hdr)) {
-								/* STEM TAPE Phase 3 (beat-sync LED
-								 * slice): the STIX record is the
-								 * authoritative song-level timing
-								 * source (lib.active.bpm_q8/
-								 * downbeat_frame/sample_rate) --
-								 * sector 0's own header carries the
-								 * SAME two fields (see st_sector_v11.h)
-								 * and is cross-checked here, once, for
-								 * consistency ONLY: a mismatch is
-								 * logged as a boot diagnostic, never
-								 * acted on -- the STIX record always
-								 * wins, matching this whole block's
-								 * own established "one selector, used
-								 * identically" rule for geometry. See
-								 * st_beat_phase.h's own doc comment for
-								 * why this is the sole place tempo is
-								 * ever read, and g_stem_beat_timing's
-								 * own doc comment for why writing it
-								 * here, strictly before the release
-								 * fence below, needs no separate
-								 * synchronization. */
-								if (hdr.bpm_q8 != lib.active.bpm_q8 ||
-								    hdr.downbeat_frame != lib.active.downbeat_frame) {
-									printk("V11 lib: sector 0 header timing "
-									       "(bpm_q8=%u downbeat=%u) disagrees "
-									       "with the STIX record's own "
-									       "(bpm_q8=%u downbeat=%u) -- STIX "
-									       "wins, sector data is not re-checked "
-									       "again\n",
-									       (unsigned)hdr.bpm_q8, (unsigned)hdr.downbeat_frame,
-									       (unsigned)lib.active.bpm_q8,
-									       (unsigned)lib.active.downbeat_frame);
-								}
+						if (stem_prime_group0(lib.active.song_start_block,
+								       lib.active.sector_count)) {
+							{
+								/* STEM_PRIME_GROUP0() IS THE VALIDATION.
+								 * v1.1 checked sector 0's 32-byte STSC
+								 * header against the stream geometry;
+								 * a v1.2 group header is eight bytes and
+								 * carries identity instead -- magic, the
+								 * stem it claims to be, the span it
+								 * covers. stem_read_groups() checks each
+								 * of the four against what was ASKED
+								 * for, so a region miscomputed from the
+								 * STIX geometry fails above rather than
+								 * playing as another stem's audio. The
+								 * geometry itself was already checked by
+								 * st_stream_init().
+								 *
+								 * NO SECTOR-0 TIMING CROSS-CHECK ANY
+								 * MORE, and nothing is lost with it.
+								 * v1.1's STSC header repeated bpm_q8
+								 * and downbeat_frame, and this block
+								 * compared them to the STIX record
+								 * purely to log a disagreement -- STIX
+								 * always won and the sector copy was
+								 * never acted on. A v1.2 group header
+								 * is eight bytes of IDENTITY (magic,
+								 * stem, span) and carries no timing to
+								 * disagree with, so the one authority
+								 * is now also the only one. See
+								 * st_beat_phase.h for why this is the
+								 * sole place tempo is ever read, and
+								 * g_stem_beat_timing's own comment for
+								 * why writing it here, strictly before
+								 * the release fence below, needs no
+								 * separate synchronization. */
 								/* TEMPO REPORT, always -- success as well as
 								 * failure. The global loop quantises every
 								 * window to this beat and REFUSES to start
@@ -5604,7 +5757,13 @@ static void streamer_thread(void *a, void *b, void *c)
 									       (unsigned)lib.active.downbeat_frame,
 									       (unsigned)g_stem_beat_timing.frames_per_beat);
 								}
-								st_stem_mbox_init(&g_stem_mbox, 0u);
+								{
+									uint32_t mk;
+
+									for (mk = 0; mk < ST_PL_STEMS; mk++) {
+										st_stem_mbox_init(&g_stem_mbox[mk], 0u);
+									}
+								}
 								{
 									/* Fill the REST of the ring before
 									 * publishing the song, so playback
@@ -5758,33 +5917,55 @@ static void streamer_thread(void *a, void *b, void *c)
 
 			if (want_base >= 0 &&
 			    (int32_t)atomic_get(&g_stem_loop_pin_base[region]) != want_base) {
-				uint32_t filled = 0u;
+				/*
+				 * ONE READ PER STEM, NOT ONE PER SPAN -- which is
+				 * why the pin pool is stem-major.
+				 *
+				 * A region is `depth` consecutive spans, so for a
+				 * single stem those are `depth` consecutive groups
+				 * on storage AND `depth` consecutive buffers in
+				 * RAM. The whole region for one stem is therefore
+				 * one emmc_read_blocks() of depth*4 blocks, and a
+				 * loop arms in 8 reads where v1.1 took 10. Laying
+				 * the pool out span-major would have made it 4
+				 * reads per span, 40 in all.
+				 */
+				uint32_t filled = st_loop_pin_depth[region];
 				uint32_t k;
 
 				atomic_set(&g_stem_loop_pin_count[region], 0);   /* invalidate first */
 				atomic_set(&g_stem_loop_pin_base[region], -1);
-				for (k = 0; k < st_loop_pin_depth[region]; k++) {
-					uint32_t sec = (uint32_t)want_base + k;
-					st11_sector_header_t hdr;
-					uint32_t blk;
 
-					if (sec >= g_stem_stream.sector_count) {
-						break;   /* past the song: fewer pins, still safe */
-					}
-					blk = g_stem_stream.song_start_block +
-					      sec * ST11_BLOCKS_PER_SECTOR;
+				/* Clamp to the song before reading, not during:
+				 * a short region is fine, a read past the song is
+				 * not. */
+				if ((uint32_t)want_base >= g_stem_stream.sector_count) {
+					filled = 0u;
+				} else if (filled > g_stem_stream.sector_count - (uint32_t)want_base) {
+					filled = g_stem_stream.sector_count - (uint32_t)want_base;
+				}
+
+				for (k = 0; k < ST_PL_STEMS && filled > 0u; k++) {
+					const uint32_t blk = st_pl_group_block(
+						g_stem_stream.song_start_block,
+						g_stem_stream.sector_count,
+						k, (uint32_t)want_base);
+					uint32_t i;
+
 					if (!emmc_read_blocks(blk,
-							       g_stem_loop_pin_bufs[st_loop_pin_off[region] + k],
-							       ST11_BLOCKS_PER_SECTOR)) {
+							       &g_stem_loop_pin_bufs[k][st_loop_pin_off[region]][0],
+							       filled * ST_PL_GROUP_BLOCKS)) {
+						filled = 0u;
 						break;
 					}
-					if (!st11_sector_read_header(
-						    g_stem_loop_pin_bufs[st_loop_pin_off[region] + k],
-						    &hdr) ||
-					    !st_stream_validate_sector(&g_stem_stream, sec, &hdr)) {
-						break;   /* never pin unvalidated bytes */
+					for (i = 0; i < filled; i++) {
+						if (!st_pl_validate(
+							    g_stem_loop_pin_bufs[k][st_loop_pin_off[region] + i],
+							    k, (uint32_t)want_base + i)) {
+							filled = 0u;   /* never pin unvalidated bytes */
+							break;
+						}
 					}
-					filled++;
 				}
 				if (filled > 0u) {
 					atomic_set(&g_stem_loop_pin_count[region],
@@ -5804,24 +5985,46 @@ static void streamer_thread(void *a, void *b, void *c)
 		}
 
 		if (atomic_get(&g_stem_song_selected)) {
-			uint32_t needed;
-			uint32_t target_slot;
+			/*
+			 * THE SUSTAINED PATH -- one batched read per stem per
+			 * pass, and the thing every sizing decision was about.
+			 *
+			 * v1.1 fetched one 16-block sector holding all four
+			 * stems. v1.2 fetches ST_PL_REFILL_GROUPS consecutive
+			 * groups of ONE stem, four times. That is more reads per
+			 * pass and FEWER reads per span: a batch of R groups
+			 * carries R spans of that stem, so the four stems
+			 * between them cost 4/R reads per span instead of 1 --
+			 * 2 reads at R=2, moving 8 blocks each, 3834 us against
+			 * v1.1's 3178. 92% busy against 83%, which is an
+			 * operating point this device has already run with zero
+			 * silence frames.
+			 *
+			 * What it buys is that a stem's address is now
+			 * independent of the others', which is the whole
+			 * precondition for reversing one of them.
+			 */
+			uint32_t stem;
 
-			if (st_stem_mbox_producer_next_fill(&g_stem_mbox,
-							     g_stem_stream.sector_count,
-							     &needed, &target_slot)) {
-				uint8_t *target_buf = g_stem_sector_bufs[target_slot];
-				uint32_t start_block =
-					g_stem_stream.song_start_block + needed * ST11_BLOCKS_PER_SECTOR;
+			for (stem = 0; stem < ST_PL_STEMS; stem++) {
+				uint32_t first, target_slot, n, i;
+				uint32_t read_t0, read_us;
+				bool read_ok;
 
-				uint32_t read_t0 = DWT->CYCCNT;
-				/* THE SUSTAINED PATH, and the only one switched. The
-				 * boot prime, the seek refills and the loop pins are
-				 * one-off costs; what decides whether v1.2 fits is the
-				 * read that repeats every sector, forever. */
-				bool read_ok = stem_read_sector(start_block, target_buf);
-				uint32_t read_us = (DWT->CYCCNT - read_t0) / 64u; /* 64 MHz -> us, same convention
-										    * as g_audio_us_max below */
+				if (!st_stem_mbox_producer_next_run(
+					    &g_stem_mbox[stem],
+					    g_stem_stream.sector_count,
+					    ST_PL_REFILL_GROUPS,
+					    &first, &target_slot, &n)) {
+					continue;
+				}
+
+				read_t0 = DWT->CYCCNT;
+				read_ok = stem_read_groups(g_stem_stream.song_start_block,
+							    g_stem_stream.sector_count,
+							    stem, first, target_slot, n);
+				read_us = (DWT->CYCCNT - read_t0) / 64u; /* 64 MHz -> us, same convention
+									  * as g_audio_us_max below */
 
 				/* atomic_add()/atomic_set(): single-writer counters
 				 * (this thread is the only one that ever writes any
@@ -5840,24 +6043,33 @@ static void streamer_thread(void *a, void *b, void *c)
 				}
 
 				if (read_ok) {
-					st11_sector_header_t hdr;
-
-					if (st11_sector_read_header(target_buf, &hdr) &&
-					    st_stream_validate_sector(&g_stem_stream, needed, &hdr)) {
-						(void)atomic_add(&g_stem_diag_bytes_total, (atomic_val_t)ST11_SECTOR_BYTES);
-						(void)atomic_add(&g_stem_diag_read_us_total, (atomic_val_t)read_us);
-						st_stem_mbox_publish_ready(&g_stem_mbox, needed, target_slot);
-					} else {
-						(void)atomic_add(&g_stem_corrupt_count, 1);
+					/* PUBLISHED ONE GROUP AT A TIME, after
+					 * every byte of the batch is written and
+					 * validated -- the release store is
+					 * per-slot, so a consumer observing group
+					 * g has observed g's bytes and nothing is
+					 * claimed on behalf of a group whose read
+					 * failed. */
+					(void)atomic_add(&g_stem_diag_bytes_total,
+							  (atomic_val_t)(n * ST_PL_GROUP_BYTES));
+					(void)atomic_add(&g_stem_diag_read_us_total, (atomic_val_t)read_us);
+					for (i = 0; i < n; i++) {
+						st_stem_mbox_publish_ready(
+							&g_stem_mbox[stem], first + i,
+							st_stem_mbox_slot_of(first + i));
 					}
 					work = true;
+				} else {
+					/* A failed or misaddressed batch publishes
+					 * NOTHING, so the slots stay stale and
+					 * next_run() names this same group again
+					 * next pass. Counted as corrupt because
+					 * stem_read_groups() validates every group
+					 * header it read, so "the read returned
+					 * bytes that are not this stem's group g"
+					 * lands here rather than being played. */
+					(void)atomic_add(&g_stem_corrupt_count, 1);
 				}
-				/* else: short/failed read -- nothing published, so
-				 * the slot stays stale and next_fill() names this
-				 * same sector again next pass (see this block's own
-				 * comment); `work` stays whatever PASS 2 below
-				 * decides, so a stuck stem prefetch alone does not
-				 * suppress the idle-window cache flush forever. */
 			}
 		}
 #endif

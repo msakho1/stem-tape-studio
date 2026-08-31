@@ -31,7 +31,7 @@ find_call_sites() in stemtape_player_safety_gate.py already does):
      once per block) -- and drives stem_render_run().
 
      stem_render_run() is the tight -O2 renderer: it calls
-     st11_sector_decode_frame() (the real STSC per-frame decoder,
+     st_pl_decode_frame_shared() (the real v1.2 per-frame decoder,
      RAM-only, no I/O) and st_stem_mix_frame_prepared() (the real
      4-stem-to-stereo mixdown).
 
@@ -51,10 +51,10 @@ find_call_sites() in stemtape_player_safety_gate.py already does):
   2. streamer_thread() (the one thread that ever touches flash) -- the
      mailbox PRODUCER -- calls st_stream_init() (seeding the state
      machine from the real selected song's own STIX geometry, once, at
-     boot) and st_stream_validate_sector() (validating EVERY sector
+     boot) and stem_read_groups() (validating EVERY group
      read, not just the first -- read-only geometry access, safe from
      the producer thread) plus st_stem_mbox_init()/st_stem_mbox_
-     producer_next_fill()/st_stem_mbox_publish_ready() (the atomic
+     producer_next_run()/st_stem_mbox_publish_ready() (the atomic
      ring's producer-side API) -- proving both the boot-time first
      sector AND the continuous per-pass prefetch that streams the rest
      of the song go through the real state machine and the real atomic
@@ -103,9 +103,9 @@ find_call_sites() in stemtape_player_safety_gate.py already does):
 
   6. Beat/chase from real STIX timing: streamer_thread()'s boot code
      genuinely reads lib.active.bpm_q8/downbeat_frame (the selected STIX
-     record's own authoritative song-level timing) AND cross-checks them
-     against hdr.bpm_q8/hdr.downbeat_frame (the first sector's own
-     header) before calling the real st_beat_timing_init()
+     record's own authoritative song-level timing -- and under v1.2 the
+     ONLY source of it, since a group header carries identity rather
+     than tempo) before calling the real st_beat_timing_init()
      (REQUIRED_CALLS); audio_block_epilogue() genuinely calls
      atomic_set(&g_stem_song_frame_pub, ...) once per block
      (REQUIRED_SUBSTRINGS -- an atomic-write call whose OWN argument is
@@ -203,15 +203,30 @@ REQUIRED_CALLS = {
         "st_stem_mbox_set_requested_sector",
     ],
     "stem_render_run": [
-        "st11_sector_decode_frame",
+        # v1.2: the decode is now four per-stem GROUPS rather than one
+        # interleaved sector, which is the change that makes a stem's read
+        # address independent of the others'. The _shared form is the one the
+        # hot loop uses while all four heads are together; per-track reverse
+        # is what starts passing different indices, through the array form.
+        "st_pl_decode_frame_shared",
         "st_stem_mix_frame_prepared",
     ],
     "streamer_thread": [
-        "st11_sector_read_header",
         "st_stream_init",
-        "st_stream_validate_sector",
+        # v1.2 REPLACES THE SECTOR-HEADER CHECK WITH A GROUP-HEADER ONE, and
+        # it is a stronger check, not a weaker one. A v1.1 STSC header could
+        # say "I am sector 7"; it could not say which stem it was, because a
+        # sector held all four. A group header names the stem AND the span, so
+        # stem_read_groups() rejects a read that landed in another stem's
+        # region -- the failure mode song-planar newly makes possible, caught
+        # by construction rather than heard.
+        "stem_read_groups",
+        "stem_prime_group0",
         "st_stem_mbox_init",
-        "st_stem_mbox_producer_next_fill",
+        # The BATCHED producer, not the single fill: four per-stem rings cost
+        # four fills per span, and requiring the run form is what stops a
+        # regression to one-group-per-read (5147 us against a 7083 us span).
+        "st_stem_mbox_producer_next_run",
         "st_stem_mbox_publish_ready",
         "st_beat_timing_init",
     ],
@@ -434,8 +449,16 @@ REQUIRED_SUBSTRINGS = {
     "streamer_thread": [
         "lib.active.bpm_q8",
         "lib.active.downbeat_frame",
-        "hdr.bpm_q8",
-        "hdr.downbeat_frame",
+        # NO hdr.bpm_q8 / hdr.downbeat_frame ANY MORE, and nothing weakened.
+        # v1.1's 32-byte STSC header repeated the tempo fields and this gate
+        # required the boot code to cross-check them -- but the check only ever
+        # LOGGED a disagreement: the STIX record always won and the sector copy
+        # was never acted on. A v1.2 group header is eight bytes of identity
+        # (magic, stem, span) and carries no timing at all, so the single
+        # authority is now also the only one. What replaced the check is
+        # stronger and lives in REQUIRED_CALLS: stem_read_groups() validates
+        # every group against the stem AND span it was asked for, which a
+        # sector header could not do because a sector held all four stems.
     ],
 }
 

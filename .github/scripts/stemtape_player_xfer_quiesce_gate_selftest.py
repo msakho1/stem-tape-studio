@@ -47,7 +47,8 @@ CLEAR = ("\t\t\t\tatomic_set(&g_xfer_audio_quiesced, 0);\n"
          "\t\t\t\tatomic_set(&g_xfer_stream_quiesced, 0);\n")
 DROP = "\t\t\t\tstem_loop_pins_drop();\n"
 ENTER = "\t\t\t\tg_xfer_mode = 1;\n"
-SCRATCH = "\treturn g_stem_loop_pin_bufs[ST_XFER_SCRATCH_PIN];\n"
+SCRATCH = ("\treturn &g_stem_loop_pin_bufs[ST_XFER_SCRATCH_STEM]"
+           "[ST_XFER_SCRATCH_GROUP][0];\n")
 HELPER = ("\treturn atomic_get(&g_xfer_audio_quiesced) != 0 &&\n"
           "\t       atomic_get(&g_xfer_stream_quiesced) != 0;\n")
 ESCAPE = ("\t\tif (k_uptime_get() - last > 1000) {\n"
@@ -113,7 +114,7 @@ MUTANTS = [
          "static uint8_t g_stem_loop_pin_bufs", 1)),
 
     ("N8  the scratch aliases the READ-AHEAD RING instead of a pin",
-     lambda s: sub(s, SCRATCH, "\treturn g_stem_sector_bufs[0];\n")),
+     lambda s: sub(s, SCRATCH, "\treturn &g_stem_group_bufs[0][0][0];\n")),
 
     ("N9  the pins are NOT dropped before transfer mode is entered",
      lambda s: sub(s, DROP, "")),

@@ -41,7 +41,7 @@
  *     None of the three, together or alone, claims physical playback was
  *     heard.
  *
- * SIMULATED BOOT A/B SELECTION: test_boot_selects_active_generation()
+ * SIMULATED BOOT, v1.2 REFUSAL: test_boot_refuses_a_v11_library()
  * below reuses the SAME real, frozen, SHA-256-verified handoff/v1.1/
  * binaries/index-a-valid.bin / index-b-valid.bin fixtures test_stem_
  * v11.c's own Phase-1 tests already established select generation 3
@@ -79,6 +79,7 @@
 #include "st_checksum32.h"
 #include "st_sector_v11.h"
 #include "st_stem_bufmbox.h"
+#include "st_planar.h"
 #include "st_stem_mix.h"
 #include "st_stem_stream.h"
 #include "st_stix.h"
@@ -174,7 +175,26 @@ static uint32_t hash_stereo_sample(uint32_t h, int16_t l, int16_t r)
 #define FIXTURE_SONG_B_START 144u
 #define FIXTURE_SONG_B_BLOCKS 128u
 
-static void test_boot_selects_active_generation(void)
+/*
+ * THE v1.1 INDEX FIXTURES NOW PROVE THE OPPOSITE THING, AND THAT IS THE POINT.
+ *
+ * These two recorded blocks used to prove the boot selector picks the greater
+ * generation. They still contain exactly what they always did -- generation 3,
+ * slot A, title "HANDOFF TWO" -- but they declare formatMinor = 1, and this
+ * firmware is v1.2. So the selector must REFUSE them.
+ *
+ * That is the more important property of the two, and it is the one the
+ * format change newly makes load-bearing: a v1.1 sector read as four planar
+ * groups is not noise, it is one stem's timeline played as all four stems.
+ * Silently accepting an old song would sound like a broken mix rather than
+ * like an error, so the refusal is what stands between a stale upload and a
+ * confusing bug report.
+ *
+ * The selector itself is not left unproven. tests/test_stem_v11.c exercises
+ * the whole generation/slot/rollback contract against these same fixtures,
+ * compiled at -DST11_FORMAT_MINOR=1u -- the version they are a record OF.
+ */
+static void test_boot_refuses_a_v11_library(void)
 {
 	size_t len_a, len_b;
 	uint8_t *block_a = read_fixture("handoff/v1.1/binaries/index-a-valid.bin", &len_a);
@@ -182,21 +202,21 @@ static void test_boot_selects_active_generation(void)
 
 	CHECK(len_a == ST11_PHYSICAL_BLOCK_BYTES && len_b == ST11_PHYSICAL_BLOCK_BYTES,
 	      "both real index fixtures are exactly one physical block (512 bytes)");
+	CHECK(ST11_FORMAT_MINOR == 2u,
+	      "this build really is v1.2 -- otherwise the refusal below proves nothing");
 
 	st_stix_library_state_t lib;
 
 	st_stix_read_library(block_a, block_b, FIXTURE_SONG_A_START, FIXTURE_SONG_A_BLOCKS, FIXTURE_SONG_B_START,
 			      FIXTURE_SONG_B_BLOCKS, &lib);
 
-	CHECK(lib.status == ST_STIX_LIB_OK, "simulated boot: the real selector resolves a valid library");
-	CHECK(lib.generation == 3ull, "simulated boot: selects the strictly-greater real generation (3)");
-	CHECK(lib.active_index_slot == ST11_SLOT_A, "simulated boot: selects index slot A, matching the real "
-						     "generation-3 record's own slot_identity");
-	CHECK((lib.active.flags & ST11_IX_FLAG_SONG_PRESENT) != 0u,
-	      "simulated boot: the selected real record declares a song present");
-	CHECK(memcmp(lib.active.title, "HANDOFF TWO", 11) == 0,
-	      "simulated boot: the selected real record's own title matches the already-established fact "
-	      "(index-a-valid.bin's real, declared title)");
+	CHECK(lib.status != ST_STIX_LIB_OK,
+	      "a REAL, byte-exact, otherwise-valid v1.1 library is REFUSED by v1.2 "
+	      "firmware -- generation 3, slot A, checksums all intact, and still "
+	      "rejected purely on its format version");
+	CHECK((lib.active.flags & ST11_IX_FLAG_SONG_PRESENT) == 0u,
+	      "and no song is selected from it, so nothing downstream can play "
+	      "v1.1 bytes through the planar decoder");
 
 	free(block_a);
 	free(block_b);
@@ -262,8 +282,13 @@ typedef struct {
 	walk_options_t opt;
 
 	st_stream_t stream;
-	st_stem_mbox_t mbox;
-	uint8_t bufs[ST_STEM_MBOX_SLOTS][ST11_SECTOR_BYTES];
+	/* v1.2: one ring and one mailbox PER STEM. The protocol is unchanged --
+	 * this mirrors main.c, where four instances of the same struct replaced
+	 * one, and the ring was reshaped from [slots][8192] to
+	 * [stems][slots][2048] at identical total cost. */
+	st_stem_mbox_t mbox[ST_PL_STEMS];
+	uint8_t bufs[ST_PL_STEMS][ST_STEM_MBOX_SLOTS][ST_PL_GROUP_BYTES];
+	uint32_t groups;                      /* groups per stem == v1.1 sector count */
 
 	/* Producer-local (this thread only). */
 	bool corrupted_once;
@@ -283,6 +308,50 @@ typedef struct {
 	walk_result_t result;
 } walk_ctx_t;
 
+/*
+ * THE v1.2 IMAGE, DERIVED FROM THE RECORDED v1.1 SONG.
+ *
+ * Not a second fixture. handoff/v1.1/binaries/song-sectors-four-stem.bin stays
+ * the one recorded artefact, and this converts it with the SAME
+ * st_pl_from_v11_sector() the companion will use -- so the audio this gate
+ * plays is provably the audio the companion recorded, moved rather than
+ * re-encoded.
+ *
+ * That is what makes the output hash meaningful. It is compared against the
+ * value the v1.1 read path produced, so an identical hash says the format
+ * change altered the arrangement of bytes on storage and nothing a listener
+ * could hear. A derived fixture is the only way to make that claim before the
+ * companion can emit v1.2 at all.
+ */
+static uint8_t *planar_image_from_v11(const uint8_t *v11, size_t len, uint32_t *out_groups)
+{
+	const uint32_t groups = (uint32_t)(len / ST11_SECTOR_BYTES);
+	uint8_t *img = calloc((size_t)groups * ST_PL_STEMS, ST_PL_GROUP_BYTES);
+	uint32_t g;
+
+	if (!img) {
+		fprintf(stderr, "FATAL: out of memory building the v1.2 image\n");
+		exit(2);
+	}
+	for (g = 0; g < groups; g++) {
+		uint8_t four[ST_PL_STEMS][ST_PL_GROUP_BYTES];
+		uint32_t k;
+
+		if (!st_pl_from_v11_sector(v11 + (size_t)g * ST11_SECTOR_BYTES, four)) {
+			fprintf(stderr, "FATAL: the recorded v1.1 sector %u would not convert\n",
+				(unsigned)g);
+			exit(2);
+		}
+		for (k = 0; k < ST_PL_STEMS; k++) {
+			memcpy(img + (size_t)st_pl_group_block(0u, groups, k, g) *
+					ST11_PHYSICAL_BLOCK_BYTES,
+			       four[k], ST_PL_GROUP_BYTES);
+		}
+	}
+	*out_groups = groups;
+	return img;
+}
+
 static void *walk_producer_main(void *arg)
 {
 	walk_ctx_t *ctx = (walk_ctx_t *)arg;
@@ -300,12 +369,7 @@ static void *walk_producer_main(void *arg)
 	 * data race this bookkeeping avoids by construction: fetch/
 	 * validate/publish each sector index exactly ONCE. */
 	for (;;) {
-		uint32_t needed;
-		uint32_t target_slot;
-		uint8_t *target_buf;
-		size_t src_off;
-
-		if (st_stem_mbox_producer_requested_sector(&ctx->mbox) >= ctx->stream.sector_count) {
+		if (st_stem_mbox_producer_requested_sector(&ctx->mbox[0]) >= ctx->stream.sector_count) {
 			/* Consumer signals completion by publishing a sentinel
 			 * out-of-range "requested sector" once it is done --
 			 * see walk_consumer_main()'s own final publish. */
@@ -315,60 +379,94 @@ static void *walk_producer_main(void *arg)
 		/* The ring's own slot contents ARE the record of what has
 		 * already been fetched, so there is no producer-local
 		 * "published_sector" bookkeeping any more (exactly like
-		 * main.c's own prefetch step). next_fill() returning false
-		 * means the read-ahead window is full. */
-		if (!st_stem_mbox_producer_next_fill(&ctx->mbox, ctx->stream.sector_count,
-						      &needed, &target_slot)) {
-			sched_yield();
+		 * main.c's own prefetch step). next_run() returning false for
+		 * every stem means every read-ahead window is full.
+		 *
+		 * v1.2: BATCHED, and per stem. Four per-stem rings cost four
+		 * fills per span, so runs of consecutive groups are fetched in
+		 * one go -- the same st_stem_mbox_producer_next_run() the real
+		 * streamer calls, with the same ST_PL_REFILL_GROUPS. */
+		{
+			bool any = false;
+			uint32_t stem;
+
+			for (stem = 0; stem < ST_PL_STEMS; stem++) {
+				uint32_t first, slot, n, i;
+				size_t src_off;
+
+				if (!st_stem_mbox_producer_next_run(&ctx->mbox[stem],
+								     ctx->stream.sector_count,
+								     ST_PL_REFILL_GROUPS,
+								     &first, &slot, &n)) {
+					continue;
+				}
+				any = true;
+
+				/* Withhold the stalled span until the consumer
+				 * has actually starved for as long as this walk
+				 * asked for.
+				 *
+				 * RANGE, NOT EQUALITY. A batch of R groups
+				 * starts on a multiple of R, so a span in the
+				 * middle of a run is never a run's FIRST group
+				 * -- testing `first == target` silently never
+				 * fires for odd targets, which is exactly how
+				 * the corruption case below failed to inject
+				 * anything while still reporting a pass. */
+				if (ctx->opt.stall_at_sector >= 0 &&
+				    (uint32_t)ctx->opt.stall_at_sector >= first &&
+				    (uint32_t)ctx->opt.stall_at_sector < first + n &&
+				    (uint32_t)st_atomic_get(&ctx->underrun_seen) <
+					    ctx->opt.stall_until_underruns) {
+					continue;
+				}
+
+				src_off = (size_t)st_pl_group_block(0u, ctx->groups, stem, first) *
+					  ST11_PHYSICAL_BLOCK_BYTES;
+				if (src_off + (size_t)n * ST_PL_GROUP_BYTES > ctx->fixture_len) {
+					return NULL; /* test-setup bug, not a real-path condition */
+				}
+				memcpy(&ctx->bufs[stem][slot][0], ctx->fixture + src_off,
+				       (size_t)n * ST_PL_GROUP_BYTES);
+
+				if (ctx->opt.corrupt_at_sector >= 0 && stem == 0u &&
+				    !ctx->corrupted_once &&
+				    (uint32_t)ctx->opt.corrupt_at_sector >= first &&
+				    (uint32_t)ctx->opt.corrupt_at_sector < first + n) {
+					/* Flip one real, already-valid field -- the
+					 * group index this group claims to be, which
+					 * is what st_pl_validate() checks and what a
+					 * misaddressed read would get wrong.
+					 * Addressed by OFFSET WITHIN THE RUN, so the
+					 * target span is hit wherever in the batch it
+					 * happens to land. */
+					const uint32_t off =
+						(uint32_t)ctx->opt.corrupt_at_sector - first;
+
+					ctx->bufs[stem][slot + off][ST_PL_OFF_GROUP] ^= 0xffu;
+					ctx->corrupted_once = true;
+				}
+
+				for (i = 0; i < n; i++) {
+					if (st_pl_validate(ctx->bufs[stem][slot + i],
+							    stem, first + i)) {
+						st_stem_mbox_publish_ready(
+							&ctx->mbox[stem], first + i,
+							st_stem_mbox_slot_of(first + i));
+					} else {
+						st_atomic_set(&ctx->corrupt_count,
+							       st_atomic_get(&ctx->corrupt_count) + 1);
+						/* Real production behaviour: do not
+						 * publish; retried next pass. */
+					}
+				}
+			}
+			if (!any) {
+				sched_yield();
+			}
 			continue;
 		}
 
-		/* Withhold the stalled sector until the consumer has actually
-		 * starved for as long as this walk asked for -- measured in
-		 * the consumer's own underrun ticks, never in iterations of
-		 * this loop (see walk_options_t::stall_until_underruns for
-		 * why the iteration form was inherently racy). */
-		if ((int32_t)needed == ctx->opt.stall_at_sector &&
-		    (uint32_t)st_atomic_get(&ctx->underrun_seen) < ctx->opt.stall_until_underruns) {
-			sched_yield();
-			continue;
-		}
-
-		target_buf = ctx->bufs[target_slot];
-		src_off = (size_t)needed * ST11_SECTOR_BYTES;
-
-		if (src_off + ST11_SECTOR_BYTES > ctx->fixture_len) {
-			return NULL; /* would be a test-setup bug, not a real-path condition */
-		}
-		memcpy(target_buf, ctx->fixture + src_off, ST11_SECTOR_BYTES);
-
-		if ((int32_t)needed == ctx->opt.corrupt_at_sector && !ctx->corrupted_once) {
-			/* Flip one real, already-valid field (sector_index) --
-			 * the same "corrupt exactly one verified field"
-			 * technique test_stem_v11.c's own corruption tests and
-			 * test_stem_stream.c's own header-corruption test
-			 * already established. */
-			target_buf[ST11_SECTOR_OFF_SECTOR_INDEX] ^= 0xffu;
-			ctx->corrupted_once = true;
-		}
-
-		st11_sector_header_t hdr;
-		bool ok = st11_sector_read_header(target_buf, &hdr) &&
-			  st_stream_validate_sector(&ctx->stream, needed, &hdr);
-
-		if (ok) {
-			st_stem_mbox_publish_ready(&ctx->mbox, needed, target_slot);
-		} else {
-			/* Single-writer counter (only this thread ever writes
-			 * it) -- get+set is race-free for the write side; it
-			 * is `st_atomic32_t` so a cross-thread READ (this
-			 * file's own main(), after both threads join) never
-			 * observes a torn value either. */
-			st_atomic_set(&ctx->corrupt_count, st_atomic_get(&ctx->corrupt_count) + 1);
-			/* Real production behavior: do not publish; retried
-			 * next pass (see main.c's own prefetch step comment). */
-		}
-		sched_yield();
 	}
 }
 
@@ -382,7 +480,7 @@ static void *walk_consumer_main(void *arg)
 	unity_channels(channels);
 	st_stream_play(&ctx->stream);
 
-	uint32_t local_active_buf = 0;
+	uint32_t local_active_buf[ST_PL_STEMS] = { 0, 0, 0, 0 };
 	uint32_t progressed = 0;
 	uint32_t iterations = 0;
 
@@ -397,23 +495,40 @@ static void *walk_consumer_main(void *arg)
 		if (ctx->stream.ready_sector != needed) {
 			uint32_t acquired;
 
-			if (st_stem_mbox_try_acquire(&ctx->mbox, needed, &acquired)) {
-				local_active_buf = acquired;
+			uint32_t hits = 0u;
+
+			/* ALL FOUR OR NONE -- a span is playable only when every
+			 * stem's group for it is resident. Same rule as main.c. */
+			for (uint32_t ak = 0; ak < ST_PL_STEMS; ak++) {
+				if (!st_stem_mbox_try_acquire(&ctx->mbox[ak], needed, &acquired)) {
+					break;
+				}
+				local_active_buf[ak] = acquired;
+				hits++;
+			}
+			if (hits == ST_PL_STEMS) {
 				st_stream_sector_ready(&ctx->stream, needed);
 			} else {
 				/* Reading nothing: say so, so the producer may
 				 * use every slot (see st_stem_mbox_release()). */
-				st_stem_mbox_release(&ctx->mbox);
+				for (uint32_t rk = 0; rk < ST_PL_STEMS; rk++) {
+					st_stem_mbox_release(&ctx->mbox[rk]);
+				}
 			}
 		}
-		st_stem_mbox_set_requested_sector(&ctx->mbox, needed);
+		for (uint32_t qk = 0; qk < ST_PL_STEMS; qk++) {
+			st_stem_mbox_set_requested_sector(&ctx->mbox[qk], needed);
+		}
 
 		if (ctx->stream.ready_sector == needed) {
-			const uint8_t *buf = ctx->bufs[local_active_buf];
-			uint32_t frame_in_sector = ctx->stream.song_frame - needed * ST11_FRAMES_PER_SECTOR;
+			const uint8_t *grp[ST_PL_STEMS];
+			uint32_t frame_in_group = ctx->stream.song_frame - needed * ST_PL_FRAMES_PER_GROUP;
 			st11_audio_frame_t frame;
 
-			st11_sector_decode_frame(buf, frame_in_sector, &frame);
+			for (uint32_t dk = 0; dk < ST_PL_STEMS; dk++) {
+				grp[dk] = ctx->bufs[dk][local_active_buf[dk]];
+			}
+			st_pl_decode_frame_shared(grp, frame_in_group, &frame);
 
 			int16_t out_l, out_r;
 
@@ -466,7 +581,11 @@ static void *walk_consumer_main(void *arg)
 	/* Signal completion: publish an out-of-range "requested sector" so
 	 * the producer's own loop (which only ever checks requested_sector)
 	 * exits cleanly. */
-	st_stem_mbox_set_requested_sector(&ctx->mbox, ctx->stream.sector_count);
+	/* Sentinel completion signal to the producer -- published on every
+	 * stem's mailbox, since the producer polls stem 0's. */
+	for (uint32_t ek = 0; ek < ST_PL_STEMS; ek++) {
+		st_stem_mbox_set_requested_sector(&ctx->mbox[ek], ctx->stream.sector_count);
+	}
 	return NULL;
 }
 
@@ -476,8 +595,12 @@ static void run_production_walk(const uint8_t *fixture, size_t fixture_len, cons
 	walk_ctx_t ctx;
 
 	memset(&ctx, 0, sizeof(ctx));
-	ctx.fixture = fixture;
-	ctx.fixture_len = fixture_len;
+	/* THE WALK RUNS ON v1.2, DERIVED FROM THE v1.1 RECORDING. Callers still
+	 * hand over the one recorded fixture; the conversion happens here, once,
+	 * so every case below exercises the real planar read path without a
+	 * second recorded artefact existing. */
+	ctx.fixture = planar_image_from_v11(fixture, fixture_len, &ctx.groups);
+	ctx.fixture_len = (size_t)ctx.groups * ST_PL_STEMS * ST_PL_GROUP_BYTES;
 	ctx.opt = *opt;
 	st_atomic_set(&ctx.corrupt_count, 0); /* explicit atomic init, not relied on the memset above */
 	st_atomic_set(&ctx.underrun_seen, 0); /* likewise */
@@ -499,8 +622,16 @@ static void run_production_walk(const uint8_t *fixture, size_t fixture_len, cons
 	/* Boot-time synchronous seed, exactly like streamer_thread()'s own
 	 * boot block: sector 0 resident in buffer 0 before either thread's
 	 * steady-state loop starts. */
-	memcpy(ctx.bufs[0], fixture, ST11_SECTOR_BYTES);
-	st_stem_mbox_init(&ctx.mbox, 0u);
+	/* Boot-time synchronous seed, exactly like streamer_thread()'s own boot
+	 * block: group 0 of EVERY stem resident in slot 0 of its own ring
+	 * before either thread's steady-state loop starts. */
+	for (uint32_t bk = 0; bk < ST_PL_STEMS; bk++) {
+		memcpy(ctx.bufs[bk][0],
+		       ctx.fixture + (size_t)st_pl_group_block(0u, ctx.groups, bk, 0u) *
+				      ST11_PHYSICAL_BLOCK_BYTES,
+		       ST_PL_GROUP_BYTES);
+		st_stem_mbox_init(&ctx.mbox[bk], 0u);
+	}
 
 	pthread_t producer, consumer;
 
@@ -511,6 +642,7 @@ static void run_production_walk(const uint8_t *fixture, size_t fixture_len, cons
 
 	ctx.result.corrupt_events = (uint32_t)st_atomic_get(&ctx.corrupt_count);
 	*out = ctx.result;
+	free((void *)(uintptr_t)ctx.fixture);
 }
 
 /* ========================================================================
@@ -740,7 +872,7 @@ static void test_i2s_caller_chain_is_proven_at_source_level(void)
 
 int main(void)
 {
-	RUN(test_boot_selects_active_generation);
+	RUN(test_boot_refuses_a_v11_library);
 	RUN(test_full_song_production_walk);
 	RUN(test_loop_reproduces_identical_hash);
 	RUN(test_corrupt_sector_recovers);

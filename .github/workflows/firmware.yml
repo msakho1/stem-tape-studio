@@ -968,6 +968,7 @@ jobs:
             firmware/stemtape_player/src/st_stix.c \
             firmware/stemtape_player/src/st_stcp.c \
             firmware/stemtape_player/src/st_ab_session.c \
+            -DST11_FORMAT_MINOR=1u \
             firmware/stemtape_player/tests/test_stem_v11.c \
             -o audit/test_stem_v11
           ./audit/test_stem_v11 | tee audit/stem-v11-fixture-selftest.txt
@@ -1121,6 +1122,7 @@ jobs:
             firmware/stemtape_player/src/st_stix.c \
             firmware/stemtape_player/src/st_stcp.c \
             firmware/stemtape_player/src/st_ab_session.c \
+            -DST11_FORMAT_MINOR=1u \
             firmware/stemtape_player/tests/test_stem_v11_transcripts.c \
             -o audit/test_stem_v11_transcripts
           ./audit/test_stem_v11_transcripts audit/transcript-replay-results.json \
@@ -2204,7 +2206,7 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Stem Tape v1.2 SONG-PLANAR addressing (pure; no production wiring yet)
+      - name: Stem Tape v1.2 SONG-PLANAR addressing -- pure module AND the wired read path
         # THE FORMAT'S WHOLE JUSTIFICATION, as an executable claim. v1.1 weaves
         # all four stems into every frame, so a stem playing from a different
         # point costs a whole extra sector -- and WHICH stem it is decides how
@@ -2266,17 +2268,36 @@ jobs:
           grep -q 'still one ascending run' audit/planar-selftest.txt
           grep -q 'WRONG address is refused' audit/planar-selftest.txt
 
-          # NOT WIRED YET, and that is deliberate: this commit adds the pure
-          # addressing only. Playback still reads v1.1 sectors, so the format
-          # version must NOT have moved.
-          grep -q '#define ST11_FORMAT_MINOR   1u' \
+          # NOW WIRED, and the version moved WITH it -- the two must never
+          # disagree. A device reading v1.2 groups while announcing v1.1 would
+          # accept a v1.1 song and play one stem's timeline as all four.
+          # st_stix.c rejects an index record whose format version differs from
+          # the firmware's, and compatibility.ts requires the STCP reply to
+          # match the companion's, so old songs are refused in both directions
+          # rather than misread.
+          grep -q '#define ST11_FORMAT_MINOR   2u' \
             firmware/stemtape_player/src/st_v11_format.h || {
-            echo "  the format version moved before the read path was converted"
+            echo "  the read path is planar but the format version still says"
+            echo "  v1.1 -- a v1.1 song would be accepted and misread"
             exit 1; }
-          test "$(grep -c 'st_planar.h' firmware/stemtape_player/src/main.c)" = "0" || {
-            echo "  main.c already includes st_planar.h -- this step's claim of"
-            echo "  'no production wiring' is stale and must be rewritten"
+          M=firmware/stemtape_player/src/main.c
+          grep -q '#include "st_planar.h"' "$M" || {
+            echo "  main.c does not include st_planar.h, so the read path is"
+            echo "  not actually the planar one"; exit 1; }
+          # THE RING IS RESHAPED, NOT GROWN. This is the claim the whole ring
+          # sizing rests on, and a static assert in main.c pins it too -- both,
+          # because the assert can be deleted in the same edit that breaks it.
+          grep -q 'g_stem_group_bufs\[ST_PL_STEMS\]\[ST_STEM_MBOX_SLOTS\]\[ST_PL_GROUP_BYTES\]' "$M" || {
+            echo "  the per-stem ring is not [stems][slots][group] any more"
             exit 1; }
+          grep -q 'the per-stem ring costs exactly what the v1.1 sector ring did' "$M" || {
+            echo "  the RAM-neutrality assert is gone"; exit 1; }
+          grep -q 'R must divide G' "$M" || {
+            echo "  the R|G assert is gone -- a refill batch could straddle the"
+            echo "  ring's end and quietly become two reads"; exit 1; }
+          # AND THE OLD SECTOR RING IS REALLY GONE, not merely unreferenced.
+          test "$(grep -c 'g_stem_sector_bufs' "$M")" = "0" || {
+            echo "  the v1.1 sector ring is still present in main.c"; exit 1; }
           {
             echo '### Stem Tape v1.2 song-planar addressing'
             echo '```text'
@@ -2717,7 +2738,7 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Stem Tape v1.1 full continuous playback gate (Slice 3C)
+      - name: Stem Tape v1.2 full continuous playback gate -- same audio, planar path
         # Phase 2, Slice 3C -- the FULL continuous playback gate. Drives
         # the REAL production algorithm (st_stem_stream.h + st_stem_
         # bufmbox.h + st_sector_v11.h + st_stem_mix.h, in the exact call
@@ -2759,17 +2780,34 @@ jobs:
             firmware/stemtape_player/src/st_stem_stream.c \
             firmware/stemtape_player/src/st_stem_bufmbox.c \
             firmware/stemtape_player/src/st_stix.c \
+            firmware/stemtape_player/src/st_planar.c \
             firmware/stemtape_player/tests/test_stem_playback_gate.c \
             -o audit/test_stem_playback_gate
           ./audit/test_stem_playback_gate | tee audit/stem-playback-gate.txt
+
+          # THE STEP-3 CLAIM, AS AN ASSERTION RATHER THAN A READING. The walk
+          # now runs the PLANAR read path over a v1.2 image derived from the
+          # same recorded v1.1 song, and must produce the SAME output hash the
+          # v1.1 path produced. Identical hash = the format change moved bytes
+          # around on storage and altered nothing a listener could hear.
+          grep -q 'deterministic hash: 0xe9650dda' audit/stem-playback-gate.txt || {
+            echo "  the planar read path does not reproduce the v1.1 audio hash"
+            echo "  0xe9650dda -- the format change altered the decoded audio"
+            exit 1; }
+          # AND THE REFUSAL, which the format change newly makes load-bearing:
+          # a v1.1 sector read as four planar groups is not noise, it is one
+          # stem's timeline played as all four.
+          grep -q 'is REFUSED by v1.2 firmware' audit/stem-playback-gate.txt || {
+            echo "  a v1.1 library is not refused -- an old song could be"
+            echo "  accepted and misread through the planar decoder"; exit 1; }
           {
-            echo '### Stem Tape v1.1 full continuous playback gate (Slice 3C)'
+            echo '### Stem Tape v1.2 full continuous playback gate'
             echo '```text'
             cat audit/stem-playback-gate.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Stem Tape v1.1 full playback gate ThreadSanitizer run (supplemental evidence)
+      - name: Stem Tape v1.2 full playback gate ThreadSanitizer run (supplemental evidence)
         # Supplemental evidence ONLY, not the sole proof -- same posture
         # and same caveats as the SPSC mailbox's own TSan step above (see
         # that step's own comment): validates this slice's real two-
@@ -2788,6 +2826,7 @@ jobs:
             firmware/stemtape_player/src/st_stem_stream.c \
             firmware/stemtape_player/src/st_stem_bufmbox.c \
             firmware/stemtape_player/src/st_stix.c \
+            firmware/stemtape_player/src/st_planar.c \
             firmware/stemtape_player/tests/test_stem_playback_gate.c \
             -o audit/test_stem_playback_gate_tsan
           ./audit/test_stem_playback_gate_tsan | tee audit/stem-playback-gate-tsan.txt
