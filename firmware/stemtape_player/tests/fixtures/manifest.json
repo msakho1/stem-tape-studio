@@ -1,0 +1,63 @@
+{
+  "format": {
+    "codec": "SP1_CODEC_PCM (main.c SAMP_PER_BLK default)",
+    "sample_format": "mono int16 little-endian, 48000 Hz",
+    "emmc_block_size": 512,
+    "samples_per_block": 256,
+    "frame_count_blocks": 8,
+    "duration_ms": 42.667,
+    "ntrk": 4
+  },
+  "slot": 0,
+  "bpm_q8": 24576,
+  "downbeat_frame": 0,
+  "generation": {
+    "method": "closed-form per-stem waveform, fixed seed, no external audio -- see generate_fixture.py:gen_stem()",
+    "stems": [
+      "stem0: 220 Hz sine",
+      "stem1: 330 Hz sine",
+      "stem2: 110 Hz sine",
+      "stem3: xorshift32 PRNG noise (seed fixed in source)"
+    ]
+  },
+  "stems": [
+    {
+      "index": 0,
+      "file": "stem0.bin",
+      "bytes": 4096,
+      "sha256": "5a547d4c0bcb5acd33d5b64cfa261ca80877a8ccf8e703f5fe9232bf3f39ae92",
+      "crc32_ieee_hex": "0x09CF6B00"
+    },
+    {
+      "index": 1,
+      "file": "stem1.bin",
+      "bytes": 4096,
+      "sha256": "2f039346f018efad3fc045615d18408225508f57a363886c773256f94e884f89",
+      "crc32_ieee_hex": "0xB029AC6D"
+    },
+    {
+      "index": 2,
+      "file": "stem2.bin",
+      "bytes": 4096,
+      "sha256": "b2215f021de9dd9175af87ae2e934949c7efb4079738395adf408319675a9ade",
+      "crc32_ieee_hex": "0x2CD21102"
+    },
+    {
+      "index": 3,
+      "file": "stem3.bin",
+      "bytes": 4096,
+      "sha256": "8f61a0703873ef6c2eed4c79d295c8b263442b0f4bb3bd15927c83150b2260ad",
+      "crc32_ieee_hex": "0x90EC77F9"
+    }
+  ],
+  "corrupt_variant": {
+    "file": "stem0_corrupt.bin",
+    "of_stem": 0,
+    "change": "single bit flip (byte 0, bit 0) in the raw PCM data",
+    "bytes": 4096,
+    "sha256": "e778cb3e2b464c0ecaf3a80cd1621c64ab6cb04c45b18425e5ef9780470df08c",
+    "crc32_ieee_hex": "0x5317C22C"
+  },
+  "z_verb_payload_hex": "0008000000080000000800000008000000006bcf096dac29b00211d22cf977ec90006000000000",
+  "z_verb_payload_bytes": 39
+}

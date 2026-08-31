@@ -1,0 +1,116 @@
+{
+  "_comment": [
+    "MEASURED SP-1 Volume resistor-ladder calibration (SAADC AIN1, 12-bit).",
+    "Captured on physical hardware with firmware build st20-VOLCAL, transport",
+    "STOPPED, via the ST_VOL_CAL capture in main.c's control loop. This file is",
+    "the AUTHORITATIVE provenance for decode_vol()'s band edges in src/main.c.",
+    "",
+    "This rail is the companion to docs/ladder-measured.json, which records AIN0",
+    "(Track + PLAY). AIN0 was captured in the st16-cal build long ago; AIN1 had",
+    "NEVER been measured, and every band edge in decode_vol() was inherited",
+    "guesswork. That is what this capture ends -- for the three buttons it",
+    "actually exercised.",
+    "",
+    "'lo'/'hi' are the extreme SETTLED values observed for that state: a reading",
+    "held within +/-8 counts for 6 consecutive 8 ms control passes, so an edge",
+    "sample caught mid-press cannot appear here. 'centre' is the midpoint of",
+    "that observed span.",
+    "",
+    "WHAT THIS CAPTURE PROVES. Volume+ (1821..1830) and the two-button chord",
+    "(2019..2029) are cleanly separated by 189 counts of empty rail. Before this",
+    "measurement decode_vol()'s top band was 'anything >= 1500', so BOTH states",
+    "returned VOL_UP and the FX entry chord was undecodable. That was the single",
+    "blocker on FX mode, and these numbers remove it.",
+    "",
+    "The chord reading HIGHER than either single press confirms the parallel-",
+    "resistor model docs/ladder-measured.json established for AIN0, on this rail",
+    "and on real hardware.",
+    "",
+    "IMPORTANT LIMITATION, stated here rather than hidden: FWD and RWD share",
+    "this rail and were NEVER PRESSED during the capture. decode_vol()'s two",
+    "tempo bands (~404 and ~1220) are therefore still the inherited, unverified",
+    "values they always were. They do not conflict with anything measured here",
+    "-- no observed plateau falls inside either -- but they are not proven, and",
+    "this file does not pretend otherwise. Measuring them needs another",
+    "st20-VOLCAL session with those two buttons pressed.",
+    "",
+    "Second limitation, same one AIN0 carries: captured with the transport",
+    "STOPPED. Band centres are resistor ratios and do not move with playback;",
+    "the JITTER figure is a stopped-state figure."
+  ],
+  "capture": {
+    "build_tag": "st20-VOLCAL",
+    "adc_bits": 12,
+    "transport": "stopped",
+    "settle_rule": "raw held within +/-8 counts for 6 consecutive 8 ms passes",
+    "captured_utc": "2026-08-30"
+  },
+  "states": [
+    {
+      "name": "idle",
+      "buttons": [],
+      "lo": 1,
+      "hi": 10,
+      "centre": 5,
+      "decodes_as": "VOL_NONE"
+    },
+    {
+      "name": "volume_minus",
+      "buttons": ["VOL_MINUS"],
+      "lo": 732,
+      "hi": 742,
+      "centre": 737,
+      "decodes_as": "VOL_DOWN"
+    },
+    {
+      "name": "volume_plus",
+      "buttons": ["VOL_PLUS"],
+      "lo": 1821,
+      "hi": 1830,
+      "centre": 1825,
+      "decodes_as": "VOL_UP"
+    },
+    {
+      "name": "volume_chord",
+      "buttons": ["VOL_MINUS", "VOL_PLUS"],
+      "lo": 2019,
+      "hi": 2029,
+      "centre": 2024,
+      "decodes_as": "VOL_BOTH",
+      "_comment": "The FX overlay entry chord. FUNCTION held first selects GLOBAL scope."
+    }
+  ],
+  "unmeasured_states": [
+    {
+      "name": "tempo_down",
+      "buttons": ["RWD"],
+      "assumed_centre": 404,
+      "evidence": "NOT MEASURED -- inherited value, never pressed in the st20-VOLCAL capture"
+    },
+    {
+      "name": "tempo_up",
+      "buttons": ["FWD"],
+      "assumed_centre": 1220,
+      "evidence": "NOT MEASURED -- inherited value, never pressed in the st20-VOLCAL capture"
+    }
+  ],
+  "band_edges": {
+    "_comment": [
+      "The edges decode_vol() actually uses, and where each came from.",
+      "ST_VOL_CHORD_MIN is the one edge this capture placed: the MIDPOINT of the",
+      "measured 1830..2019 gap, which sits 95 counts clear of both neighbours.",
+      "Symmetric by construction, so noise in either direction has equal room.",
+      "Not a centre-plus-tolerance band like st_ladder.c builds for AIN0: this is",
+      "the top of the rail, nothing exists above the chord to collide with, so",
+      "one threshold is the entire decision."
+    ],
+    "VOL_NONE_max": 200,
+    "VOL_TEMPO_DOWN_max": 560,
+    "VOL_DOWN_max": 950,
+    "VOL_TEMPO_UP_max": 1500,
+    "ST_VOL_CHORD_MIN": 1925,
+    "ST_VOL_CHORD_RAW": 2024,
+    "margin_below_chord_min": 95,
+    "margin_above_volume_plus_max": 95
+  }
+}

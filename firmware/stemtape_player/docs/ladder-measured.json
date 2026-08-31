@@ -1,0 +1,63 @@
+{
+  "_comment": [
+    "MEASURED SP-1 Track/PLAY resistor-ladder calibration (SAADC AIN0, 12-bit).",
+    "Captured on physical hardware with firmware build st16-cal, transport STOPPED,",
+    "via cal_service()'s rate-limited CDC capture. This file is the AUTHORITATIVE",
+    "provenance for src/st_ladder.c's band table -- the table is generated from",
+    "these numbers by the documented rule below and is checked against this file",
+    "by tests/test_ladder.c, so a hand-edited band cannot silently diverge.",
+    "",
+    "'centre' is the modal settled value. 'lo'/'hi' are the extreme RAW values",
+    "observed while holding that combination. Rows with lo == hi == centre were",
+    "held long enough to settle but produced no jitter in the capture window.",
+    "",
+    "IMPORTANT LIMITATION, stated here rather than hidden: these were captured",
+    "while the transport was STOPPED. Band CENTRES are resistor ratios and do not",
+    "move with playback, but the JITTER figure is a stopped-state figure. The",
+    "production decoder is therefore built to fail closed (an out-of-band reading",
+    "HOLDS the last mask, it never invents one) and never to latch off."
+  ],
+  "capture": {
+    "build_tag": "st16-cal",
+    "adc_bits": 12,
+    "oversample": 2,
+    "transport": "stopped",
+    "tempo_line": "V11 lib: TEMPO OK bpm_q8=23990 (93.71 BPM) sample_rate=48000 downbeat=16320 frames_per_beat=30733"
+  },
+  "model_refit": {
+    "_comment": "V = F / (1 + 1/sum(1/x_k)); x_k fitted to the four measured singles.",
+    "full_scale_F": 3636,
+    "rms_error_counts": 3.7,
+    "chords_checked": 10
+  },
+  "band_rule": {
+    "_comment": "half_width = min(25, floor(0.40 * nearest neighbour gap)). Everything outside a band is guard zone and HOLDS.",
+    "max_half_width": 25,
+    "gap_fraction_num": 40,
+    "gap_fraction_den": 100
+  },
+  "idle_max": 110,
+  "states": [
+    { "mask": 0,  "name": "idle",     "centre": 0,    "lo": 0,    "hi": 0    },
+    { "mask": 1,  "name": "T1",       "centre": 205,  "lo": 199,  "hi": 211  },
+    { "mask": 2,  "name": "T2",       "centre": 400,  "lo": 396,  "hi": 405  },
+    { "mask": 3,  "name": "T1+T2",    "centre": 570,  "lo": 565,  "hi": 574  },
+    { "mask": 4,  "name": "T3",       "centre": 727,  "lo": 722,  "hi": 733  },
+    { "mask": 5,  "name": "T1+T3",    "centre": 868,  "lo": 866,  "hi": 871  },
+    { "mask": 6,  "name": "T2+T3",    "centre": 993,  "lo": 989,  "hi": 998  },
+    { "mask": 7,  "name": "T1+T2+T3", "centre": 1104, "lo": 1102, "hi": 1107 },
+    { "mask": 8,  "name": "T4",       "centre": 1213, "lo": 1209, "hi": 1216 },
+    { "mask": 9,  "name": "T1+T4",    "centre": 1309, "lo": 1307, "hi": 1310 },
+    { "mask": 10, "name": "T2+T4",    "centre": 1396, "lo": 1396, "hi": 1396 },
+    { "mask": 11, "name": "T1+T2+T4", "centre": 1480, "lo": 1480, "hi": 1480 },
+    { "mask": 12, "name": "T3+T4",    "centre": 1559, "lo": 1559, "hi": 1559 },
+    { "mask": 13, "name": "T1+T3+T4", "centre": 1628, "lo": 1628, "hi": 1628 },
+    { "mask": 14, "name": "T2+T3+T4", "centre": 1695, "lo": 1693, "hi": 1698 },
+    { "mask": 15, "name": "T1+T2+T3+T4", "centre": 1755, "lo": 1749, "hi": 1761 }
+  ],
+  "play": { "name": "PLAY", "centre": 1813, "lo": 1808, "hi": 1819 },
+  "superseded_claims": [
+    "st15's st_track_chord.h claimed every chord containing both T3 and T4 was undecodable. MEASUREMENT DISPROVES THIS: T3+T4=1559, T1+T3+T4=1628, T2+T3+T4=1695, all four=1755, PLAY=1813 -- 58 counts of clearance at the tightest point. The claim came from a model anchored on 1335 (the midpoint of the wide 1280..1390 DFU tolerance band) instead of the true T1+T4 centre of 1309.",
+    "st15's ST_CHORD_PLAY_FLOOR of 1600 rejected three real, decodable chords."
+  ]
+}
