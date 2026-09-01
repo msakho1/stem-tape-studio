@@ -366,7 +366,9 @@ export function evaluate(caps: StemTapeCapabilities | null, demand?: CapacityDem
     requirements,
     staging: has(CAP_FLAG.STAGING_COW),
     regionProblems: problems,
-    summary: writable ? "Stem Tape v1.1 A/B firmware negotiated — writes enabled" : READ_ONLY_NOTICE,
+    summary: writable
+      ? `Stem Tape v${caps!.formatMajor}.${caps!.formatMinor} A/B firmware negotiated — writes enabled`
+      : READ_ONLY_NOTICE,
   };
 }
 

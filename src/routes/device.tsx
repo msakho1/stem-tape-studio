@@ -125,6 +125,10 @@ function DevicePage() {
   const [caps, setCaps] = useState<StemTapeCapabilities | null>(null);
   const [library, setLibrary] = useState<LibraryState | null>(null);
   const [readingDevice, setReadingDevice] = useState(false);
+  const [settingUp, setSettingUp] = useState(false);
+  const [setupDone, setSetupDone] = useState(false);
+  const [setupError, setSetupError] = useState<string | null>(null);
+  const [confirmSetup, setConfirmSetup] = useState(false);
   const [upload, setUpload] = useState<UploadState>({ phase: "idle" });
 
 
@@ -280,6 +284,35 @@ function DevicePage() {
     say("Disconnected. The SP-1 has resumed normal operation.");
   }, [say]);
 
+
+  /* ---- set up (explicit initialization) -------------------------------- */
+
+  const setUpDevice = useCallback(async () => {
+    const t = transportRef.current;
+    if (!t) return;
+    setSettingUp(true);
+    setSetupError(null);
+    say("Setting up this SP-1: writing a fresh index record to index A…");
+    try {
+      const { library: lib, reportedGeneration, confirmed } = await t.setUpLibrary();
+      setLibrary(lib);
+      setSetupDone(true);
+      say(
+        confirmed
+          ? `Set up. The SP-1 now reports generation ${reportedGeneration}. The next upload will commit at generation 2.`
+          : `Index written and read back at generation ${lib.generation}. The capability reply reported ${
+              reportedGeneration === null ? "no generation" : `generation ${reportedGeneration}`
+            }.`,
+        confirmed ? "success" : "warning",
+      );
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setSetupError(msg);
+      say(`Setting up did not complete: ${msg}`, "error");
+    } finally {
+      setSettingUp(false);
+    }
+  }, [say]);
 
   useEffect(() => () => void transportRef.current?.disconnect().catch(() => {}), []);
 
@@ -918,8 +951,70 @@ function DevicePage() {
               <div className="h-[3px] w-full animate-pulse bg-[var(--bench-line)]" />
               <div className="h-[14px] w-1/2 animate-pulse bg-[var(--bench-line)]" />
             </div>
+          ) : library?.requiresInitialization ? (
+            <div data-testid="library-needs-setup" data-kind={library.status}>
+              <p className="font-mono text-[14px] text-[var(--ink)]">
+                {library.status === "legacy"
+                  ? "This SP-1 was set up by an earlier version."
+                  : "This SP-1 hasn’t been set up yet."}
+              </p>
+              <p className="mt-1 font-mono text-[12px] leading-relaxed text-[var(--ink-dim)]">
+                {library.status === "legacy"
+                  ? "Setting it up again will clear the old song, which this firmware can no longer play."
+                  : "Its index has never been written for this firmware, so there is nothing stored to lose. Setting it up takes a moment and prepares it for uploads."}
+              </p>
+
+              {setupError && (
+                <p className="mt-3 font-mono text-[12px] text-[var(--ink)]" data-testid="setup-error">
+                  Setting up did not complete: {setupError}. Nothing else on the SP-1 was changed —
+                  you can try again.
+                </p>
+              )}
+
+              {!confirmSetup ? (
+                <button
+                  className="st-btn mt-4"
+                  data-testid="setup-device"
+                  disabled={!verdict.writable || settingUp}
+                  onClick={() => setConfirmSetup(true)}
+                >
+                  Set up this SP-1
+                </button>
+              ) : (
+                <div className="mt-4" data-testid="setup-confirm">
+                  <p className="font-mono text-[12px] leading-relaxed text-[var(--ink-dim)]">
+                    {library.status === "legacy"
+                      ? "Setting up clears the song already on this SP-1. That song can no longer be played by this firmware, but it will be gone for good."
+                      : "Setting up writes a fresh, empty index. Anything already in the index area is cleared."}
+                  </p>
+                  <div className="mt-3 flex flex-wrap gap-3">
+                    <button
+                      className="st-btn st-btn--primary"
+                      data-testid="setup-confirm-go"
+                      disabled={settingUp}
+                      onClick={() => void setUpDevice()}
+                    >
+                      {settingUp ? "Setting up…" : "Clear and set up"}
+                    </button>
+                    <button
+                      className="st-btn st-btn--quiet"
+                      data-testid="setup-cancel"
+                      disabled={settingUp}
+                      onClick={() => setConfirmSetup(false)}
+                    >
+                      Keep as is
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
           ) : (
             <>
+              {setupDone && (
+                <p className="mb-3 font-mono text-[12px] text-[var(--ink-dim)]" data-testid="setup-done">
+                  This SP-1 is set up and ready for an upload.
+                </p>
+              )}
               {songs.length === 0 ? (
                 <div data-testid="library-empty">
                   <p className="font-mono text-[14px] text-[var(--ink)]">No song on this SP-1 yet.</p>

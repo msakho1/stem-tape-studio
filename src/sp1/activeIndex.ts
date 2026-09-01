@@ -22,8 +22,11 @@ import {
   otherSlot,
   slotName,
   type AbSlot,
+  FORMAT_MAJOR,
+  FORMAT_MINOR,
   SLOT_A,
   SLOT_B,
+  STIX_VERSION,
 } from "./stemTapeFormat";
 import {
   parseIndexRecord,
@@ -33,7 +36,7 @@ import {
   type StemTapeIndexRecord,
 } from "./stemIndex";
 
-export type LibraryStatus = "ok" | "blank" | "corrupt";
+export type LibraryStatus = "ok" | "blank" | "legacy" | "corrupt";
 
 export interface SlotReading {
   slot: AbSlot;
@@ -67,6 +70,24 @@ function isBlank(bytes: Uint8Array): boolean {
   return bytes.every((b) => b === 0);
 }
 
+/**
+ * A record written by an EARLIER format version: it is a committed STIX record
+ * whose CRC verifies, so nothing is damaged — this firmware simply no longer
+ * accepts that `formatMinor`. This is never corruption and is never reported as
+ * such.
+ */
+export function isLegacyRecord(s: SlotReading): boolean {
+  const r = s.record;
+  return (
+    !s.validation.valid &&
+    r.committed &&
+    r.crc === r.crcComputed &&
+    r.indexVersion === STIX_VERSION &&
+    r.formatMajor === FORMAT_MAJOR &&
+    r.formatMinor !== FORMAT_MINOR
+  );
+}
+
 export function readSlot(
   slot: AbSlot,
   bytes: Uint8Array,
@@ -90,9 +111,11 @@ export function selectActiveIndex(a: SlotReading, b: SlotReading): LibraryState 
 
   if (valid.length === 0) {
     const blank = a.blank && b.blank;
+    const legacySlots = slots.filter((s) => isLegacyRecord(s));
+    const legacy = legacySlots.length > 0;
     return {
       slots,
-      status: blank ? "blank" : "corrupt",
+      status: blank ? "blank" : legacy ? "legacy" : "corrupt",
       activeIndexSlot: null,
       active: null,
       activeSongSlot: null,
@@ -102,7 +125,11 @@ export function selectActiveIndex(a: SlotReading, b: SlotReading): LibraryState 
       requiresInitialization: true,
       explanation: blank
         ? "Both index slots are blank: this storage has never been initialized."
-        : `Both index slots are unreadable (A: ${a.validation.reason}; B: ${b.validation.reason}). This is corrupt storage, not an interrupted transfer.`,
+        : legacy
+          ? `This SP-1 was set up by an earlier version of the format (index ${legacySlots
+              .map((s) => slotName(s.slot))
+              .join(" and ")} carries a CRC-valid v1.${legacySlots[0]!.record.formatMinor} record). The records read correctly; this firmware simply no longer accepts that layout.`
+          : `Neither index slot holds a readable record (A: ${a.validation.reason}; B: ${b.validation.reason}). This SP-1 has not been set up for this firmware.`,
     };
   }
 
