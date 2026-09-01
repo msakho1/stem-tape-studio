@@ -293,7 +293,7 @@ export function evaluate(caps: StemTapeCapabilities | null, demand?: CapacityDem
       has(CAP_FLAG.RATE_48K) && caps?.sampleRate === 48000,
       caps ? `${caps.sampleRate} Hz` : "not reported",
     ),
-    req("depth", "24-bit support", has(CAP_FLAG.DEPTH_24), has(CAP_FLAG.DEPTH_24) ? "yes" : "not reported"),
+    req("depth", "16-bit support", has(CAP_FLAG.DEPTH_16), has(CAP_FLAG.DEPTH_16) ? "yes" : "not reported"),
     req(
       "index-ext",
       "index-extension support",

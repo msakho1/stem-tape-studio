@@ -200,7 +200,8 @@ export const CAP_FLAG = {
   FOUR_STEMS: 1 << 0,
   STEREO: 1 << 1,
   RATE_48K: 1 << 2,
-  DEPTH_24: 1 << 3,
+  /** Sample width the storage format carries — 16-bit in v1.3. */
+  DEPTH_16: 1 << 3,
   INDEX_EXTENSION: 1 << 4,
   BPM_DOWNBEAT: 1 << 5,
   STAGING_COW: 1 << 6,
@@ -219,7 +220,7 @@ export const REQUIRED_CAP_FLAGS =
   CAP_FLAG.FOUR_STEMS |
   CAP_FLAG.STEREO |
   CAP_FLAG.RATE_48K |
-  CAP_FLAG.DEPTH_24 |
+  CAP_FLAG.DEPTH_16 |
   CAP_FLAG.INDEX_EXTENSION |
   CAP_FLAG.BPM_DOWNBEAT |
   CAP_FLAG.EXPLICIT_INIT |
