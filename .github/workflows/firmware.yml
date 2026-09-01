@@ -1996,10 +1996,26 @@ jobs:
               exit 1
             fi
           done
-          NSEEK="$(grep -c 'st_stream_seek(&g_stem_stream' "$M" || true)"
+          # THREE, not two, since per-track reverse gave each head its own
+          # direction -- the ducked wrap, and the containment backstop in each
+          # of the two directions a head can travel. See the LOOP SEAM gate's
+          # own note: the backward backstop is the forward one mirrored, not a
+          # new kind of transition, so "the wrap is the only thing that MOVES
+          # a playhead" is unchanged.
+          #
+          # This counts EVERY st_stream_seek() CALL, whatever it is called on.
+          # The old pattern named one specific first argument, so a seek
+          # written any other way -- on a pointer, on an array element, cast
+          # to void -- would have slipped past a check whose whole job is
+          # "no other seeks exist". Comment lines are dropped first, because
+          # this file discusses st_stream_seek() by name in several of them
+          # and a mention is not a call.
+          NSEEK="$(grep -vE '^[[:space:]]*\*|^[[:space:]]*/\*|^[[:space:]]*//' "$M" \
+                   | grep -c 'st_stream_seek(' || true)"
           echo "st_stream_seek call sites in the audio path: ${NSEEK}"
-          if [ "$NSEEK" -ne 2 ]; then
-            echo "FAIL: expected exactly 2 (the ducked wrap and its backstop), found ${NSEEK}"
+          if [ "$NSEEK" -ne 3 ]; then
+            echo "FAIL: expected exactly 3 (the ducked wrap and its backstop in"
+            echo "      each direction), found ${NSEEK}"
             grep -n 'st_stream_seek' "$M" || true
             exit 1
           fi
