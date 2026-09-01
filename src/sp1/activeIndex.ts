@@ -67,6 +67,24 @@ function isBlank(bytes: Uint8Array): boolean {
   return bytes.every((b) => b === 0);
 }
 
+/**
+ * A record written by an EARLIER format version: it is a committed STIX record
+ * whose CRC verifies, so nothing is damaged — this firmware simply no longer
+ * accepts that `formatMinor`. This is never corruption and is never reported as
+ * such.
+ */
+export function isLegacyRecord(s: SlotReading): boolean {
+  const r = s.record;
+  return (
+    !s.validation.valid &&
+    r.committed &&
+    r.crc === r.crcComputed &&
+    r.indexVersion === STIX_VERSION &&
+    r.formatMajor === FORMAT_MAJOR &&
+    r.formatMinor !== FORMAT_MINOR
+  );
+}
+
 export function readSlot(
   slot: AbSlot,
   bytes: Uint8Array,
