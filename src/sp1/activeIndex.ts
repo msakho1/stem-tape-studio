@@ -22,8 +22,11 @@ import {
   otherSlot,
   slotName,
   type AbSlot,
+  FORMAT_MAJOR,
+  FORMAT_MINOR,
   SLOT_A,
   SLOT_B,
+  STIX_VERSION,
 } from "./stemTapeFormat";
 import {
   parseIndexRecord,
