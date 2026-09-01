@@ -285,7 +285,13 @@ bool st_ab_session_verify_song_before_commit(const st_ab_session_t *s, const st_
 
 	if (candidate->format_major != ST11_FORMAT_MAJOR) {
 		return false;
-	} else if (candidate->format_minor == 2u) {
+	} else if (candidate->format_minor == 3u || candidate->format_minor == 2u) {
+		/* v1.2 and v1.3 are both SONG-PLANAR. They differ only in the
+		 * stored sample width, and the accumulator does not care: it
+		 * hashes whatever st11_sector_decode_frame() returns, at
+		 * whatever width this build was compiled for. What it cannot
+		 * do is hash a record whose LAYOUT it does not know, which is
+		 * the distinction this dispatch exists to draw. */
 		planar = true;
 	} else if (candidate->format_minor == 1u) {
 		planar = false;
@@ -598,7 +604,8 @@ bool st_ab_session_verify_accumulated(const st_ab_session_t *s, const st_stix_re
 	 * it is simply not accumulable, and the caller's documented fallback
 	 * (the full re-read, which does dispatch on the declared version)
 	 * handles it. */
-	if (candidate->format_major != ST11_FORMAT_MAJOR || candidate->format_minor != 2u) {
+	if (candidate->format_major != ST11_FORMAT_MAJOR ||
+	    (candidate->format_minor != 3u && candidate->format_minor != 2u)) {
 		return false;
 	}
 	if (candidate->sector_count == 0u || s->acc_sectors != candidate->sector_count) {
