@@ -14,6 +14,9 @@ void st_ctl_reset(st_ctl_t *c)
 	st_loop_reset(&c->loop);      /* THE one-bar cold-boot default lives here */
 	c->vol_cand    = 0;
 	c->vol_settled = 0;
+	/* -1, not 0: 0 is track 1, and memset would otherwise leave a phantom
+	 * first tap on it at cold boot. */
+	c->rev_tap_trk = -1;
 	c->seeded      = true;
 }
 
@@ -96,6 +99,9 @@ void st_ctl_service(st_ctl_t *c, const st_ctl_in_t *in, st_ctl_out_t *out)
 		c->play_hold_spent = false;
 		c->play_fn_chord  = false;
 		c->fn_consumed    = false;
+		c->trk_prev       = 0u;
+		c->rev_tap_trk    = -1;
+		c->rev_fn_held    = false;
 		st_loop_reset_gesture_edges(&c->loop);
 		publish_levels(c, out);
 		out->track_mask = 0u;
@@ -113,6 +119,82 @@ void st_ctl_service(st_ctl_t *c, const st_ctl_in_t *in, st_ctl_out_t *out)
 	 * suppressing it along with the Track bits is what made looping
 	 * impossible while an effect was held. */
 	out->track_mask &= (uint8_t)~in->track_consumed_mask;
+
+	/* ---- FUNCTION + DOUBLE-TAP TRACK: per-track reverse ---------------
+	 * The SAME published mask, one pass later, is what makes a press an
+	 * edge -- so this extends the arbitration that already exists rather
+	 * than decoding the rail a second time. Bits the FX overlay has
+	 * claimed are already gone from it, which is why an effect held on a
+	 * Track button cannot also toggle reverse.
+	 *
+	 * ONE TRACK AT A TIME, physically: the ladder classifies a chord as a
+	 * chord, so two Track bits rising together is not two taps -- it is a
+	 * mask this gesture ignores, because a reverse toggle names exactly
+	 * one track.
+	 */
+	{
+		const uint8_t trk = out->track_mask;
+		const uint8_t down_edges = (uint8_t)(trk & ~c->trk_prev);
+		const uint8_t up_edges   = (uint8_t)(c->trk_prev & ~trk);
+
+		/* FUNCTION must be held for the WHOLE press. Set on the down
+		 * edge, cleared the moment FUNCTION is seen up while the button
+		 * is still down -- see st_ctl_t's own note on why neither edge
+		 * alone is enough. */
+		if (down_edges != 0u) {
+			c->rev_fn_held = in->function_down;
+		} else if (trk != 0u && !in->function_down) {
+			c->rev_fn_held = false;
+		}
+
+		if (up_edges != 0u && c->rev_fn_held) {
+			/* Exactly one bit, or it is a chord and not a tap. */
+			const bool single = (up_edges & (uint8_t)(up_edges - 1u)) == 0u;
+
+			if (single) {
+				uint8_t k = 0u;
+
+				while (((up_edges >> k) & 1u) == 0u) {
+					k++;
+				}
+				if (c->rev_tap_trk == (int8_t)k &&
+				    (in->now_ms - c->rev_tap_ms) <= ST_CTL_REVERSE_DBLTAP_MS) {
+					/* THE SECOND TAP. Toggle, and clear the
+					 * pending tap so a THIRD tap starts a
+					 * fresh pair rather than immediately
+					 * toggling back -- a triple-tap is one
+					 * toggle and a new first tap, which is
+					 * what a player rolling three fingers
+					 * across the button actually means. */
+					out->reverse_toggle = true;
+					out->reverse_track  = k;
+					c->rev_tap_trk      = -1;
+					/* The FUNCTION press is spent: it named
+					 * a reverse toggle and must not also
+					 * reach the loop's own FN gestures. */
+					c->fn_consumed = true;
+				} else {
+					c->rev_tap_trk = (int8_t)k;
+					c->rev_tap_ms  = in->now_ms;
+				}
+			} else {
+				c->rev_tap_trk = -1;
+			}
+			c->rev_fn_held = false;
+		} else if (up_edges != 0u) {
+			/* An UNMODIFIED tap. It is not part of this gesture, and
+			 * it also invalidates a pending first tap: FUNCTION +
+			 * tap, then a bare tap, is not a double-tap. */
+			c->rev_tap_trk = -1;
+			c->rev_fn_held = false;
+		}
+
+		/* The window is checked at the second tap rather than expired
+		 * here on a timer, so this needs no per-pass work at all -- and
+		 * a first tap left pending forever is harmless, because the
+		 * elapsed test is what rejects it. */
+		c->trk_prev = trk;
+	}
 
 	/* ---- PLAY edges, from that same classification ------------------- */
 	play_now       = st_ladder_play(&c->ladder);

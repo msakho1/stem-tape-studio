@@ -157,9 +157,9 @@
 #define ST_RC_SWEEP_REPS 24u
 
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st52-VOLCAL"
+#define ST_BUILD_TAG "st53-VOLCAL"
 #else
-#define ST_BUILD_TAG "st52"
+#define ST_BUILD_TAG "st53"
 #endif
 #include "st_track_hold.h"
 
@@ -1721,6 +1721,22 @@ static atomic_t g_stem_loop_start_fr  = ATOMIC_INIT(0);
 static atomic_t g_stem_loop_end_fr    = ATOMIC_INIT(0);
 /* THE entry seek: back to the frame where PLAY went down. */
 static atomic_t g_stem_loop_enter_req = ATOMIC_INIT(0);
+/*
+ * PER-TRACK REVERSE, as a one-shot request: (track + 1), or 0 for none.
+ *
+ * Track+1 rather than a bitmask, and a single slot rather than a queue,
+ * because the gesture NAMES ONE TRACK and only one track can be reversed at a
+ * time. Two toggles landing inside one 5.3 ms audio block is a player
+ * double-tapping two different Track buttons inside one block, which the
+ * gesture's own 450 ms window makes impossible; if it ever did happen the
+ * later one wins, which is the same answer the surface would give.
+ *
+ * The audio thread consumes it with an atomic EXCHANGE to zero, so the
+ * request cannot be seen twice and cannot be lost between the read and the
+ * clear -- the same one-shot discipline g_stem_loop_enter_req uses, with the
+ * exchange doing what its atomic_cas does.
+ */
+static atomic_t g_stem_reverse_req = ATOMIC_INIT(0);
 /* THE exit target: loop_end, the first frame after the looped section. */
 static atomic_t g_stem_loop_exit_req  = ATOMIC_INIT(0);
 /* Latched vs momentary, for the LED marker only -- never a decision input. */
@@ -1815,8 +1831,14 @@ static bool stem_streams_init(uint32_t song_start_block, uint32_t song_block_cou
 				     frames, sector_count, loop_enabled)) {
 			ok = false;
 		}
+		/* st_stream_init() memsets, so `reverse` is already false --
+		 * stated rather than relied on, because "a new song has no
+		 * reversed track" is a product rule and not an artefact of how
+		 * that function happens to clear its struct. */
+		g_stem_stream[k].reverse = false;
 	}
 	s_stem_transport = 0u;
+	atomic_set(&g_stem_reverse_req, 0);
 	return ok;
 }
 
@@ -3345,6 +3367,66 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 	s_stem_slow_q16 = st_pitch_slow_glide(s_stem_slow_q16,
 					       atomic_get(&g_stem_slow_req) != 0,
 					       BLK_FRAMES, I2S_TRUE_HZ);
+
+	/*
+	 * ---- THE REVERSE TOGGLE, ONCE PER BLOCK ---------------------------
+	 * Consumed here rather than inside the render loop because it is a
+	 * transport-shaped decision, not a per-run one, and because doing it
+	 * once means the four heads cannot change direction part-way through a
+	 * block they are already being rendered for.
+	 */
+	{
+		const atomic_val_t req = atomic_set(&g_stem_reverse_req, 0);
+
+		if (req != 0) {
+			const uint32_t k = (uint32_t)(req - 1);
+
+			if (k < ST_PL_STEMS) {
+				uint32_t j;
+				const bool turning_on = !g_stem_stream[k].reverse;
+
+				/* ONE TRACK AT A TIME, and the spec says what
+				 * happens to the outgoing one: "track 2 resumes
+				 * forward from wherever it is". Not from where
+				 * it started, and not re-synced -- turning a
+				 * head forward moves nothing, which is exactly
+				 * what st_stream_set_reverse() guarantees. */
+				for (j = 0; j < ST_PL_STEMS; j++) {
+					const bool want = turning_on && (j == k);
+
+					if (g_stem_stream[j].reverse == want) {
+						continue;
+					}
+					st_stream_set_reverse(&g_stem_stream[j], want);
+					/* THE CARRIED "FRAME BEHIND" IS ON THE
+					 * WRONG SIDE NOW. Its position did not
+					 * move, but the direction of travel did,
+					 * so the frame behind the cursor is the
+					 * one at the other neighbour. Dropping it
+					 * makes the first blend after the turn
+					 * start clean; it is not a position
+					 * change, and only this head's state is
+					 * touched -- the others did not turn. */
+					s_rs_prev_valid[j]  = false;
+					s_stem_rate_frac[j] = 0u;
+				}
+
+				/* THE SONG'S CLOCK MOVES TO A FORWARD HEAD.
+				 * There is always one, because at most one track
+				 * is reversed -- but "always" is the kind of
+				 * claim that stops being true one refactor
+				 * later, so the search falls back to leaving the
+				 * transport where it is rather than pointing it
+				 * at a head running backwards. */
+				for (j = 0; j < ST_PL_STEMS; j++) {
+					if (!g_stem_stream[j].reverse) {
+						s_stem_transport = (uint8_t)j;
+						break;
+					}
+				}
+			}
+		}
+	}
 
 	while (f < BLK_FRAMES) {
 		/*
@@ -8714,6 +8796,16 @@ static void stem_ctl_apply(void)
 		 * survives only as the one-shot edge the audio thread consumes.
 		 * Publishing the window above IS the whole of entry. */
 		atomic_set(&g_stem_loop_enter_req, 1);
+	}
+	if (o->reverse_toggle) {
+		/* FUNCTION + double-tap TRACK. The control thread does not know
+		 * which way any head is going and deliberately does not try to:
+		 * it publishes WHICH TRACK the player named, and the audio
+		 * thread -- the sole owner of every playhead -- decides what
+		 * that means. A second copy of "is track 2 reversed" living
+		 * here is exactly how a surface and an engine come to
+		 * disagree. */
+		atomic_set(&g_stem_reverse_req, (atomic_val_t)(o->reverse_track + 1u));
 	}
 	if (o->loop_latch) {
 		atomic_set(&g_stem_loop_latched, 1);

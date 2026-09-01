@@ -110,6 +110,11 @@ static void rig_init(rig_t *r, uint32_t start_frame)
  * Zero for every case that does not set it. */
 static uint8_t g_fx_claim;
 
+/* The reverse toggle is a ONE-SHOT, so it has to be caught on the pass it
+ * fires rather than read afterwards. */
+static int     g_rev_seen;
+static uint8_t g_rev_track;
+
 static void pass(rig_t *r, int raw, int8_t vol, bool fn)
 {
 	st_ctl_in_t in;
@@ -136,6 +141,10 @@ static void pass(rig_t *r, int raw, int8_t vol, bool fn)
 	r->n_latch  += r->out.loop_latch     ? 1 : 0;
 	r->n_tap    += r->out.play_tap       ? 1 : 0;
 	r->n_resize += r->out.loop_resize    ? 1 : 0;
+	if (r->out.reverse_toggle) {
+		g_rev_seen++;
+		g_rev_track = r->out.reverse_track;
+	}
 
 	entered_this_pass = r->out.loop_enter;
 	exited_this_pass  = r->out.loop_exit;
@@ -783,6 +792,142 @@ static void case_loop_works_while_fx_holds_a_track(void)
 	g_fx_claim = 0u;
 }
 
+
+/* ================= FUNCTION + double-tap TRACK: reverse ==================
+ * docs/stem-tape-per-track-reverse-spec.md: "FUNCTION + double-tap a TRACK
+ * button. The same gesture exits." Written to fail if the gesture fires
+ * unmodified, fires across tracks, fires on a single tap, or survives a
+ * FUNCTION that was let go mid-press.
+ * ======================================================================== */
+
+/* One complete Track press: `settle` passes down, `settle` passes idle. The
+ * ladder needs 3 agreeing reads to commit, so 4 is a real press. */
+static void trk_press(rig_t *r, int track, bool fn, int down_passes, int up_passes)
+{
+	int i;
+
+	for (i = 0; i < down_passes; i++) {
+		pass(r, RAW_MASK[1 << track], 0, fn);
+	}
+	for (i = 0; i < up_passes; i++) {
+		pass(r, RAW_IDLE, 0, fn);
+	}
+}
+
+static int rev_count(rig_t *r, int *last_track)
+{
+	/* pass() does not accumulate this one, so the caller reads it from the
+	 * published output on the pass it fires. Counted by the helpers below
+	 * via g_rev_seen. */
+	(void)r;
+	(void)last_track;
+	return 0;
+}
+
+static void case_reverse_gesture(void)
+{
+	rig_t r;
+
+	rig_init(&r, 0u);
+
+	/* ---- 1. FUNCTION + double-tap track 2 toggles reverse on track 2 -- */
+	g_rev_seen = 0; g_rev_track = 0xFF;
+	trk_press(&r, 1, /*fn=*/true, 4, 4);
+	CHECK(g_rev_seen == 0, "27. one FUNCTION+tap is not a gesture -- nothing fires on the first tap");
+	trk_press(&r, 1, /*fn=*/true, 4, 4);
+	CHECK(g_rev_seen == 1, "28. FUNCTION + double-tap TRACK fires exactly once");
+	CHECK(g_rev_track == 1u, "29. and names the track that was tapped, not another");
+
+	/* ---- 2. the SAME gesture again is the exit ------------------------ */
+	g_rev_seen = 0; g_rev_track = 0xFF;
+	trk_press(&r, 1, true, 4, 4);
+	trk_press(&r, 1, true, 4, 4);
+	CHECK(g_rev_seen == 1 && g_rev_track == 1u,
+	      "30. the SAME gesture on the SAME track fires again -- it is a toggle, and there is no "
+	      "separate exit gesture");
+
+	/* ---- 3. UNMODIFIED double-tap does nothing ------------------------ */
+	g_rev_seen = 0;
+	trk_press(&r, 2, /*fn=*/false, 4, 4);
+	trk_press(&r, 2, /*fn=*/false, 4, 4);
+	CHECK(g_rev_seen == 0,
+	      "31. a double-tap WITHOUT FUNCTION never toggles reverse -- the modifier is what keeps it "
+	      "off an ordinary performance control");
+
+	/* ---- 4. two taps on DIFFERENT tracks are not a double-tap --------- */
+	g_rev_seen = 0;
+	trk_press(&r, 0, true, 4, 4);
+	trk_press(&r, 3, true, 4, 4);
+	CHECK(g_rev_seen == 0, "32. FUNCTION+tap track 1 then track 4 is not a double-tap on either");
+	/* and the second of those is now the pending first tap, so repeating
+	 * it completes a real pair on THAT track */
+	trk_press(&r, 3, true, 4, 4);
+	CHECK(g_rev_seen == 1 && g_rev_track == 3u,
+	      "33. the stray tap became the first of a new pair, on the track it was actually on");
+
+	/* ---- 5. too slow is not a double-tap ------------------------------ */
+	g_rev_seen = 0;
+	trk_press(&r, 0, true, 4, 4);
+	{
+		int i;
+
+		/* Idle past the window. PASS_MS is 8 ms, so 80 passes is 640 ms
+		 * -- comfortably beyond ST_CTL_REVERSE_DBLTAP_MS. */
+		for (i = 0; i < 80; i++) {
+			pass(&r, RAW_IDLE, 0, true);
+		}
+	}
+	trk_press(&r, 0, true, 4, 4);
+	CHECK(g_rev_seen == 0,
+	      "34. two FUNCTION+taps further apart than the window are two separate taps, not a gesture");
+
+	/* ---- 6. FUNCTION released mid-press disqualifies that press ------- */
+	g_rev_seen = 0;
+	rig_init(&r, 0u);
+	trk_press(&r, 0, true, 4, 4);          /* a good first tap */
+	{
+		int i;
+
+		/*
+		 * The second press, held long enough that the LADDER commits it
+		 * with FUNCTION still down -- so the down edge really is
+		 * modified and the latch really is set -- and only THEN is
+		 * FUNCTION released, before the button is.
+		 *
+		 * The split matters: an earlier version of this case released
+		 * FUNCTION after only two passes, before the ladder's 3-read
+		 * settle had published the press at all. The down edge was
+		 * therefore already unmodified, and the case passed against an
+		 * implementation with no mid-press check whatsoever. Mutation
+		 * testing caught exactly that.
+		 */
+		for (i = 0; i < 4; i++) {
+			pass(&r, RAW_MASK[1 << 0], 0, true);
+		}
+		for (i = 0; i < 2; i++) {
+			pass(&r, RAW_MASK[1 << 0], 0, false);
+		}
+		for (i = 0; i < 4; i++) {
+			pass(&r, RAW_IDLE, 0, false);
+		}
+	}
+	CHECK(g_rev_seen == 0,
+	      "35. FUNCTION let go before the button is released does not complete the gesture -- the "
+	      "press must be modified END TO END");
+
+	/* ---- 7. a Track claimed by the FX overlay cannot toggle reverse --- */
+	g_rev_seen = 0;
+	rig_init(&r, 0u);
+	g_fx_claim = 1u << 2;
+	trk_press(&r, 2, true, 4, 4);
+	trk_press(&r, 2, true, 4, 4);
+	g_fx_claim = 0u;
+	CHECK(g_rev_seen == 0,
+	      "36. while the FX overlay owns a Track button it is an effect, not a reverse toggle");
+
+	(void)rev_count;
+}
+
 int main(void)
 {
 	printf("== st_ctl: the assembled Stem Tape control path ==\n");
@@ -801,6 +946,7 @@ int main(void)
 	case_single_owner();
 	case_loop_works_while_fx_holds_a_track();
 	case_no_tempo_is_reported();
+	case_reverse_gesture();
 
 	printf("\n");
 	if (g_failures) {

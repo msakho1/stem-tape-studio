@@ -62,6 +62,20 @@
  * discipline the ladder uses, for the same reason. */
 #define ST_CTL_VOL_SETTLE 3u
 
+/*
+ * THE REVERSE GESTURE: FUNCTION + double-tap a TRACK button, and the SAME
+ * gesture again to leave. docs/stem-tape-per-track-reverse-spec.md is the
+ * contract; this is the window the two taps must fall inside.
+ *
+ * 450 ms, the SAME window the inherited engine already uses for its own
+ * double-tap ("tap to match, double-tap to come home" -- main.c's rocker
+ * gesture, and its own comment names the figure). Reusing it is the point:
+ * a player who has learned one double-tap rhythm on this instrument should
+ * not have to learn a second one, and a second constant is a second thing
+ * that can drift.
+ */
+#define ST_CTL_REVERSE_DBLTAP_MS 450u
+
 /* Why a PLAY hold did not produce a loop. Reported so the firmware can say
  * so over CDC instead of silently doing nothing. */
 typedef enum {
@@ -139,6 +153,16 @@ typedef struct {
 	uint32_t pin_entry_frame;  /* the seek-back target: loop/candidate start */
 	uint32_t pin_exit_frame;   /* end_frame: where every exit seek lands     */
 
+	/* ---- per-track reverse, as a one-shot action ----------------------
+	 * FUNCTION + double-tap track `reverse_track` was completed on this
+	 * pass. It is a TOGGLE, not a direction: the same gesture on the same
+	 * track turns reverse off again, and the audio thread owns which
+	 * tracks are currently reversed. Nothing here says which way a head is
+	 * going, because nothing here knows -- and a second copy of that fact
+	 * is exactly how a UI and an engine come to disagree. */
+	bool     reverse_toggle;
+	uint8_t  reverse_track;    /* 0..3, meaningful only when reverse_toggle */
+
 	/* ---- what main.c must NOT also act on ----------------------------- */
 	bool     function_consumed;/* this FUNCTION press belongs to the loop */
 	bool     vol_consumed;     /* this VOLUME press belongs to the loop   */
@@ -178,6 +202,30 @@ typedef struct {
 	int8_t   vol_settled;
 
 	bool     fn_consumed;      /* latched for the rest of this FN press */
+
+	/*
+	 * THE REVERSE DOUBLE-TAP, in four fields.
+	 *
+	 * `trk_prev` is last pass's published mask, so a press is a rising bit
+	 * and a release a falling one. `rev_tap_trk` is which track the first
+	 * qualifying tap was on and `rev_tap_ms` when it completed;
+	 * `rev_fn_held` records that FUNCTION was down for the WHOLE of the
+	 * press rather than merely at one edge of it.
+	 *
+	 * That last one is the reason this is not a two-line edge test.
+	 * FUNCTION is a separate GPIO and the more awkward finger, so it is
+	 * routinely pressed slightly late and released slightly early. Sampling
+	 * it at the down edge alone would make a bare tap into a modified one
+	 * whenever the player was still reaching for FUNCTION; sampling at the
+	 * up edge alone would lose the gesture whenever they let go first. The
+	 * press must be modified END TO END, which is a latch, and it is the
+	 * same argument play_fn_chord above already makes for PLAY.
+	 */
+	uint8_t  trk_prev;
+	int8_t   rev_tap_trk;      /* -1 = no first tap pending */
+	uint32_t rev_tap_ms;
+	bool     rev_fn_held;
+
 	bool     seeded;
 } st_ctl_t;
 
