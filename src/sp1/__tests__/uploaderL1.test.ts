@@ -48,13 +48,17 @@ describe("device route presents exactly three steps", () => {
   });
 
   it("shows the required success line and failure copy", () => {
+    const model = readFileSync("src/device/deviceModel.ts", "utf8");
     expect(route).toContain("Uploaded and verified. Press Play on your SP-1.");
-    expect(route).toContain("Upload stopped. Your previous song is still active.");
-    expect(route).toContain("Reconnect the SP-1 to confirm whether the new song committed.");
-    expect(route).toContain("Update the Stem Tape firmware to use fast song upload.");
-    expect(route).toContain("Uploading and verifying on SP-1. Keep it connected.");
-    expect(route).toContain("No song has been written.");
+    expect(model).toContain("Upload failed — your existing song is untouched.");
+    expect(model).toContain(
+      "Reconnect the SP-1 to see which song it is playing.",
+    );
+    expect(model).toContain("Update the firmware on your SP-1 to continue.");
+    expect(route).toContain("Keep the SP-1 connected. Playback is paused while transferring.");
+    expect(route).toContain("Uploading replaces the song on the SP-1.");
   });
+
 
   it("keeps activity controls", () => {
     const lower = route.toLowerCase();

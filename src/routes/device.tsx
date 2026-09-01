@@ -15,10 +15,12 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { SupportButton } from "@/components/SupportButton";
 import {
+  Check,
   ClipboardCopy,
   Download,
   Info,
   Loader2,
+  Music4,
   Trash2,
   Upload,
   Usb,
@@ -30,7 +32,13 @@ import { Sp1ConnectLeds } from "@/device/Sp1ConnectLeds";
 import { Sp1Transport, Sp1Session, BAUD_RATE, type SerialLikePort } from "@/sp1/protocol";
 import { STEM_ORDER, STEM_LABEL, type StemSlotName } from "@/sp1/prepare";
 import { prepareCanonicalSong, type CanonicalSong } from "@/sp1/song";
-import { parseCapabilities, readOnlyVerdict, type CompatibilityVerdict } from "@/sp1/compatibility";
+import {
+  parseCapabilities,
+  readOnlyVerdict,
+  type CompatibilityVerdict,
+  type StemTapeCapabilities,
+} from "@/sp1/compatibility";
+import type { LibraryState } from "@/sp1/activeIndex";
 import { StemTapeTransport, type UploadResult, type BulkTransactionRecord } from "@/sp1/transport";
 import { assignFiles, inferTitle } from "@/sp1/stemNaming";
 import { analyzeTiming, timingLabel, type SongTiming } from "@/sp1/autoTiming";
@@ -44,6 +52,24 @@ import {
 } from "@/sp1/preparation";
 import { sectorsForFrames } from "@/sp1/stemTapeFormat";
 import { assessCapacity, uploadEnabled, type CapabilityQueryState } from "@/sp1/capacity";
+import {
+  APP_FORMAT,
+  PHASE_DETAIL,
+  PHASE_LABEL,
+  UPLOAD_PHASES,
+  classifyFailure,
+  deviceInfoFrom,
+  existingSongIntact,
+  failureCopy,
+  formatVersion,
+  phaseIndex,
+  songsFrom,
+  storageFrom,
+  uploadStateFor,
+  type DeviceConnection,
+  type UploadFailure,
+  type UploadState,
+} from "@/device/deviceModel";
 
 export const Route = createFileRoute("/device")({
   component: DevicePage,
@@ -96,6 +122,12 @@ function DevicePage() {
   const [sectorsPerSong, setSectorsPerSong] = useState<number | null>(null);
   const [mockMode, setMockMode] = useState(false);
   const [bulkCapable, setBulkCapable] = useState(false);
+  const [caps, setCaps] = useState<StemTapeCapabilities | null>(null);
+  const [library, setLibrary] = useState<LibraryState | null>(null);
+  const [readingDevice, setReadingDevice] = useState(false);
+  const [upload, setUpload] = useState<UploadState>({ phase: "idle" });
+
+
 
   const [files, setFiles] = useState<Files>({});
   const [decoded, setDecoded] = useState<Decoded>({});
@@ -184,13 +216,17 @@ function DevicePage() {
       }
       const l = await session.handshake(40);
       const rawCaps = await session.queryCapabilities();
-      const caps = rawCaps ? parseCapabilities(rawCaps) : null;
-      const t = new StemTapeTransport(session, caps, { kind: injected ? "mock" : "physical" });
+      const parsed = rawCaps ? parseCapabilities(rawCaps) : null;
+      const t = new StemTapeTransport(session, parsed, { kind: injected ? "mock" : "physical" });
       transportRef.current = t;
+      setCaps(parsed);
       setVerdict(t.verdict);
       setQueryState(t.verdict.writable ? "compatible" : "unverified");
       setMockMode(!!injected);
+      setReadingDevice(true);
       await t.readIndex();
+      setLibrary(t.library);
+      setReadingDevice(false);
       const d = t.describe();
       setSectorsPerSong(d.sectorsPerSong);
       setConnected(true);
@@ -220,6 +256,9 @@ function DevicePage() {
       setSectorsPerSong(null);
       setBulkCapable(false);
       setQueryState("none");
+      setCaps(null);
+      setLibrary(null);
+      setReadingDevice(false);
     } finally {
       setConnecting(false);
     }
@@ -235,8 +274,12 @@ function DevicePage() {
     setBulkCapable(false);
     setQueryState("none");
     setVerdict(readOnlyVerdict());
+    setCaps(null);
+    setLibrary(null);
+    setUpload({ phase: "idle" });
     say("Disconnected. The SP-1 has resumed normal operation.");
   }, [say]);
+
 
   useEffect(() => () => void transportRef.current?.disconnect().catch(() => {}), []);
 
@@ -420,6 +463,32 @@ function DevicePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [allFour, decoded, timing, title]);
 
+  /* ------------------------------------------------- derived device state */
+
+  const songs = useMemo(() => songsFrom(library), [library]);
+  const storage = useMemo(() => storageFrom(caps, songs), [caps, songs]);
+  const activeSongId = songs.find((s) => s.isActive)?.id ?? null;
+
+  const connection: DeviceConnection = useMemo(() => {
+    if (connecting) return { status: "connecting" };
+    if (!connected) return { status: "disconnected" };
+    if (!caps || !verdict.writable || !bulkCapable)
+      return {
+        status: "incompatible",
+        deviceFormat: caps ? formatVersion(caps.formatMajor, caps.formatMinor) : "unknown",
+        appFormat: APP_FORMAT,
+      };
+    return { status: "ready", device: deviceInfoFrom(caps) };
+  }, [bulkCapable, caps, connected, connecting, verdict.writable]);
+
+  const device = connection.status === "ready" ? connection.device : null;
+  /* Every multi-song control is gated on the firmware's own capability
+   * record, never on the version number: when a firmware reports
+   * deleteSong/reorderSongs, this same build starts showing them. */
+  const canDelete = device?.capabilities.deleteSong ?? false;
+  const canReorder = device?.capabilities.reorderSongs ?? false;
+  const canAddAnother = device?.capabilities.multiSong ?? false;
+
   /* ------------------------------------------------------------ step 3 */
 
   const requiredSectors = song ? sectorsForFrames(song.frames) : 0;
@@ -438,12 +507,14 @@ function DevicePage() {
     transferActive: uploading || connecting,
   });
 
+
   const startUpload = useCallback(async () => {
     const t = transportRef.current;
     if (!t || !song || !manifest) return;
     abortRef.current = { aborted: false };
     setUploading(true);
     setResult(null);
+    setUpload({ phase: "preparing" });
     const total = manifest.totalBytes;
     const sectorsTotal = sectorsForFrames(song.frames);
     const started = performance.now();
@@ -485,6 +556,13 @@ function DevicePage() {
             retries: p.retries ?? 0,
             checkpoint: p.detail,
           });
+          setUpload(
+            uploadStateFor({
+              stage: p.stage,
+              sectorsSent: sectors,
+              sectorsTotal: p.sectorsTotal ?? sectorsTotal,
+            }),
+          );
           if (p.stage !== lastStage) {
             lastStage = p.stage;
             if (p.stage === "capacity" || p.stage === "metadata" || p.stage === "committing" || p.stage === "confirming") {
@@ -514,6 +592,7 @@ function DevicePage() {
       }
       if (out.ok) {
         const secs = out.elapsedMs / 1000;
+        setUpload({ phase: "done" });
         say(
           `Song slot ${out.targetSongSlot === 0 ? "A" : "B"} / index slot ${out.targetIndexSlot === 0 ? "A" : "B"} · generation ${out.previousGeneration} → ${out.generation} · validity magic written and flushed.`,
           "success",
@@ -522,13 +601,42 @@ function DevicePage() {
           `Uploaded and verified in ${secs.toFixed(1)}s · ${(total / 1048576 / Math.max(secs, 0.001)).toFixed(2)} MiB/s verified payload · ${out.retries} retries.`,
           "success",
         );
-      } else if (out.outcome === "unknown") {
-        say(`Outcome unknown — ${out.detail}`, "warning");
+        // reload — the screen always shows what the device actually holds
+        try {
+          setReadingDevice(true);
+          await t.readIndex();
+          setLibrary(t.library);
+        } finally {
+          setReadingDevice(false);
+        }
       } else {
-        say(`Upload stopped — ${out.detail}`, "error");
+        const sectorsSent = t.bulkTransactions.filter((x) => x.status === 0).length;
+        setUpload({
+          phase: "failed",
+          reason: classifyFailure({
+            outcome: out.outcome,
+            detail: out.detail,
+            sectorsSent,
+            sectorsTotal,
+          }),
+          existingSongIntact: existingSongIntact(out.outcome),
+        });
+        if (out.outcome === "unknown") say(`Outcome unknown — ${out.detail}`, "warning");
+        else say(`Upload stopped — ${out.detail}`, "error");
       }
     } catch (e) {
-      say(e instanceof Error ? e.message : String(e), "error");
+      const detail = e instanceof Error ? e.message : String(e);
+      setUpload({
+        phase: "failed",
+        reason: classifyFailure({
+          outcome: "failed",
+          detail,
+          sectorsSent: t.bulkTransactions.filter((x) => x.status === 0).length,
+          sectorsTotal,
+        }),
+        existingSongIntact: true,
+      });
+      say(detail, "error");
     } finally {
       // Snapshot regardless of how the attempt ended (success, a clean
       // failure response, or a thrown transport error) -- `t` is still the
@@ -541,9 +649,11 @@ function DevicePage() {
     }
   }, [manifest, say, song, title]);
 
+
   const replaceSong = useCallback(() => {
     setResult(null);
     setProgress(null);
+    setUpload({ phase: "idle" });
     setFiles({});
     setDecoded({});
     setSong(null);
@@ -683,41 +793,67 @@ function DevicePage() {
           </p>
         )}
 
-        {/* 1 — connect */}
+        {/* 1 — connection */}
         <section className="up-card" data-testid="step-connect">
           <div className="up-card__head">
             <span className="up-card__num">1</span>
             <span className="up-card__title">connect sp-1</span>
-            <span className="up-state" data-on={connected}>
+            <span
+              className="up-state"
+              data-on={connection.status === "ready"}
+              data-testid="connection-state"
+            >
               <i />
-              {connected ? "connected" : "not connected"}
+              {connection.status === "ready"
+                ? "connected"
+                : connection.status === "connecting"
+                  ? "connecting"
+                  : connection.status === "incompatible"
+                    ? "needs update"
+                    : "not connected"}
             </span>
           </div>
 
           <div className="grid items-end gap-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,300px)]">
             <div>
-              {!connected ? (
+              {connection.status === "disconnected" && (
                 <>
                   <p className="font-mono text-[13px] text-[var(--ink-dim)]" data-testid="status">
-                    Plug the SP-1 in over USB.
+                    No SP-1 found. Plug it in over USB, then connect.
                   </p>
                   <button
                     className="st-btn st-btn--primary mt-8 flex w-full items-center justify-center gap-4 py-4 sm:w-auto sm:px-10"
                     data-testid="connect"
-                    disabled={connecting}
                     onClick={() => void connect()}
                   >
                     <Usb size={16} strokeWidth={1.4} />
-                    {connecting ? "Connecting…" : "Connect SP-1"}
+                    Connect SP-1
                   </button>
                 </>
-              ) : (
-                <div className="flex flex-wrap items-center gap-3">
+              )}
+
+              {connection.status === "connecting" && (
+                <p
+                  className="flex items-center gap-3 font-mono text-[13px] text-[var(--ink)]"
+                  data-testid="status"
+                >
+                  <Loader2 size={14} strokeWidth={1.6} className="animate-spin" />
+                  Connecting to the SP-1…
+                </p>
+              )}
+
+              {connection.status === "incompatible" && (
+                <div data-testid="incompatible">
                   <p className="font-mono text-[14px] text-[var(--ink)]" data-testid="status">
-                    Stem Tape SP-1 connected
+                    This SP-1 answered, but it speaks a different song format.
+                  </p>
+                  <p className="mt-2 font-mono text-[12px] leading-relaxed text-[var(--ink-dim)]">
+                    Your SP-1 stores songs in format {connection.deviceFormat}; this app writes
+                    format {connection.appFormat}. Update the firmware on your SP-1 to upload songs.
+                    Nothing on it will be changed in the meantime.
                   </p>
                   <button
-                    className="st-btn st-btn--quiet"
+                    className="st-btn st-btn--quiet mt-3"
                     data-testid="disconnect"
                     onClick={() => void disconnect()}
                   >
@@ -725,13 +861,32 @@ function DevicePage() {
                   </button>
                 </div>
               )}
-              {connected && (incompatible || !bulkCapable) && (
-                <p
-                  className="mt-3 font-mono text-[12px] leading-relaxed text-[var(--ink-dim)]"
-                  data-testid="incompatible"
-                >
-                  Update the Stem Tape firmware to use fast song upload.
-                </p>
+
+              {connection.status === "ready" && (
+                <div>
+                  <div className="flex flex-wrap items-center gap-3">
+                    <p className="font-mono text-[14px] text-[var(--ink)]" data-testid="status">
+                      Stem Tape SP-1 connected
+                    </p>
+                    <button
+                      className="st-btn st-btn--quiet"
+                      data-testid="disconnect"
+                      onClick={() => void disconnect()}
+                    >
+                      Disconnect
+                    </button>
+                  </div>
+                  <p
+                    className="mt-2 font-mono text-[11px] text-[var(--ink-faint)]"
+                    data-testid="firmware-line"
+                  >
+                    firmware {connection.device.format.major}.{connection.device.format.minor} ·{" "}
+                    {connection.device.sampleRate / 1000} kHz
+                  </p>
+                  <p className="mt-2 font-mono text-[12px] text-[var(--ink-dim)]">
+                    Playback is paused on the SP-1 while it is connected here.
+                  </p>
+                </div>
               )}
             </div>
             <div className="relative hidden w-full sm:block">
@@ -741,11 +896,93 @@ function DevicePage() {
                 className="w-full select-none"
                 draggable={false}
               />
-              <Sp1ConnectLeds connected={connected} />
+              <Sp1ConnectLeds connected={connection.status === "ready"} />
             </div>
-
           </div>
         </section>
+
+        {/* what the SP-1 is holding */}
+        <section className="up-card" data-testid="library">
+          <div className="up-card__head">
+            <span className="up-card__title">on your sp-1</span>
+          </div>
+
+          {connection.status !== "ready" ? (
+            <p className="font-mono text-[12px] leading-relaxed text-[var(--ink-dim)]" data-testid="library-no-device">
+              This is where the song stored on your SP-1 appears, with how much room is left.
+              Connect the SP-1 to see it.
+            </p>
+          ) : readingDevice ? (
+            <div className="grid gap-3" data-testid="library-skeleton" aria-busy>
+              <div className="h-[52px] w-full animate-pulse bg-[var(--bench-line)]" />
+              <div className="h-[3px] w-full animate-pulse bg-[var(--bench-line)]" />
+              <div className="h-[14px] w-1/2 animate-pulse bg-[var(--bench-line)]" />
+            </div>
+          ) : (
+            <>
+              {songs.length === 0 ? (
+                <div data-testid="library-empty">
+                  <p className="font-mono text-[14px] text-[var(--ink)]">No song on this SP-1 yet.</p>
+                  <p className="mt-1 font-mono text-[12px] leading-relaxed text-[var(--ink-dim)]">
+                    The SP-1 is working fine — it just hasn’t been given a song. Load four stems
+                    below and upload; there is room for up to {fmtMiB(storage.maxSongBytes)}.
+                  </p>
+                </div>
+              ) : (
+                <ul className="grid gap-2" data-testid="song-list">
+                  {songs.map((s) => (
+                    <li
+                      key={s.id}
+                      className="flex items-center gap-4 border border-[var(--bench-line)] bg-[var(--bench-raised)] px-4 py-3"
+                      data-testid="song-card"
+                      data-active={s.id === activeSongId}
+                    >
+                      <Music4 size={18} strokeWidth={1.3} className="shrink-0 text-[var(--ink-dim)]" />
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate font-mono text-[15px] text-[var(--ink)]">{s.title}</p>
+                        <p className="mt-1 font-mono text-[11px] text-[var(--ink-faint)]">
+                          {fmtDur(s.durationSeconds)} · {fmtMiB(s.sizeBytes)}
+                          {s.artist ? ` · ${s.artist}` : ""}
+                        </p>
+                      </div>
+                      {s.id === activeSongId && (
+                        <span className="up-state" data-on>
+                          <i />
+                          playing on sp-1
+                        </span>
+                      )}
+                      {/* delete / reorder appear only when the firmware reports them */}
+                      {canDelete && <span data-testid="delete-song" />}
+                      {canReorder && <span data-testid="reorder-song" />}
+                    </li>
+                  ))}
+                </ul>
+              )}
+
+              <div className="mt-4" data-testid="storage">
+                <div className="h-[6px] w-full bg-[var(--bench-line)]">
+                  <div
+                    className="h-full bg-[var(--ink)]"
+                    style={{
+                      width: `${
+                        storage.capacityBytes
+                          ? Math.min(100, Math.round((storage.usedBytes / storage.capacityBytes) * 100))
+                          : 0
+                      }%`,
+                    }}
+                  />
+                </div>
+                <p className="mt-2 font-mono text-[12px] text-[var(--ink-dim)]" data-testid="storage-line">
+                  <span className="text-[var(--ink)]">{fmtMiB(storage.freeBytes)} free</span> of{" "}
+                  {fmtMiB(storage.capacityBytes)}
+                </p>
+              </div>
+
+              {canAddAnother && <span data-testid="add-song" />}
+            </>
+          )}
+        </section>
+
 
         {/* 2 — load stems */}
         <section
@@ -996,9 +1233,12 @@ function DevicePage() {
             <span className="up-card__title">upload</span>
           </div>
 
-          {!result && !uploading && (
-            <p className="font-mono text-[12px] text-[var(--ink-dim)]" data-testid="no-song">
-              No song has been written.
+          {upload.phase === "idle" && !result?.ok && (
+            <p className="font-mono text-[12px] leading-relaxed text-[var(--ink-dim)]" data-testid="no-song">
+              Uploading replaces the song on the SP-1. The song already on it keeps playing until
+              the new one is completely stored and checked.
+              {connection.status === "ready" &&
+                ` Largest song that fits: ${fmtMiB(storage.maxSongBytes)}.`}
             </p>
           )}
 
@@ -1009,12 +1249,11 @@ function DevicePage() {
                 Uploaded and verified. Press Play on your SP-1.
               </p>
               <p className="mt-1 font-mono text-[12px] text-[var(--ink-dim)]">
-                Generation {result.generation} · song slot {result.targetSongSlot === 0 ? "A" : "B"}{" "}
-                · index slot {result.targetIndexSlot === 0 ? "A" : "B"} · {result.sectorCount}{" "}
-                sectors verified from SP-1 storage.
+                {fmtMiB(result.bytesWritten)} stored and read back off the SP-1 to confirm it
+                matches.
               </p>
               <button className="st-btn mt-3" data-testid="replace-song" onClick={replaceSong}>
-                Replace song
+                Upload a different song
               </button>
             </div>
           ) : (
@@ -1026,17 +1265,17 @@ function DevicePage() {
                       className="font-mono text-[12px] text-[var(--ink-dim)]"
                       data-testid="upload-hint"
                     >
-                      {!connected
-                        ? "Connect your SP-1 to upload."
-                        : incompatible || !bulkCapable
-                          ? "Update the Stem Tape firmware to use fast song upload."
-                          : !allFour
-                            ? "Load all four stems."
-                            : prepState !== "ready"
-                              ? "Preparing audio…"
-                              : capacity.status === "insufficient"
-                                ? "This song is too long for the space on your SP-1."
-                                : "Checking your SP-1…"}
+                      {connection.status !== "ready"
+                        ? connection.status === "incompatible"
+                          ? "Update the firmware on your SP-1 to upload songs."
+                          : "Connect your SP-1 to upload."
+                        : !allFour
+                          ? "Load all four stems."
+                          : prepState !== "ready"
+                            ? "Preparing audio…"
+                            : capacity.status === "insufficient"
+                              ? `This song needs more room than the ${fmtMiB(storage.maxSongBytes)} your SP-1 can hold.`
+                              : "Checking your SP-1…"}
                     </p>
                   )}
                   {uploading && (
@@ -1062,89 +1301,212 @@ function DevicePage() {
                 </button>
               </div>
 
-              {progress && (
-                <div className="mt-4" data-testid="progress">
-                  <div className="h-[6px] w-full bg-[var(--bench-line)]">
-                    <div
-                      className="h-full bg-[var(--ink)]"
-                      style={{ width: `${Math.round(progress.fraction * 100)}%` }}
-                    />
-                  </div>
-                  <p className="mt-2 font-mono text-[13px] text-[var(--ink)]" data-testid="progress-title">
-                    {title || "Untitled song"}
-                  </p>
-                  <p className="mt-1 font-mono text-[12px] leading-relaxed text-[var(--ink-dim)]">
-                    {Math.round(progress.fraction * 100)}% · {fmtMiB(progress.verifiedBytes)} /{" "}
-                    {fmtMiB(progress.total)} verified · {progress.sectors}/{progress.sectorsTotal}{" "}
-                    sectors verified
-                    <br />
-                    {(progress.rate / 1048576).toFixed(2)} MiB/s · {fmtClock(progress.eta)} left ·{" "}
-                    {progress.retries} {progress.retries === 1 ? "retry" : "retries"}
-                    <br />
-                    {progress.checkpoint}
-                  </p>
-                  <p className="mt-2 font-mono text-[12px] text-[var(--ink)]" data-testid="uploading-copy">
-                    Uploading and verifying on SP-1. Keep it connected.
-                  </p>
+              {(uploading || upload.phase === "failed") && upload.phase !== "idle" && (
+                <div className="mt-5" data-testid="phases">
+                  <ol className="grid gap-2">
+                    {UPLOAD_PHASES.filter((p) => p !== "done").map((p) => {
+                      const current = upload.phase === p;
+                      const done =
+                        upload.phase !== "failed" && phaseIndex(upload.phase) > phaseIndex(p);
+                      return (
+                        <li
+                          key={p}
+                          className="flex items-start gap-3 font-mono text-[12px]"
+                          data-testid={`phase-${p}`}
+                          data-state={current ? "current" : done ? "done" : "todo"}
+                        >
+                          <span className="mt-[2px] w-[16px] shrink-0 text-[var(--ink)]">
+                            {done ? (
+                              <Check size={13} strokeWidth={1.8} />
+                            ) : current ? (
+                              <Loader2 size={13} strokeWidth={1.8} className="animate-spin" />
+                            ) : (
+                              <span className="block h-[5px] w-[5px] translate-y-[4px] bg-[var(--bench-line)]" />
+                            )}
+                          </span>
+                          <span className="min-w-0">
+                            <span className={current || done ? "text-[var(--ink)]" : "text-[var(--ink-faint)]"}>
+                              {PHASE_LABEL[p]}
+                            </span>
+                            {current && (
+                              <>
+                                {p === "sending" && upload.phase === "sending" && (
+                                  <>
+                                    <span className="ml-2 tabular-nums text-[var(--ink-dim)]">
+                                      {upload.sectorsSent.toLocaleString()} /{" "}
+                                      {upload.sectorsTotal.toLocaleString()} chunks
+                                    </span>
+                                    <span className="mt-2 block h-[6px] w-full bg-[var(--bench-line)]">
+                                      <span
+                                        className="block h-full bg-[var(--ink)]"
+                                        style={{
+                                          width: `${
+                                            upload.sectorsTotal
+                                              ? Math.round(
+                                                  (upload.sectorsSent / upload.sectorsTotal) * 100,
+                                                )
+                                              : 0
+                                          }%`,
+                                        }}
+                                      />
+                                    </span>
+                                  </>
+                                )}
+                                {p !== "sending" && (
+                                  <span className="mt-2 block h-[6px] w-full overflow-hidden bg-[var(--bench-line)]">
+                                    <span className="block h-full w-1/3 animate-pulse bg-[var(--ink)]" />
+                                  </span>
+                                )}
+                                <span className="mt-1 block leading-relaxed text-[var(--ink-dim)]">
+                                  {PHASE_DETAIL[p]}
+                                </span>
+                              </>
+                            )}
+                          </span>
+                        </li>
+                      );
+                    })}
+                  </ol>
+                  {uploading && (
+                    <p className="mt-3 font-mono text-[12px] text-[var(--ink)]" data-testid="uploading-copy">
+                      Keep the SP-1 connected. Playback is paused while transferring.
+                    </p>
+                  )}
                 </div>
               )}
 
-              {result && !result.ok && (
-                <div className="mt-3" data-testid="upload-error">
-                  <p className="font-mono text-[14px] text-[var(--ink)]">
-                    {result.outcome === "unknown"
-                      ? "Reconnect the SP-1 to confirm whether the new song committed."
-                      : "Upload stopped. Your previous song is still active."}
-                  </p>
-                  <p className="mt-1 font-mono text-[12px] leading-relaxed text-[var(--ink-dim)]">
-                    {result.detail}
-                  </p>
-                  <button className="st-btn mt-3" onClick={downloadReport}>
-                    Download diagnostic report
-                  </button>
-                </div>
-              )}
+              {upload.phase === "failed" &&
+                (() => {
+                  const copy = failureCopy(upload.reason, upload.existingSongIntact);
+                  return (
+                    <div className="mt-4 border-l-2 border-[var(--ink)] pl-4" data-testid="upload-error">
+                      <p className="font-mono text-[14px] leading-relaxed text-[var(--ink)]">
+                        {copy.headline}
+                      </p>
+                      <p className="mt-2 font-mono text-[12px] leading-relaxed text-[var(--ink-dim)]">
+                        {copy.body}
+                      </p>
+                      {copy.retryable && (
+                        <button
+                          className="st-btn mt-3"
+                          data-testid="retry-upload"
+                          disabled={!canUpload}
+                          onClick={() => void startUpload()}
+                        >
+                          Try again
+                        </button>
+                      )}
+                    </div>
+                  );
+                })()}
             </>
           )}
         </section>
 
-        {/* activity */}
-        <section className="up-card" data-testid="activity">
-          <div className="mb-4 flex items-center justify-between gap-4">
-            <span className="font-mono text-[13px] uppercase tracking-[0.18em] text-[var(--ink)]">
-              activity
-            </span>
-            <span className="font-mono text-[11px] text-[var(--ink-faint)]">
-              {log.length === 0 ? "No recent activity" : `${log.length} events`}
-            </span>
+        {/* advanced — collapsed, off the normal path */}
+        <details className="up-card" data-testid="advanced">
+          <summary className="cursor-pointer font-mono text-[13px] uppercase tracking-[0.18em] text-[var(--ink)]">
+            advanced &amp; diagnostics
+          </summary>
+
+          <div className="mt-4 grid gap-5 font-mono text-[11px] leading-relaxed text-[var(--ink-dim)]">
+            {caps ? (
+              <>
+                <div data-testid="adv-device">
+                  <p className="text-[var(--ink)]">device</p>
+                  <p>
+                    firmware id 0x{(caps.firmwareId >>> 0).toString(16)} · protocol{" "}
+                    {caps.protoMajor}.{caps.protoMinor} · format {caps.formatMajor}.
+                    {caps.formatMinor} · STIX v{caps.stixVersion}
+                  </p>
+                  <p>
+                    device blocks {caps.deviceBlocks} · song A {caps.song[0].start}+
+                    {caps.song[0].blocks} · song B {caps.song[1].start}+{caps.song[1].blocks} ·
+                    index A {caps.index[0].start}+{caps.index[0].blocks} · index B{" "}
+                    {caps.index[1].start}+{caps.index[1].blocks}
+                  </p>
+                  <p>
+                    active index slot{" "}
+                    {library?.activeIndexSlot === null || library?.activeIndexSlot === undefined
+                      ? "none"
+                      : library.activeIndexSlot === 0
+                        ? "A"
+                        : "B"}{" "}
+                    · active song slot{" "}
+                    {library?.activeSongSlot === null || library?.activeSongSlot === undefined
+                      ? "none"
+                      : library.activeSongSlot === 0
+                        ? "A"
+                        : "B"}{" "}
+                    · generation {library?.generation ?? 0}
+                  </p>
+                </div>
+
+                <div data-testid="adv-slots">
+                  <p className="text-[var(--ink)]">index slots</p>
+                  {library?.slots.map((s) => (
+                    <p key={s.slot}>
+                      slot {s.slot === 0 ? "A" : "B"} · “{s.record.title || "—"}” · generation{" "}
+                      {s.record.generation} · {s.validation.valid ? "valid" : "invalid"} (
+                      {s.validation.reason})
+                      {library.activeIndexSlot === s.slot ? " · active" : ""}
+                      {s.validation.valid &&
+                      library.activeIndexSlot !== s.slot &&
+                      s.record.songPresent
+                        ? " · rollback copy, not playable"
+                        : ""}
+                    </p>
+                  ))}
+                  {library && <p>{library.explanation}</p>}
+                </div>
+              </>
+            ) : (
+              <p data-testid="adv-nodevice">No device connected — nothing to report.</p>
+            )}
+
+            {upload.phase === "failed" && (
+              <div data-testid="adv-failure">
+                <p className="text-[var(--ink)]">last upload failure, verbatim</p>
+                <pre className="mt-1 max-h-[160px] overflow-auto whitespace-pre-wrap break-words border border-[var(--bench-line)] p-2 text-[10px]">
+                  {JSON.stringify({ reason: upload.reason, result }, null, 2)}
+                </pre>
+              </div>
+            )}
+
+            <div>
+              <div className="mb-2 flex items-center justify-between gap-4">
+                <span className="text-[var(--ink)]">activity</span>
+                <span className="text-[var(--ink-faint)]">
+                  {log.length === 0 ? "No recent activity" : `${log.length} events`}
+                </span>
+              </div>
+              <div className="grid gap-2">
+                <button className="up-act" data-testid="copy-activity" onClick={copyActivity}>
+                  <ClipboardCopy size={15} strokeWidth={1.4} />
+                  copy activity
+                </button>
+                <button className="up-act" data-testid="download-report" onClick={downloadReport}>
+                  <Download size={15} strokeWidth={1.4} />
+                  download diagnostic report
+                </button>
+                <button className="up-act" data-testid="clear-activity" onClick={() => setLog([])}>
+                  <Trash2 size={15} strokeWidth={1.4} />
+                  clear activity
+                </button>
+              </div>
+              {log.length > 0 && (
+                <ul className="mt-3 max-h-[220px] overflow-auto" data-testid="log">
+                  {log.map((e, i) => (
+                    <li key={i} data-level={e.level}>
+                      {e.at} · {e.level} · {e.text}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
           </div>
-          <div className="grid gap-2">
-            <button className="up-act" data-testid="copy-activity" onClick={copyActivity}>
-              <ClipboardCopy size={15} strokeWidth={1.4} />
-              copy activity
-            </button>
-            <button className="up-act" data-testid="download-report" onClick={downloadReport}>
-              <Download size={15} strokeWidth={1.4} />
-              download diagnostic report
-            </button>
-            <button className="up-act" data-testid="clear-activity" onClick={() => setLog([])}>
-              <Trash2 size={15} strokeWidth={1.4} />
-              clear activity
-            </button>
-          </div>
-          {log.length > 0 && (
-            <ul
-              className="mt-3 max-h-[220px] overflow-auto font-mono text-[11px] text-[var(--ink-dim)]"
-              data-testid="log"
-            >
-              {log.map((e, i) => (
-                <li key={i} data-level={e.level}>
-                  {e.at} · {e.level} · {e.text}
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
+        </details>
+
       </main>
     </div>
   );
