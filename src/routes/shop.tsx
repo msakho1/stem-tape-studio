@@ -92,9 +92,9 @@ function ShopPage() {
           </p>
           <SupportButton />
         </div>
-        <div className="flex flex-wrap items-center gap-x-8 gap-y-3 px-4 pb-4 pt-2 md:px-8">
+        <div className="flex flex-wrap items-center gap-x-8 gap-y-3 px-4 pb-3 pt-2 md:px-8 md:pb-4">
           <Link to="/" className="flex items-center gap-3">
-            <img src={stemTapeLogo.url} alt="Stem Tape logo" width={120} height={120} className="h-[120px] w-[120px] object-contain" />
+            <img src={stemTapeLogo.url} alt="Stem Tape logo" width={120} height={120} className="h-16 w-16 object-contain md:h-[120px] md:w-[120px]" />
             <div>
               <p className="font-mono text-xl tracking-tight text-[var(--ink)]">Stem Tape</p>
               <p className="font-mono text-[11px] text-[var(--ink-dim)]">shop · sp-1 interface</p>
