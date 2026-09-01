@@ -92,6 +92,47 @@ void st_stream_sector_ready(st_stream_t *st, uint32_t sector_index)
 	}
 }
 
+void st_stream_set_reverse(st_stream_t *st, bool reverse)
+{
+	if (st->reverse == reverse) {
+		return;
+	}
+	st->reverse = reverse;
+
+	/*
+	 * POSITION AND RESIDENCY ARE NOT TOUCHED. See the header: the head is
+	 * still on the frame it was on, and the group holding that frame still
+	 * holds it. The only thing that changed is which neighbour comes next.
+	 *
+	 * The terminal states ARE lifted, but only the one the new direction
+	 * frees. A head parked at START_OF_SONG has tape ahead of it again the
+	 * moment it turns forward; a head parked at END_OF_SONG has tape ahead
+	 * of it the moment it turns back. Leaving either latched would make the
+	 * track silently refuse to move after a turn -- and the spec is explicit
+	 * that turning reverse off "lets it move forward from the beginning
+	 * again".
+	 */
+	if (!reverse && st->state == ST_STREAM_START_OF_SONG) {
+		st->state = ST_STREAM_PLAYING;
+		return;
+	}
+	if (reverse && st->state == ST_STREAM_END_OF_SONG) {
+		/* END_OF_SONG parks song_frame at `frames`, one PAST the last
+		 * real index -- unlike START_OF_SONG, which parks at 0, a
+		 * frame that genuinely exists. Turning around therefore has to
+		 * pull the head back onto the song before it can play, and
+		 * that is a position change, so residency goes with it. This is
+		 * the one place direction moves a head, and it moves it onto
+		 * the nearest frame that exists rather than to anywhere
+		 * chosen. */
+		if (st->frames > 0u) {
+			st->song_frame = st->frames - 1u;
+			st->ready_sector = ST_STREAM_NO_SECTOR;
+			st->state = ST_STREAM_PLAYING;
+		}
+	}
+}
+
 void st_stream_play(st_stream_t *st)
 {
 	if (st->state == ST_STREAM_STOPPED) {
@@ -139,7 +180,8 @@ bool st_stream_seek(st_stream_t *st, uint32_t frame)
 __attribute__((optimize("O2")))
 st_stream_tick_t st_stream_advance_frame(st_stream_t *st)
 {
-	if (st->state == ST_STREAM_STOPPED || st->state == ST_STREAM_END_OF_SONG) {
+	if (st->state == ST_STREAM_STOPPED || st->state == ST_STREAM_END_OF_SONG ||
+	    st->state == ST_STREAM_START_OF_SONG) {
 		return ST_STREAM_TICK_NOT_PLAYING;
 	}
 
@@ -160,6 +202,24 @@ st_stream_tick_t st_stream_advance_frame(st_stream_t *st)
 	/* state is PLAYING (or was UNDERRUN and st_stream_sector_ready()
 	 * already recovered it to PLAYING before this call). */
 	st->state = ST_STREAM_PLAYING;
+
+	if (st->reverse) {
+		/* THE MIRROR, and the reason it is a separate branch rather
+		 * than a signed step: the end conditions are not symmetric.
+		 * Forward runs off the end into a state that parks one PAST
+		 * the song and may loop; backward runs into frame 0, which is
+		 * a real frame, parks ON it, and never wraps. */
+		if (st->song_frame == 0u) {
+			st->state = ST_STREAM_START_OF_SONG;
+			return ST_STREAM_TICK_START_REACHED;
+		}
+		st->song_frame--;
+		if (st_stream_required_sector(st) != needed) {
+			return ST_STREAM_TICK_SECTOR_CROSSED;
+		}
+		return ST_STREAM_TICK_OK;
+	}
+
 	st->song_frame++;
 
 	if (st->song_frame >= st->frames) {
@@ -194,7 +254,8 @@ st_stream_tick_t st_stream_advance_frames(st_stream_t *st, uint32_t count)
 	if (count == 0u) {
 		return ST_STREAM_TICK_NOT_PLAYING;
 	}
-	if (st->state == ST_STREAM_STOPPED || st->state == ST_STREAM_END_OF_SONG) {
+	if (st->state == ST_STREAM_STOPPED || st->state == ST_STREAM_END_OF_SONG ||
+	    st->state == ST_STREAM_START_OF_SONG) {
 		return ST_STREAM_TICK_NOT_PLAYING;
 	}
 
@@ -212,6 +273,27 @@ st_stream_tick_t st_stream_advance_frames(st_stream_t *st, uint32_t count)
 	}
 
 	st->state = ST_STREAM_PLAYING;
+
+	if (st->reverse) {
+		/* Exactly `count` calls to the per-frame form, in one step --
+		 * the same equivalence the forward path claims and the same
+		 * host test walks. A caller honouring the precondition passes
+		 * at most (fis + 1), so `count > song_frame` means it asked to
+		 * step off the front of the song; the head parks ON frame 0
+		 * rather than at some negative index, because frame 0 is a real
+		 * frame and START_OF_SONG is where a reversed head stops. */
+		if (count > st->song_frame) {
+			st->song_frame = 0u;
+			st->state = ST_STREAM_START_OF_SONG;
+			return ST_STREAM_TICK_START_REACHED;
+		}
+		st->song_frame -= count;
+		if (st_stream_required_sector(st) != needed) {
+			return ST_STREAM_TICK_SECTOR_CROSSED;
+		}
+		return ST_STREAM_TICK_OK;
+	}
+
 	st->song_frame += count;
 
 	if (st->song_frame >= st->frames) {

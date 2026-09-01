@@ -301,6 +301,164 @@ static void test_underrun_missing_sector_and_recovery(void)
 }
 
 /* ========================================================================
+ * PER-TRACK REVERSE: one head's direction, and nothing else.
+ *
+ * docs/stem-tape-per-track-reverse-spec.md's one rule is that reverse
+ * changes a head's DIRECTION and never its POSITION, so these cases are
+ * written to fail if any of position, residency or transport state moves
+ * when direction is set -- not merely to confirm the head walks backward.
+ * ======================================================================== */
+static void test_reverse_turns_without_moving(void)
+{
+	st_stream_t st;
+
+	st_stream_init(&st, 4096u, SONG_BLOCK_COUNT_EXACT, SONG_FRAMES, SONG_SECTOR_COUNT, false);
+	st_stream_play(&st);
+	CHECK(!st.reverse, "a freshly initialised head is forward");
+
+	/* Walk to a position mid-sector so a turn has somewhere to go both
+	 * ways, and mark the sector it needs ready so it is genuinely
+	 * playing rather than starved. */
+	st_stream_sector_ready(&st, 0u);
+	(void)st_stream_advance_frames(&st, 100u);
+	CHECK(st.song_frame == 100u && st.state == ST_STREAM_PLAYING,
+	      "walked forward to frame 100, playing");
+
+	const uint32_t pos_before   = st.song_frame;
+	const uint32_t ready_before = st.ready_sector;
+
+	st_stream_set_reverse(&st, true);
+	CHECK(st.reverse, "direction is now backward");
+	CHECK(st.song_frame == pos_before,
+	      "THE ONE RULE: turning around did not move the head");
+	CHECK(st.ready_sector == ready_before,
+	      "residency survives a turn -- the group holding this frame still holds it");
+	CHECK(st.state == ST_STREAM_PLAYING,
+	      "turning around is not a stop, a restart or a seek");
+
+	/* And it really does walk the other way, one frame at a time. */
+	st_stream_tick_t t = st_stream_advance_frame(&st);
+
+	CHECK(t == ST_STREAM_TICK_OK && st.song_frame == 99u,
+	      "one backward tick moves the head from 100 to 99");
+	(void)st_stream_advance_frames(&st, 9u);
+	CHECK(st.song_frame == 90u,
+	      "the run form retreats by exactly its count -- 99 - 9 == 90");
+
+	/* Turning back forward is equally inert. */
+	st_stream_set_reverse(&st, false);
+	CHECK(st.song_frame == 90u && st.state == ST_STREAM_PLAYING,
+	      "turning forward again also leaves the head exactly where it is");
+	(void)st_stream_advance_frames(&st, 5u);
+	CHECK(st.song_frame == 95u, "and it advances forward from there, not from anywhere else");
+}
+
+static void test_reverse_clamps_at_the_start_and_never_wraps(void)
+{
+	st_stream_t st;
+
+	/* loop_enabled TRUE on purpose: the song loops, and the spec still
+	 * says a reversed head reaching the absolute beginning stops there
+	 * rather than wrapping to the end. Whole-song looping is a forward
+	 * behaviour. */
+	st_stream_init(&st, 4096u, SONG_BLOCK_COUNT_EXACT, SONG_FRAMES, SONG_SECTOR_COUNT, true);
+	st_stream_play(&st);
+	st_stream_sector_ready(&st, 0u);
+	st.song_frame = 3u;
+	st_stream_set_reverse(&st, true);
+
+	(void)st_stream_advance_frames(&st, 3u);
+	CHECK(st.song_frame == 0u && st.state == ST_STREAM_PLAYING,
+	      "retreating exactly onto frame 0 is an ordinary move -- frame 0 is a real frame");
+
+	st_stream_tick_t t = st_stream_advance_frame(&st);
+
+	CHECK(t == ST_STREAM_TICK_START_REACHED, "the tick that would step off the front reports START_REACHED");
+	CHECK(st.state == ST_STREAM_START_OF_SONG, "the head is parked at the start of the song");
+	CHECK(st.song_frame == 0u, "CLAMPED at 0 -- never a negative index, never the end of the song");
+	CHECK(st.song_frame != SONG_FRAMES - 1u && st.song_frame != SONG_FRAMES,
+	      "and specifically NOT wrapped to the end, even though this song loops");
+
+	/* Parked means parked: further ticks do nothing at all. */
+	for (int i = 0; i < 4; i++) {
+		CHECK(st_stream_advance_frame(&st) == ST_STREAM_TICK_NOT_PLAYING,
+		      "a parked reversed head is a no-op, exactly like END_OF_SONG");
+	}
+	CHECK(st.song_frame == 0u, "still at 0 after repeated ticks");
+	CHECK(st.underrun_count == 0u,
+	      "reaching the start is NOT an underrun -- the data was there, the song was not");
+
+	/* "Turning reverse off then lets it move forward from the beginning
+	 * again" -- the spec's own sentence, as a check. */
+	st_stream_set_reverse(&st, false);
+	CHECK(st.state == ST_STREAM_PLAYING, "turning forward releases the park");
+	CHECK(st.song_frame == 0u, "and releases it from frame 0, not from anywhere else");
+	(void)st_stream_advance_frames(&st, 7u);
+	CHECK(st.song_frame == 7u, "it moves forward from the beginning again");
+
+	/* AND THE RUN FORM CLAMPS THE SAME WAY. Everything above reached the
+	 * park through the per-frame form; a run that OVERSHOOTS the front of
+	 * the song is a different branch, and it is the branch main.c's audio
+	 * path actually takes. Without this, an implementation that wrapped a
+	 * whole run to the end of the song passed every check above. */
+	st_stream_set_reverse(&st, true);
+	CHECK(st.song_frame == 7u, "still at 7 after turning back around");
+	st_stream_tick_t tr = st_stream_advance_frames(&st, 20u);
+
+	CHECK(tr == ST_STREAM_TICK_START_REACHED, "a run that overshoots the front reports START_REACHED");
+	CHECK(st.song_frame == 0u,
+	      "and CLAMPS at 0 -- not the end of the song, and not 7 - 20 wrapped through zero");
+	CHECK(st.state == ST_STREAM_START_OF_SONG, "parked, by the run form too");
+}
+
+static void test_reverse_run_form_matches_frame_form_backwards(void)
+{
+	/* The same equivalence the forward path claims, walked backwards
+	 * across a sector boundary so the SECTOR_CROSSED tick is included. */
+	st_stream_t a, b;
+	const uint32_t start = ST11_FRAMES_PER_SECTOR + 4u;   /* 4 frames into sector 1 */
+
+	st_stream_init(&a, 4096u, SONG_BLOCK_COUNT_EXACT, SONG_FRAMES, SONG_SECTOR_COUNT, false);
+	st_stream_init(&b, 4096u, SONG_BLOCK_COUNT_EXACT, SONG_FRAMES, SONG_SECTOR_COUNT, false);
+	a.song_frame = start;
+	b.song_frame = start;
+	st_stream_play(&a);
+	st_stream_play(&b);
+	st_stream_set_reverse(&a, true);
+	st_stream_set_reverse(&b, true);
+	st_stream_sector_ready(&a, 1u);
+	st_stream_sector_ready(&b, 1u);
+
+	/* 5 frames back from offset 4 is exactly the caller's maximum
+	 * (fis + 1), and it lands on the LAST frame of the previous sector --
+	 * the mirror of a forward run landing on the first frame of the next
+	 * one. */
+	st_stream_tick_t ta = ST_STREAM_TICK_OK;
+
+	for (uint32_t i = 0; i < 5u; i++) {
+		ta = st_stream_advance_frame(&a);
+	}
+	st_stream_tick_t tb = st_stream_advance_frames(&b, 5u);
+
+	CHECK(a.song_frame == b.song_frame, "backward run form lands on the same frame as five single ticks");
+	CHECK(a.song_frame == ST11_FRAMES_PER_SECTOR - 1u,
+	      "and that frame is the LAST of the previous sector -- the mirror of the forward clamp");
+	CHECK(ta == tb, "and reports the same terminal tick");
+	CHECK(tb == ST_STREAM_TICK_SECTOR_CROSSED, "which is SECTOR_CROSSED: a backward head crosses backwards");
+	CHECK(a.state == b.state && a.underrun_count == b.underrun_count,
+	      "same state and same underrun accounting either way");
+
+	/* A backward head starves exactly like a forward one: frozen, not
+	 * guessed, counted once per episode. */
+	CHECK(st_stream_required_sector(&b) == 0u, "the head now needs sector 0");
+	CHECK(b.ready_sector == 1u, "which is not the sector it holds");
+	CHECK(st_stream_advance_frames(&b, 1u) == ST_STREAM_TICK_UNDERRUN,
+	      "so the next backward run underruns rather than reading the wrong group");
+	CHECK(b.song_frame == ST11_FRAMES_PER_SECTOR - 1u, "song_frame frozen through the underrun");
+	CHECK(b.underrun_count == 1u, "one episode counted");
+}
+
+/* ========================================================================
  * Loop transition: wrapping at end-of-song invalidates the stale sector
  * and resumes cleanly from frame 0 once it is resupplied.
  * ======================================================================== */
@@ -622,6 +780,9 @@ int main(void)
 	RUN(test_init_rejects_invalid_geometry);
 	RUN(test_validate_sector_real_fixture_and_corrupt_header);
 	RUN(test_underrun_missing_sector_and_recovery);
+	RUN(test_reverse_turns_without_moving);
+	RUN(test_reverse_clamps_at_the_start_and_never_wraps);
+	RUN(test_reverse_run_form_matches_frame_form_backwards);
 	RUN(test_loop_transition);
 	RUN(test_full_song_walk_transitions_and_hash);
 	RUN(test_run_form_matches_frame_form);

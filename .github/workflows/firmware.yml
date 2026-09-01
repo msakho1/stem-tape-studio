@@ -2257,8 +2257,10 @@ jobs:
           ./audit/test_planar | tee audit/planar-selftest.txt
 
           # THE EQUIVALENCE PROOF, against the recorded song rather than
-          # anything this build generated. handoff/v1.1/binaries/song-sectors-
-          # four-stem.bin is 43 sectors of a real upload, and its manifest
+          # anything this build generated. handoff/v1.3/binaries/song-sectors-
+          # four-stem.bin is the same 14592-frame real upload the v1.1 bundle
+          # recorded, restored at the shipped width -- 29 sectors at v1.3's
+          # 510 frames per sector, 43 at v1.2's 340 -- and its manifest
           # carries the COMPANION's own per-stem and song checksums -- computed
           # on the other side of the contract, before this format existed. A
           # conversion that dropped, reordered or resampled anything would have
@@ -2301,11 +2303,25 @@ jobs:
           # the firmware's, and compatibility.ts requires the STCP reply to
           # match the companion's, so old songs are refused in both directions
           # rather than misread.
-          grep -q '#define ST11_FORMAT_MINOR   2u' \
+          # ALL THREE VERSIONED CONSTANTS, not just the format one. Each is
+          # #ifndef-overridable so the v1.1 conformance harness can compile
+          # these same sources at the v1.1 contract, and an override that
+          # leaked into a real build would be silent: 24-bit decode over
+          # 16-bit media is not a crash, it is noise. Asserted on the SOURCE
+          # here and on the compiled value in test_stem_playback_gate.c --
+          # both, because either alone can be edited away.
+          grep -q '#define ST11_FORMAT_MINOR   3u' \
             firmware/stemtape_player/src/st_v11_format.h || {
-            echo "  the read path is planar but the format version still says"
-            echo "  v1.1 -- a v1.1 song would be accepted and misread"
+            echo "  the read path is planar but the stored-format version does"
+            echo "  not say v1.3 -- an older song would be accepted and misread"
             exit 1; }
+          grep -q '#define ST11_PCM_BIT_DEPTH        16u' \
+            firmware/stemtape_player/src/st_v11_format.h || {
+            echo "  the shipped stored sample width is not 16-bit"; exit 1; }
+          grep -q '#define ST11_PROTOCOL_MINOR 3u' \
+            firmware/stemtape_player/src/st_v11_format.h || {
+            echo "  the STCP transport version does not say 3, so a companion"
+            echo "  still encoding 24-bit would not be refused"; exit 1; }
           M=firmware/stemtape_player/src/main.c
           grep -q '#include "st_planar.h"' "$M" || {
             echo "  main.c does not include st_planar.h, so the read path is"
@@ -2893,7 +2909,7 @@ jobs:
           # AND THE REFUSAL, which the format change newly makes load-bearing:
           # a v1.1 sector read as four planar groups is not noise, it is one
           # stem's timeline played as all four.
-          grep -q 'is REFUSED by v1.2 firmware' audit/stem-playback-gate.txt || {
+          grep -q 'is REFUSED by v1.3 firmware' audit/stem-playback-gate.txt || {
             echo "  a v1.1 library is not refused -- an old song could be"
             echo "  accepted and misread through the planar decoder"; exit 1; }
           {

@@ -84,6 +84,16 @@
  *                    matching STOPPED's own "stop at end" behavior
  *                    exactly, until st_stream_play() or a fresh
  *                    st_stream_init() is called.
+ *   START_OF_SONG -- END_OF_SONG's mirror, reachable only while
+ *                    `reverse` is set: a backward head consumed frame 0
+ *                    and there is nothing before it. song_frame frozen
+ *                    AT 0 (a real, playable index, unlike END_OF_SONG's
+ *                    one-past-the-end), advance is a no-op, and
+ *                    st_stream_set_reverse(st, false) lifts it straight
+ *                    back to PLAYING. Per docs/stem-tape-per-track-
+ *                    reverse-spec.md: "A reversed track that reaches the
+ *                    absolute beginning stops/clamps there. It does not
+ *                    wrap to the end."
  * (A persistently corrupt sector -- the producer's own validation keeps
  * failing -- is no longer a distinct state this module tracks: the
  * mailbox simply never publishes it ready, which this module already
@@ -121,6 +131,7 @@ typedef enum {
 	ST_STREAM_PLAYING,
 	ST_STREAM_END_OF_SONG,
 	ST_STREAM_UNDERRUN,
+	ST_STREAM_START_OF_SONG,
 } st_stream_state_t;
 
 typedef struct {
@@ -152,6 +163,24 @@ typedef struct {
 	uint32_t song_frame;     /* the ONE authoritative absolute song frame */
 	uint32_t ready_sector;   /* sector index this thread has locally confirmed ready, or ST_STREAM_NO_SECTOR */
 	uint32_t underrun_count; /* diagnostic: UNDERRUN episodes (not ticks); never reset here */
+	/*
+	 * THE DIRECTION OF THIS HEAD. false = forward (every stream, always,
+	 * before per-track reverse existed, and still every stream that is not
+	 * the one reversed track).
+	 *
+	 * It lives here rather than in the caller because every function that
+	 * moves song_frame has to agree about which way it moves, and a
+	 * direction held outside the struct is a second source of truth that
+	 * one of those functions will eventually be updated without.
+	 *
+	 * It is NOT part of the immutable geometry: the geometry above is
+	 * written once at init and read by two threads, while this is mutable
+	 * and audio-thread-owned like every other field in this block. The
+	 * producer thread never reads it -- what to fetch NEXT for a reversed
+	 * head is derived by the consumer and published through the mailbox's
+	 * requested_sector exactly as a forward head's is.
+	 */
+	bool reverse;
 } st_stream_t;
 
 /*
@@ -262,6 +291,29 @@ void st_stream_stop(st_stream_t *st);
  */
 bool st_stream_seek(st_stream_t *st, uint32_t frame);
 
+/*
+ * DIRECTION, and the two rules that make it a head rather than an effect.
+ *
+ * st_stream_set_reverse() does NOT move song_frame, does NOT stop, does NOT
+ * restart, and does NOT invalidate residency. The frame the head is on is
+ * still the frame it is on, and the group holding that frame is still the
+ * group holding it -- turning around does not change either. That is the
+ * whole of docs/stem-tape-per-track-reverse-spec.md's one rule: "Reverse
+ * changes the direction of that track's head. It never changes its position."
+ *
+ * The one state it does touch is the pair of terminal states, and only in the
+ * direction that frees the head: setting reverse=false lifts START_OF_SONG
+ * back to PLAYING, and setting reverse=true lifts END_OF_SONG back to PLAYING
+ * with song_frame pulled back to the last real frame (END_OF_SONG parks one
+ * PAST the song, which is not a playable index). A head that has run out of
+ * tape in one direction has not run out in the other.
+ *
+ * STOPPED is never lifted: direction is not a transport command.
+ *
+ * Audio-thread-only, like every other mutator here.
+ */
+void st_stream_set_reverse(st_stream_t *st, bool reverse);
+
 typedef enum {
 	ST_STREAM_TICK_NOT_PLAYING = 0,  /* state was STOPPED or END_OF_SONG already; no-op */
 	ST_STREAM_TICK_OK,               /* advanced by one frame, same sector as before */
@@ -272,6 +324,9 @@ typedef enum {
 					   * END_OF_SONG, song_frame frozen at `frames` */
 	ST_STREAM_TICK_UNDERRUN,         /* could not advance: the sector song_frame needs was never marked
 					   * ready; state is (now) UNDERRUN, song_frame UNCHANGED */
+	ST_STREAM_TICK_START_REACHED,    /* reverse only: retreated past frame 0 -- state is now
+					   * START_OF_SONG and song_frame is CLAMPED at 0, the mirror of
+					   * ST_STREAM_TICK_ENDED. Never wraps to the end of the song. */
 } st_stream_tick_t;
 
 /*
@@ -295,6 +350,14 @@ st_stream_tick_t st_stream_advance_frame(st_stream_t *st);
  * computes exactly that by clamping its run to whichever comes first --
  * the end of the sector, the end of the song, or the end of its output
  * block. main.c's audio path is written that way.
+ *
+ * REVERSED, the same precondition mirrors exactly. A forward head at offset
+ * `fis` inside its sector may consume at most (FRAMES_PER_SECTOR - fis)
+ * frames and lands on the first frame of the NEXT sector; a backward head at
+ * the same offset may consume at most (fis + 1) -- frames fis, fis-1, ... 0 --
+ * and lands on the LAST frame of the previous one. Both are "as many frames
+ * as remain in this sector in the direction of travel", which is the single
+ * rule the caller's clamp actually implements.
  *
  * Given that precondition this is EXACTLY equivalent to calling
  * st_stream_advance_frame() `count` times: same final song_frame, same
