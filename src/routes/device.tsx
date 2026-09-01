@@ -972,10 +972,23 @@ function DevicePage() {
                     }}
                   />
                 </div>
+                {/* On a one-song device free space cannot be spent, so the
+                    headline leads with what is used. Multi-song firmware leads
+                    with what is still available. */}
                 <p className="mt-2 font-mono text-[12px] text-[var(--ink-dim)]" data-testid="storage-line">
-                  <span className="text-[var(--ink)]">{fmtMiB(storage.freeBytes)} free</span> of{" "}
-                  {fmtMiB(storage.capacityBytes)}
+                  {canAddAnother ? (
+                    <>
+                      <span className="text-[var(--ink)]">{fmtMiB(storage.freeBytes)} free</span> of{" "}
+                      {fmtMiB(storage.capacityBytes)}
+                    </>
+                  ) : (
+                    <>
+                      <span className="text-[var(--ink)]">{fmtMiB(storage.usedBytes)}</span> of{" "}
+                      {fmtMiB(storage.capacityBytes)} used
+                    </>
+                  )}
                 </p>
+
               </div>
 
               {canAddAnother && <span data-testid="add-song" />}
@@ -1235,12 +1248,22 @@ function DevicePage() {
 
           {upload.phase === "idle" && !result?.ok && (
             <p className="font-mono text-[12px] leading-relaxed text-[var(--ink-dim)]" data-testid="no-song">
-              Uploading replaces the song on the SP-1. The song already on it keeps playing until
-              the new one is completely stored and checked.
-              {connection.status === "ready" &&
-                ` Largest song that fits: ${fmtMiB(storage.maxSongBytes)}.`}
+              {canAddAnother ? (
+                <>
+                  Adding a song keeps the songs already on the SP-1.
+                  {connection.status === "ready" && ` Up to ${fmtMiB(storage.freeBytes)}.`}
+                </>
+              ) : (
+                <>
+                  Uploading replaces the song on the SP-1. The song already on it keeps playing
+                  until the new one is completely stored and checked.
+                  {connection.status === "ready" &&
+                    ` Replaces the current song. Up to ${fmtMiB(storage.maxSongBytes)}.`}
+                </>
+              )}
             </p>
           )}
+
 
           {result?.ok ? (
             <div data-testid="success">
