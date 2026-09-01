@@ -90,9 +90,11 @@ export function selectActiveIndex(a: SlotReading, b: SlotReading): LibraryState 
 
   if (valid.length === 0) {
     const blank = a.blank && b.blank;
+    const legacySlots = slots.filter((s) => isLegacyRecord(s));
+    const legacy = legacySlots.length > 0;
     return {
       slots,
-      status: blank ? "blank" : "corrupt",
+      status: blank ? "blank" : legacy ? "legacy" : "corrupt",
       activeIndexSlot: null,
       active: null,
       activeSongSlot: null,
@@ -102,7 +104,11 @@ export function selectActiveIndex(a: SlotReading, b: SlotReading): LibraryState 
       requiresInitialization: true,
       explanation: blank
         ? "Both index slots are blank: this storage has never been initialized."
-        : `Both index slots are unreadable (A: ${a.validation.reason}; B: ${b.validation.reason}). This is corrupt storage, not an interrupted transfer.`,
+        : legacy
+          ? `This SP-1 was set up by an earlier version of the format (index ${legacySlots
+              .map((s) => slotName(s.slot))
+              .join(" and ")} carries a CRC-valid v1.${legacySlots[0]!.record.formatMinor} record). The records read correctly; this firmware simply no longer accepts that layout.`
+          : `Neither index slot holds a readable record (A: ${a.validation.reason}; B: ${b.validation.reason}). This SP-1 has not been set up for this firmware.`,
     };
   }
 
