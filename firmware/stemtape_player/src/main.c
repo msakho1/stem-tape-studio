@@ -157,9 +157,9 @@
 #define ST_RC_SWEEP_REPS 24u
 
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st51-VOLCAL"
+#define ST_BUILD_TAG "st52-VOLCAL"
 #else
-#define ST_BUILD_TAG "st51"
+#define ST_BUILD_TAG "st52"
 #endif
 #include "st_track_hold.h"
 
@@ -1749,7 +1749,125 @@ static st_ctl_out_t g_stem_ctl_out;
  * ever reads its immutable geometry fields (via st_stream_validate_
  * sector()), never its mutable ones -- see that struct's own doc
  * comment. */
-static st_stream_t g_stem_stream;
+/*
+ * FOUR PLAYHEADS, ONE PER STEM -- and, until a track is reversed, four
+ * copies of the same number.
+ *
+ * docs/stem-tape-per-track-reverse-spec.md names this directly: "main.c:1677
+ * static st_stream_t g_stem_stream; <- ONE playhead. Four heads means four of
+ * these." The struct makes it cheap. Everything above the mutable line
+ * (song_start_block, song_block_count, frames, sector_count, loop_enabled) is
+ * IDENTICAL for every stem -- it describes the song, not the head -- so the
+ * array costs only the four mutable fields plus the direction flag, on the
+ * order of 128 bytes rather than a redesign.
+ *
+ * BECAUSE THE GEOMETRY IS IDENTICAL, every reader that wants geometry rather
+ * than position reads it through ST_STEM_GEOM below. That includes
+ * streamer_thread, which touches these structs from the OTHER thread: the
+ * geometry fields are written once, by st_stream_init(), before either
+ * steady-state loop starts, and never reassigned -- so a concurrent read of a
+ * value nobody writes again is not a race. That was already the rule when
+ * there was one stream (see st_stem_stream.h's ownership section); making it
+ * four does not change it, and routing those reads through one name means a
+ * future field that is NOT identical cannot be read this way by accident.
+ */
+static st_stream_t g_stem_stream[ST_PL_STEMS];
+
+/* THE GEOMETRY, which every head shares. Never use this to read a position. */
+#define ST_STEM_GEOM (g_stem_stream[0])
+
+/*
+ * THE TRANSPORT CLOCK IS A HEAD, BUT NOT NECESSARILY STEM 0.
+ *
+ * The loop window, the seam duck, the beat phase and the published song frame
+ * belong to the SONG, and a reversed head must not drag the song's clock
+ * backwards with it. So they are all read from this head, which is always one
+ * that is still going forward. There is always at least one, because only one
+ * track reverses at a time -- asserted where the gesture sets it, not assumed
+ * here.
+ *
+ * Audio-thread-owned, like the streams themselves.
+ */
+static uint8_t s_stem_transport;
+
+/*
+ * THE FOUR HEADS ARE INITIALISED, PLAYED AND STOPPED TOGETHER, ALWAYS.
+ *
+ * Not because they must stay together -- the whole point of the array is that
+ * they need not -- but because a song load, a PLAY and a STOP are facts about
+ * the SONG, and a version of any of them that reached three heads and missed
+ * one would leave the fourth pointed at a song that no longer exists. These
+ * exist so that is unrepresentable rather than merely avoided, the same
+ * argument stem_rs_drop() already makes for the resampler's carried state.
+ *
+ * A load also puts every head forward and hands the transport back to stem 0:
+ * a new song has no reversed track, and a stale direction surviving a load
+ * would be a track playing backwards for no reason the player could see.
+ */
+static bool stem_streams_init(uint32_t song_start_block, uint32_t song_block_count,
+			       uint32_t frames, uint32_t sector_count, bool loop_enabled)
+{
+	uint32_t k;
+	bool ok = true;
+
+	for (k = 0; k < ST_PL_STEMS; k++) {
+		if (!st_stream_init(&g_stem_stream[k], song_start_block, song_block_count,
+				     frames, sector_count, loop_enabled)) {
+			ok = false;
+		}
+	}
+	s_stem_transport = 0u;
+	return ok;
+}
+
+static void stem_streams_play(void)
+{
+	uint32_t k;
+
+	for (k = 0; k < ST_PL_STEMS; k++) {
+		st_stream_play(&g_stem_stream[k]);
+	}
+}
+
+static void stem_streams_stop(void)
+{
+	uint32_t k;
+
+	for (k = 0; k < ST_PL_STEMS; k++) {
+		st_stream_stop(&g_stem_stream[k]);
+	}
+}
+
+/* The largest underrun episode count across the four heads. See its use. */
+static uint32_t stem_underrun_worst(void)
+{
+	uint32_t k;
+	uint32_t worst = g_stem_stream[0].underrun_count;
+
+	for (k = 1; k < ST_PL_STEMS; k++) {
+		if (g_stem_stream[k].underrun_count > worst) {
+			worst = g_stem_stream[k].underrun_count;
+		}
+	}
+	return worst;
+}
+
+/*
+ * ONE GROUP OF SILENCE, SHARED, CONST, IN FLASH.
+ *
+ * A head whose group is not resident has to render SOMETHING, and the
+ * alternatives are all worse than this: a per-frame "is this stem live" test
+ * costs a branch 48,000 times a second on the deadline thread; skipping the
+ * stem in the mixer means a second code path through the hottest loop in the
+ * firmware; and reading its stale buffer is the wrong audio, played
+ * confidently.
+ *
+ * Pointing that head's group pointer here instead makes silence fall out of
+ * the arithmetic the loop already does: decoding zeros yields zeros. No
+ * branch, no second path, 2 KiB of .rodata, and the starved head is silent
+ * for exactly as long as it is starved.
+ */
+static const uint8_t g_stem_silent_group[ST_PL_GROUP_BYTES];
 
 /* Set at boot, by streamer_thread(), only after g_stem_stream above is
  * validly initialized AND g_stem_group_bufs[..][0]/g_stem_mbox[] all hold a real,
@@ -1757,7 +1875,7 @@ static st_stream_t g_stem_stream;
  * this file already uses for g_v11_layout_ready/g_meta_loaded, now a
  * real atomic (Slice 3B.1) rather than a `volatile` flag, since it is
  * exactly the kind of "shared ready flag" st_stem_bufmbox.h's own
- * protocol note requires be atomic. Distinct from g_stem_stream.state
+ * protocol note requires be atomic. Distinct from g_stem_stream[].state
  * (STOPPED/PLAYING/..., which toggles with transport): this flag means
  * "a valid song is currently selected and geometry-validated". Slice C3:
  * no longer "never cleared again" -- audio_thread's own post-commit
@@ -1832,7 +1950,7 @@ static atomic_t g_stem_diag_ph_pulse_ns;   /* worst single clock pulse in the wi
  */
 static atomic_t g_stem_underrun_frames;
 
-static atomic_t g_stem_underrun_count;     /* mirrors g_stem_stream.underrun_count, atomically, for cross-thread
+static atomic_t g_stem_underrun_count;     /* mirrors the worst head's underrun_count, atomically, for cross-thread
 					     * reads (g_stem_stream itself is audio-thread-exclusive -- see above) */
 /*
  * PER-STEM FAULT COUNTERS, because the global ones cannot answer the
@@ -1882,7 +2000,7 @@ static atomic_t g_stem_reload_fail_count;  /* Slice C3: post-commit runtime relo
  * observes the fence via atomic_get()); never written again afterward,
  * so plain (non-atomic) is correct here for the exact same reason it is
  * correct for g_stem_stream's own immutable geometry fields. g_stem_
- * song_frame_pub: g_stem_stream.song_frame's real, ongoing atomic
+ * song_frame_pub: the transport head's song_frame's real, ongoing atomic
  * mirror, refreshed every audio block (see looper_audio_block()'s own
  * comment at its publish site) -- audio-thread-exclusive g_stem_stream
  * itself is never read from led_service() (control thread); this
@@ -2459,16 +2577,25 @@ static uint8_t   s_stem_jump_pend;   /* 0 none, else ST_SEAM_JUMP_* */
  * match a .constprop/.isra clone suffix. */
 __attribute__((optimize("O2"), noinline, noclone))
 static void stem_render_run(const uint8_t *const grp[ST_PL_STEMS],
-			     uint32_t frame_in_group,
+			     const uint32_t frame_in_group[ST_PL_STEMS],
 			     const st_stem_mix_prepared_t *prep,
 			     int32_t m0, int32_t md, int32_t mv,
 			     uint32_t f0, uint32_t n, int16_t *s,
 			     uint32_t peak[ST11_STEM_COUNT],
-			     st_seam_t *seam, uint32_t song_frame,
+			     st_seam_t *seam, uint32_t transport,
 			     uint32_t rate_q16, uint32_t frac_io[ST_PL_STEMS],
-			     uint32_t src_avail,
-			     uint32_t used_out[ST_PL_STEMS])
+			     const uint32_t src_avail[ST_PL_STEMS],
+			     uint32_t used_out[ST_PL_STEMS],
+			     const st_stream_t heads[ST_PL_STEMS],
+			     const int8_t dirs[ST_PL_STEMS])
 {
+	/* THE SONG'S CLOCK is the TRANSPORT head's position, never stem 0's --
+	 * the same number until stem 0 is the track being reversed, and then
+	 * stem 0 is running backwards while the song is not. Taken by index so
+	 * that the cursor offset added to it below belongs to the same head. */
+	const uint32_t fx_clock_stem = transport;
+	const uint32_t song_frame    = heads[transport].song_frame;
+
 	/* Hoisted out of the 48 kHz loop: with the overlay never opened this is
 	 * false and the whole rack costs one test per block. */
 	const bool fx_on = st_fx_running(&g_stem_fx);
@@ -2480,27 +2607,56 @@ static void stem_render_run(const uint8_t *const grp[ST_PL_STEMS],
 	 * ordinary playback is bit-identical to a build without inertia and the
 	 * full-playback gate's output hash still holds.
 	 */
-	const bool unity = (rate_q16 == ST_RS_ONE) && stem_rs_all_aligned();
 	/*
-	 * PER-STEM CURSORS. All four still move together here -- one rate, one
-	 * direction -- so every element of each array holds the same value and
-	 * the arithmetic below is what it always was. What changed is that
-	 * nothing in the loop now REQUIRES them to agree, which is the whole
-	 * prerequisite for one stem reading the other way.
+	 * PER-STEM CURSORS, AND PER-STEM DIRECTIONS.
 	 *
-	 * The unity fast path above is untouched and is what ordinary
-	 * four-forward playback takes, so this costs nothing until a rate is
-	 * actually bent.
+	 * dirs[] is +1 for a head reading forward and -1 for the one reading
+	 * back. Everything below is written in terms of it, so there is exactly
+	 * ONE cursor implementation rather than a forward one and a mirrored
+	 * copy that can drift from it: the read index is
+	 *
+	 *     idx = frame_in_group + dir * cur
+	 *
+	 * and the frame BEHIND the cursor -- behind in the direction of travel,
+	 * which for a reversed head is the frame at a HIGHER index -- is that
+	 * same expression at (cur - 1).
+	 *
+	 * IT COMES FROM THE CALLER, not from heads[].reverse, and the
+	 * difference matters exactly once: a head with no resident group is
+	 * pointed at the all-zero group, where every index reads zero, so its
+	 * direction is meaningless -- and giving it the transport's own index
+	 * and direction is what keeps the fast path below available for the
+	 * three heads that ARE reading real bytes. Deriving the sign here
+	 * instead would drop all four onto the interpolating path for the
+	 * duration of one head's starvation, which is a one-sample shift on
+	 * stems that never lost anything.
 	 */
 	uint32_t frac[ST_PL_STEMS];
 	uint32_t cur[ST_PL_STEMS];      /* source frames consumed within this run */
 	uint32_t idx[ST_PL_STEMS];      /* where each stem reads, inside its group */
 	uint32_t sp;
+	/*
+	 * THE FAST PATH, and the two things it now requires.
+	 *
+	 * The transport is at nominal speed almost always -- inertia bends it
+	 * only for the few hundred milliseconds of a spin-up or spin-down --
+	 * and every head reads the same frame of the same group unless a track
+	 * is reversed. When both hold, this takes the decode this function has
+	 * always made, with the argument it has always passed, so ordinary
+	 * four-forward playback is bit-identical to a build without any of
+	 * this: the full-playback gate's output hash is the proof.
+	 */
+	bool together = true;
 
 	for (sp = 0; sp < ST_PL_STEMS; sp++) {
 		frac[sp] = frac_io[sp];
 		cur[sp]  = 0u;
+		if (dirs[sp] < 0 || frame_in_group[sp] != frame_in_group[0]) {
+			together = false;
+		}
 	}
+
+	const bool unity = (rate_q16 == ST_RS_ONE) && stem_rs_all_aligned() && together;
 
 	for (uint32_t k = 0; k < n; k++) {
 		const uint32_t f = f0 + k;
@@ -2508,7 +2664,7 @@ static void stem_render_run(const uint8_t *const grp[ST_PL_STEMS],
 		int16_t stem_l, stem_r;
 
 		if (unity) {
-			st_pl_decode_frame_shared(grp, frame_in_group + k, &frame);
+			st_pl_decode_frame_shared(grp, frame_in_group[0] + k, &frame);
 			/* at 1x source and output are the same count */
 			for (sp = 0; sp < ST_PL_STEMS; sp++) {
 				cur[sp] = k;
@@ -2539,9 +2695,11 @@ static void stem_render_run(const uint8_t *const grp[ST_PL_STEMS],
 			 * group buffer is memory corruption in a real-time
 			 * thread. */
 			for (sp = 0; sp < ST_PL_STEMS; sp++) {
-				idx[sp] = (cur[sp] >= src_avail) ? (src_avail - 1u)
-								 : cur[sp];
-				idx[sp] += frame_in_group;
+				const uint32_t c = (cur[sp] >= src_avail[sp])
+						   ? (src_avail[sp] - 1u) : cur[sp];
+
+				idx[sp] = (uint32_t)((int32_t)frame_in_group[sp] +
+						      dirs[sp] * (int32_t)c);
 			}
 			/* THE ARRAY FORM, one index per stem -- but only when the
 			 * four indices actually differ, which today they never
@@ -2602,7 +2760,7 @@ static void stem_render_run(const uint8_t *const grp[ST_PL_STEMS],
 				while (frac[sp] >= ST_RS_ONE) {
 					frac[sp] -= ST_RS_ONE;
 					cur[sp]++;
-					if (cur[sp] >= src_avail) {
+					if (cur[sp] >= src_avail[sp]) {
 						/*
 						 * OUT OF RUN. Reachable only
 						 * from the floored corner in
@@ -2625,7 +2783,7 @@ static void stem_render_run(const uint8_t *const grp[ST_PL_STEMS],
 						 * exactly "the fractional
 						 * part".
 						 */
-						cur[sp] = src_avail;
+						cur[sp] = src_avail[sp];
 						s_rs_prev.stem_l[sp] = nxt.stem_l[sp];
 						s_rs_prev.stem_r[sp] = nxt.stem_r[sp];
 						frac[sp] &= (ST_RS_ONE - 1u);
@@ -2639,11 +2797,19 @@ static void stem_render_run(const uint8_t *const grp[ST_PL_STEMS],
 						 * once directions differ, three
 						 * stems read at a position that
 						 * is not theirs. */
-						uint32_t pidx = cur[sp] - 1u;
+						uint32_t pc = cur[sp] - 1u;
+						uint32_t pidx;
 
-						if (pidx >= src_avail) {
-							pidx = src_avail - 1u;
+						if (pc >= src_avail[sp]) {
+							pc = src_avail[sp] - 1u;
 						}
+						/* BEHIND IN THE DIRECTION OF
+						 * TRAVEL: one step back along
+						 * this head's own path, which
+						 * for a reversed head is a
+						 * HIGHER index in the group. */
+						pidx = (uint32_t)((int32_t)frame_in_group[sp] +
+								   dirs[sp] * (int32_t)pc);
 						/*
 						 * THE FRAME BEHIND THE NEW CURSOR
 						 * IS USUALLY THE ONE ALREADY IN
@@ -2677,13 +2843,12 @@ static void stem_render_run(const uint8_t *const grp[ST_PL_STEMS],
 						 * way: it is the same frame of
 						 * the same group.
 						 */
-						if (frame_in_group + pidx == idx[sp]) {
+						if (pidx == idx[sp]) {
 							s_rs_prev.stem_l[sp] = nxt.stem_l[sp];
 							s_rs_prev.stem_r[sp] = nxt.stem_r[sp];
 						} else {
 							st_pl_decode_stem_inline(
-								grp[sp],
-								frame_in_group + pidx,
+								grp[sp], pidx,
 								&s_rs_prev.stem_l[sp],
 								&s_rs_prev.stem_r[sp]);
 						}
@@ -2728,7 +2893,9 @@ static void stem_render_run(const uint8_t *const grp[ST_PL_STEMS],
 			 * answer whether or not it is the one running
 			 * backwards, and was indistinguishable from the shared
 			 * cursor while all four moved together. */
-			st_fx_process(&g_stem_fx, &fl, &fr, song_frame + cur[s_fx_target]);
+			st_fx_process(&g_stem_fx, &fl, &fr,
+				       (uint32_t)((int32_t)heads[s_fx_target].song_frame +
+						   dirs[s_fx_target] * (int32_t)cur[s_fx_target]));
 			/* st_fx_process() clamps its output to the Q23 range, so
 			 * the shift back cannot exceed the stored sample's own
 			 * range and needs no second saturation. */
@@ -2813,11 +2980,16 @@ static void stem_render_run(const uint8_t *const grp[ST_PL_STEMS],
 			int32_t gr = (int32_t)stem_r << 8;
 
 			/* GLOBAL scope carries the whole mix, so its clock is
-			 * the TRANSPORT's own position -- stem 0's cursor,
-			 * which is the transport's until a stem is reversed and
-			 * stays the transport's after, because a reversed stem
-			 * does not drag the song's clock backwards with it. */
-			st_fx_process(&g_stem_fx, &gl, &gr, song_frame + cur[0]);
+			 * the TRANSPORT's own position -- `song_frame` is the
+			 * transport head's, and cur[] advances by the same
+			 * count for every forward head, so stem 0's cursor
+			 * offset is the transport's whenever stem 0 is going
+			 * forward. It is the transport itself whenever stem 0
+			 * is the one reversed, because then the transport is
+			 * some other stem and this offset would be backwards --
+			 * so the offset is taken from the transport's own
+			 * direction, which is always forward. */
+			st_fx_process(&g_stem_fx, &gl, &gr, song_frame + cur[fx_clock_stem]);
 			gl >>= 8;
 			gr >>= 8;
 			if (gl > INT16_MAX) gl = INT16_MAX;
@@ -2863,7 +3035,7 @@ static void stem_render_run(const uint8_t *const grp[ST_PL_STEMS],
 		frac_io[sp] = frac[sp];
 		/* Never report more than the run held, whatever the arithmetic
 		 * did. */
-		used_out[sp] = (cur[sp] > src_avail) ? src_avail : cur[sp];
+		used_out[sp] = (cur[sp] > src_avail[sp]) ? src_avail[sp] : cur[sp];
 	}
 }
 #endif /* SP1_XFER_ENABLE */
@@ -2938,7 +3110,7 @@ if (g_loop_active) {
 }
 #if SP1_XFER_ENABLE
 /* STEM TAPE Phase 3 control-matrix (beat-sync LED slice): publishes
- * g_stem_stream.song_frame -- "the ONE authoritative absolute song
+ * the TRANSPORT head's song_frame -- "the ONE authoritative absolute song
  * frame" (st_stem_stream.h's own words), audio-thread-EXCLUSIVE -- to
  * its atomic cross-thread mirror ONCE per block, the SAME "computed
  * once per block, ~5 ms granularity is plenty for an LED" rationale
@@ -2951,10 +3123,14 @@ if (g_loop_active) {
  * second clock: there is no second clock, only this published copy
  * of the real one, refreshed every block). Unconditional (not gated
  * on stem_active): when no stem song is active this mirror simply
- * holds whatever g_stem_stream.song_frame last was (0 if never
+ * holds whatever the transport head's song_frame last was (0 if never
  * selected) -- harmless, since led_service() only reads it behind
  * its own g_stem_song_selected gate. */
-atomic_set(&g_stem_song_frame_pub, (atomic_val_t)g_stem_stream.song_frame);
+/* THE TRANSPORT'S position, not stem 0's -- they are the same number until
+ * a track is reversed, and after that this is the one the song's clock is
+ * made of. A reversed head must never drag the beat phase backwards. */
+atomic_set(&g_stem_song_frame_pub,
+	   (atomic_val_t)g_stem_stream[s_stem_transport].song_frame);
 #endif
 }
 
@@ -3171,16 +3347,39 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 					       BLK_FRAMES, I2S_TRUE_HZ);
 
 	while (f < BLK_FRAMES) {
-		uint32_t needed;
-		uint32_t fis, run, left_in_song, want, out_n;
-		/* Per-stem source consumption, filled by stem_render_run().
-		 * Every element is `used` today; the array exists so that when
-		 * one stem diverges, the four streams are advanced by the four
-		 * numbers the render loop actually produced rather than by one
-		 * the caller re-derived. */
+		/*
+		 * THE TRANSPORT HEAD. Everything that belongs to the SONG rather
+		 * than to a track -- the loop window, the seam duck, the beat
+		 * phase, the published song frame -- is read from this one. It is
+		 * always a head that is still going forward, so a reversed track
+		 * cannot drag the song's clock backwards with it.
+		 */
+		st_stream_t *const tr = &g_stem_stream[s_stem_transport];
+		/*
+		 * PER-STEM, because a head can now be somewhere else.
+		 *
+		 * `needed[k]` is the group each head wants, `fis[k]` where it sits
+		 * inside that group, `run_k[k]` how many source frames it may take
+		 * before it leaves the group. `run` is the MINIMUM of those, which
+		 * is the spec's own rule: "out_n is bounded by the minimum ... or
+		 * the reversed stem starves while the other three run on."
+		 */
+		uint32_t needed[ST_PL_STEMS];
+		uint32_t fis[ST_PL_STEMS];
+		uint32_t run_k[ST_PL_STEMS];
+		uint32_t pin_idx[ST_PL_STEMS];
+		bool     from_pin[ST_PL_STEMS];
+		bool     resident[ST_PL_STEMS];
+		/* +1 forward, -1 backward -- and +1 for a head with no group,
+		 * which reads zeros and so has no direction of its own. See
+		 * stem_render_run()'s own note on why the caller decides. */
+		int8_t   dirs[ST_PL_STEMS];
+		uint32_t run, left_in_song, out_n;
+		uint32_t sk;
+		/* Per-stem source consumption, filled by stem_render_run(): the
+		 * four streams are advanced by the four numbers the render loop
+		 * actually produced rather than by one the caller re-derived. */
 		uint32_t stem_used[ST_PL_STEMS];
-		uint32_t pin_idx;
-		bool from_pin = false;
 		/* The loop window, sampled ONCE per iteration. `active` is read
 		 * first and the bounds after it, which is the read side of the
 		 * publication order described where these atomics are declared:
@@ -3290,7 +3489,7 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 
 		if (lp_on) {
 			const uint32_t len = lp_hi - lp_lo;
-			const uint32_t pos = g_stem_stream.song_frame;
+			const uint32_t pos = tr->song_frame;
 
 			if (pos >= lp_hi) {
 				lp_end = lp_lo + ((pos - lp_lo) / len + 1u) * len;
@@ -3309,15 +3508,15 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 		 * the playhead lands on this frame rather than stepping over
 		 * it. */
 		if (lp_on && !s_stem_jump_pend &&
-		    g_stem_stream.song_frame >= lp_lo &&
-		    g_stem_stream.song_frame < lp_end &&
-		    g_stem_stream.song_frame + ST_SEAM_FRAMES >= lp_end) {
+		    tr->song_frame >= lp_lo &&
+		    tr->song_frame < lp_end &&
+		    tr->song_frame + ST_SEAM_FRAMES >= lp_end) {
 			s_stem_jump_to   = lp_lo;
 			s_stem_jump_pend = ST_SEAM_JUMP_WRAP;
 			s_stem_seam_lo   = lp_lo;
 			s_stem_seam_hi   = lp_end;
 			st_seam_begin_in(&s_stem_seam,
-					  (uint16_t)(lp_end - g_stem_stream.song_frame));
+					  (uint16_t)(lp_end - tr->song_frame));
 		}
 
 		/* ---- THE JUMP, on the frame the gain actually reached zero -
@@ -3331,69 +3530,105 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 			 * else in the song, and blending across that join is
 			 * the discontinuity the duck exists to prevent. */
 			stem_rs_drop();
-			if (st_stream_seek(&g_stem_stream, s_stem_jump_to)) {
-				atomic_inc(&g_stem_loop_wraps);
+			/* EVERY HEAD THAT IS WHERE THE TRANSPORT IS. The duck
+			 * was armed off the transport's approach to loop_end,
+			 * and every head standing on that same frame is
+			 * crossing the same boundary at the same instant, so
+			 * they wrap together and the one duck covers all of
+			 * them. A head that has DRIFTED is somewhere else and
+			 * has not reached the boundary yet -- moving it here
+			 * would be a jump it did not earn, and would re-sync
+			 * exactly the divergence per-track reverse exists to
+			 * create. It wraps on its own crossing, in the
+			 * backstop below. */
+			for (sk = 0; sk < ST_PL_STEMS; sk++) {
+				if (g_stem_stream[sk].song_frame != tr->song_frame) {
+					continue;
+				}
+				if (st_stream_seek(&g_stem_stream[sk], s_stem_jump_to) &&
+				    sk == s_stem_transport) {
+					atomic_inc(&g_stem_loop_wraps);
+				}
 			}
 			s_stem_jump_pend = 0u;
 		}
 
-		needed = st_stream_required_sector(&g_stem_stream);
+		for (sk = 0; sk < ST_PL_STEMS; sk++) {
+			needed[sk] = st_stream_required_sector(&g_stem_stream[sk]);
+			from_pin[sk] = false;
+			pin_idx[sk] = 0u;
+		}
 
-		/* ---- RESIDENCY: the pin is consulted FIRST ----------------
+		/* ---- RESIDENCY, PER STEM: the pin is consulted FIRST -------
 		 * The pinned sectors are the loop's exit kit; right after a
 		 * seek back to loop_start_frame they are the only place those
 		 * bytes exist. Checking the pin before the ring also keeps the
 		 * ring's own acquire from being spent on a sector the pin
-		 * already holds. */
-		if (stem_loop_pin_lookup(needed, &pin_idx)) {
-			from_pin = true;
-			st_stream_sector_ready(&g_stem_stream, needed);
-		} else if (g_stem_stream.ready_sector != needed) {
-			/* Ask the mailbox (st_stem_bufmbox.h) whether
-			 * the producer has published it since we last
-			 * looked. Wait-free: one acquire load, and on
-			 * success one release store. */
+		 * already holds.
+		 *
+		 * PER STEM, NOT ALL-FOUR-OR-NONE ACROSS STEMS. It stays
+		 * all-or-none WITHIN a stem -- a group is either resident or it
+		 * is not -- but the four heads may now want four different
+		 * groups, and the old shared check would have silenced all four
+		 * for whichever one was late. The spec names this directly: "a
+		 * stem whose group is not resident is the one that underruns".
+		 *
+		 * While the heads are together (the ordinary case, and the only
+		 * case before a track is reversed) all four ask for the same
+		 * group and the four mailboxes fill in lockstep, so this is
+		 * four hits or four misses exactly as it was. */
+		{
 			uint32_t acquired_slot;
 			uint32_t got = 0u;
-			uint32_t k;
 
-			/* ALL FOUR OR NONE. A span is playable only when every
-			 * stem's group for it is resident; a partial acquire
-			 * would render three stems and silence one. The four
-			 * mailboxes track the same group and fill in lockstep,
-			 * so this is normally four hits or four misses.
-			 *
-			 * A partial acquire leaves the stems that DID hit with
-			 * their held_sector advanced, which is harmless -- it
-			 * only makes their producer more conservative for one
-			 * pass -- and the release below clears all four. */
-			for (k = 0; k < ST_PL_STEMS; k++) {
-				if (!st_stem_mbox_try_acquire(&g_stem_mbox[k], needed,
-							       &acquired_slot)) {
-					/* WHICH STEM WAS NOT THERE. The global
-					 * underrun counters say a span was not
-					 * playable; only this says whose group
-					 * was missing, which is the whole
-					 * question when one stem drops out and
-					 * the other three keep playing. */
-					(void)atomic_add(&g_stem_miss[k], 1);
-					break;
+			for (sk = 0; sk < ST_PL_STEMS; sk++) {
+				if (stem_loop_pin_lookup(needed[sk], &pin_idx[sk])) {
+					from_pin[sk] = true;
+					st_stream_sector_ready(&g_stem_stream[sk], needed[sk]);
+				} else if (g_stem_stream[sk].ready_sector != needed[sk]) {
+					/* Ask the mailbox (st_stem_bufmbox.h)
+					 * whether the producer has published it
+					 * since we last looked. Wait-free: one
+					 * acquire load, and on success one
+					 * release store. */
+					if (st_stem_mbox_try_acquire(&g_stem_mbox[sk], needed[sk],
+								      &acquired_slot)) {
+						g_stem_active_slot_local[sk] = (uint8_t)acquired_slot;
+						st_stream_sector_ready(&g_stem_stream[sk], needed[sk]);
+					} else {
+						/* WHICH STEM WAS NOT THERE. The
+						 * global underrun counters say a
+						 * span was not playable; only this
+						 * says whose group was missing,
+						 * which is the whole question when
+						 * one stem drops out and the other
+						 * three keep playing. */
+						(void)atomic_add(&g_stem_miss[sk], 1);
+					}
 				}
-				g_stem_active_slot_local[k] = (uint8_t)acquired_slot;
-				got++;
+				resident[sk] = (g_stem_stream[sk].ready_sector == needed[sk]);
+				if (resident[sk]) {
+					got++;
+				}
 			}
 			if (got == ST_PL_STEMS) {
-				st_stream_sector_ready(&g_stem_stream, needed);
 				s_stem_released = false;   /* holding buffers again */
-			} else if (!s_stem_released) {
-				/* Genuinely reading nothing: say so, so the
+			} else if (got == 0u && !s_stem_released) {
+				/* Genuinely reading nothing -- not one stem of
+				 * four, but none of them: say so, so the
 				 * producer may fill every slot including the
 				 * one the previously-held sector maps to. See
 				 * st_stem_mbox_release()'s own doc comment for
 				 * the loop-wrap stall this prevents. Latched,
-				 * so it happens once per starvation episode. */
-				for (k = 0; k < ST_PL_STEMS; k++) {
-					st_stem_mbox_release(&g_stem_mbox[k]);
+				 * so it happens once per starvation episode.
+				 *
+				 * Releasing while ANY stem is still reading its
+				 * group would tell the producer it may refill a
+				 * buffer this thread is decoding out of, which
+				 * is the one thing the release protocol exists
+				 * to prevent. */
+				for (sk = 0; sk < ST_PL_STEMS; sk++) {
+					st_stem_mbox_release(&g_stem_mbox[sk]);
 				}
 				s_stem_released = true;
 			}
@@ -3408,52 +3643,116 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 		 * reload) keep asking for IT: fetching further ahead
 		 * then would strand the consumer waiting on a sector
 		 * nobody is fetching. */
-		want = needed;
-		if (g_stem_stream.ready_sector == needed) {
-			uint32_t ahead = needed + 1u;
+		for (sk = 0; sk < ST_PL_STEMS; sk++) {
+			uint32_t want = needed[sk];
 
-			if (ahead >= g_stem_stream.sector_count) {
-				/* End of song: wrap only if this song loops;
-				 * otherwise there is nothing further to fetch
-				 * and re-publishing `needed` is a no-op. */
-				ahead = g_stem_stream.loop_enabled ? 0u : needed;
+			if (resident[sk]) {
+				/* THE DIRECTION THE HEAD IS ACTUALLY GOING. A forward
+				 * head wants the group after its own; a reversed head
+				 * wants the one before it, and asking for the one after
+				 * would prefetch tape it has already played while the
+				 * group it is about to need went unfetched. This is the
+				 * whole of what reverse costs the read path: one sign,
+				 * on an address. */
+				uint32_t ahead;
+
+				if (g_stem_stream[sk].reverse) {
+					/* A REVERSED HEAD PUBLISHES THE BASE OF ITS
+					 * BATCH, NOT ITS NEXT GROUP.
+					 *
+					 * The producer's fill is always an ASCENDING
+					 * run of ST_PL_REFILL_GROUPS starting at what
+					 * the consumer requested -- st_planar.h says so
+					 * directly: "a reversed stem covers groups
+					 * [g-N+1, g] and is read as ONE ASCENDING
+					 * block". Publishing needed-1 would make that
+					 * run [needed-1, needed-1+R): one useful group
+					 * and R-1 refetches of groups this head has
+					 * already played, which is three times the read
+					 * traffic for one reversed track.
+					 *
+					 * Publishing needed-R makes the SAME ascending
+					 * read cover exactly the R groups this head is
+					 * about to need, in the order storage wants
+					 * them, at exactly the cost a forward head
+					 * pays. Storage sees no difference between a
+					 * forward stem and a reversed one; only the
+					 * address moved.
+					 *
+					 * Before the start of the song there is nothing
+					 * to fetch and nothing to wrap to either -- a
+					 * reversed head clamps at frame 0 rather than
+					 * wrapping (st_stem_stream.h, START_OF_SONG) --
+					 * so the base is clamped rather than allowed to
+					 * wrap around through zero. */
+					ahead = (needed[sk] >= ST_PL_REFILL_GROUPS)
+						? needed[sk] - ST_PL_REFILL_GROUPS
+						: 0u;
+				} else {
+					ahead = needed[sk] + 1u;
+					if (ahead >= ST_STEM_GEOM.sector_count) {
+						/* End of song: wrap only if this song
+						 * loops; otherwise there is nothing
+						 * further to fetch and re-publishing
+						 * `needed` is a no-op. */
+						ahead = ST_STEM_GEOM.loop_enabled ? 0u : needed[sk];
+					}
+				}
+				/* READ-AHEAD STAYS IN SONG ORDER, EVEN INSIDE A LOOP,
+				 * and that is deliberate.
+				 *
+				 * The obvious-looking optimisation -- point the producer
+				 * at the loop's start sector as the window end
+				 * approaches, so the wrap arrives resident -- is WRONG
+				 * on this ring, for the same reason st_stem_bufmbox.c's
+				 * scan refuses to wrap at the song seam: sector s and
+				 * sector s+SLOTS map to the SAME slot. Inside a loop
+				 * both of those are live sectors, so prefetching the
+				 * post-wrap region evicts the pre-wrap region the
+				 * playhead has not reached yet.
+				 *
+				 * That is not hypothetical. With a 1/4-beat loop
+				 * (sectors 3..20) an earlier version of this code did
+				 * exactly that, and tests/test_loop_playback_gate.c
+				 * caught the consequence directly: "needs sector 18,
+				 * slot 6 holds sector 6" -- 18 % 12 == 6, the producer
+				 * had filled the post-wrap sector into the slot the
+				 * playhead was about to read. The loop starved and
+				 * emitted silence.
+				 *
+				 * The wrap is covered by the PINNED sectors instead,
+				 * exactly as the exit is; the pin lives outside the
+				 * ring and so cannot collide with anything. */
+				want = ahead;
 			}
-			/* READ-AHEAD STAYS IN SONG ORDER, EVEN INSIDE A LOOP,
-			 * and that is deliberate.
-			 *
-			 * The obvious-looking optimisation -- point the producer
-			 * at the loop's start sector as the window end
-			 * approaches, so the wrap arrives resident -- is WRONG
-			 * on this ring, for the same reason st_stem_bufmbox.c's
-			 * scan refuses to wrap at the song seam: sector s and
-			 * sector s+SLOTS map to the SAME slot. Inside a loop
-			 * both of those are live sectors, so prefetching the
-			 * post-wrap region evicts the pre-wrap region the
-			 * playhead has not reached yet.
-			 *
-			 * That is not hypothetical. With a 1/4-beat loop
-			 * (sectors 3..20) an earlier version of this code did
-			 * exactly that, and tests/test_loop_playback_gate.c
-			 * caught the consequence directly: "needs sector 18,
-			 * slot 6 holds sector 6" -- 18 % 12 == 6, the producer
-			 * had filled the post-wrap sector into the slot the
-			 * playhead was about to read. The loop starved and
-			 * emitted silence.
-			 *
-			 * The wrap is covered by the PINNED sectors instead,
-			 * exactly as the exit is; the pin lives outside the
-			 * ring and so cannot collide with anything. */
-			want = ahead;
+			st_stem_mbox_set_requested_sector(&g_stem_mbox[sk], want);
 		}
+
+		/*
+		 * WHOSE UNDERRUN IS IT? Heads that share a position are
+		 * logically ONE head and must starve together: before a track
+		 * is reversed all four are co-located, and letting three
+		 * advance while the fourth froze would desync them permanently
+		 * for a jitter the ring is meant to absorb. A head that is
+		 * somewhere ELSE is genuinely independent -- that is what
+		 * reverse made it -- so it starves alone, goes silent, and the
+		 * rest of the block plays.
+		 *
+		 * The transport is trivially co-located with itself, so a
+		 * transport miss is always a whole-block underrun, exactly as
+		 * it was.
+		 */
 		{
-			uint32_t k;
+			bool block_underrun = false;
 
-			for (k = 0; k < ST_PL_STEMS; k++) {
-				st_stem_mbox_set_requested_sector(&g_stem_mbox[k], want);
+			for (sk = 0; sk < ST_PL_STEMS; sk++) {
+				if (!resident[sk] &&
+				    g_stem_stream[sk].song_frame == tr->song_frame) {
+					block_underrun = true;
+					break;
+				}
 			}
-		}
-
-		if (g_stem_stream.ready_sector != needed) {
+			if (block_underrun) {
 			/* UNDERRUN: silence for the remainder of the
 			 * block, then stop polling until the next block. */
 			/*
@@ -3482,9 +3781,14 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 			/* Records the underrun EPISODE (once on the
 			 * transition, not once per stuck frame) and leaves
 			 * song_frame frozen -- the same accounting the
-			 * per-frame form did. */
-			(void)st_stream_advance_frames(&g_stem_stream, 1u);
+			 * per-frame form did. Every head: the ones that are
+			 * resident are not advanced either, because the block
+			 * they would have advanced through was not rendered. */
+			for (sk = 0; sk < ST_PL_STEMS; sk++) {
+				(void)st_stream_advance_frames(&g_stem_stream[sk], 1u);
+			}
 			break;
+			}
 		}
 
 		/* THE RUN, NOW IN TWO DOMAINS.
@@ -3507,26 +3811,116 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 		 * rate has converted between the domains. At 1x that
 		 * conversion is the identity and every clamp lands on
 		 * exactly the value it did before. */
-		fis = g_stem_stream.song_frame - needed * ST11_FRAMES_PER_SECTOR;
-		run = ST11_FRAMES_PER_SECTOR - fis;
-		left_in_song = g_stem_stream.frames - g_stem_stream.song_frame;
-		if (run > left_in_song) {
-			run = left_in_song;
-		}
-		/* ---- A FOURTH BOUND WHILE LOOPING: the window's end -------
-		 * The run must stop exactly at loop_end_frame so the wrap lands
-		 * on a frame boundary rather than somewhere inside a rendered
-		 * run. With that clamp the wrap below is exact: the last frame
-		 * rendered is end-1 and the next one rendered is start, so no
-		 * frame is skipped and none is played twice. */
-		if (lp_on && g_stem_stream.song_frame >= lp_lo &&
-		    g_stem_stream.song_frame < lp_end) {
-			uint32_t left_in_loop = lp_end - g_stem_stream.song_frame;
+		/* ---- PER-HEAD SOURCE BOUNDS, then the MINIMUM --------------
+		 * Each head has its own offset inside its own group and its own
+		 * direction, so each has its own frames-remaining. The block can
+		 * only render as many as the WORST-SUPPLIED head can feed --
+		 * rendering more would run some head past the end of the group
+		 * it holds, which is reading another sector's bytes as if they
+		 * were this one's.
+		 *
+		 * A head that is not resident is SILENT this run (it decodes out
+		 * of the all-zero group below) and does not bound anything: it
+		 * is not reading real bytes, so there is nothing to run off the
+		 * end of.
+		 *
+		 * FORWARD a head at offset fis may take (FRAMES_PER_SECTOR -
+		 * fis) and lands on the next group's first frame; BACKWARD it
+		 * may take (fis + 1) -- frames fis down to 0 -- and lands on the
+		 * previous group's last one. Same rule, mirrored, and it is the
+		 * same one st_stream_advance_frames() states as its own
+		 * precondition. */
+		/* No head's run can exceed the group it is reading, so that is
+		 * the identity for a minimum -- not BLK_FRAMES, which would cap
+		 * `run` below what a single pass can legitimately consume and
+		 * split one iteration into several at pitched-up rates, on
+		 * exactly the path that has the least CPU to spare. */
+		{
+		/* The transport's own offset inside its own group. It is always
+		 * resident here -- a transport miss is a whole-block underrun,
+		 * handled above -- and it is what a silent head borrows. */
+		const uint32_t fis_tr = tr->song_frame -
+					needed[s_stem_transport] * ST11_FRAMES_PER_SECTOR;
 
-			if (run > left_in_loop) {
-				run = left_in_loop;
+		run = ST11_FRAMES_PER_SECTOR;
+		for (sk = 0; sk < ST_PL_STEMS; sk++) {
+			uint32_t rk;
+			const uint32_t pos_k = g_stem_stream[sk].song_frame;
+
+			if (!resident[sk]) {
+				/* SILENT THIS RUN. It reads the all-zero group,
+				 * where every in-bounds index yields zero, so it
+				 * is given the transport's own offset and a
+				 * forward direction: that keeps every index in
+				 * bounds without a second bounds rule, and keeps
+				 * the four indices EQUAL, which is what lets the
+				 * three heads that are reading real bytes stay
+				 * on the fast path. It bounds nothing -- there
+				 * are no real bytes to run off the end of. */
+				fis[sk] = fis_tr;
+				dirs[sk] = 1;
+				/* Bounded so its own index cannot leave the
+				 * group even in st_rs_out_frames()'s floored
+				 * corner, and never tighter than the transport's
+				 * own sector bound, so it constrains nothing. */
+				run_k[sk] = ST11_FRAMES_PER_SECTOR - fis_tr;
+				continue;
 			}
-			/* ---- A FIFTH BOUND: land ON the arming frame ------
+			fis[sk] = pos_k - needed[sk] * ST11_FRAMES_PER_SECTOR;
+			dirs[sk] = g_stem_stream[sk].reverse ? -1 : 1;
+			if (g_stem_stream[sk].reverse) {
+				rk = fis[sk] + 1u;
+				/* The song's own front edge. A reversed head
+				 * clamps at frame 0 and never wraps, so the run
+				 * may reach it but not pass it. */
+				if (rk > pos_k + 1u) {
+					rk = pos_k + 1u;
+				}
+			} else {
+				rk = ST11_FRAMES_PER_SECTOR - fis[sk];
+				left_in_song = ST_STEM_GEOM.frames - pos_k;
+				if (rk > left_in_song) {
+					rk = left_in_song;
+				}
+			}
+			/* ---- THE LOOP WINDOW, IN THIS HEAD'S OWN DIRECTION -
+			 * The run must stop exactly ON the boundary this head
+			 * is approaching, so the wrap lands on a frame boundary
+			 * rather than somewhere inside a rendered run: the last
+			 * frame rendered is the boundary's neighbour and the
+			 * next one rendered is across it, so no frame is skipped
+			 * and none is played twice.
+			 *
+			 * Forward that boundary is loop_end; backward it is
+			 * loop_start, and the head wraps to loop_end and keeps
+			 * going backward (the spec: "on reaching loop_start it
+			 * wraps to loop_end"). */
+			if (lp_on) {
+				if (g_stem_stream[sk].reverse) {
+					if (pos_k >= lp_lo && pos_k < lp_end &&
+					    rk > pos_k - lp_lo + 1u) {
+						rk = pos_k - lp_lo + 1u;
+					}
+				} else if (pos_k >= lp_lo && pos_k < lp_end &&
+					   rk > lp_end - pos_k) {
+					rk = lp_end - pos_k;
+				}
+			}
+			run_k[sk] = rk;
+			if (rk < run) {
+				run = rk;
+			}
+		}
+		}
+		/* ---- A FIFTH BOUND, TRANSPORT-ONLY: land ON the arming frame
+		 * The window clamps above are per-head; this one is not, and
+		 * that is deliberate. The duck is a gain on the whole MIX, so
+		 * there is one of it, and it belongs to the head the song's
+		 * clock is made of. A drifted head's own wrap is covered by the
+		 * backstop below. */
+		if (lp_on && tr->song_frame >= lp_lo &&
+		    tr->song_frame < lp_end) {
+			/*
 			 * The wrap's duck has to start exactly ST_SEAM_FRAMES
 			 * before loop_end. A run is up to a whole block long,
 			 * so without this clamp the playhead can step straight
@@ -3544,10 +3938,10 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 			 * start the duck early, finish it early, and fire the
 			 * wrap before the playhead ever reached loop_end. At 1x
 			 * the conversion returns ST_SEAM_FRAMES unchanged. */
-			if (!s_stem_jump_pend &&
-			    g_stem_stream.song_frame + seam_src < lp_end) {
+			if (!s_stem_jump_pend && !tr->reverse &&
+			    tr->song_frame + seam_src < lp_end) {
 				uint32_t to_arm = lp_end - seam_src -
-						  g_stem_stream.song_frame;
+						  tr->song_frame;
 
 				if (run > to_arm) {
 					run = to_arm;
@@ -3574,12 +3968,24 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 		 * same number and everything below reduces to what shipped;
 		 * during a ramp it is more, because the tape is passing more
 		 * slowly than the output is being produced. */
-		/* One rate, one direction, so every stem's cursor fraction is
-		 * the same and stem 0's is the transport's. When a stem can
-		 * diverge, the run has to be sized by the stem that will
-		 * consume the MOST source, which is a decision this line will
-		 * have to make explicitly rather than inherit. */
-		out_n = st_rs_out_frames(run, s_stem_rate_frac[0], rate_q16);
+		/* SIZED BY THE HEAD THAT WILL CONSUME THE MOST SOURCE, which
+		 * is the one whose cursor fraction is largest: a bigger carried
+		 * fraction crosses a source frame sooner, so it runs out of
+		 * `run` first. `run` is already the minimum across heads, so
+		 * pairing it with the maximum fraction is the conservative
+		 * corner and no head can be asked for a frame the run does not
+		 * contain. All four fractions are equal until a head diverges,
+		 * and then this is exactly stem 0's value again. */
+		{
+			uint32_t frac_max = s_stem_rate_frac[0];
+
+			for (sk = 1; sk < ST_PL_STEMS; sk++) {
+				if (s_stem_rate_frac[sk] > frac_max) {
+					frac_max = s_stem_rate_frac[sk];
+				}
+			}
+			out_n = st_rs_out_frames(run, frac_max, rate_q16);
+		}
 
 		/* ---- A FIFTH BOUND, IN THE OUTPUT DOMAIN: this block ----- */
 		if (out_n > BLK_FRAMES - f) {
@@ -3624,21 +4030,25 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 		const uint8_t *grp[ST_PL_STEMS];
 		uint32_t gk;
 
-		/* FOUR POINTERS, ONE PER STEM, resolved the same way the single
-		 * sector pointer was: from the pin if this span is pinned, from
-		 * each stem's own ring otherwise. All four still name the same
-		 * span -- reverse is what makes them diverge, and that changes
-		 * only the numbers, not this shape. */
+		/* FOUR POINTERS, ONE PER STEM, each resolved from ITS OWN
+		 * residency: the pin if that head's span is pinned, its own ring
+		 * otherwise -- and the all-zero group if it has nothing, which
+		 * is how one starved head plays silence while the other three
+		 * play on WITHOUT a branch anywhere in the 48 kHz loop. Decoding
+		 * zeros is silence; there is no special case to get wrong and no
+		 * per-frame test to pay for. */
 		for (gk = 0; gk < ST_PL_STEMS; gk++) {
-			grp[gk] = from_pin
-				  ? g_stem_loop_pin_bufs[gk][pin_idx]
-				  : g_stem_group_bufs[gk][g_stem_active_slot_local[gk]];
+			grp[gk] = !resident[gk]
+				  ? g_stem_silent_group
+				  : (from_pin[gk]
+				     ? g_stem_loop_pin_bufs[gk][pin_idx[gk]]
+				     : g_stem_group_bufs[gk][g_stem_active_slot_local[gk]]);
 		}
 		stem_render_run(grp, fis, &stem_prepared, m0, md, mv,
 				 f, out_n, s, stem_peak, &s_stem_seam,
-				 g_stem_stream.song_frame,
-				 rate_q16, s_stem_rate_frac, run,
-				 stem_used);
+				 s_stem_transport,
+				 rate_q16, s_stem_rate_frac, run_k,
+				 stem_used, g_stem_stream, dirs);
 		f += out_n;
 		/* THE PLAYHEAD ADVANCES BY WHAT WAS ACTUALLY READ, which is
 		 * `out_n * rate` rounded down to whole frames -- the
@@ -3646,9 +4056,28 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 		 * carried into the next run, so nothing is lost or repeated
 		 * across a run boundary. At 1x this is out_n exactly. */
 		}
-		/* ONE stream, so it advances by the transport stem's count.
-		 * stem_used[] carries all four for when there are four. */
-		(void)st_stream_advance_frames(&g_stem_stream, stem_used[0]);
+		/* EACH HEAD BY ITS OWN COUNT, in its own direction. A head
+		 * that is not resident is advanced too, and freezes: its
+		 * ready_sector still does not match what it needs, so
+		 * st_stream_advance_frames() reports UNDERRUN, counts the
+		 * episode once and leaves song_frame exactly where it is --
+		 * which is the same accounting a whole-block underrun gets, and
+		 * needs no separate case here. */
+		for (sk = 0; sk < ST_PL_STEMS; sk++) {
+			st_stream_tick_t tk =
+				st_stream_advance_frames(&g_stem_stream[sk], stem_used[sk]);
+
+			/* A REVERSED HEAD THAT REACHED THE FRONT OF THE SONG
+			 * parks there, and its resampler's carried "frame
+			 * behind" belongs to a position it is no longer moving
+			 * away from. Dropped so that turning it forward again
+			 * starts a clean blend rather than one across the park.
+			 */
+			if (tk == ST_STREAM_TICK_START_REACHED) {
+				s_rs_prev_valid[sk]  = false;
+				s_stem_rate_frac[sk] = 0u;
+			}
+		}
 
 		/* ---- THE WRAP BACKSTOP ------------------------------------
 		 * The ducked wrap above is the normal path, and after it the
@@ -3676,11 +4105,48 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 		 * re-acquires -- from the pin, which holds precisely the
 		 * sectors at loop_start_frame. That is the second reason the
 		 * pin exists: without it every wrap would race the streamer. */
-		if (lp_on && s_stem_jump_pend != ST_SEAM_JUMP_WRAP &&
-		    g_stem_stream.song_frame >= lp_end && lp_end > lp_lo) {
-			stem_rs_drop();   /* moved, not advanced */
-			if (st_stream_seek(&g_stem_stream, lp_lo)) {
-				atomic_inc(&g_stem_loop_wraps);
+		if (lp_on && lp_end > lp_lo) {
+			for (sk = 0; sk < ST_PL_STEMS; sk++) {
+				st_stream_t *const hd = &g_stem_stream[sk];
+				bool wrapped = false;
+
+				if (hd->reverse) {
+					/* BACKWARD: the boundary is loop_START,
+					 * and crossing it wraps to loop_END --
+					 * the spec's own rule, and the mirror of
+					 * the forward case rather than a second
+					 * mechanism. A head that has retreated
+					 * ONTO lp_lo has not crossed it yet; the
+					 * run clamp above lets it reach lp_lo
+					 * exactly, and the crossing is the step
+					 * that would take it below. */
+					if (hd->song_frame < lp_lo && lp_end > 0u) {
+						wrapped = st_stream_seek(hd, lp_end - 1u);
+					}
+				} else if (sk == s_stem_transport &&
+					   s_stem_jump_pend == ST_SEAM_JUMP_WRAP) {
+					/* The transport's ducked wrap is already
+					 * on its way; a second jump here would be
+					 * the click the duck exists to remove. */
+					continue;
+				} else if (hd->song_frame >= lp_end) {
+					wrapped = st_stream_seek(hd, lp_lo);
+				}
+				if (wrapped) {
+					/* MOVED, not advanced: this head's
+					 * "frame behind the cursor" is now a
+					 * frame from somewhere else, and
+					 * blending across that join is exactly
+					 * the discontinuity a wrap must not
+					 * cause. Only this head's carried state
+					 * is dropped -- the other three did not
+					 * move. */
+					s_rs_prev_valid[sk]  = false;
+					s_stem_rate_frac[sk] = 0u;
+					if (sk == s_stem_transport) {
+						atomic_inc(&g_stem_loop_wraps);
+					}
+				}
 			}
 		}
 
@@ -3689,13 +4155,18 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 		 * the rare pass it actually changed -- atomic counters
 		 * are for cross-thread OBSERVABILITY, not a hot-path
 		 * cost. */
-		if (g_stem_stream.underrun_count != s_stem_underrun_shadow) {
-			s_stem_underrun_shadow = g_stem_stream.underrun_count;
+		/* THE WORST HEAD'S count, not stem 0's. This is a dropout
+		 * diagnostic, and "some head starved" is the fact it is meant
+		 * to report -- reading only one head would hide exactly the
+		 * per-track starvation the per-stem residency above makes
+		 * possible. g_stem_miss[] still says WHICH. */
+		if (stem_underrun_worst() != s_stem_underrun_shadow) {
+			s_stem_underrun_shadow = stem_underrun_worst();
 			atomic_set(&g_stem_underrun_count, (atomic_val_t)s_stem_underrun_shadow);
 		}
 	}
-	if (g_stem_stream.underrun_count != s_stem_underrun_shadow) {
-		s_stem_underrun_shadow = g_stem_stream.underrun_count;
+	if (stem_underrun_worst() != s_stem_underrun_shadow) {
+		s_stem_underrun_shadow = stem_underrun_worst();
 		atomic_set(&g_stem_underrun_count, (atomic_val_t)s_stem_underrun_shadow);
 	}
 
@@ -3743,9 +4214,9 @@ static void looper_audio_block(int16_t *s)
 	if (atomic_get(&g_stem_reload_req)) {
 		bool reload_ok = false;
 
-		if (st_stream_init(&g_stem_stream, g_stem_reload_pending.song_start_block,
-				    g_stem_reload_pending.song_block_count, g_stem_reload_pending.frames,
-				    g_stem_reload_pending.sector_count, /*loop_enabled=*/true)) {
+		if (stem_streams_init(g_stem_reload_pending.song_start_block,
+				       g_stem_reload_pending.song_block_count, g_stem_reload_pending.frames,
+				       g_stem_reload_pending.sector_count, /*loop_enabled=*/true)) {
 			/* Group 0 of all four stems was read AND validated by the
 			 * streamer before it published the reload (see stem_song_
 			 * post_commit_reload()), against the stem and span each
@@ -3813,7 +4284,7 @@ static void looper_audio_block(int16_t *s)
 		/* Idempotent transport sync -- and it must stay called through
 		 * the spin-down, or the stream would refuse to advance the
 		 * playhead for the very frames the slowdown is made of. */
-		st_stream_play(&g_stem_stream);
+		stem_streams_play();
 		/* CONSUME the transport/edit request flags rather than leaving
 		 * them latched. Every handler for them below is classic-only and,
 		 * on this firmware, a provable no-op: g_restart_req's body
@@ -3838,7 +4309,7 @@ static void looper_audio_block(int16_t *s)
 	/* No stem song playing: the classic engine below renders this block.
 	 * Freeze the stem transport, and let the meters decay to dark rather
 	 * than hold whatever the last playing block left behind. */
-	st_stream_stop(&g_stem_stream);
+	stem_streams_stop();
 	/* The reel is at rest, and it must be RECORDED as at rest. Reaching
 	 * here with a spin-down still half-run -- which happens when the song
 	 * is deselected mid-stop -- would leave the envelope frozen part-way,
@@ -5950,11 +6421,11 @@ static uint32_t stem_prime_read_ahead(void)
 		for (g = 1u; g < ST_STEM_MBOX_SLOTS; g++) {
 			const uint32_t slot = st_stem_mbox_slot_of(g);
 
-			if (g >= g_stem_stream.sector_count) {
+			if (g >= ST_STEM_GEOM.sector_count) {
 				break;          /* song shorter than the ring */
 			}
-			if (!stem_read_groups(g_stem_stream.song_start_block,
-					       g_stem_stream.sector_count,
+			if (!stem_read_groups(ST_STEM_GEOM.song_start_block,
+					       ST_STEM_GEOM.sector_count,
 					       k, g, slot, 1u)) {
 				break;
 			}
@@ -6221,9 +6692,9 @@ static void streamer_thread(void *a, void *b, void *c)
 				 * below the main while(1) loop's top -- see its own
 				 * comment. */
 				if (lib.active.flags & ST11_IX_FLAG_SONG_PRESENT) {
-					if (st_stream_init(&g_stem_stream, lib.active.song_start_block,
-							    lib.active.song_block_count, lib.active.frames,
-							    lib.active.sector_count, /*loop_enabled=*/true)) {
+					if (stem_streams_init(lib.active.song_start_block,
+							       lib.active.song_block_count, lib.active.frames,
+							       lib.active.sector_count, /*loop_enabled=*/true)) {
 						if (stem_prime_group0(lib.active.song_start_block,
 								       lib.active.sector_count)) {
 							{
@@ -6473,16 +6944,16 @@ static void streamer_thread(void *a, void *b, void *c)
 				/* Clamp to the song before reading, not during:
 				 * a short region is fine, a read past the song is
 				 * not. */
-				if ((uint32_t)want_base >= g_stem_stream.sector_count) {
+				if ((uint32_t)want_base >= ST_STEM_GEOM.sector_count) {
 					filled = 0u;
-				} else if (filled > g_stem_stream.sector_count - (uint32_t)want_base) {
-					filled = g_stem_stream.sector_count - (uint32_t)want_base;
+				} else if (filled > ST_STEM_GEOM.sector_count - (uint32_t)want_base) {
+					filled = ST_STEM_GEOM.sector_count - (uint32_t)want_base;
 				}
 
 				for (k = 0; k < ST_PL_STEMS && filled > 0u; k++) {
 					const uint32_t blk = st_pl_group_block(
-						g_stem_stream.song_start_block,
-						g_stem_stream.sector_count,
+						ST_STEM_GEOM.song_start_block,
+						ST_STEM_GEOM.sector_count,
 						k, (uint32_t)want_base);
 					uint32_t i;
 
@@ -6624,15 +7095,15 @@ static void streamer_thread(void *a, void *b, void *c)
 
 				if (!st_stem_mbox_producer_next_run(
 					    &g_stem_mbox[stem],
-					    g_stem_stream.sector_count,
+					    ST_STEM_GEOM.sector_count,
 					    ST_PL_REFILL_GROUPS,
 					    &first, &target_slot, &n)) {
 					continue;
 				}
 
 				read_t0 = DWT->CYCCNT;
-				read_ok = stem_read_groups(g_stem_stream.song_start_block,
-							    g_stem_stream.sector_count,
+				read_ok = stem_read_groups(ST_STEM_GEOM.song_start_block,
+							    ST_STEM_GEOM.sector_count,
 							    stem, first, target_slot, n);
 				read_us = (DWT->CYCCNT - read_t0) / 64u; /* 64 MHz -> us, same convention
 									  * as g_audio_us_max below */
@@ -9225,7 +9696,7 @@ int main(void)
 			 * it refreshes every block -- not a control-thread
 			 * estimate. This is the frame a PLAY-down edge captures. */
 			ci.song_frame     = (uint32_t)atomic_get(&g_stem_song_frame_pub);
-			ci.song_frames    = g_stem_stream.frames;
+			ci.song_frames    = ST_STEM_GEOM.frames;
 			ci.frames_per_beat = g_stem_beat_timing.frames_per_beat;
 			ci.now_ms         = (uint32_t)k_uptime_get();
 

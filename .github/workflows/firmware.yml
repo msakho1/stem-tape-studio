@@ -2431,13 +2431,21 @@ jobs:
           # AND THE RATE MUST REACH THE READ. An envelope that never becomes
           # a read position is a fade waiting to happen.
           # The cursor fraction became PER STEM when the resampler's carried
-          # state did, so these two match the array rather than the scalar.
-          # The question they ask is unchanged: the rate must reach the read,
-          # and the source/output domain conversion must be applied.
-          grep -q 'rate_q16, s_stem_rate_frac, run' "$M" || {
+          # state did, and the RUN became per stem when the playheads did, so
+          # these two match the arrays rather than the scalars. The question
+          # they ask is unchanged: the rate must reach the read, and the
+          # source/output domain conversion must be applied.
+          grep -q 'rate_q16, s_stem_rate_frac, run_k' "$M" || {
             echo "  the renderer is not given the transport rate"; fail=1; }
-          grep -q 'st_rs_out_frames(run, s_stem_rate_frac\[0\], rate_q16)' "$M" || {
+          grep -q 'out_n = st_rs_out_frames(run, frac_max, rate_q16)' "$M" || {
             echo "  the source/output domain conversion is not applied"; fail=1; }
+          # AND THE CONVERSION MUST USE THE WORST-CASE HEAD. `run` is the
+          # minimum across the four playheads; pairing it with anything but
+          # the LARGEST carried fraction would let some head be asked for a
+          # source frame its own run does not contain, which is reading the
+          # next group's bytes as if they were this one's.
+          grep -q 'if (s_stem_rate_frac\[sk\] > frac_max)' "$M" || {
+            echo "  out_n is not sized by the worst-supplied head"; fail=1; }
           [ "$fail" = 0 ] || exit 1
           echo "inertia wiring: PLAY/STOP move the reel, and the reel moves the tape"
           {
