@@ -1,0 +1,436 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SP-1 Playback Analyzer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+:root{
+  --ground:#f4f5f6; --panel:#fff; --panel-2:#eceef0;
+  --ink:#14181b; --ink-dim:#5d666d; --ink-faint:#8b959c;
+  --rule:#d8dcdf; --rule-soft:#e6e9eb;
+  --signal:#0f7d8f; --good:#2f7d52; --warn:#a8741d; --bad:#b3402c;
+  --good-bg:#e2f0e8; --warn-bg:#f6ecd8; --bad-bg:#f7e3de;
+  --sans:'IBM Plex Sans',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-serif;
+  --mono:'IBM Plex Mono',ui-monospace,'SF Mono',Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --ground:#0e1113; --panel:#171b1e; --panel-2:#1f2428;
+  --ink:#e8ecee; --ink-dim:#9aa4ab; --ink-faint:#69737a;
+  --rule:#2c3338; --rule-soft:#232a2e;
+  --signal:#4dc4d8; --good:#5cc389; --warn:#d7a544; --bad:#e0705a;
+  --good-bg:#13291d; --warn-bg:#2c2412; --bad-bg:#2e1a16;
+}}
+:root[data-theme="dark"]{
+  --ground:#0e1113; --panel:#171b1e; --panel-2:#1f2428;
+  --ink:#e8ecee; --ink-dim:#9aa4ab; --ink-faint:#69737a;
+  --rule:#2c3338; --rule-soft:#232a2e;
+  --signal:#4dc4d8; --good:#5cc389; --warn:#d7a544; --bad:#e0705a;
+  --good-bg:#13291d; --warn-bg:#2c2412; --bad-bg:#2e1a16;
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--ground);color:var(--ink);font-family:var(--sans);line-height:1.5;
+  padding:30px 20px 80px;overflow-x:hidden;font-size:15px}
+.wrap{max-width:1080px;margin:0 auto;display:flex;flex-direction:column;gap:20px}
+h1{font-size:26px;font-weight:600;letter-spacing:-.015em;margin:0;text-wrap:balance}
+.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--signal);font-weight:500;margin:0 0 6px}
+header p{margin:6px 0 0;color:var(--ink-dim);max-width:64ch;font-size:14px}
+.panel{background:var(--panel);border:1px solid var(--rule);border-radius:10px;padding:18px}
+.panel h2{font-size:13px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--ink-dim);margin:0 0 12px}
+button{font-family:var(--sans);font-size:13px;font-weight:500;padding:9px 16px;border-radius:7px;
+  border:1px solid var(--rule);background:var(--panel-2);color:var(--ink);cursor:pointer}
+button.primary{background:var(--signal);border-color:var(--signal);color:#fff}
+button.mark{background:var(--warn);border-color:var(--warn);color:#231c08}
+button:hover:not(:disabled){border-color:var(--signal)}
+button:disabled{opacity:.42;cursor:not-allowed}
+button:focus-visible{outline:2px solid var(--signal);outline-offset:2px}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--ink-faint);flex:none}
+.dot.on{background:var(--good);box-shadow:0 0 0 3px color-mix(in srgb,var(--good) 25%,transparent)}
+.dot.err{background:var(--bad)}
+.status{font-family:var(--mono);font-size:12.5px;color:var(--ink-dim)}
+.note{font-size:13px;color:var(--ink-dim);margin:12px 0 0;max-width:70ch}
+.note code,code.c{font-family:var(--mono);font-size:12.5px;background:rgba(127,127,127,.16);
+  padding:1px 5px;border-radius:4px}
+.verdict{border-radius:10px;padding:20px;border:1px solid}
+.verdict.good{background:var(--good-bg);border-color:var(--good)}
+.verdict.warn{background:var(--warn-bg);border-color:var(--warn)}
+.verdict.bad{background:var(--bad-bg);border-color:var(--bad)}
+.verdict .tag{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;font-weight:600}
+.verdict.good .tag{color:var(--good)} .verdict.warn .tag{color:var(--warn)} .verdict.bad .tag{color:var(--bad)}
+.verdict h3{margin:6px 0 8px;font-size:19px;font-weight:600;letter-spacing:-.01em}
+.verdict p{margin:0 0 8px;font-size:14px;max-width:72ch} .verdict p:last-child{margin:0}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(158px,1fr));gap:12px}
+.tile{background:var(--panel);border:1px solid var(--rule);border-radius:9px;padding:14px}
+.tile .k{font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--ink-faint);margin-bottom:7px}
+.tile .v{font-family:var(--mono);font-size:23px;font-weight:600;font-variant-numeric:tabular-nums;
+  letter-spacing:-.02em;line-height:1.1}
+.tile .s{font-size:11.5px;color:var(--ink-dim);margin-top:5px;font-family:var(--mono)}
+.tile.is-bad .v{color:var(--bad)} .tile.is-warn .v{color:var(--warn)} .tile.is-good .v{color:var(--good)}
+.chart{margin-bottom:20px} .chart:last-child{margin-bottom:0}
+.chart .ct{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:7px}
+.chart .cn{font-size:13px;font-weight:500}
+.chart .cd{font-family:var(--mono);font-size:11.5px;color:var(--ink-dim)}
+.scroller{overflow-x:auto} svg{display:block}
+table{border-collapse:collapse;width:100%;font-family:var(--mono);font-size:12px;font-variant-numeric:tabular-nums}
+th,td{text-align:right;padding:5px 9px;border-bottom:1px solid var(--rule-soft);white-space:nowrap}
+th{color:var(--ink-faint);font-weight:500;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;
+  position:sticky;top:0;background:var(--panel)}
+th:first-child,td:first-child{text-align:left}
+td.hot{color:var(--bad);font-weight:600}
+tr.marked td{background:color-mix(in srgb,var(--warn) 18%,transparent)}
+.tbl-wrap{max-height:320px;overflow:auto;border:1px solid var(--rule);border-radius:8px}
+.raw{max-height:200px;overflow:auto;background:var(--panel-2);border:1px solid var(--rule);
+  border-radius:7px;padding:10px;font-family:var(--mono);font-size:11.5px;white-space:pre-wrap;
+  word-break:break-all;color:var(--ink-dim)}
+textarea{width:100%;min-height:110px;background:var(--panel-2);color:var(--ink);border:1px solid var(--rule);
+  border-radius:7px;padding:11px;font-family:var(--mono);font-size:12.5px;resize:vertical}
+details summary{cursor:pointer;font-size:13px;color:var(--ink-dim);font-weight:500}
+details[open] summary{margin-bottom:12px}
+.legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--ink-dim);margin-top:10px}
+.legend b{font-family:var(--mono);font-weight:600;color:var(--ink)}
+footer{color:var(--ink-faint);font-size:12px;border-top:1px solid var(--rule);padding-top:14px}
+.warnbox{background:var(--warn-bg);border:1px solid var(--warn);border-radius:9px;padding:14px;font-size:13.5px}
+.warnbox b{font-weight:600}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <p class="eyebrow">Stem Tape · v1.2 song-planar</p>
+    <h1>SP-1 Playback Analyzer</h1>
+    <p>Plug the SP-1 in, connect, press PLAY on the device. This listens to the diagnostic console,
+       differences the counters as they arrive, and says which failure mode the numbers match.
+       It only ever <em>reads</em> the port — it never sends a byte, so it cannot disturb playback.</p>
+  </header>
+
+  <section class="panel">
+    <h2>Device</h2>
+    <div class="row">
+      <span class="dot" id="dot"></span>
+      <button class="primary" id="conn">Connect to SP-1</button>
+      <button id="disc" disabled>Disconnect</button>
+      <button class="mark" id="mark" disabled>Mark — I hear it now</button>
+      <button id="save" disabled>Save capture</button>
+      <span class="status" id="status">not connected</span>
+    </div>
+    <div id="unsupported" hidden style="margin-top:14px">
+      <div class="warnbox">
+        <b>This browser has no Web Serial.</b> Use desktop Chrome or Edge.
+        If you are already in Chrome and seeing this, the page was probably opened in a way that
+        blocks it — from the folder containing this file run
+        <code class="c">python3 -m http.server 8000</code> and open
+        <code class="c">http://localhost:8000/sp1-playback-analyzer.html</code>.
+      </div>
+    </div>
+    <p class="note"><b>Close the companion app's connection first</b> — the SP-1 has one serial port and
+      it carries both the console and the upload protocol, so only one page can hold it at a time.</p>
+  </section>
+
+  <div id="out" hidden>
+    <div id="verdict"></div>
+    <section class="panel" style="margin-top:20px">
+      <h2>Totals across the capture</h2>
+      <div class="tiles" id="tiles"></div>
+    </section>
+    <section class="panel" style="margin-top:20px">
+      <h2>Over time</h2>
+      <div id="charts"></div>
+      <div class="legend">
+        <span><b>span</b> 7083 µs — one group of audio</span>
+        <span><b>need</b> 1 152 000 B/s — four stems at 48 kHz</span>
+        <span><b>R=2</b> ≈3834 µs — modelled batched fetch</span>
+      </div>
+    </section>
+    <section class="panel" style="margin-top:20px">
+      <h2>Per-sample deltas</h2>
+      <div class="tbl-wrap"><table id="tbl"></table></div>
+    </section>
+  </div>
+
+  <section class="panel">
+    <details>
+      <summary>Live console · paste or load a saved capture</summary>
+      <div class="raw" id="raw">(nothing captured yet)</div>
+      <div class="row" style="margin-top:12px">
+        <input type="file" id="file" accept=".log,.txt" style="font-size:13px">
+      </div>
+      <textarea id="src" spellcheck="false" placeholder="…or paste a capture here" style="margin-top:12px"></textarea>
+      <div class="row" style="margin-top:10px">
+        <button id="go">Analyze pasted text</button>
+        <button id="demo">Load example</button>
+      </div>
+    </details>
+  </section>
+
+  <footer>Counters are cumulative, so every figure here is a difference between consecutive samples.
+    <code class="c">rduswin</code> is already windowed by the firmware (read-and-clear);
+    <code class="c">rdusmx</code> is a sticky maximum since boot.</footer>
+</div>
+
+<script>
+const SPAN_US=7083, NEED_BPS=1152000, MODEL_R2_US=3834, SR=48000;
+const $=s=>document.querySelector(s);
+let samples=[], rawText='', marks=[], port=null, reader=null, keep=false;
+
+/* ---------- parsing ---------- */
+const num=(s,k)=>{const m=s.match(new RegExp('\\b'+k+'=(-?\\d+)'));return m?+m[1]:null;};
+let pendingIO=null, buildTag=null;
+
+function feedLine(line){
+  line=line.trim(); if(!line) return;
+  const b=line.match(/STEMTAPE BUILD\s+(\S+)/); if(b) buildTag=b[1];
+  if(line.includes('STEMIO')){
+    pendingIO={t:Date.now(),
+      rdby:num(line,'rdby'),rdc:num(line,'rdc'),rdus:num(line,'rdus'),
+      rdusmx:num(line,'rdusmx'),rduswin:num(line,'rduswin'),rate:num(line,'rate'),
+      sil:num(line,'sil'),und:num(line,'und'),corr:num(line,'corr'),
+      reloadfail:num(line,'reloadfail'),rd:null};
+    samples.push(pendingIO);
+  } else if(line.includes('STEMRD') && pendingIO && !pendingIO.rd){
+    pendingIO.rd={hunt:num(line,'hunt'),dma:num(line,'dma'),crc:num(line,'crc'),huntclk:num(line,'huntclk')};
+  }
+}
+function parseAll(text){
+  samples=[];marks=[];pendingIO=null;buildTag=null;
+  for(const l of text.split(/\r?\n/)) feedLine(l);
+}
+function deltas(){
+  const d=[];
+  for(let i=1;i<samples.length;i++){
+    const a=samples[i-1],b=samples[i];
+    const dv=k=>(b[k]==null||a[k]==null)?0:Math.max(0,b[k]-a[k]);
+    d.push({i,t:b.t,sil:dv('sil'),und:dv('und'),corr:dv('corr'),rdby:dv('rdby'),rdc:dv('rdc'),
+      reloadfail:dv('reloadfail'),rduswin:b.rduswin??0,rate:b.rate??0,rd:b.rd,
+      marked:marks.some(m=>m>=a.t&&m<=b.t)});
+  }
+  return d;
+}
+const fmt=n=>n==null?'—':n.toLocaleString('en-US');
+
+/* ---------- verdict ---------- */
+function verdict(d){
+  const tot=k=>d.reduce((s,x)=>s+x[k],0);
+  const corr=tot('corr'),sil=tot('sil'),und=tot('und'),rf=tot('reloadfail');
+  const worst=d.reduce((m,x)=>Math.max(m,x.rduswin),0);
+  const rates=d.map(x=>x.rate).filter(x=>x>0);
+  const minRate=rates.length?Math.min(...rates):null;
+  const silMs=sil/SR*1000;
+  const atMark=d.filter(x=>x.marked);
+  const markNote=atMark.length?`<p><strong>At the moment you marked</strong>, the sample showed
+      <code>corr Δ${atMark[0].corr}</code>, <code>sil Δ${atMark[0].sil}</code>,
+      <code>rduswin ${fmt(atMark[0].rduswin)} µs</code>.</p>`:'';
+
+  if(corr>0) return {cls:'bad',tag:'group validation failing',h:`${fmt(corr)} rejected group batches`,
+    b:[`The read path fetched bytes whose group header was not the stem and span it asked for, so
+        <code>stem_read_groups()</code> refused to publish them. Nothing played from those slots —
+        the affected stem went silent until the next good fetch.`,
+       `This is <strong>not</strong> a throughput problem. It is an addressing or ring-synchronisation
+        fault in the v1.2 planar read path, and it is what "one stem disappears and comes back" sounds
+        like.${sil>0?` There is also <code>sil=${fmt(sil)}</code> (${silMs.toFixed(0)} ms silenced) as the downstream effect.`:''}`,markNote]};
+  if(sil>0) return {cls:'bad',tag:'starvation',h:`${fmt(sil)} frames silenced — ${silMs.toFixed(0)} ms`,
+    b:[`The streamer could not keep the audio thread fed, across ${fmt(und)} underrun episode${und===1?'':'s'}.
+        The playhead freezes rather than dropping frames, so this presents as the song running
+        <strong>slow</strong> and dragging.`,
+       `Worst fetch ${fmt(worst)} µs against a ${SPAN_US} µs span budget (batched R=2 should be near
+        ${MODEL_R2_US} µs).${minRate!==null?` Lowest sustained rate ${fmt(minRate)} B/s against ${fmt(NEED_BPS)} required.`:''}`,markNote]};
+  if(minRate!==null&&minRate<NEED_BPS) return {cls:'warn',tag:'under rate, no silence yet',
+    h:`Sustained read dipped to ${fmt(minRate)} B/s`,
+    b:[`Below the ${fmt(NEED_BPS)} B/s four-stem requirement, but no frames were silenced — read-ahead
+        absorbed it. There is no margin left.`,markNote]};
+  if(worst>SPAN_US) return {cls:'warn',tag:'fetch over budget',h:`Worst fetch ${fmt(worst)} µs`,
+    b:[`Longer than the ${SPAN_US} µs a group of audio lasts, so that fetch was a deficit by definition,
+        absorbed by read-ahead this time. Expected for batched R=2 is about ${MODEL_R2_US} µs; far above
+        that is contention rather than arithmetic.`,markNote]};
+  if(rf>0) return {cls:'warn',tag:'reload rejected',h:`${fmt(rf)} post-commit reloads refused`,
+    b:[`The audio thread rejected a reload after a commit — the song being played may not be the one on
+        the device.`,markNote]};
+  return {cls:'good',tag:'read path clean',h:'No starvation and no rejected groups',
+    b:[`Every read-path fault counter stayed flat across ${samples.length} samples:
+        <code>sil=0</code>, <code>und=0</code>, <code>corr=0</code>. Worst fetch ${fmt(worst)} µs inside
+        the ${SPAN_US} µs budget${minRate!==null?`, lowest rate ${fmt(minRate)} B/s`:''}.`,
+       `If it still sounds wrong, the fault is downstream of the reader — the mixer, the gain structure
+        or the output stage — not the eMMC path.`,markNote]};
+}
+
+/* ---------- charts ---------- */
+function spark(vals,{h=54,color='var(--signal)',threshold=null,thLabel='',markIdx=[]}={}){
+  const n=vals.length; if(!n) return '';
+  const w=Math.max(320,Math.min(1400,n*7));
+  const max=Math.max(...vals,threshold??0,1);
+  const x=i=>(n===1?0:(i/(n-1))*(w-2))+1;
+  const y=v=>h-4-(v/max)*(h-10);
+  const pts=vals.map((v,i)=>`${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+  const area=`M1,${h-4} L${pts.split(' ').join(' L')} L${x(n-1).toFixed(1)},${h-4} Z`;
+  let extra='';
+  if(threshold!==null&&threshold<=max){const ty=y(threshold).toFixed(1);
+    extra+=`<line x1="1" y1="${ty}" x2="${w-1}" y2="${ty}" stroke="var(--bad)" stroke-width="1"
+      stroke-dasharray="4 3" opacity=".85"/><text x="${w-3}" y="${+ty-4}" text-anchor="end" font-size="9"
+      fill="var(--bad)">${thLabel}</text>`;}
+  for(const mi of markIdx) extra+=`<line x1="${x(mi).toFixed(1)}" y1="2" x2="${x(mi).toFixed(1)}" y2="${h-2}"
+      stroke="var(--warn)" stroke-width="1.5" opacity=".9"/>`;
+  return `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" role="img">
+    <path d="${area}" fill="${color}" opacity=".14"/>
+    <polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.6"
+      stroke-linejoin="round" stroke-linecap="round"/>${extra}</svg>`;
+}
+
+/* ---------- render ---------- */
+let rafPending=false;
+function scheduleRender(){ if(rafPending) return; rafPending=true;
+  requestAnimationFrame(()=>{rafPending=false;render();}); }
+
+function render(){
+  $('#status').textContent = (port?'connected · ':'') + `${samples.length} samples` +
+    (buildTag?` · build ${buildTag}`:'') + (marks.length?` · ${marks.length} mark${marks.length>1?'s':''}`:'');
+  if(samples.length<2){ $('#out').hidden=true; return; }
+  const d=deltas(); $('#out').hidden=false;
+  const v=verdict(d);
+  $('#verdict').innerHTML=`<div class="verdict ${v.cls}"><div class="tag">${v.tag}</div>
+    <h3>${v.h}</h3>${v.b.filter(Boolean).map(p=>`<p>${p}</p>`).join('')}</div>`;
+
+  const tot=k=>d.reduce((s,x)=>s+x[k],0);
+  const worst=d.reduce((m,x)=>Math.max(m,x.rduswin),0);
+  const rates=d.map(x=>x.rate).filter(x=>x>0);
+  const minRate=rates.length?Math.min(...rates):null;
+  const last=samples[samples.length-1];
+  $('#tiles').innerHTML=[
+    ['frames silenced',fmt(tot('sil')),`${(tot('sil')/SR*1000).toFixed(0)} ms of audio`,tot('sil')?'is-bad':'is-good'],
+    ['rejected groups',fmt(tot('corr')),'header did not match',tot('corr')?'is-bad':'is-good'],
+    ['underrun episodes',fmt(tot('und')),'transitions, not duration',tot('und')?'is-warn':'is-good'],
+    ['worst fetch',fmt(worst)+' µs',`budget ${SPAN_US} µs`,worst>SPAN_US?'is-bad':(worst>MODEL_R2_US*1.4?'is-warn':'is-good')],
+    ['lowest rate',minRate!==null?fmt(minRate)+' B/s':'—',`need ${fmt(NEED_BPS)}`,minRate!==null&&minRate<NEED_BPS?'is-bad':'is-good'],
+    ['sticky max fetch',fmt(last.rdusmx)+' µs','since boot',last.rdusmx>SPAN_US?'is-warn':'is-good'],
+  ].map(([k,val,s,c])=>`<div class="tile ${c}"><div class="k">${k}</div><div class="v">${val}</div>
+    <div class="s">${s}</div></div>`).join('');
+
+  const markIdx=d.map((x,i)=>x.marked?i:-1).filter(i=>i>=0);
+  $('#charts').innerHTML=[
+    ['Frames silenced per sample','sil','var(--bad)',null,''],
+    ['Rejected group batches per sample','corr','var(--bad)',null,''],
+    ['Worst fetch in window (µs)','rduswin','var(--signal)',SPAN_US,'span 7083'],
+    ['Sustained read rate (B/s)','rate','var(--signal)',NEED_BPS,'need 1.152 MB/s'],
+  ].map(([name,key,col,th,thl])=>{
+    const vals=d.map(x=>x[key]);
+    return `<div class="chart"><div class="ct"><span class="cn">${name}</span>
+      <span class="cd">peak ${fmt(Math.max(...vals))}</span></div>
+      <div class="scroller">${spark(vals,{color:col,threshold:th,thLabel:thl,markIdx})}</div></div>`;
+  }).join('');
+
+  const cols=['#','sil Δ','corr Δ','und Δ','rduswin','rate','bytes Δ','reads Δ','hunt','dma','crc'];
+  $('#tbl').innerHTML=`<thead><tr>${cols.map(c=>`<th>${c}</th>`).join('')}</tr></thead><tbody>`+
+    d.map(x=>`<tr class="${x.marked?'marked':''}"><td>${x.i}</td>
+      <td class="${x.sil?'hot':''}">${fmt(x.sil)}</td>
+      <td class="${x.corr?'hot':''}">${fmt(x.corr)}</td>
+      <td class="${x.und?'hot':''}">${fmt(x.und)}</td>
+      <td class="${x.rduswin>SPAN_US?'hot':''}">${fmt(x.rduswin)}</td>
+      <td class="${x.rate&&x.rate<NEED_BPS?'hot':''}">${fmt(x.rate)}</td>
+      <td>${fmt(x.rdby)}</td><td>${fmt(x.rdc)}</td>
+      <td>${x.rd?fmt(x.rd.hunt):'—'}</td><td>${x.rd?fmt(x.rd.dma):'—'}</td>
+      <td>${x.rd?fmt(x.rd.crc):'—'}</td></tr>`).join('')+'</tbody>';
+}
+
+/* ---------- web serial ---------- */
+if(!('serial' in navigator)){ $('#unsupported').hidden=false; $('#conn').disabled=true; }
+
+async function connect(){
+  try{
+    port=await navigator.serial.requestPort();
+    await port.open({baudRate:115200});
+  }catch(e){
+    if(e && e.name==='NotFoundError'){ return; }      /* user dismissed the picker */
+    $('#dot').className='dot err';
+    $('#status').textContent='could not open the port — '+(e.message||e);
+    port=null; return;
+  }
+  keep=true;
+  $('#dot').className='dot on';
+  $('#conn').disabled=true; $('#disc').disabled=false;
+  $('#mark').disabled=false; $('#save').disabled=false;
+  samples=[];marks=[];rawText='';pendingIO=null;
+  readLoop();
+}
+
+async function readLoop(){
+  const dec=new TextDecoder();
+  let buf='';
+  try{
+    while(keep && port && port.readable){
+      reader=port.readable.getReader();
+      try{
+        while(true){
+          const {value,done}=await reader.read();
+          if(done) break;
+          const chunk=dec.decode(value,{stream:true});
+          rawText+=chunk; buf+=chunk;
+          let nl;
+          while((nl=buf.indexOf('\n'))>=0){
+            const line=buf.slice(0,nl); buf=buf.slice(nl+1);
+            feedLine(line);
+          }
+          const tail=rawText.length>20000?rawText.slice(-20000):rawText;
+          $('#raw').textContent=tail;
+          $('#raw').scrollTop=$('#raw').scrollHeight;
+          scheduleRender();
+        }
+      } finally { try{reader.releaseLock();}catch(_){} reader=null; }
+    }
+  }catch(e){
+    $('#dot').className='dot err';
+    $('#status').textContent='read error — '+(e.message||e);
+  }
+}
+
+async function disconnect(){
+  keep=false;
+  try{ if(reader) await reader.cancel(); }catch(_){}
+  try{ if(port) await port.close(); }catch(_){}
+  port=null;
+  $('#dot').className='dot';
+  $('#conn').disabled=false; $('#disc').disabled=true; $('#mark').disabled=true;
+  render();
+}
+
+/* ---------- wiring ---------- */
+$('#conn').addEventListener('click',connect);
+$('#disc').addEventListener('click',disconnect);
+$('#mark').addEventListener('click',()=>{ marks.push(Date.now()); render(); });
+$('#save').addEventListener('click',()=>{
+  const meta=`# SP-1 capture ${new Date().toISOString()}\n`+
+    marks.map((m,i)=>`# mark ${i+1} at +${((m-(samples[0]?.t??m))/1000).toFixed(1)}s\n`).join('');
+  const blob=new Blob([meta+rawText],{type:'text/plain'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download=`sp1-capture-${Date.now()}.log`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(a.href),2000);
+});
+$('#go').addEventListener('click',()=>{ rawText=$('#src').value; parseAll(rawText); render(); });
+$('#file').addEventListener('change',async e=>{
+  const f=e.target.files[0]; if(!f) return;
+  rawText=await f.text(); parseAll(rawText);
+  $('#raw').textContent=rawText.slice(-20000); render();
+});
+const DEMO=`STEMTAPE BUILD st40
+STEMIO rdby=8192 rdc=1 rdus=3820 rdusmx=3820 rduswin=3820 rate=1156000Bps sil=0 und=0 corr=0 reloadfail=0
+STEMRD hunt=1690us dma=2050us crc=1095us huntclk=4980
+STEMIO rdby=1048576 rdc=128 rdus=3840 rdusmx=4100 rduswin=4100 rate=1154000Bps sil=0 und=0 corr=0 reloadfail=0
+STEMRD hunt=1700us dma=2050us crc=1100us huntclk=5010
+STEMIO rdby=2097152 rdc=256 rdus=3900 rdusmx=9800 rduswin=9800 rate=1101000Bps sil=1024 und=1 corr=2 reloadfail=0
+STEMRD hunt=6200us dma=2050us crc=1110us huntclk=18400
+STEMIO rdby=3145728 rdc=384 rdus=3870 rdusmx=9800 rduswin=4300 rate=1148000Bps sil=1024 und=1 corr=5 reloadfail=0
+STEMRD hunt=1710us dma=2050us crc=1100us huntclk=5020
+STEMIO rdby=4194304 rdc=512 rdus=3860 rdusmx=9800 rduswin=3990 rate=1152400Bps sil=3072 und=2 corr=9 reloadfail=0
+STEMRD hunt=1695us dma=2050us crc=1098us huntclk=4990`;
+$('#demo').addEventListener('click',()=>{ $('#src').value=DEMO; rawText=DEMO; parseAll(DEMO);
+  $('#raw').textContent=DEMO; render(); });
+</script>
+</body>
+</html>
