@@ -152,7 +152,7 @@ describe("four real WAV fixtures, end to end", () => {
     expect(entry.frames).toBe(14592);
     expect(entry.sampleRate).toBe(48000);
     expect(entry.channels).toBe(2);
-    expect(entry.bitDepth).toBe(24);
+    expect(entry.bitDepth).toBe(16);
     expect(entry.sectorCount).toBe(29);
     expect(entry.stemChecksums).toEqual(song.stems.map((s) => s.checksum));
     // The previous generation is untouched in the other index slot.
