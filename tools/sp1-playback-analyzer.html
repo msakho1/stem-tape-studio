@@ -254,9 +254,22 @@ function verdict(d){
   const worstStem=anyPS?NAMES[missTot.map((m,j)=>m+badTot[j]).reduce((bi,v,j,arr)=>v>arr[bi]?j:bi,0)]:null;
   const psNote=anyPS?`<p><strong>Per stem:</strong> misses ${missTot.map((v,j)=>`${NAMES[j]} ${v}`).join(' · ')};
       bad headers ${badTot.map((v,j)=>`${NAMES[j]} ${v}`).join(' · ')}.
-      ${missTot.filter(x=>x>0).length===1||badTot.filter(x=>x>0).length===1
-        ?`<strong>Only ${worstStem} is failing</strong> — a per-stem fault, not a shared stall.`
-        :`All stems affected — a shared stall rather than one ring.`}</p>`:'';
+      ${(()=>{
+        const nzMiss=missTot.filter(x=>x>0).length, nzBad=badTot.filter(x=>x>0).length;
+        if(nzBad===1) return `<strong>Only ${worstStem} has bad headers</strong> — a per-stem addressing fault.`;
+        if(nzMiss<=1) return `<strong>Only ${worstStem} is missing groups</strong> — a per-stem fault, not a shared stall.`;
+        /* miss[] counts the FIRST stem that was not resident: the acquire loop
+           breaks there, so later stems are never tested on that pass. A skewed
+           spread therefore shows failure ORDER, not per-stem failure RATE. */
+        const mx=Math.max(...missTot), mn=Math.min(...missTot.filter(x=>x>0));
+        const skew=mn>0?(mx/mn):Infinity;
+        return skew>4
+          ? `Every stem misses, but heavily skewed (${missTot.join(' / ')}) — and miss[] records the
+             FIRST stem found missing on each pass, because the acquire loop breaks there. So this is
+             failure ORDER, not rate: <strong>${worstStem} is last in fill order and starves first</strong>.
+             The shortfall itself is shared.`
+          : `All stems missing at a similar rate — a shared stall rather than one ring.`;
+      })()}</p>`:'';
 
   if(corr>0) return {cls:'bad',tag:'group validation failing',h:`${fmt(corr)} rejected group batches`,
     b:[`The read path fetched bytes whose group header was not the stem and span it asked for, so
