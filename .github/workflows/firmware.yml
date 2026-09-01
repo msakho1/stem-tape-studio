@@ -1895,12 +1895,30 @@ jobs:
             echo "  stem_render_run() does not take the seam"; fail=1; }
           grep -q 'st_seam_gain(seam)' "$M" || {
             echo "  the render loop never applies the seam gain"; fail=1; }
-          # EXACTLY TWO seeks may exist in the audio path: the ducked wrap,
-          # and its containment backstop. A third is an un-ducked transition,
-          # i.e. the defect coming back.
-          seeks="$(grep -cE '^[[:space:]]*(bool moved = |if \()st_stream_seek\(' "$M")"
-          echo "  st_stream_seek() call sites in the audio path: $seeks (want 2)"
-          [ "$seeks" = 2 ] || { echo "  an un-ducked loop seek has appeared"; fail=1; }
+          # EXACTLY THREE seeks may exist in the audio path, and they are a
+          # closed set: the ducked wrap, and its containment backstop in each
+          # of the two directions a head can travel. A fourth is an un-ducked
+          # transition, i.e. the defect coming back.
+          #
+          # It was TWO until per-track reverse gave each head its own
+          # direction. The backward backstop is the forward one mirrored --
+          # a head crossing loop_START wraps to loop_END and keeps going
+          # backward -- not a new kind of transition, so the property this
+          # check defends is unchanged: every transport move is either the
+          # ducked wrap or a containment wrap, and nothing else moves a
+          # playhead.
+          seeks="$(grep -cE '(if \(|wrapped = )st_stream_seek\(' "$M")"
+          echo "  st_stream_seek() call sites in the audio path: $seeks (want 3)"
+          [ "$seeks" = 3 ] || { echo "  an un-ducked loop seek has appeared"; fail=1; }
+          # AND EACH ONE IS THE ONE IT CLAIMS TO BE. A count alone would pass
+          # if a wrap were replaced by something else that also seeks.
+          grep -q 'if (st_stream_seek(&g_stem_stream\[sk\], s_stem_jump_to)' "$M" || {
+            echo "  the ducked wrap no longer seeks the heads on the boundary"; fail=1; }
+          grep -q 'wrapped = st_stream_seek(hd, lp_lo)' "$M" || {
+            echo "  the FORWARD containment backstop is gone"; fail=1; }
+          grep -q 'wrapped = st_stream_seek(hd, lp_end - 1u)' "$M" || {
+            echo "  the BACKWARD containment backstop is gone -- a reversed head"
+            echo "  would run out of the loop window instead of wrapping"; fail=1; }
           [ "$fail" = 0 ] || exit 1
           echo "seam wiring: the wrap ducks before it jumps"
           # st_seam.h is header-only inline; there is no st_seam.c.
