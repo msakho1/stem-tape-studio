@@ -19,7 +19,7 @@ import { encodeSong } from "../sector";
 import { parseIndexRecord, validateIndexRecord } from "../stemIndex";
 import {
   BLOCKS_PER_SECTOR,
-  FRAMES_PER_SECTOR,
+  FRAMES_PER_GROUP,
   INDEX_MAGIC,
   PHYSICAL_BLOCK_BYTES,
   SECTOR_BYTES,
@@ -98,7 +98,7 @@ describe("four real WAV fixtures, end to end", () => {
     const sectors = encodeSong(song);
     const expectedSectors = sectorsForFrames(song.frames);
     expect(sectors.length).toBe(expectedSectors);
-    expect(expectedSectors).toBe(Math.ceil(14592 / FRAMES_PER_SECTOR));
+    expect(expectedSectors).toBe(Math.ceil(14592 / FRAMES_PER_GROUP));
     expect(expectedSectors).toBe(43);
     for (const s of sectors) expect(s.length).toBe(SECTOR_BYTES);
 

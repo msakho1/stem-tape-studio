@@ -14,7 +14,7 @@ import { evaluate, parseCapabilities, readOnlyVerdict, READ_ONLY_NOTICE } from "
 import { ReadOnlyDeviceError, StemTapeTransport } from "../transport";
 import {
   CAP_FLAG,
-  FRAMES_PER_SECTOR,
+  FRAMES_PER_GROUP,
   GROUP_BYTES,
   GROUP_HEADER_BYTES,
   REQUIRED_CAP_FLAGS,
@@ -136,7 +136,7 @@ async function connect(opts: MockOptions = {}) {
 
 describe("logical 8 KiB sector mapping", () => {
   it("maps one sector onto sixteen ascending 512-byte blocks and round-trips", async () => {
-    const song = await prep([FRAMES_PER_SECTOR * 2 + 7]);
+    const song = await prep([FRAMES_PER_GROUP * 2 + 7]);
     const sectors = encodeSong(song);
     expect(sectors.length).toBe(sectorsForFrames(song.frames));
     expect(sectors[0]!.length).toBe(SECTOR_BYTES);
@@ -254,7 +254,7 @@ describe("Stem Tape transport upload", () => {
     const { t, mock } = await connect({ stemTape: true });
     await t.initialiseLibrary();
     expect(t.indexInitialised).toBe(true);
-    const song = await prep([FRAMES_PER_SECTOR + 40]);
+    const song = await prep([FRAMES_PER_GROUP + 40]);
     const stages: string[] = [];
     const out = await t.uploadSong({ song, onProgress: (p) => stages.push(p.stage) });
     expect(out.ok).toBe(true);
@@ -292,7 +292,7 @@ describe("Stem Tape transport upload", () => {
     const { t } = await connect({ stemTape: true });
     await t.initialiseLibrary();
     const before = (await t.readIndex())!.generation;
-    const song = await prep([FRAMES_PER_SECTOR * 2]);
+    const song = await prep([FRAMES_PER_GROUP * 2]);
     const out = await t.uploadSong({ song, signal: { aborted: true } });
     expect(out.ok).toBe(false);
     const after = await t.readIndex();
@@ -304,7 +304,7 @@ describe("Stem Tape transport upload", () => {
     const { t, mock } = await connect({ stemTape: true, sectorsPerSong: 1 });
     await t.initialiseLibrary();
     const writesBefore = mock.writes;
-    const song = await prep([FRAMES_PER_SECTOR * 2]);
+    const song = await prep([FRAMES_PER_GROUP * 2]);
     const out = await t.uploadSong({ song });
     expect(out.ok).toBe(false);
     expect(out.detail).toMatch(/Insufficient safe staging capacity/);
