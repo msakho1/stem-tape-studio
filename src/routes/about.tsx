@@ -53,7 +53,7 @@ function AboutPage() {
         </div>
         <div className="flex flex-wrap items-center gap-x-8 gap-y-3 px-4 pb-4 pt-2 md:px-8">
           <Link to="/" className="flex items-center gap-3">
-            <img src={stemTapeLogo.url} alt="Stem Tape logo" width={34} height={34} className="h-[34px] w-[34px] object-contain" />
+            <img src={stemTapeLogo.url} alt="Stem Tape logo" width={64} height={64} className="h-[64px] w-[64px] object-contain" />
             <div>
               <p className="font-mono text-xl tracking-tight text-[var(--ink)]">Stem Tape</p>
               <p className="font-mono text-[11px] text-[var(--ink-dim)]">about · project · creator</p>
