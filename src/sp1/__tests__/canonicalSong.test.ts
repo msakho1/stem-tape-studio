@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { stemPcm16 } from "../pcm16";
 import { MockSp1, type MockOptions } from "./mockSerial";
 import { Sp1Transport, Sp1Session } from "../protocol";
 import {
