@@ -214,8 +214,8 @@ static void test_boot_refuses_a_v11_library(void)
 
 	CHECK(len_a == ST11_PHYSICAL_BLOCK_BYTES && len_b == ST11_PHYSICAL_BLOCK_BYTES,
 	      "both real index fixtures are exactly one physical block (512 bytes)");
-	CHECK(ST11_FORMAT_MINOR == 2u,
-	      "this build really is v1.2 -- otherwise the refusal below proves nothing");
+	CHECK(ST11_FORMAT_MINOR == 3u,
+	      "this build really is v1.3 -- otherwise the refusal below proves nothing");
 
 	st_stix_library_state_t lib;
 

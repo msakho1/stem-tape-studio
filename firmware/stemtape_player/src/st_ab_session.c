@@ -419,16 +419,32 @@ static bool accumulate_one_sector_v11(uint32_t stem_hash[ST11_STEM_COUNT], uint3
 
 		st11_sector_decode_frame(sector, f, &frame);
 		for (si = 0; si < ST11_STEM_COUNT; si++) {
-			uint8_t sample_bytes[6];
+			/*
+			 * THE STEREO FRAME'S WIDTH, NOT A LITERAL SIX.
+			 *
+			 * This wrote six bytes per stem -- three per sample --
+			 * which was ST11_STEM_FRAME_BYTES exactly while samples
+			 * were 24-bit. It is the commit-time verification of
+			 * every upload, so at v1.3's 4-byte frame it would have
+			 * hashed two bytes of nothing per stem per frame and
+			 * refused every song the companion sent, with a
+			 * checksum mismatch pointing at the transfer rather
+			 * than at this loop.
+			 *
+			 * Derived now, so the next width change moves it or
+			 * fails to compile.
+			 */
+			uint8_t sample_bytes[ST11_STEM_FRAME_BYTES];
 			int32_t l = frame.stem_l[si];
 			int32_t r = frame.stem_r[si];
+			uint32_t byte_i;
 
-			sample_bytes[0] = (uint8_t)(l & 0xff);
-			sample_bytes[1] = (uint8_t)((l >> 8) & 0xff);
-			sample_bytes[2] = (uint8_t)((l >> 16) & 0xff);
-			sample_bytes[3] = (uint8_t)(r & 0xff);
-			sample_bytes[4] = (uint8_t)((r >> 8) & 0xff);
-			sample_bytes[5] = (uint8_t)((r >> 16) & 0xff);
+			for (byte_i = 0u; byte_i < ST11_BYTES_PER_SAMPLE; byte_i++) {
+				sample_bytes[byte_i] =
+					(uint8_t)((uint32_t)l >> (8u * byte_i));
+				sample_bytes[ST11_BYTES_PER_SAMPLE + byte_i] =
+					(uint8_t)((uint32_t)r >> (8u * byte_i));
+			}
 			stem_hash[si] = st_checksum32_update(stem_hash[si], sample_bytes, sizeof(sample_bytes));
 		}
 	}

@@ -187,8 +187,23 @@ _Static_assert(ST11_PCM_BIT_DEPTH >= 16u,
  * shipped firmware's value is asserted separately in CI so this cannot be
  * used to quietly ship the wrong one.
  */
+/*
+ * 2 -> 3 WITH THE 16-BIT PAYLOAD, and this is the STRONGEST of the three
+ * fail-closed layers because it rejects at song LOAD rather than per group.
+ *
+ * Not to be confused with ST11_PROTOCOL_MINOR above: that one versions the
+ * TRANSPORT (what the companion negotiates over USB before it uploads), this
+ * one versions the STORED FORMAT (what is on the card). They moved together
+ * here only because v1.3 changed both.
+ *
+ * st_stix_validate() compares this against the index record's own
+ * format_minor, so a v1.2 index still on a card returns ST_STIX_ERR_VERSION
+ * and the song never loads -- before a single audio group is fetched, and
+ * with a diagnostic that names the reason instead of playing 24-bit bytes as
+ * 16-bit noise.
+ */
 #ifndef ST11_FORMAT_MINOR
-#define ST11_FORMAT_MINOR   2u
+#define ST11_FORMAT_MINOR   3u
 #endif
 #define ST11_STIX_VERSION   2u
 #define ST11_INDEX_MAGIC    0x53544958u /* 'STIX', written LAST -- the sole commit point */
