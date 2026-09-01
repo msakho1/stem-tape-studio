@@ -13,10 +13,20 @@ tape head.
 
 ## Behaviour
 
-**Gesture: double-tap a TRACK button.** Not FUNCTION + PLAY — `st_loop.h`
-already records that an earlier revision invented that binding and it was never
-authorised. Extends the existing click-vs-double-click arbitration; no second
-gesture detector.
+**Gesture: FUNCTION + double-tap a TRACK button. The same gesture exits.**
+Not FUNCTION + PLAY — `st_loop.h` already records that an earlier revision
+invented that binding and it was never authorised. Extends the existing
+click-vs-double-click arbitration; no second gesture detector.
+
+> CORRECTED, on the product owner's instruction, from an earlier revision of
+> this document that said "double-tap a TRACK button" with no modifier.
+> FUNCTION is held. The modifier matters: an unmodified Track double-tap is
+> already spoken for by the track controls, and reverse must not be reachable
+> by accident on an instrument where a mis-hit is heard immediately.
+
+Engage and disengage are the SAME gesture on the SAME track. There is no
+separate exit: FUNCTION + double-tap track 2 reverses track 2, and FUNCTION +
+double-tap track 2 again returns it to forward, from wherever it has drifted to.
 
 **Drift is the point.** All four tracks at 1:00, reverse track 2 for ten
 seconds:
@@ -31,10 +41,11 @@ jumped back into sync.
 
 **One track at a time.**
 
-- Double-tap the same reversed track → reverse OFF, continue **forward from its
-  exact current position**.
-- Track 2 reversed, double-tap track 4 → track 2 resumes forward from wherever
-  it is, track 4 begins reversing from wherever *it* is. Neither position moves.
+- FUNCTION + double-tap the same reversed track → reverse OFF, continue
+  **forward from its exact current position**.
+- Track 2 reversed, FUNCTION + double-tap track 4 → track 2 resumes forward from
+  wherever it is, track 4 begins reversing from wherever *it* is. Neither
+  position moves.
 
 **Start of song.** A reversed track that reaches the absolute beginning
 **stops/clamps there**. It does not wrap to the end. The other tracks keep
@@ -146,7 +157,7 @@ Two further prerequisites, both small:
   it. It is deliberately unlinked until then; the link-closure gate lists it
   among the files present-but-unlinked, and adding dead weight to the image is
   what the symbol gate's own comments argue against.
-- The double-tap TRACK binding extends the existing click/double-click
+- The FUNCTION + double-tap TRACK binding extends the existing click/double-click
   arbitration. No second gesture detector.
 
 ## Order of work
@@ -169,9 +180,16 @@ Two further prerequisites, both small:
 4. Build one-track-at-a-time reverse.
    - **part 1 DONE** — the resampler's carried state is per-stem, audio
      bit-identical at `0xe9650dda`.
-   - part 2 — four playheads, and PASS C reworked around them (see above).
-   - part 3 — the double-tap gesture, `st_scrub`'s signed-rate crossing, the
-     backward loop wrap and the clamp at the start of the song.
+   - **part 2a DONE** — `st_stream_t` has a direction. Turning it moves no
+     playhead, invalidates no residency, stops and restarts nothing; reaching
+     frame 0 clamps and never wraps to the end.
+   - **part 2b DONE** — four playheads, and PASS C reworked around them:
+     per-head residency, per-head direction-aware prefetch, `run` as the
+     minimum across heads, a transport clock that is always a forward head, and
+     a per-head per-direction loop wrap. The backward loop wrap and the clamp
+     at the start of the song landed with it.
+   - part 3 — the FUNCTION + double-tap gesture and `st_scrub`'s signed-rate
+     crossing.
 5. Flash; physical test.
 6. Instrument and measure the REAL implementation. `sil=` (frames actually
    silenced) and `rduswin=` (worst fetch since the last print) are in the

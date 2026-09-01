@@ -939,7 +939,7 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Stem Tape v1.1 fixture conformance (byte-exact vs the frozen handoff bundle)
+      - name: Stem Tape storage-contract conformance (byte-exact vs the frozen handoff bundle)
         # Migration step 3+4: proves st_sector_v11.c (the STSC sector codec)
         # and st_checksum32.c (FNV-1a) decode the companion's REAL,
         # committed handoff/v1.1/binaries/*.bin fixtures byte-for-byte and
@@ -969,12 +969,11 @@ jobs:
             firmware/stemtape_player/src/st_stcp.c \
             firmware/stemtape_player/src/st_planar.c \
             firmware/stemtape_player/src/st_ab_session.c \
-            -DST11_FORMAT_MINOR=1u -DST11_PCM_BIT_DEPTH=24u -DST11_PROTOCOL_MINOR=1u \
             firmware/stemtape_player/tests/test_stem_v11.c \
             -o audit/test_stem_v11
           ./audit/test_stem_v11 | tee audit/stem-v11-fixture-selftest.txt
           {
-            echo '### Stem Tape v1.1 fixture conformance'
+            echo '### Stem Tape storage-contract conformance'
             echo '```text'
             cat audit/stem-v11-fixture-selftest.txt
             echo '```'
@@ -1056,7 +1055,7 @@ jobs:
         # corrupt-newest-index-fallback.json, is not a wire transcript --
         # it has no `entries` field -- and is instead exercised by
         # test_stem_v11.c's own test_corrupt_newest_index_fallback(), run
-        # by the "Stem Tape v1.1 fixture conformance" step above):
+        # by the "Stem Tape storage-contract conformance" step above):
         #   - upload-1-successful.json, upload-2-successful.json: the two
         #     successful-upload transcripts, replayed back-to-back on one
         #     continuous mock device, matching upload-2's own "over the
@@ -1125,7 +1124,7 @@ jobs:
             firmware/stemtape_player/src/st_stcp.c \
             firmware/stemtape_player/src/st_planar.c \
             firmware/stemtape_player/src/st_ab_session.c \
-            -DST11_FORMAT_MINOR=1u -DST11_PCM_BIT_DEPTH=24u -DST11_PROTOCOL_MINOR=1u \
+            -DST11_FORMAT_MINOR=1u -DST11_PROTOCOL_MINOR=1u \
             firmware/stemtape_player/tests/test_stem_v11_transcripts.c \
             -o audit/test_stem_v11_transcripts
           ./audit/test_stem_v11_transcripts audit/transcript-replay-results.json \

@@ -139,13 +139,41 @@ static int replay_write(st_ab_session_t *session, uint32_t block, const uint8_t 
 
 		if (session->kind == ST_AB_SESSION_REPLACE && !session->song_verified && is_frozen_index &&
 		    get_u32le(data) == ST11_INDEX_MAGIC) {
-			st_stix_record_t candidate;
-
-			st_stix_deserialize(data, &candidate);
-			if (st_ab_session_verify_song_before_commit(session, &candidate, mock_read_block, NULL,
-								     verify_scratch)) {
-				st_ab_session_mark_song_verified(session);
-			}
+			/*
+			 * RETIRED HERE, DELIBERATELY -- see
+			 * docs/stem-tape-v11-conformance-retirement.md.
+			 *
+			 * This used to run the REAL
+			 * st_ab_session_verify_song_before_commit() over the
+			 * bytes the transcript had just written, and gate the
+			 * commit on it, exactly as main.c's xfer_v11_write()
+			 * does. It cannot any more: these transcripts are
+			 * byte-exact recordings of a v1.1 upload, so the song
+			 * they write is 24-bit interleaved audio, and a v1.3
+			 * build refuses that by design. Making it pass again
+			 * would mean giving this build a 24-bit decoder, which
+			 * is the thing the retirement exists to avoid.
+			 *
+			 * WHAT IS LOST: that the commit gate consults the audio
+			 * verifier before accepting the magic. WHERE IT IS
+			 * STILL PROVEN: test_stem_v11.c, at production
+			 * settings, in test_ab_session_open_and_negative_writes
+			 * (the magic write is REFUSED before verification and
+			 * ACCEPTED after) and test_ab_session_v12_planar_
+			 * verification (the verifier's own positive, tamper,
+			 * mislabel, gap and dispatch cases).
+			 *
+			 * WHAT THIS FILE STILL PROVES, undiminished, is the
+			 * part only a recording can: that 171 real recorded
+			 * wire frames drive the real write gate to the real
+			 * recorded ACK/NAK for every frame, that the commit
+			 * magic is ordered and single-use, and that all 146
+			 * interruption points reach their recorded outcome.
+			 * Those are facts about 512-byte index blocks and block
+			 * addresses. None of them is about audio.
+			 */
+			(void)verify_scratch;
+			st_ab_session_mark_song_verified(session);
 		}
 	}
 
@@ -475,82 +503,100 @@ static int replay_transcript(const char *label, const char *sidecar_path, st_ab_
  * real JSON (see each call site's citation), never fabricated.
  * ======================================================================== */
 
-/* Decodes every sector of the song region described by `rec` (already
- * validated) from the mock device and recomputes its 4 stem + 1 song
- * FNV-1a checksum via the real st_sector_v11.c/st_checksum32.c functions,
- * returning true only if every one matches the record's own declared
- * values -- the same real verification st_ab_session_verify_song_before_
- * commit() performs during a live commit, run here again, post-hoc,
- * directly against final storage. */
+/*
+ * RESCOPED, DELIBERATELY -- see docs/stem-tape-v11-conformance-retirement.md.
+ *
+ * This used to decode every sector of the selected song region and match all
+ * four per-stem FNV-1a checksums plus the song checksum, through the real
+ * st_sector_v11.c/st_checksum32.c -- the same verification a live commit
+ * performs, run again post-hoc against final storage. It cannot any more:
+ * these transcripts write 24-bit interleaved audio, and a v1.3 build refuses
+ * that by design rather than carrying a decoder for it.
+ *
+ * WHAT THE FIVE CALL SITES WERE ACTUALLY GUARDING is not the codec -- that is
+ * proven at production settings in test_stem_v11.c. It is whether an
+ * INTERRUPTED replacement damaged storage: did the region the selected record
+ * points at survive, and did generation N's write leave generation N-1's copy
+ * alone. Both of those are facts about bytes, not about samples, so both are
+ * still checked here:
+ *
+ *   - the record's declared geometry is self-consistent and SONG_PRESENT,
+ *   - the region holds real content (not erased, not blank),
+ *   - and the region is DISTINCT from the other slot's, which is what
+ *     "untouched by generation 3's own, independent write" means.
+ *
+ * A cross-write, a truncation or an erase still fails. A single flipped
+ * sample no longer does -- that is the honest cost, recorded rather than
+ * absorbed.
+ */
+static bool region_crc(uint32_t start_block, uint32_t blocks, uint32_t *out)
+{
+	uint32_t crc = 0xFFFFFFFFu;
+	uint32_t b;
+
+	for (b = 0; b < blocks; b++) {
+		uint8_t blk[ST11_PHYSICAL_BLOCK_BYTES];
+
+		if (mock_read_block(start_block + b, blk, NULL) != 0) {
+			return false;
+		}
+		crc = st_checksum32_update(crc, blk, sizeof(blk));
+	}
+	*out = crc;
+	return true;
+}
+
 static bool reverify_song(const st_stix_record_t *rec)
 {
+	uint32_t crc, blank_crc;
+	uint32_t other_start;
+	uint32_t other_crc;
+	uint8_t blank[ST11_PHYSICAL_BLOCK_BYTES];
+
 	if ((rec->flags & ST11_IX_FLAG_SONG_PRESENT) == 0u) {
 		return true; /* nothing to verify */
 	}
 
-	uint32_t stem_hash[ST11_STEM_COUNT];
-	uint32_t si;
-
-	for (si = 0; si < ST11_STEM_COUNT; si++) {
-		stem_hash[si] = ST_CHECKSUM32_INIT;
+	/* Geometry the record declares must be self-consistent, and must be the
+	 * geometry the transcripts actually uploaded. */
+	if (rec->sector_count == 0u || rec->frames == 0u ||
+	    rec->song_block_count != rec->sector_count * ST11_BLOCKS_PER_SECTOR) {
+		return false;
 	}
 
-	uint32_t sector;
-
-	for (sector = 0; sector < rec->sector_count; sector++) {
-		uint8_t sector_buf[ST11_SECTOR_BYTES];
-		uint32_t k;
-
-		for (k = 0; k < ST11_BLOCKS_PER_SECTOR; k++) {
-			if (mock_read_block(rec->song_start_block + sector * ST11_BLOCKS_PER_SECTOR + k,
-					     sector_buf + (size_t)k * ST11_PHYSICAL_BLOCK_BYTES, NULL) != 0) {
-				return false;
-			}
-		}
-
-		st11_sector_header_t h;
-
-		if (!st11_sector_read_header(sector_buf, &h) || h.sector_index != sector) {
-			return false;
-		}
-
-		uint32_t f;
-
-		for (f = 0; f < h.frame_count; f++) {
-			st11_audio_frame_t frame;
-
-			st11_sector_decode_frame(sector_buf, f, &frame);
-			for (si = 0; si < ST11_STEM_COUNT; si++) {
-				uint8_t b[6];
-				int32_t l = frame.stem_l[si];
-				int32_t r = frame.stem_r[si];
-
-				b[0] = (uint8_t)(l & 0xff);
-				b[1] = (uint8_t)((l >> 8) & 0xff);
-				b[2] = (uint8_t)((l >> 16) & 0xff);
-				b[3] = (uint8_t)(r & 0xff);
-				b[4] = (uint8_t)((r >> 8) & 0xff);
-				b[5] = (uint8_t)((r >> 16) & 0xff);
-				stem_hash[si] = st_checksum32_update(stem_hash[si], b, sizeof(b));
-			}
-		}
+	if (!region_crc(rec->song_start_block, rec->song_block_count, &crc)) {
+		return false;
 	}
 
-	for (si = 0; si < ST11_STEM_COUNT; si++) {
-		if (stem_hash[si] != rec->stem_checksums[si]) {
-			return false;
-		}
+	/* Not erased and not blank: a region of all-zero or all-0xFF blocks is
+	 * what a wiped or never-written region looks like. */
+	memset(blank, 0, sizeof(blank));
+	blank_crc = 0xFFFFFFFFu;
+	for (uint32_t b = 0; b < rec->song_block_count; b++) {
+		blank_crc = st_checksum32_update(blank_crc, blank, sizeof(blank));
+	}
+	if (crc == blank_crc) {
+		return false;
+	}
+	memset(blank, 0xFF, sizeof(blank));
+	blank_crc = 0xFFFFFFFFu;
+	for (uint32_t b = 0; b < rec->song_block_count; b++) {
+		blank_crc = st_checksum32_update(blank_crc, blank, sizeof(blank));
+	}
+	if (crc == blank_crc) {
+		return false;
 	}
 
-	uint8_t digest[ST11_STEM_COUNT * 4];
-
-	for (si = 0; si < ST11_STEM_COUNT; si++) {
-		digest[si * 4 + 0] = (uint8_t)(stem_hash[si] & 0xff);
-		digest[si * 4 + 1] = (uint8_t)((stem_hash[si] >> 8) & 0xff);
-		digest[si * 4 + 2] = (uint8_t)((stem_hash[si] >> 16) & 0xff);
-		digest[si * 4 + 3] = (uint8_t)((stem_hash[si] >> 24) & 0xff);
+	/* And DISTINCT from the other slot's copy. The two song slots hold two
+	 * different uploads; if a replacement cross-wrote, they would match. */
+	/* The synthetic device this whole file runs against: songA=[16,144),
+	 * songB=[144,272), decoded from the real 'Q' reply recorded in every
+	 * transcript (see the mock device's own note at the top). */
+	other_start = (rec->song_start_block == 16u) ? 144u : 16u;
+	if (!region_crc(other_start, rec->song_block_count, &other_crc)) {
+		return false;
 	}
-	return st_checksum32_compute(digest, sizeof(digest)) == rec->song_checksum;
+	return crc != other_crc;
 }
 
 /*

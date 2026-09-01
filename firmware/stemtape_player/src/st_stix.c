@@ -174,7 +174,8 @@ st_stix_validity_t st_stix_validate_fields_only(const uint8_t block[ST11_PHYSICA
 		    record_out->song_block_count != record_out->sector_count * ST11_BLOCKS_PER_SECTOR ||
 		    record_out->sample_rate != ST11_SAMPLE_RATE_HZ ||
 		    record_out->channels != ST11_CHANNELS_PER_STEM ||
-		    record_out->bit_depth != ST11_PCM_BIT_DEPTH) {
+		    record_out->bit_depth !=
+			    ST11_BIT_DEPTH_FOR_FORMAT(record_out->format_minor)) {
 			return ST_STIX_ERR_SONG_METADATA;
 		}
 	} else {

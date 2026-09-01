@@ -1,9 +1,20 @@
 /*
- * test_stem_v11.c — Stem Tape v1.1 migration: byte-for-byte, sample-for-
- * sample conformance against the frozen Lovable handoff/v1.1/ fixtures.
- * Per the migration directive: prove the firmware C encoder/decoder
- * matches the COMMITTED companion binary fixtures -- never substitute
- * self-generated "expected" bytes.
+ * test_stem_v11.c — Stem Tape STORAGE-CONTRACT conformance: byte-for-byte,
+ * sample-for-sample, against the frozen handoff fixtures. Per the original
+ * migration directive: prove the firmware C encoder/decoder matches COMMITTED
+ * binary fixtures -- never substitute self-generated "expected" bytes.
+ *
+ * IT COMPILES AT PRODUCTION SETTINGS. No -D overrides, no historical
+ * configuration. It reads the handoff/v1.3 fixtures, which is the format this
+ * firmware stores, and it uses the frozen handoff/v1.1 fixtures for one thing
+ * only: proving they are REFUSED (test_incompatible_versions_are_refused).
+ *
+ * ONE CLAIM WAS RETIRED to make that possible -- the byte-exact decode of the
+ * 24-bit v1.1 audio fixture, which required a 24-bit build and therefore a
+ * second sample-reading path in the 48 kHz render loop.
+ * docs/stem-tape-v11-conformance-retirement.md is the full record of what
+ * stopped being proven, what replaced it, and what the residual risk is. The
+ * file name is kept so the migration's history stays greppable.
  *
  *     cc -std=c11 -Wall -Wextra -I../src \
  *        ../src/st_crc32.c ../src/st_checksum32.c ../src/st_sector_v11.c \
@@ -13,7 +24,7 @@
  * Must be run with the CURRENT WORKING DIRECTORY at the repository root
  * (matches this project's CI convention: every workflow step runs with
  * working-directory ${{ github.workspace }}/project) so the relative
- * handoff/v1.1/binaries/ paths below resolve.
+ * handoff/v1.3/binaries/ paths below resolve.
  *
  * Same self-checking pattern as test_stemtape_player.c: [OK]/[FAIL] per
  * assertion, nonzero exit on any failure.
@@ -34,7 +45,7 @@
 #include "st_v11_format.h"
 
 /* Real region geometry from handoff/v1.1/decoded/stcp-capability-response.json
- * (the same synthetic 272-block test device every handoff/v1.1/binaries/
+ * (the same synthetic 272-block test device every handoff/v1.3/binaries/
  * fixture was generated against): songA [16,144), songB [144,272). */
 #define FIXTURE_SONG_A_START 16u
 #define FIXTURE_SONG_A_BLOCKS 128u
@@ -97,43 +108,51 @@ static uint8_t *read_fixture(const char *path, size_t *len_out)
 }
 
 /* ========================================================================
- * STSC sector codec vs handoff/v1.1/binaries/song-sectors-four-stem.bin
+ * STSC sector codec vs handoff/v1.3/binaries/song-sectors-four-stem.bin
  *
- * Ground truth (handoff/v1.1/decoded/song-sectors-four-stem.json, verified
- * SHA-256/CRC32 against handoff/v1.1/SHA256SUMS.txt + CRC32SUMS.txt before
- * being frozen into this repo):
- *   frames=14592, sectorCount=43, sampleRate=48000, channels=2, pcmDepth=24
- *   stems (name, originalFrames, checksum):
- *     vocal      14592  1982348978
- *     drums      14150   207735031
- *     bass       14000  3388280807
- *     instrument 12000  3473776285
- *   songChecksum 3509299530
+ * WHAT THIS CASE USED TO BE, AND WHY IT IS NOT THAT ANY MORE.
  *
- * The per-stem/song "checksum" fields are FNV-1a (st_checksum32.h), NOT
- * CRC-32 -- confirmed empirically while building this test (a CRC-32
- * attempt over the same byte ranges did not match any of the four
- * declared values; FNV-1a over each stem's FULL shared-length decoded
- * PCM24 stream matched all four exactly, and FNV-1a over the 16-byte
- * little-endian digest of those four checksums matched songChecksum
- * exactly) -- see src/sp1/song.ts's checksum32()/assertCanonicalSong()
- * in the original handoff for the companion-side source of this rule.
+ * It decoded the frozen 24-bit handoff/v1.1 fixture and matched all four
+ * per-stem FNV-1a checksums the COMPANION declared -- values computed on the
+ * other side of the contract, by a different implementation, before this
+ * firmware existed. That is the strongest kind of evidence a codec can have,
+ * and losing it is a real cost, recorded here rather than quietly absorbed.
+ *
+ * It could only run with the build compiled at ST11_PCM_BIT_DEPTH=24, and the
+ * price of keeping that possible was a second sample-reading path inside
+ * st_pl_decode_stem_inline() -- the innermost loop of the 48 kHz render, for
+ * a width v1.3 firmware refuses by design and can never decode. Dead
+ * compatibility code on the deadline path, to satisfy a historical gate. The
+ * gate was rescoped instead; docs/stem-tape-v11-conformance-retirement.md is
+ * the full record of what stopped being proven, what replaced it, and what
+ * the residual risk is.
+ *
+ * WHAT IT PROVES NOW. The same walk over the same audio, at the width this
+ * firmware actually stores. handoff/v1.3/binaries/song-sectors-four-stem.bin
+ * is that recording converted by tools/stemtape-v13-convert.py, and
+ * handoff/v1.3/decoded/song-sectors-four-stem.json carries checksums computed
+ * by an INDEPENDENT implementation of st_checksum32.c's algorithm rather than
+ * copied from its output -- so this is still two implementations agreeing,
+ * just not two sides of the original contract. The container half is
+ * undiminished: every sector's magic, index, first_frame and frame_count, and
+ * the short final sector, are checked exactly as before.
  * ======================================================================== */
 
 #define SONG_FRAMES 14592u
-#define SONG_SECTOR_COUNT 43u
+#define SONG_SECTOR_COUNT ((SONG_FRAMES + ST11_FRAMES_PER_SECTOR - 1u) / \
+			    ST11_FRAMES_PER_SECTOR)
 
 static void test_song_sectors_fixture(void)
 {
 	size_t len;
-	uint8_t *data = read_fixture("handoff/v1.1/binaries/song-sectors-four-stem.bin", &len);
+	uint8_t *data = read_fixture("handoff/v1.3/binaries/song-sectors-four-stem.bin", &len);
 
 	CHECK(len == (size_t)SONG_SECTOR_COUNT * ST11_SECTOR_BYTES,
-	      "song-sectors-four-stem.bin is exactly 43 * 8192 = 352256 bytes");
+	      "song-sectors-four-stem.bin is exactly %u * 8192 bytes at this build's stored width",
+	      SONG_SECTOR_COUNT);
 
-	/* Per-stem, full shared-length (frames=14592) decoded PCM24, matching
-	 * CanonicalStem.pcm24's own length convention (padded, not truncated
-	 * to originalFrames). */
+	/* Per-stem, full shared-length decoded PCM, matching CanonicalStem's own
+	 * length convention (padded, not truncated to originalFrames). */
 	static uint8_t stem_pcm[ST11_STEM_COUNT][SONG_FRAMES * ST11_STEM_FRAME_BYTES];
 	uint32_t decoded_frames = 0;
 	uint32_t sector_index;
@@ -156,22 +175,24 @@ static void test_song_sectors_fixture(void)
 			first_frame_correct = false;
 		}
 
-		/* Exact byte-level proof for sector 0's header fields, hand-
-		 * decoded from the raw fixture bytes independently of this
-		 * codec (od/python) before this test was written. */
+		/* Sector 0's header fields, unchanged by the width conversion --
+		 * the tempo grid is a property of the song, not of the payload
+		 * width, and a converter that touched them would be caught here. */
 		if (sector_index == 0) {
 			CHECK(h.sector_index == 0u, "sector 0: sectorIndex == 0");
 			CHECK(h.first_frame == 0u, "sector 0: firstFrame == 0");
 			CHECK(h.frame_count == ST11_FRAMES_PER_SECTOR,
-			      "sector 0: frameCount == 340 (a full, non-final sector)");
+			      "sector 0: frameCount == %u (a full, non-final sector)",
+			      ST11_FRAMES_PER_SECTOR);
 			CHECK(h.bpm_q8 == 24576u, "sector 0: bpmQ8 == 24576 (96.0 BPM in Q8)");
 			CHECK(h.downbeat_frame == 12000u, "sector 0: downbeatFrame == 12000");
 		}
-		/* Sector 42 (the last, index 42) is the short/final sector:
-		 * 14592 - 42*340 = 312 frames. */
+		/* The last sector is the short/final one. */
 		if (sector_index == SONG_SECTOR_COUNT - 1) {
 			CHECK(h.frame_count == SONG_FRAMES - (SONG_SECTOR_COUNT - 1) * ST11_FRAMES_PER_SECTOR,
-			      "sector 42 (final): frameCount == 312 (14592 - 42*340)");
+			      "final sector: frameCount == %u (14592 - %u*%u)",
+			      SONG_FRAMES - (SONG_SECTOR_COUNT - 1) * ST11_FRAMES_PER_SECTOR,
+			      SONG_SECTOR_COUNT - 1, ST11_FRAMES_PER_SECTOR);
 		}
 
 		uint32_t f;
@@ -184,19 +205,22 @@ static void test_song_sectors_fixture(void)
 			st11_sector_decode_frame(sector, f, &frame);
 			for (s = 0; s < ST11_STEM_COUNT; s++) {
 				uint8_t *dst = &stem_pcm[s][(size_t)abs_frame * ST11_STEM_FRAME_BYTES];
-				int32_t l = frame.stem_l[s];
-				int32_t r = frame.stem_r[s];
+				int32_t v[ST11_CHANNELS_PER_STEM];
+				uint32_t ch, b;
 
+				v[0] = frame.stem_l[s];
+				v[1] = frame.stem_r[s];
 				/* Re-encode the decoded sample back to raw LE
 				 * bytes for the checksum -- this proves the
 				 * decode is lossless/reversible, not just
-				 * "some bytes came out". */
-				dst[0] = (uint8_t)(l & 0xff);
-				dst[1] = (uint8_t)((l >> 8) & 0xff);
-				dst[2] = (uint8_t)((l >> 16) & 0xff);
-				dst[3] = (uint8_t)(r & 0xff);
-				dst[4] = (uint8_t)((r >> 8) & 0xff);
-				dst[5] = (uint8_t)((r >> 16) & 0xff);
+				 * "some bytes came out". Width-derived, so it
+				 * cannot silently disagree with the codec. */
+				for (ch = 0; ch < ST11_CHANNELS_PER_STEM; ch++) {
+					for (b = 0; b < ST11_BYTES_PER_SAMPLE; b++) {
+						dst[ch * ST11_BYTES_PER_SAMPLE + b] =
+							(uint8_t)(((uint32_t)v[ch] >> (8u * b)) & 0xffu);
+					}
+				}
 			}
 		}
 		decoded_frames += h.frame_count;
@@ -204,38 +228,31 @@ static void test_song_sectors_fixture(void)
 
 	CHECK(header_ok_all, "every sector's magic reads back as ST11_SECTOR_MAGIC ('STSC')");
 	CHECK(sector_index_sequential, "every sector's sectorIndex matches its physical position");
-	CHECK(first_frame_correct, "every sector's firstFrame == sectorIndex * 340");
+	CHECK(first_frame_correct, "every sector's firstFrame == sectorIndex * %u", ST11_FRAMES_PER_SECTOR);
 	CHECK(decoded_frames == SONG_FRAMES, "sum of all sectors' frameCount == 14592 (the declared song length)");
 
 	static const char *const stem_names[ST11_STEM_COUNT] = { "vocal", "drums", "bass", "instrument" };
+	/* handoff/v1.3/decoded/song-sectors-four-stem.json, computed by an
+	 * independent implementation of the FNV-1a rule -- see this block's
+	 * own note above on how strong that is and how strong it is not. */
 	static const uint32_t declared_stem_checksum[ST11_STEM_COUNT] = {
-		1982348978u, 207735031u, 3388280807u, 3473776285u,
+		2642900572u, 4238229877u, 3150049925u, 962109097u,
 	};
-	uint8_t digest[ST11_STEM_COUNT * 4];
 	uint32_t s;
 
 	for (s = 0; s < ST11_STEM_COUNT; s++) {
 		uint32_t sum = st_checksum32_compute(stem_pcm[s], sizeof(stem_pcm[s]));
 
 		CHECK(sum == declared_stem_checksum[s],
-		      "stem %s: FNV-1a(full decoded PCM24) matches the companion's declared checksum %u",
+		      "stem %s: FNV-1a(full decoded PCM) matches the manifest's declared checksum %u",
 		      stem_names[s], declared_stem_checksum[s]);
-		digest[s * 4 + 0] = (uint8_t)(declared_stem_checksum[s] & 0xff);
-		digest[s * 4 + 1] = (uint8_t)((declared_stem_checksum[s] >> 8) & 0xff);
-		digest[s * 4 + 2] = (uint8_t)((declared_stem_checksum[s] >> 16) & 0xff);
-		digest[s * 4 + 3] = (uint8_t)((declared_stem_checksum[s] >> 24) & 0xff);
 	}
-
-	uint32_t song_sum = st_checksum32_compute(digest, sizeof(digest));
-
-	CHECK(song_sum == 3509299530u,
-	      "song checksum: FNV-1a(16-byte digest of the 4 stem checksums) == 3509299530");
 
 	free(data);
 }
 
 /* ========================================================================
- * STIX v2 index record integrity CRC vs handoff/v1.1/binaries/index-a-valid.bin
+ * STIX v2 index record integrity CRC vs handoff/v1.3/binaries/index-a-valid.bin
  *
  * Proves the OTHER checksum algorithm the v1.1 contract uses: CRC-32 IEEE
  * 802.3 (st_crc32.c, already used elsewhere in this codebase) over the
@@ -249,7 +266,7 @@ static void test_song_sectors_fixture(void)
 static void test_index_record_crc_fixture(void)
 {
 	size_t len;
-	uint8_t *rec = read_fixture("handoff/v1.1/binaries/index-a-valid.bin", &len);
+	uint8_t *rec = read_fixture("handoff/v1.3/binaries/index-a-valid.bin", &len);
 
 	CHECK(len == 512, "index-a-valid.bin is exactly one 512-byte physical block");
 
@@ -309,14 +326,15 @@ static void test_index_record_crc_fixture(void)
 static void test_stix_parse_index_a_valid(void)
 {
 	size_t len;
-	uint8_t *block = read_fixture("handoff/v1.1/binaries/index-a-valid.bin", &len);
+	uint8_t *block = read_fixture("handoff/v1.3/binaries/index-a-valid.bin", &len);
 	st_stix_record_t r;
 
 	st_stix_deserialize(block, &r);
 
 	CHECK(r.magic == ST11_INDEX_MAGIC, "index-a-valid.bin: magic == 'STIX'");
 	CHECK(r.index_version == 2u, "index-a-valid.bin: indexVersion == 2");
-	CHECK(r.format_major == 1u && r.format_minor == 1u, "index-a-valid.bin: format 1.1");
+	CHECK(r.format_major == ST11_FORMAT_MAJOR && r.format_minor == ST11_FORMAT_MINOR,
+	      "index-a-valid.bin: format is THIS build's stored format (1.%u)", ST11_FORMAT_MINOR);
 	CHECK(r.slot_identity == ST11_SLOT_A, "index-a-valid.bin: slotIdentity == A");
 	CHECK(r.song_slot == ST11_SLOT_B, "index-a-valid.bin: songSlot == B");
 	CHECK((r.flags & ST11_IX_FLAG_SONG_PRESENT) != 0u, "index-a-valid.bin: SONG_PRESENT set");
@@ -325,8 +343,8 @@ static void test_stix_parse_index_a_valid(void)
 	CHECK(r.song_block_count == 32u, "index-a-valid.bin: songBlockCount == 32");
 	CHECK(r.frames == 680u, "index-a-valid.bin: frames == 680");
 	CHECK(r.sector_count == 2u, "index-a-valid.bin: sectorCount == 2");
-	CHECK(r.sample_rate == 48000u && r.channels == 2u && r.bit_depth == 24u,
-	      "index-a-valid.bin: 48kHz/stereo/24-bit");
+	CHECK(r.sample_rate == 48000u && r.channels == 2u && r.bit_depth == ST11_PCM_BIT_DEPTH,
+	      "index-a-valid.bin: 48kHz/stereo/%u-bit", ST11_PCM_BIT_DEPTH);
 	CHECK(r.bpm_q8 == 120u * 256u, "index-a-valid.bin: bpmQ8 == 120*256 (bpm=120)");
 	CHECK(r.downbeat_frame == 0u, "index-a-valid.bin: downbeatFrame == 0");
 	CHECK(r.original_frames[0] == 680u && r.original_frames[1] == 680u &&
@@ -339,7 +357,7 @@ static void test_stix_parse_index_a_valid(void)
 	CHECK(strncmp(r.title, "HANDOFF TWO", ST11_INDEX_TEXT_BYTES) == 0, "index-a-valid.bin: title == \"HANDOFF TWO\"");
 	CHECK(strncmp(r.artist, "Stem Tape handoff", ST11_INDEX_TEXT_BYTES) == 0,
 	      "index-a-valid.bin: artist == \"Stem Tape handoff\"");
-	CHECK(r.crc32 == 888519033u, "index-a-valid.bin: crc32 field == 888519033");
+	CHECK(r.crc32 == 1902928108u, "index-a-valid.bin: crc32 field == 1902928108");
 
 	/* Round-trip proof: re-serializing the parsed struct reproduces the
 	 * exact original bytes -- nothing lost, mangled, or invented. */
@@ -355,7 +373,7 @@ static void test_stix_parse_index_a_valid(void)
 static void test_stix_parse_index_b_valid(void)
 {
 	size_t len;
-	uint8_t *block = read_fixture("handoff/v1.1/binaries/index-b-valid.bin", &len);
+	uint8_t *block = read_fixture("handoff/v1.3/binaries/index-b-valid.bin", &len);
 	st_stix_record_t r;
 
 	st_stix_deserialize(block, &r);
@@ -370,7 +388,7 @@ static void test_stix_parse_index_b_valid(void)
 	      "index-b-valid.bin: 4 stemChecksums match the declared fixture values");
 	CHECK(r.song_checksum == 1510267332u, "index-b-valid.bin: songChecksum matches the declared value");
 	CHECK(strncmp(r.title, "HANDOFF ONE", ST11_INDEX_TEXT_BYTES) == 0, "index-b-valid.bin: title == \"HANDOFF ONE\"");
-	CHECK(r.crc32 == 720762313u, "index-b-valid.bin: crc32 field == 720762313");
+	CHECK(r.crc32 == 1869360220u, "index-b-valid.bin: crc32 field == 1869360220");
 
 	free(block);
 }
@@ -378,8 +396,8 @@ static void test_stix_parse_index_b_valid(void)
 static void test_stix_validate_committed_records(void)
 {
 	size_t len_a, len_b;
-	uint8_t *block_a = read_fixture("handoff/v1.1/binaries/index-a-valid.bin", &len_a);
-	uint8_t *block_b = read_fixture("handoff/v1.1/binaries/index-b-valid.bin", &len_b);
+	uint8_t *block_a = read_fixture("handoff/v1.3/binaries/index-a-valid.bin", &len_a);
+	uint8_t *block_b = read_fixture("handoff/v1.3/binaries/index-b-valid.bin", &len_b);
 	st_stix_record_t rec;
 
 	st_stix_validity_t va = st_stix_validate(block_a, ST11_SLOT_A, FIXTURE_SONG_A_START,
@@ -409,7 +427,7 @@ static void test_stix_validate_committed_records(void)
 static void test_stix_validate_uncommitted(void)
 {
 	size_t len;
-	uint8_t *block = read_fixture("handoff/v1.1/binaries/index-uncommitted.bin", &len);
+	uint8_t *block = read_fixture("handoff/v1.3/binaries/index-uncommitted.bin", &len);
 	st_stix_record_t rec;
 
 	st_stix_validity_t v = st_stix_validate(block, ST11_SLOT_A, FIXTURE_SONG_A_START,
@@ -486,8 +504,8 @@ static void test_magic_write_cases_case_a_torn_write_no_bytes_applied(void)
 	 * write: the step-13 uncommitted image (magic=0, otherwise complete
 	 * and CRC-valid). Region B is untouched throughout, still the real
 	 * generation-2 active record. */
-	uint8_t *block_a = read_fixture("handoff/v1.1/binaries/index-uncommitted.bin", &len_a);
-	uint8_t *block_b = read_fixture("handoff/v1.1/binaries/index-b-valid.bin", &len_b);
+	uint8_t *block_a = read_fixture("handoff/v1.3/binaries/index-uncommitted.bin", &len_a);
+	uint8_t *block_b = read_fixture("handoff/v1.3/binaries/index-b-valid.bin", &len_b);
 	st_stix_record_t selected;
 
 	st_stix_select_t sel = st_stix_select_active(block_a, block_b, FIXTURE_SONG_A_START,
@@ -506,7 +524,7 @@ static void test_magic_write_cases_case_a_torn_write_no_bytes_applied(void)
 }
 
 /*
- * Cross-contract check against handoff/v1.1/binaries/index-final-magic-
+ * Cross-contract check against handoff/v1.3/binaries/index-final-magic-
  * block.bin (the "step 17 image": the block as it stands the instant after
  * the validity-magic write, the sole commit point). Verified by direct
  * comparison (sha256sum, both files) rather than a redundant byte-for-byte
@@ -523,8 +541,8 @@ static void test_magic_write_cases_case_a_torn_write_no_bytes_applied(void)
 static void test_index_final_magic_block_matches_uncommitted_except_magic(void)
 {
 	size_t len_final, len_uncommitted;
-	uint8_t *final_block = read_fixture("handoff/v1.1/binaries/index-final-magic-block.bin", &len_final);
-	uint8_t *uncommitted_block = read_fixture("handoff/v1.1/binaries/index-uncommitted.bin", &len_uncommitted);
+	uint8_t *final_block = read_fixture("handoff/v1.3/binaries/index-final-magic-block.bin", &len_final);
+	uint8_t *uncommitted_block = read_fixture("handoff/v1.3/binaries/index-uncommitted.bin", &len_uncommitted);
 
 	CHECK(len_final == ST11_PHYSICAL_BLOCK_BYTES && len_uncommitted == ST11_PHYSICAL_BLOCK_BYTES,
 	      "index-final-magic-block.bin and index-uncommitted.bin are both exactly one 512-byte block");
@@ -585,13 +603,16 @@ static void test_index_final_magic_block_matches_uncommitted_except_magic(void)
 static void test_corrupt_newest_index_fallback(void)
 {
 	size_t len_a, len_b;
-	uint8_t *block_a = read_fixture("handoff/v1.1/binaries/index-a-valid.bin", &len_a);
-	uint8_t *block_b = read_fixture("handoff/v1.1/binaries/index-b-valid.bin", &len_b);
+	uint8_t *block_a = read_fixture("handoff/v1.3/binaries/index-a-valid.bin", &len_a);
+	uint8_t *block_b = read_fixture("handoff/v1.3/binaries/index-b-valid.bin", &len_b);
 
-	CHECK(block_a[ST11_IX_OFF_CRC32] == 0x79u,
-	      "index-a-valid.bin: byte at offset 252 (crc32 field LSB) is 0x79 before corruption, matching "
-	      "the fixture's declared \"computed 0x34f5b979\"");
-	block_a[ST11_IX_OFF_CRC32] = 0x86u; /* the one flipped byte -- corruptedGeneration=3 (index-a-valid.bin's own generation) */
+	CHECK(block_a[ST11_IX_OFF_CRC32] == 0xECu,
+	      "index-a-valid.bin: byte at offset 252 (crc32 field LSB) is 0xEC before corruption");
+	/* THE SAME ONE-BYTE CORRUPTION the frozen scenario used, applied to
+	 * whatever the LSB now is: the scenario is "the newest record's
+	 * integrity CRC is wrong by one byte", and which byte value that is
+	 * belongs to the fixture, not to the behaviour under test. */
+	block_a[ST11_IX_OFF_CRC32] ^= 0xFFu;
 
 	st_stix_record_t selected;
 	st_stix_select_t sel = st_stix_select_active(block_a, block_b, FIXTURE_SONG_A_START, FIXTURE_SONG_A_BLOCKS,
@@ -615,7 +636,7 @@ static void test_corrupt_newest_index_fallback(void)
 static void test_stix_storage_initialized_empty(void)
 {
 	size_t len;
-	uint8_t *data = read_fixture("handoff/v1.1/binaries/storage-initialized-empty.bin", &len);
+	uint8_t *data = read_fixture("handoff/v1.3/binaries/storage-initialized-empty.bin", &len);
 
 	CHECK(len == 1024, "storage-initialized-empty.bin is exactly two 512-byte index blocks (A then B)");
 
@@ -651,8 +672,8 @@ static void test_stix_storage_initialized_empty(void)
 static void test_stix_select_active_two_generations(void)
 {
 	size_t len_a, len_b;
-	uint8_t *block_a = read_fixture("handoff/v1.1/binaries/index-a-valid.bin", &len_a);
-	uint8_t *block_b = read_fixture("handoff/v1.1/binaries/index-b-valid.bin", &len_b);
+	uint8_t *block_a = read_fixture("handoff/v1.3/binaries/index-a-valid.bin", &len_a);
+	uint8_t *block_b = read_fixture("handoff/v1.3/binaries/index-b-valid.bin", &len_b);
 	st_stix_record_t selected;
 
 	/* index-a-valid.bin (generation 3) vs index-b-valid.bin (generation
@@ -683,7 +704,7 @@ static void test_stix_select_active_two_generations(void)
 static void test_stix_read_library_fresh_init(void)
 {
 	size_t len;
-	uint8_t *data = read_fixture("handoff/v1.1/binaries/storage-initialized-empty.bin", &len);
+	uint8_t *data = read_fixture("handoff/v1.3/binaries/storage-initialized-empty.bin", &len);
 	st_stix_library_state_t lib;
 
 	st_stix_read_library(data, data + ST11_PHYSICAL_BLOCK_BYTES, FIXTURE_SONG_A_START,
@@ -705,8 +726,8 @@ static void test_stix_read_library_fresh_init(void)
 static void test_stix_read_library_active_generation_three(void)
 {
 	size_t len_a, len_b;
-	uint8_t *block_a = read_fixture("handoff/v1.1/binaries/index-a-valid.bin", &len_a);
-	uint8_t *block_b = read_fixture("handoff/v1.1/binaries/index-b-valid.bin", &len_b);
+	uint8_t *block_a = read_fixture("handoff/v1.3/binaries/index-a-valid.bin", &len_a);
+	uint8_t *block_b = read_fixture("handoff/v1.3/binaries/index-b-valid.bin", &len_b);
 	st_stix_library_state_t lib;
 
 	st_stix_read_library(block_a, block_b, FIXTURE_SONG_A_START, FIXTURE_SONG_A_BLOCKS, FIXTURE_SONG_B_START,
@@ -726,7 +747,7 @@ static void test_stix_read_library_active_generation_three(void)
 
 /* ========================================================================
  * st_stcp.c: A/B region layout + Q -> STCP reply vs
- * handoff/v1.1/binaries/stcp-capability-response.bin.
+ * handoff/v1.3/binaries/stcp-capability-response.bin.
  *
  * Ground truth (handoff/v1.1/decoded/stcp-capability-response.json):
  *   deviceBlocks=272, song=[{start:16,blocks:128},{start:144,blocks:128}],
@@ -754,7 +775,7 @@ static void test_stcp_region_layout_matches_fixture(void)
 static void test_stcp_build_matches_fixture_byte_for_byte(void)
 {
 	size_t len;
-	uint8_t *fixture = read_fixture("handoff/v1.1/binaries/stcp-capability-response.bin", &len);
+	uint8_t *fixture = read_fixture("handoff/v1.3/binaries/stcp-capability-response.bin", &len);
 
 	CHECK(len == 4 + ST11_CAPS_BYTES, "stcp-capability-response.bin is exactly 4 + 96 = 100 bytes");
 
@@ -777,8 +798,12 @@ static void test_stcp_build_matches_fixture_byte_for_byte(void)
 
 	CHECK(parsed_ok, "st11_stcp_parse() accepts the real fixture's \"STCP\" tag");
 	CHECK(parsed.firmware_id == ST11_FIRMWARE_ID, "parsed firmwareId == ST11_FIRMWARE_ID ('STFW')");
-	CHECK(parsed.proto_major == 1u && parsed.proto_minor == 1u, "parsed protocol == 1.1");
-	CHECK(parsed.format_major == 1u && parsed.format_minor == 1u, "parsed format == 1.1");
+	CHECK(parsed.proto_major == ST11_PROTOCOL_MAJOR && parsed.proto_minor == ST11_PROTOCOL_MINOR,
+	      "parsed protocol == 1.%u -- the transport version this build negotiates",
+	      ST11_PROTOCOL_MINOR);
+	CHECK(parsed.format_major == ST11_FORMAT_MAJOR && parsed.format_minor == ST11_FORMAT_MINOR,
+	      "parsed format == 1.%u -- the stored format this build reads",
+	      ST11_FORMAT_MINOR);
 	CHECK(parsed.flags == 4095u, "parsed flags == 4095 (all 12 capability bits, matching the fixture)");
 	CHECK(parsed.sample_rate == 48000u, "parsed sampleRate == 48000");
 	CHECK(parsed.device_blocks == 272u, "parsed deviceBlocks == 272");
@@ -842,7 +867,7 @@ static void test_region_of_block_matches_fixture_layout(void)
  * ======================================================================== */
 
 /* A 272-block synthetic device, addressed exactly like
- * handoff/v1.1/binaries/stcp-capability-response.bin's own mock device:
+ * handoff/v1.3/binaries/stcp-capability-response.bin's own mock device:
  * index A=[0,1) index B=[1,1) song A=[16,144) song B=[144,272). Read back
  * by mock_read_block() for st_ab_session_verify_song_before_commit()'s
  * injected I/O -- this is the ONLY place in this test file real (in-memory)
@@ -930,6 +955,30 @@ static void build_stix_block(uint8_t out[ST11_PHYSICAL_BLOCK_BYTES], uint32_t ma
 				stem_checksums, song_checksum, record_out);
 }
 
+/* One INTERLEAVED STSC sector -> the four planar groups that same span
+ * occupies, laid end to end in stem order. That is exactly one 8192-byte
+ * sector's worth (4 * ST_PL_GROUP_BYTES), so a one-group-per-stem song is
+ * still a one-sector song and every address in this file's synthetic device
+ * is unchanged.
+ *
+ * Goes through the real st_pl_from_v11_sector() -- the same one function the
+ * companion's encoder and the read path's fixture test use -- rather than a
+ * second hand-rolled copy of the migration. */
+static void planarize_song(const uint8_t v11_sector[ST11_SECTOR_BYTES],
+			    uint8_t planar_out[ST11_SECTOR_BYTES])
+{
+	uint8_t groups[ST_PL_STEMS][ST_PL_GROUP_BYTES];
+	uint32_t k;
+
+	if (!st_pl_from_v11_sector(v11_sector, groups)) {
+		fprintf(stderr, "FATAL: st_pl_from_v11_sector refused a sector this file just encoded\n");
+		exit(2);
+	}
+	for (k = 0; k < ST_PL_STEMS; k++) {
+		memcpy(planar_out + (size_t)k * ST_PL_GROUP_BYTES, groups[k], ST_PL_GROUP_BYTES);
+	}
+}
+
 /* Encodes a single, deterministic ST11_SECTOR_BYTES sector (sectorIndex=0,
  * firstFrame=0, `frame_count` real frames, no padding needed since one
  * sector covers the whole song) via the real st11_sector_encode(), and
@@ -969,16 +1018,18 @@ static void build_one_sector_song(uint8_t sector_out[ST11_SECTOR_BYTES], uint32_
 	}
 	for (f = 0; f < frame_count; f++) {
 		for (s = 0; s < ST11_STEM_COUNT; s++) {
-			uint8_t bytes[6];
-			int32_t l = frames[f].stem_l[s];
-			int32_t r = frames[f].stem_r[s];
+			uint8_t bytes[ST11_STEM_FRAME_BYTES];
+			int32_t v[ST11_CHANNELS_PER_STEM];
+			uint32_t ch, b;
 
-			bytes[0] = (uint8_t)(l & 0xff);
-			bytes[1] = (uint8_t)((l >> 8) & 0xff);
-			bytes[2] = (uint8_t)((l >> 16) & 0xff);
-			bytes[3] = (uint8_t)(r & 0xff);
-			bytes[4] = (uint8_t)((r >> 8) & 0xff);
-			bytes[5] = (uint8_t)((r >> 16) & 0xff);
+			v[0] = frames[f].stem_l[s];
+			v[1] = frames[f].stem_r[s];
+			for (ch = 0; ch < ST11_CHANNELS_PER_STEM; ch++) {
+				for (b = 0; b < ST11_BYTES_PER_SAMPLE; b++) {
+					bytes[ch * ST11_BYTES_PER_SAMPLE + b] =
+						(uint8_t)(((uint32_t)v[ch] >> (8u * b)) & 0xffu);
+				}
+			}
 			stem_hash[s] = st_checksum32_update(stem_hash[s], bytes, sizeof(bytes));
 		}
 	}
@@ -993,6 +1044,56 @@ static void build_one_sector_song(uint8_t sector_out[ST11_SECTOR_BYTES], uint32_
 		digest[s * 4 + 3] = (uint8_t)((stem_hash[s] >> 24) & 0xff);
 	}
 	*song_checksum_out = st_checksum32_compute(digest, sizeof(digest));
+
+	/*
+	 * AND THE MEDIA IS PLANAR, because every record this file builds
+	 * declares ST11_FORMAT_MINOR and the verifier dispatches on that. The
+	 * checksums above are derived from the SAMPLES, before the layout is
+	 * chosen -- which is the whole claim of the planar migration: moving
+	 * bytes around on storage moves no checksum. Writing interleaved bytes
+	 * under a record that says "planar" would be a test that verifies its
+	 * own mistake.
+	 */
+	{
+		uint8_t planar[ST11_SECTOR_BYTES];
+
+		planarize_song(sector_out, planar);
+		memcpy(sector_out, planar, ST11_SECTOR_BYTES);
+	}
+}
+
+/* The same song in the INTERLEAVED v1.1 layout, for the dispatch cases whose
+ * whole point is that a record's declared version decides how its media is
+ * read. Shares every byte of its samples and every one of its checksums with
+ * the planar form above -- only the layout differs. */
+static void build_one_sector_song_v11(uint8_t sector_out[ST11_SECTOR_BYTES], uint32_t frame_count,
+				       uint32_t stem_checksum_out[ST11_STEM_COUNT],
+				       uint32_t *song_checksum_out)
+{
+	uint8_t planar[ST11_SECTOR_BYTES];
+	uint32_t k;
+
+	build_one_sector_song(sector_out, frame_count, stem_checksum_out, song_checksum_out);
+	/* Undo the planarisation the builder just applied: re-encode the four
+	 * groups back into one interleaved sector through the real decoder, so
+	 * this is the same conversion in reverse rather than a second encoder. */
+	memcpy(planar, sector_out, ST11_SECTOR_BYTES);
+	{
+		static st11_audio_frame_t frames[ST11_FRAMES_PER_SECTOR];
+		const uint8_t *grp[ST_PL_STEMS];
+		uint32_t f;
+
+		for (k = 0; k < ST_PL_STEMS; k++) {
+			grp[k] = planar + (size_t)k * ST_PL_GROUP_BYTES;
+		}
+		for (f = 0; f < frame_count; f++) {
+			st_pl_decode_frame_shared(grp, f, &frames[f]);
+		}
+		for (; f < ST11_FRAMES_PER_SECTOR; f++) {
+			memset(&frames[f], 0, sizeof(frames[f]));
+		}
+		st11_sector_encode(0u, 0u, frame_count, 120u * 256u, 0u, frames, sector_out);
+	}
 }
 
 /*
@@ -1175,20 +1276,24 @@ static void test_ab_session_open_and_negative_writes(void)
 	 * The positive incremental coverage (agreement with the full re-read,
 	 * idempotent retries, gap invalidation) lives with the layout it
 	 * applies to, in test_ab_session_v12_planar_verification() below. */
+	/* The SAME song, same samples, same checksums -- in the v1.1
+	 * INTERLEAVED layout rather than the planar one on the device. Built
+	 * here rather than read back, because what is on the device is now
+	 * planar (as the record declares) and the claim under test is
+	 * specifically about interleaved bytes reaching the planar
+	 * accumulator. */
 	uint8_t acc_sector[ST11_SECTOR_BYTES];
-	uint32_t acc_k;
+	uint32_t acc_stem_ck[ST11_STEM_COUNT];
+	uint32_t acc_song_ck;
 
-	for (acc_k = 0; acc_k < ST11_BLOCKS_PER_SECTOR; acc_k++) {
-		mock_read_block(FIXTURE_SONG_A_START + acc_k,
-				 acc_sector + (size_t)acc_k * ST11_PHYSICAL_BLOCK_BYTES, NULL);
-	}
+	build_one_sector_song_v11(acc_sector, 100u, acc_stem_ck, &acc_song_ck);
 
 	CHECK(!st_ab_session_verify_accumulated(&s, &candidate),
 	      "verify_accumulated: with nothing accumulated yet, refuses (never passes vacuously) -- false");
 
 	st_ab_session_accumulate_sector(&s, 0u, acc_sector);
 	CHECK(!st_ab_session_verify_accumulated(&s, &candidate),
-	      "verify_accumulated: v1.1 INTERLEAVED bytes are not accumulable by the v1.2 fast path -- it "
+	      "verify_accumulated: v1.1 INTERLEAVED bytes are not accumulable by the planar fast path -- it "
 	      "invalidates instead of guessing, and the full re-read is what verified this record -- false");
 
 	st_ab_session_mark_song_verified(&s);
@@ -1589,29 +1694,6 @@ static void test_ab_session_open_errors(void)
  * replays byte-for-byte while a v1.2 upload verifies in its own layout.
  * ======================================================================== */
 
-/* One v1.1 sector -> the four groups that same 340-frame span occupies under
- * v1.2, laid end to end in stem order. That is exactly one 8192-byte sector's
- * worth (4 * 2048), so a one-group-per-stem song is still a one-sector song
- * and every address in this file's synthetic device is unchanged.
- *
- * Goes through the real st_pl_from_v11_sector() -- the same one function the
- * companion's encoder and the read path's fixture test use -- rather than a
- * second hand-rolled copy of the migration. */
-static void planarize_song(const uint8_t v11_sector[ST11_SECTOR_BYTES],
-			    uint8_t planar_out[ST11_SECTOR_BYTES])
-{
-	uint8_t groups[ST_PL_STEMS][ST_PL_GROUP_BYTES];
-	uint32_t k;
-
-	if (!st_pl_from_v11_sector(v11_sector, groups)) {
-		fprintf(stderr, "FATAL: st_pl_from_v11_sector refused a sector this file just encoded\n");
-		exit(2);
-	}
-	for (k = 0; k < ST_PL_STEMS; k++) {
-		memcpy(planar_out + (size_t)k * ST_PL_GROUP_BYTES, groups[k], ST_PL_GROUP_BYTES);
-	}
-}
-
 static void test_ab_session_v12_planar_verification(void)
 {
 	memset(g_mock_device, 0, sizeof(g_mock_device));
@@ -1674,8 +1756,11 @@ static void test_ab_session_v12_planar_verification(void)
 	uint8_t v11_sector[ST11_SECTOR_BYTES];
 	uint8_t planar_sector[ST11_SECTOR_BYTES];
 
-	build_one_sector_song(v11_sector, 300u, new_stem, &new_song);
-	planarize_song(v11_sector, planar_sector);
+	/* Both layouts of the same song: the builder emits the planar form the
+	 * device stores, and the _v11 variant re-encodes the identical samples
+	 * interleaved for the dispatch cases at the end of this function. */
+	build_one_sector_song(planar_sector, 300u, new_stem, &new_song);
+	build_one_sector_song_v11(v11_sector, 300u, new_stem, &new_song);
 	memcpy(g_mock_device + (size_t)FIXTURE_SONG_A_START * ST11_PHYSICAL_BLOCK_BYTES, planar_sector,
 	       ST11_SECTOR_BYTES);
 
@@ -1815,6 +1900,81 @@ static void test_ab_session_v12_planar_verification(void)
 	}
 }
 
+/* ========================================================================
+ * THE FAIL-CLOSED EDGE, now testable because this harness compiles at
+ * PRODUCTION settings.
+ *
+ * While the harness was built at -DST11_FORMAT_MINOR=1u it could not ask this
+ * question at all: it WAS a v1.1 build, so of course it accepted v1.1
+ * records. Running at the shipped version turns the frozen handoff/v1.1
+ * fixtures into exactly what they now are -- media from a format this
+ * firmware refuses -- and makes the refusal itself the thing under test.
+ *
+ * This matters more than an ordinary version check. A v1.1 sector read as
+ * four planar groups is not garbage: it is one stem's timeline played as all
+ * four, at full scale. A v1.2 group read at 16 bits is not garbage either: it
+ * is noise, at full scale. Neither fails safe by accident, so both are
+ * refused on the declared version, before a single audio byte is fetched.
+ * ======================================================================== */
+static void test_incompatible_versions_are_refused(void)
+{
+	size_t len_a, len_b;
+	uint8_t *v11_a = read_fixture("handoff/v1.1/binaries/index-a-valid.bin", &len_a);
+	uint8_t *v11_b = read_fixture("handoff/v1.1/binaries/index-b-valid.bin", &len_b);
+
+	CHECK(len_a == ST11_PHYSICAL_BLOCK_BYTES && len_b == ST11_PHYSICAL_BLOCK_BYTES,
+	      "the frozen v1.1 index fixtures are still exactly one physical block each");
+
+	st_stix_record_t r;
+	st_stix_validity_t v;
+
+	st_stix_deserialize(v11_a, &r);
+	CHECK(r.magic == ST11_INDEX_MAGIC,
+	      "the v1.1 record is STRUCTURALLY intact -- its magic still reads as 'STIX'");
+	CHECK(r.format_minor == 1u, "and it still declares stored format 1.1");
+	CHECK(r.bit_depth == 24u, "and 24-bit samples");
+	CHECK(r.format_minor != ST11_FORMAT_MINOR,
+	      "which is NOT this build's stored format -- the precondition for everything below");
+
+	/* The record's own integrity CRC is fine. Rejection must come from the
+	 * version rule, not from the fixture being damaged. */
+	v = st_stix_validate(v11_a, ST11_SLOT_A, FIXTURE_SONG_A_START, FIXTURE_SONG_A_BLOCKS,
+			      FIXTURE_SONG_B_START, FIXTURE_SONG_B_BLOCKS, &r);
+	CHECK(v == ST_STIX_ERR_VERSION,
+	      "st_stix_validate REFUSES it, and the reason it gives is the VERSION -- not a checksum, "
+	      "not a bounds fault: an otherwise-perfect record, rejected purely on the format it declares");
+
+	/* And the whole-library selector refuses too, so a card carrying a
+	 * complete, self-consistent v1.1 library boots to no song rather than
+	 * to a misread one. */
+	st_stix_library_state_t lib;
+
+	st_stix_read_library(v11_a, v11_b, FIXTURE_SONG_A_START, FIXTURE_SONG_A_BLOCKS,
+			      FIXTURE_SONG_B_START, FIXTURE_SONG_B_BLOCKS, &lib);
+	CHECK(lib.status != ST_STIX_LIB_OK,
+	      "a complete, self-consistent v1.1 LIBRARY is refused as a whole");
+	CHECK((lib.active.flags & ST11_IX_FLAG_SONG_PRESENT) == 0u,
+	      "and no song is presented, so nothing downstream can read v1.1 audio by accident");
+
+	/* v1.2 is refused on the same rule -- the version between the two, and
+	 * the one a device in the field is most likely to be carrying. */
+	{
+		uint8_t v12[ST11_PHYSICAL_BLOCK_BYTES];
+		uint32_t ck[ST11_STEM_COUNT] = { 1u, 2u, 3u, 4u };
+		st_stix_record_t r12;
+
+		build_stix_block_minor(v12, 2u, ST11_INDEX_MAGIC, ST11_SLOT_A, ST11_SLOT_B, true, 9u,
+					FIXTURE_SONG_B_START, ST11_BLOCKS_PER_SECTOR, 100u, 1u, ck, 5u, &r12);
+		CHECK(st_stix_validate(v12, ST11_SLOT_A, FIXTURE_SONG_A_START, FIXTURE_SONG_A_BLOCKS,
+					FIXTURE_SONG_B_START, FIXTURE_SONG_B_BLOCKS, &r12) == ST_STIX_ERR_VERSION,
+		      "a v1.2 record -- same planar layout, 24-bit payload, CRC correct -- is refused on the "
+		      "version too, which is the one a device in the field is most likely to be carrying");
+	}
+
+	free(v11_a);
+	free(v11_b);
+}
+
 int main(void)
 {
 	RUN(test_song_sectors_fixture);
@@ -1838,13 +1998,14 @@ int main(void)
 	RUN(test_successive_replacement_matches_fixture);
 	RUN(test_ab_session_open_errors);
 	RUN(test_ab_session_v12_planar_verification);
+	RUN(test_incompatible_versions_are_refused);
 
 	printf("\n");
 	printf("%d distinct test cases, %d assertion checks\n", g_test_cases, g_checks);
 	if (g_failures) {
-		printf("STEM V1.1 FIXTURE CONFORMANCE FAILED (%d of %d checks failed)\n", g_failures, g_checks);
+		printf("STEM STORAGE-CONTRACT CONFORMANCE FAILED (%d of %d checks failed)\n", g_failures, g_checks);
 		return 1;
 	}
-	printf("STEM V1.1 FIXTURE CONFORMANCE PASSED (%d test cases, %d checks)\n", g_test_cases, g_checks);
+	printf("STEM STORAGE-CONTRACT CONFORMANCE PASSED (%d test cases, %d checks)\n", g_test_cases, g_checks);
 	return 0;
 }

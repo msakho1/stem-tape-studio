@@ -87,17 +87,38 @@
  * stride alternates alignment and each sample is a three-byte assemble with
  * a sign-extend. Asserted in st_planar.h, where the decode lives.
  *
- * OVERRIDABLE FOR THE SAME ONE REASON ST11_FORMAT_MINOR is (see below): the
- * frozen handoff fixtures are byte-exact records of a CONTRACT, and testing
- * a contract means testing it at its own width. test_stem_v11.c compiles at
- * -DST11_PCM_BIT_DEPTH=24u -DST11_FORMAT_MINOR=1u and keeps proving exactly
- * what it always proved about v1.1. The shipped firmware's value is asserted
- * separately in CI, so this cannot be used to quietly ship the wrong width.
+ * NOT OVERRIDABLE, DELIBERATELY. It was, briefly, so a historical harness
+ * could decode the frozen 24-bit fixtures -- and the price was a second
+ * sample-reading path inside st_pl_decode_stem_inline(), which is the
+ * innermost loop of the 48 kHz render. v1.3 is a breaking storage migration
+ * that fails closed on v1.1 and v1.2 media by design, so that path could
+ * never be taken by shipped firmware; carrying it to satisfy a CI gate was
+ * the wrong trade. The gate was rescoped instead --
+ * docs/stem-tape-v11-conformance-retirement.md records exactly what stopped
+ * being proven and what took its place. There is now ONE stored width, and
+ * one way to read a sample.
  */
-#ifndef ST11_PCM_BIT_DEPTH
 #define ST11_PCM_BIT_DEPTH        16u
-#endif
 #define ST11_BYTES_PER_SAMPLE     (ST11_PCM_BIT_DEPTH / 8u) /* 2 */
+
+/*
+ * THE WIDTH A GIVEN STORED FORMAT VERSION IMPLIES.
+ *
+ * The stored width is not an independent field a record may choose: it is
+ * decided by the format version, and a record that disagrees with its own
+ * version is malformed. Saying that once, here, is what lets st_stix.c check
+ * a record's declared bit_depth against the version the record itself carries
+ * rather than against this build's constant.
+ *
+ * For the shipped firmware the two are identical -- the version check already
+ * requires format_minor == ST11_FORMAT_MINOR, so the width check that follows
+ * can only pass at ST11_PCM_BIT_DEPTH. What it buys is that a test harness
+ * replaying a RECORDED v1.1 session (see
+ * docs/stem-tape-v11-conformance-retirement.md) can validate those records
+ * without the build being handed a 24-bit width -- which is what would have
+ * dragged a 24-bit decoder back into the 48 kHz path.
+ */
+#define ST11_BIT_DEPTH_FOR_FORMAT(minor) (((minor) >= 3u) ? 16u : 24u)
 /* One frame carries all four stems, both channels: 4*2*2 = 16 bytes. */
 #define ST11_BYTES_PER_FRAME      (ST11_STEM_COUNT * ST11_CHANNELS_PER_STEM * ST11_BYTES_PER_SAMPLE)
 #define ST11_STEM_FRAME_BYTES     (ST11_CHANNELS_PER_STEM * ST11_BYTES_PER_SAMPLE) /* 4 */
@@ -175,12 +196,17 @@ _Static_assert(ST11_PCM_BIT_DEPTH >= 16u,
  * replaces, and reusing its number for a different payload width is exactly
  * the ambiguity these fields exist to prevent.
  *
- * Overridable on the same terms as ST11_PCM_BIT_DEPTH and ST11_FORMAT_MINOR:
- * the frozen 100-byte stcp-capability-response.bin in handoff/v1.1 is a
- * byte-exact record of what a v1.1 firmware answered, and the conformance
- * harness compiles at -DST11_PROTOCOL_MINOR=1u so it keeps checking that
- * st11_stcp_build() still reproduces it. CI asserts the shipped value
- * separately, so this cannot quietly ship the wrong one.
+ * OVERRIDABLE, and unlike the width this costs nothing anywhere: it is a
+ * version integer that appears in one serialiser. The transcript harness
+ * replays a RECORDED v1.1 session frame for frame, and the recorded 'Q' reply
+ * carries the protocol version the device answered with -- so reproducing it
+ * requires answering as that version. No code path is duplicated to allow it.
+ *
+ * The SHIPPED value is asserted in CI in a build that takes no overrides, and
+ * the reply's byte-exactness is checked against
+ * handoff/v1.3/binaries/stcp-capability-response.bin -- the reply this
+ * firmware actually sends -- which is a stronger test than reproducing a
+ * retired one.
  */
 #ifndef ST11_PROTOCOL_MINOR
 #define ST11_PROTOCOL_MINOR 3u
