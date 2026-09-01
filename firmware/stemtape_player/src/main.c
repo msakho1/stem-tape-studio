@@ -157,9 +157,9 @@
 #define ST_RC_SWEEP_REPS 24u
 
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st47-VOLCAL"
+#define ST_BUILD_TAG "st48-VOLCAL"
 #else
-#define ST_BUILD_TAG "st47"
+#define ST_BUILD_TAG "st48"
 #endif
 #include "st_track_hold.h"
 
@@ -2549,18 +2549,49 @@ static void stem_render_run(const uint8_t *const grp[ST_PL_STEMS],
 						if (pidx >= src_avail) {
 							pidx = src_avail - 1u;
 						}
-						/* Inline: at any rate at or above
-						 * 1x this runs for every stem on
-						 * every output frame, and it was
-						 * the second per-frame call across
-						 * a translation unit on this
-						 * path. Same arithmetic, same
-						 * bytes, no call. */
-						st_pl_decode_stem_inline(
-							grp[sp],
-							frame_in_group + pidx,
-							&s_rs_prev.stem_l[sp],
-							&s_rs_prev.stem_r[sp]);
+						/*
+						 * THE FRAME BEHIND THE NEW CURSOR
+						 * IS USUALLY THE ONE ALREADY IN
+						 * HAND.
+						 *
+						 * On the first step of this walk
+						 * the cursor moves from c to c+1,
+						 * so the frame behind it is c --
+						 * which is exactly where `nxt`
+						 * was just decoded. Re-reading it
+						 * from the group was four decodes
+						 * per output frame thrown away,
+						 * and at any rate at or above 1x
+						 * that is EVERY frame: it roughly
+						 * doubled the cost of the
+						 * variable-rate render against
+						 * the unity one, which is why the
+						 * pitch rocker pushed the audio
+						 * block past its 5.333 ms
+						 * deadline while unity playback
+						 * sat comfortably inside it.
+						 *
+						 * The compare is against the index
+						 * `nxt` was actually decoded at,
+						 * including the clamp, so it is
+						 * correct rather than merely
+						 * usually correct -- and a second
+						 * or later step of the walk (rates
+						 * above 2x) still decodes for
+						 * real. Identical bytes either
+						 * way: it is the same frame of
+						 * the same group.
+						 */
+						if (frame_in_group + pidx == idx[sp]) {
+							s_rs_prev.stem_l[sp] = nxt.stem_l[sp];
+							s_rs_prev.stem_r[sp] = nxt.stem_r[sp];
+						} else {
+							st_pl_decode_stem_inline(
+								grp[sp],
+								frame_in_group + pidx,
+								&s_rs_prev.stem_l[sp],
+								&s_rs_prev.stem_r[sp]);
+						}
 					}
 				}
 			}

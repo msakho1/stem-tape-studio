@@ -227,6 +227,19 @@ void st_fx_process(st_fx_t *fx, int32_t *l, int32_t *r, uint32_t song_frame)
 
 	for (i = 0; i < (int)ST_FX_COUNT; i++) {
 		const uint8_t e = st_fx_signal_order[i];
+		const bool engaged = (fx->active & ST_FX_BIT(e)) != 0u;
+
+		/* FULLY IDLE: not engaged and its ramp already at zero. There is
+		 * nothing for wet_step() to move and nothing for the switch to
+		 * do, and this is the common case -- at most one or two of the
+		 * four effects are ever held. Skipping the whole arm here is
+		 * what keeps a single engaged effect from costing four effects'
+		 * worth of dispatch on every one of the 48,000 frames a second
+		 * this function runs at. */
+		if (!engaged && fx->wet[e] == 0u &&
+		    !(e == ST_FX_ECHO && fx->echo_tail != 0u)) {
+			continue;
+		}
 
 		w = wet_step(fx, e);
 
@@ -234,7 +247,25 @@ void st_fx_process(st_fx_t *fx, int32_t *l, int32_t *r, uint32_t song_frame)
 		case ST_FX_FILTER: {
 			int32_t fl, fr;
 
-			if (w == 0u) break;
+			/* STATE MUST NOT SURVIVE A DISENGAGE.
+			 *
+			 * The biquad only ran while wet, so its x1/x2/y1/y2 were
+			 * frozen at whatever passed through the last time the
+			 * filter was held -- an arbitrary earlier moment in an
+			 * unrelated part of the song. Re-engaging restarted a
+			 * RECURSIVE filter from that stale history, so the first
+			 * few milliseconds were an artefact of old audio rather
+			 * than the signal, ringing through the 12 ms engage ramp.
+			 * That is a click on every press, and it is why the
+			 * filter "does not sound right" rather than merely
+			 * sounding filtered.
+			 *
+			 * Cleared at full disengage, which is the only moment the
+			 * state is provably unobservable. */
+			if (w == 0u) {
+				memset(&fx->filter, 0, sizeof(fx->filter));
+				break;
+			}
 			fl = biquad(&fx->filter, 0, dl,
 				     FILT_B0, FILT_B1, FILT_B2, FILT_A1, FILT_A2);
 			fr = biquad(&fx->filter, 1, dr,
@@ -247,7 +278,12 @@ void st_fx_process(st_fx_t *fx, int32_t *l, int32_t *r, uint32_t song_frame)
 		case ST_FX_DIRT: {
 			int32_t sl, sr;
 
-			if (w == 0u) break;
+			/* Same stale-state reset as the filter above: the
+			 * taming lowpass is a biquad with the same problem. */
+			if (w == 0u) {
+				memset(&fx->dirt_tame, 0, sizeof(fx->dirt_tame));
+				break;
+			}
 			sl = st_fx_shape_dirt(dl);
 			sr = st_fx_shape_dirt(dr);
 			sl = biquad(&fx->dirt_tame, 0, sl,
@@ -272,7 +308,31 @@ void st_fx_process(st_fx_t *fx, int32_t *l, int32_t *r, uint32_t song_frame)
 			 * counter: a loop wrap moves song_frame and the gate
 			 * follows it exactly, with nothing to resync. */
 			if (song_frame < fx->downbeat_frame) break;
-			pos = (song_frame - fx->downbeat_frame) % fx->gate_cycle;
+			/* The modulo is a hardware DIVIDE, once per output frame
+			 * at 48 kHz -- the same cost the mixer was paying eight
+			 * times a frame before st46. gate_cycle does not change
+			 * inside a block, and song_frame almost always advances
+			 * by one, so subtracting is right far more often than
+			 * dividing is. The divide stays as the general case: a
+			 * seek, a loop wrap or a varispeed step can move
+			 * song_frame by any amount, and this must still land on
+			 * the same phase it always did. */
+			{
+				uint32_t rel = song_frame - fx->downbeat_frame;
+
+				if (rel >= fx->gate_prev_rel &&
+				    rel - fx->gate_prev_rel < fx->gate_cycle) {
+					pos = fx->gate_prev_pos +
+					      (rel - fx->gate_prev_rel);
+					if (pos >= fx->gate_cycle) {
+						pos -= fx->gate_cycle;
+					}
+				} else {
+					pos = rel % fx->gate_cycle;
+				}
+				fx->gate_prev_rel = rel;
+				fx->gate_prev_pos = pos;
+			}
 			half = fx->gate_cycle / 2u;
 
 			if (pos < half) {

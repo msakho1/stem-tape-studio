@@ -119,6 +119,13 @@ typedef struct {
 
 	/* echo */
 	int16_t  echo_line[ST_FX_ECHO_MAX_FRAMES];   /* Q15 mono */
+	/* Gate phase carried between frames so the per-frame modulo becomes a
+	 * subtraction in the overwhelmingly common case where song_frame
+	 * advanced by a small amount. Zeroed by st_fx_reset() with the rest of
+	 * the struct; a mismatch simply falls back to the divide. */
+	uint32_t gate_prev_rel;
+	uint32_t gate_prev_pos;
+
 	uint32_t echo_w;                 /* write index */
 	uint32_t echo_len;               /* live delay length in frames */
 	int32_t  echo_damp;              /* one-pole LP state, Q23 */
