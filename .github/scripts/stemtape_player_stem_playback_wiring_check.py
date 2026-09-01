@@ -209,7 +209,24 @@ REQUIRED_CALLS = {
         # hot loop uses while all four heads are together; per-track reverse
         # is what starts passing different indices, through the array form.
         "st_pl_decode_frame_shared",
-        "st_stem_mix_frame_prepared",
+        # THE INLINE FORM, and requiring it by name is deliberate.
+        #
+        # st50 moved the mixdown arithmetic into st_stem_mix.h as
+        # st_stem_mix_frame_prepared_inline(); the out-of-line
+        # st_stem_mix_frame_prepared() now calls that, so there is still
+        # exactly one implementation and the host tests and the FX gate
+        # still exercise the code this loop runs. What changed is which
+        # entry point the 48 kHz path uses: a pointer to an
+        # st11_audio_frame_t crossing a translation unit obliged the
+        # compiler to spill eight int32_t to the stack and the callee to
+        # load them back, 48,000 times a second, computing nothing.
+        #
+        # The name checked here has to be the one the render loop actually
+        # calls or this gate stops proving anything -- and it must be the
+        # _inline suffix specifically, because the bare name is a prefix of
+        # it: accepting the short form would let a regression back to the
+        # out-of-line call pass unnoticed.
+        "st_stem_mix_frame_prepared_inline",
     ],
     "streamer_thread": [
         "st_stream_init",

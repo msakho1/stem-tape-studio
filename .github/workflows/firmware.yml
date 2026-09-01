@@ -3237,16 +3237,31 @@ jobs:
           # step below, which parses main.c's own source.
           check st11_sector_decode_frame
           check st11_sector_read_header
-          # st_stem_mix_prepare()/st_stem_mix_frame_prepared(), not
-          # st_stem_mix_frame(): the audio path calls the two halves
-          # separately so the mute/solo/gain-ceiling work runs once per
-          # block instead of 48000 times a second. st_stem_mix_frame()
-          # itself is the two of them back to back, kept for callers that
-          # mix a single frame (the host tests), and -ffunction-sections/
-          # --gc-sections is right to drop it from an image that never
-          # calls it -- requiring it would be requiring dead weight.
+          # st_stem_mix_prepare(), not st_stem_mix_frame(): the audio path
+          # calls the two halves separately so the mute/solo/gain-ceiling
+          # work runs once per block instead of 48000 times a second.
+          # st_stem_mix_frame() itself is the two of them back to back, kept
+          # for callers that mix a single frame (the host tests), and
+          # -ffunction-sections/--gc-sections is right to drop it from an
+          # image that never calls it -- requiring it would be requiring
+          # dead weight.
+          #
+          # st_stem_mix_frame_prepared() IS NO LONGER CHECKED HERE, and that
+          # is not a weakening. st50 moved the mixdown into st_stem_mix.h as
+          # st_stem_mix_frame_prepared_inline() and the render loop calls
+          # that, so the out-of-line symbol is now in exactly the position
+          # st_stem_mix_frame() is in: real, host-tested, and called by
+          # nothing in the firmware. --gc-sections is right to drop it, and
+          # a symbol gate cannot see an inline function at all -- it has no
+          # symbol by design.
+          #
+          # What proves the mixdown is still in the audio path is the SOURCE
+          # gate instead: .github/scripts/stemtape_player_stem_playback_
+          # wiring_check.py requires st_stem_mix_frame_prepared_inline( to
+          # appear inside stem_render_run()'s own body, by that exact name.
+          # That is a stronger check than symbol presence ever was -- it
+          # names the call site, not merely the linkage.
           check st_stem_mix_prepare
-          check st_stem_mix_frame_prepared
           # THE FX RACK. Required here because until this was added, nothing
           # in CI obliged st_fx_process() to survive linking at all: the two
           # FX host tests exercise the module standalone and never touch
