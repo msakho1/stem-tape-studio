@@ -33,7 +33,7 @@ import {
   type StemTapeIndexRecord,
 } from "./stemIndex";
 
-export type LibraryStatus = "ok" | "blank" | "corrupt";
+export type LibraryStatus = "ok" | "blank" | "legacy" | "corrupt";
 
 export interface SlotReading {
   slot: AbSlot;
