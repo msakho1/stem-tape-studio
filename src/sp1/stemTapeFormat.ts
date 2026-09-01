@@ -34,19 +34,27 @@ export const SECTOR_BYTES = PHYSICAL_BLOCK_BYTES * BLOCKS_PER_SECTOR; // 8192
 /** Every A/B region start and length is expressed in whole 512-byte blocks. */
 export const REQUIRED_ALIGNMENT = PHYSICAL_BLOCK_BYTES;
 
-/** Audio format — fixed by the Stem Tape contract. */
+/** Audio format — fixed by the Stem Tape v1.3 contract. */
 export const STEM_COUNT = 4;
 export const CHANNELS = 2;
-export const PCM_BIT_DEPTH = 24;
-export const BYTES_PER_SAMPLE = PCM_BIT_DEPTH / 8;
+/** v1.3 stores signed 16-bit LE samples. */
+export const PCM_BIT_DEPTH = 16;
+export const BYTES_PER_SAMPLE = PCM_BIT_DEPTH / 8; // 2
 export const SAMPLE_RATE = 48000;
-/** One frame carries all four stems, both channels: 4*2*3 = 24 bytes. */
-export const BYTES_PER_FRAME = STEM_COUNT * CHANNELS * BYTES_PER_SAMPLE;
 
+/* ---------- frozen v1.1 mixed-frame geometry (audit only) ---------- */
+
+export const PCM_BIT_DEPTH_V11 = 24;
+export const BYTES_PER_SAMPLE_V11 = 3;
+/** One v1.1 frame carried all four stems, both channels: 4*2*3 = 24 bytes. */
+export const BYTES_PER_FRAME_V11 = STEM_COUNT * CHANNELS * BYTES_PER_SAMPLE_V11;
 /** Sector header: reserved timing / tempo / LED bytes, then the frame payload. */
 export const SECTOR_HEADER_BYTES = 32;
 export const SECTOR_PAYLOAD_BYTES = SECTOR_BYTES - SECTOR_HEADER_BYTES; // 8160
-export const FRAMES_PER_SECTOR = SECTOR_PAYLOAD_BYTES / BYTES_PER_FRAME; // 340
+export const FRAMES_PER_SECTOR_V11 = SECTOR_PAYLOAD_BYTES / BYTES_PER_FRAME_V11; // 340
+/** v1.2 planar groups held 340 frames of 24-bit stereo. */
+export const FRAMES_PER_GROUP_V12 = 340;
+
 
 /**
  * v1.1 mixed-sector magic. Retained ONLY so the frozen v1.1 handoff bundle can
