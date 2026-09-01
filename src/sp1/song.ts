@@ -15,6 +15,56 @@
 
 import { downmixToMono, type StemSlotName } from "./prepare";
 
+export const INT16_MAX = 32767;
+export const INT16_MIN = -32768;
+
+/**
+ * Signed 24-bit (Q23) sample -> signed 16-bit, round-to-nearest, saturating,
+ * NO dither. v1.3 storage is 16-bit; this host model stays 24-bit because that
+ * is what decoding and resampling produce, so the conversion lives here, in
+ * one place, and every checksum is taken from its output.
+ *
+ * Rounding rather than truncation is measured, not stylistic: truncation
+ * biases every sample toward negative infinity (a DC offset across the whole
+ * mix), and dither is wrong here because the device re-quantises after summing
+ * four stems. There is deliberately no RNG in this path.
+ */
+export function to16(v: number): number {
+  const q = (v + 128) >> 8;
+  return q > INT16_MAX ? INT16_MAX : q < INT16_MIN ? INT16_MIN : q;
+}
+
+/** Interleaved stereo 24-bit LE (6 B/frame) -> interleaved 16-bit LE (4 B/frame). */
+export function pcm24ToPcm16(pcm24: Uint8Array): Uint8Array {
+  const samples = Math.floor(pcm24.length / 3);
+  const out = new Uint8Array(samples * 2);
+  for (let i = 0; i < samples; i++) {
+    const s = i * 3;
+    const raw = pcm24[s]! | (pcm24[s + 1]! << 8) | (pcm24[s + 2]! << 16);
+    const q = to16(raw & 0x800000 ? raw - 0x1000000 : raw);
+    const u = q < 0 ? q + 0x10000 : q;
+    out[i * 2] = u & 0xff;
+    out[i * 2 + 1] = (u >>> 8) & 0xff;
+  }
+  return out;
+}
+
+/** Read one signed 16-bit LE sample. */
+export function readInt16LE(bytes: Uint8Array, off: number): number {
+  const v = bytes[off]! | (bytes[off + 1]! << 8);
+  return v & 0x8000 ? v - 0x10000 : v;
+}
+
+/** The stored 16-bit image of a prepared stem, converted once per buffer. */
+const PCM16 = new WeakMap<Uint8Array, Uint8Array>();
+export function stemPcm16(stem: { pcm24: Uint8Array }): Uint8Array {
+  const hit = PCM16.get(stem.pcm24);
+  if (hit) return hit;
+  const made = pcm24ToPcm16(stem.pcm24);
+  PCM16.set(stem.pcm24, made);
+  return made;
+}
+
 export const CANONICAL_SAMPLE_RATE = 48000;
 export const CANONICAL_CHANNELS = 2;
 export const CANONICAL_PCM_DEPTH = 24;
@@ -207,7 +257,7 @@ export async function prepareCanonicalSong(
       peak,
       clipped,
       padFrames: N - original,
-      checksum: checksum32(pcm24),
+      checksum: checksum32(pcm24ToPcm16(pcm24)),
     };
   });
 
@@ -253,7 +303,7 @@ export function assertCanonicalSong(song: CanonicalSong): void {
     const expect = N * CANONICAL_CHANNELS * BYTES_PER_SAMPLE;
     if (s.pcm24.length !== expect) fail(`${s.name}: ${s.pcm24.length} bytes !== ${expect}`);
     if (s.pcm24.length % 6 !== 0) fail(`${s.name}: packed bytes are not whole stereo 24-bit frames`);
-    if (s.checksum !== checksum32(s.pcm24)) fail(`${s.name}: checksum does not match the packed bytes`);
+    if (s.checksum !== checksum32(stemPcm16(s))) fail(`${s.name}: checksum does not match the stored 16-bit bytes`);
     if (s.padFrames < 0 || s.originalFrames + s.padFrames !== N) fail(`${s.name}: padding accounting`);
   }
   const total = N * 4 * CANONICAL_CHANNELS * BYTES_PER_SAMPLE;
