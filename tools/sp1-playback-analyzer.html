@@ -175,32 +175,56 @@ footer{color:var(--ink-faint);font-size:12px;border-top:1px solid var(--rule);pa
     </details>
   </section>
 
-  <footer>Counters are cumulative, so every figure here is a difference between consecutive samples.
-    <code class="c">rduswin</code> is already windowed by the firmware (read-and-clear);
-    <code class="c">rdusmx</code> is a sticky maximum since boot.</footer>
+  <footer>Counters are cumulative, so every figure here is a difference between consecutive samples —
+    which means <strong>the capture has to be running while the song is</strong>. A capture taken after
+    playback stopped shows identical lines and zero deltas; this tool now says so instead of showing a
+    clean page. <code class="c">rduswin</code> is already windowed by the firmware (read-and-clear);
+    <code class="c">rdusmx</code> is a sticky maximum since boot. On build st42 and later
+    <code class="c">STEMRD</code> is a per-read average over the print window
+    (<code class="c">n=</code> reads), not the single most recent read.</footer>
 </div>
 
 <script>
 const SPAN_US=7083, NEED_BPS=1152000, MODEL_R2_US=3834, SR=48000;
+/* One stem read is ST_PL_REFILL_GROUPS (2) planar groups of 2048 bytes. That
+   fixes the read-cost ceiling: NEED_BPS bytes a second cannot be delivered by
+   reads averaging longer than R_BYTES/NEED_BPS, whatever the read-ahead is. */
+const R_BYTES=4096;
 const $=s=>document.querySelector(s);
 let samples=[], rawText='', marks=[], port=null, reader=null, keep=false;
 
 /* ---------- parsing ---------- */
 const num=(s,k)=>{const m=s.match(new RegExp('\\b'+k+'=(-?\\d+)'));return m?+m[1]:null;};
-let pendingIO=null, buildTag=null;
+let pendingIO=null, buildTag=null, transport=null;
 
 function feedLine(line){
   line=line.trim(); if(!line) return;
   const b=line.match(/STEMTAPE BUILD\s+(\S+)/); if(b) buildTag=b[1];
+  /* TRANSPORT STATE. Every counter on STEMIO is cumulative, so a capture
+     taken while the device is stopped is a wall of identical lines and every
+     delta is zero -- which is why this tool once showed an empty page for a
+     capture the operator was sure contained a fault. It did not: the fault
+     had happened, playback had since been stopped, and nothing was moving any
+     more. Latch the transport so that case can be NAMED instead of rendered
+     as silence. */
+  const lp=line.match(/LOOPER\b.*?\b(PLAY|STOP)\b/);
+  if(lp) transport=lp[1];
   if(line.includes('STEMIO')){
     pendingIO={t:Date.now(),
       rdby:num(line,'rdby'),rdc:num(line,'rdc'),rdus:num(line,'rdus'),
       rdusmx:num(line,'rdusmx'),rduswin:num(line,'rduswin'),rate:num(line,'rate'),
       sil:num(line,'sil'),und:num(line,'und'),corr:num(line,'corr'),
-      reloadfail:num(line,'reloadfail'),rd:null};
+      reloadfail:num(line,'reloadfail'),rd:null,transport};
     samples.push(pendingIO);
   } else if(line.includes('STEMRD') && pendingIO && !pendingIO.rd){
-    pendingIO.rd={hunt:num(line,'hunt'),dma:num(line,'dma'),crc:num(line,'crc'),huntclk:num(line,'huntclk')};
+    /* st42 made this a per-read AVERAGE over the print window (n= reads,
+       avg= whole call, spin= the clocking part of hunt, clk= pulses).
+       st41 and earlier printed the LATEST read only, with huntclk= and no
+       n=/avg=/spin=. Both are read here so old captures still open. */
+    pendingIO.rd={n:num(line,'n'),avg:num(line,'avg'),
+      hunt:num(line,'hunt'),spin:num(line,'spin'),
+      dma:num(line,'dma'),crc:num(line,'crc'),
+      clk:num(line,'clk')??num(line,'huntclk')};
   } else if(line.includes('STEMPS') && pendingIO && !pendingIO.ps){
     const four=(k)=>{const m=line.match(new RegExp('\\b'+k+'=(\\d+),(\\d+),(\\d+),(\\d+)'));
       return m?[+m[1],+m[2],+m[3],+m[4]]:null;};
@@ -208,7 +232,7 @@ function feedLine(line){
   }
 }
 function parseAll(text){
-  samples=[];marks=[];pendingIO=null;buildTag=null;
+  samples=[];marks=[];pendingIO=null;buildTag=null;transport=null;
   for(const l of text.split(/\r?\n/)) feedLine(l);
 }
 function deltas(){
@@ -232,8 +256,38 @@ function deltas(){
 }
 const fmt=n=>n==null?'—':n.toLocaleString('en-US');
 
+/* IS ANYTHING ACTUALLY MOVING? Every STEMIO counter is cumulative since boot,
+   so this tool differences consecutive samples. That is right while the device
+   plays and useless the moment it stops: the lines keep arriving, identical,
+   and every delta is zero. Reported as "no faults", which is a lie of omission
+   — the counters are frozen at whatever the last session left them. */
+function frozen(d){ return d.length>0 && !d.some(x=>x.rdby>0||x.rdc>0); }
+const lastSample=()=>samples[samples.length-1];
+
 /* ---------- verdict ---------- */
 function verdict(d){
+  if(frozen(d)){
+    const L=lastSample()||{};
+    const stopped=L.transport==='STOP';
+    const silMs0=(L.sil??0)/SR*1000;
+    const carry=(L.sil||L.und||L.corr)
+      ? `The frozen totals themselves are not clean: <code>sil=${fmt(L.sil)}</code>
+         (${silMs0.toFixed(0)} ms silenced) across <code>und=${fmt(L.und)}</code> underrun episodes,
+         <code>corr=${fmt(L.corr)}</code> rejected groups. That is a real record of the session that
+         has already ended — it just cannot be located in time from a capture taken after the fact.`
+      : `The frozen totals are clean, but they describe a session that has already ended.`;
+    return {cls:'warn',tag:'counters frozen — nothing is playing',
+      h:stopped?'Device is STOPPED':'No reads happened during this capture',
+      b:[`Across all ${samples.length} samples <code>rdby</code> and <code>rdc</code> never moved, so the
+          streamer issued no reads at all while this was recorded${
+          stopped?' and <code>LOOPER</code> reports <code>STOP</code>':''}. Every number on
+          <code>STEMIO</code> is cumulative since boot, so identical lines mean an idle machine, not a
+          healthy one.`,
+         carry,
+         `<strong>To catch a dropout, the capture has to be running while the song is.</strong> Connect,
+          then press PLAY, then let it run through the part that fails — this tool differences
+          consecutive samples, so it can only see a fault that happens between two of them.`]};
+  }
   const tot=k=>d.reduce((s,x)=>s+x[k],0);
   const corr=tot('corr'),sil=tot('sil'),und=tot('und'),rf=tot('reloadfail');
   const worst=d.reduce((m,x)=>Math.max(m,x.rduswin),0);
@@ -278,12 +332,60 @@ function verdict(d){
        `This is <strong>not</strong> a throughput problem. It is an addressing or ring-synchronisation
         fault in the v1.2 planar read path, and it is what "one stem disappears and comes back" sounds
         like.${sil>0?` There is also <code>sil=${fmt(sil)}</code> (${silMs.toFixed(0)} ms silenced) as the downstream effect.`:''}`,markNote,psNote]};
-  if(sil>0) return {cls:'bad',tag:'starvation',h:`${fmt(sil)} frames silenced — ${silMs.toFixed(0)} ms`,
+  if(sil>0){
+    /* HOW IT SOUNDS depends entirely on the SHAPE of the deficit, and this
+       tool used to state only one shape. The playhead freezes rather than
+       dropping frames, so a large sustained shortfall really does drag. A
+       small one does not: it is the same total silence cut into thousands of
+       gaps, and a 2 ms gap is not a tempo, it is a click. Measured hardware
+       settled it -- 6.7% short arrived as 3762 freezes of ~1.9 ms and was
+       reported as constant crackle, not as a slow song. So compute the gap
+       and say which of the two this is. */
+    const gapFrames=und>0?sil/und:0, gapMs=gapFrames/SR*1000;
+    const shape=und===0
+      ? `<strong>Frames were silenced with no underrun episode recorded</strong>, which should not
+         happen — treat the episode counter as suspect before the silence counter.`
+      : (gapMs<20
+        ? `Average gap <strong>${gapMs.toFixed(1)} ms</strong> across ${fmt(und)} episodes. That is far
+           too short to hear as tempo: it is heard as a <strong>constant crackle</strong>, and gargling
+           where the gaps bunch up. A song that merely ran slow would show a handful of long freezes,
+           not thousands of short ones.`
+        : `Average gap <strong>${(gapMs/1000).toFixed(2)} s</strong> across ${fmt(und)} episodes. Freezes
+           this long are heard as the song <strong>dragging</strong>, and as whole passages dropping out.`);
+    const cap=(()=>{
+      const rr=d.map(x=>x.rd).filter(r=>r&&r.avg>0&&r.n>0);
+      if(!rr.length) return '';
+      const avg=Math.round(rr.reduce((s,r)=>s+r.avg,0)/rr.length);
+      const ceil=Math.round(R_BYTES/NEED_BPS*1e6);
+      const hunt=Math.round(rr.reduce((s,r)=>s+r.hunt,0)/rr.length);
+      const spin=rr[0].spin!=null?Math.round(rr.reduce((s,r)=>s+(r.spin||0),0)/rr.length):null;
+      const clk=Math.round(rr.reduce((s,r)=>s+(r.clk||0),0)/rr.length);
+      const perPulse=(spin!==null&&clk>0)?(spin*1000/clk):null;
+      return `<p><strong>Where the time goes.</strong> A read moves ${fmt(R_BYTES)} bytes and must
+        therefore average under <code>${fmt(ceil)} µs</code> to sustain ${fmt(NEED_BPS)} B/s at 100%
+        duty. Measured average <code>${fmt(avg)} µs</code> — ${avg>ceil
+          ? `<strong>over the ceiling by ${(100*(avg/ceil-1)).toFixed(0)}%</strong>, so the read path
+             cannot feed playback no matter how deep the read-ahead is`
+          : `inside the ceiling, so the shortfall is duty cycle, not read cost`}.
+        Of that, the start-bit hunt is <code>${fmt(hunt)} µs</code> (${(100*hunt/avg).toFixed(0)}%)${
+          perPulse!==null
+            ? `, of which <code>${fmt(spin)} µs</code> was actually issuing its ${fmt(clk)} clock pulses —
+               <strong>${perPulse.toFixed(0)} ns per pulse</strong>. ${perPulse>500
+                 ? `A pulse is a GPIO write, three nops and a GPIO read, so this is far too slow to be the
+                    loop: the CPU is being taken away inside it.`
+                 : `That is the right cost for a GPIO write, three nops and a GPIO read, so the loop is
+                    fine — the other <code>${fmt(hunt-spin)} µs</code> of the hunt is time this thread
+                    held the bus and clocked nothing at all.`}`
+            : ` across ${fmt(clk)} clock pulses (build st41 and earlier cannot split it further).`}</p>`;
+    })();
+    return {cls:'bad',tag:'starvation',h:`${fmt(sil)} frames silenced — ${silMs.toFixed(0)} ms`,
     b:[`The streamer could not keep the audio thread fed, across ${fmt(und)} underrun episode${und===1?'':'s'}.
-        The playhead freezes rather than dropping frames, so this presents as the song running
-        <strong>slow</strong> and dragging.`,
+        The playhead freezes rather than dropping frames.`,
+       shape,
        `Worst fetch ${fmt(worst)} µs against a ${SPAN_US} µs span budget (batched R=2 should be near
-        ${MODEL_R2_US} µs).${minRate!==null?` Lowest sustained rate ${fmt(minRate)} B/s against ${fmt(NEED_BPS)} required.`:''}`,markNote,psNote]};
+        ${MODEL_R2_US} µs).${minRate!==null?` Lowest sustained rate ${fmt(minRate)} B/s against ${fmt(NEED_BPS)} required.`:''}`,
+       cap,markNote,psNote]};
+  }
   if(minRate!==null&&minRate<NEED_BPS) return {cls:'warn',tag:'under rate, no silence yet',
     h:`Sustained read dipped to ${fmt(minRate)} B/s`,
     b:[`Below the ${fmt(NEED_BPS)} B/s four-stem requirement, but no frames were silenced — read-ahead
@@ -331,25 +433,32 @@ function scheduleRender(){ if(rafPending) return; rafPending=true;
   requestAnimationFrame(()=>{rafPending=false;render();}); }
 
 function render(){
+  const froz=samples.length>1&&frozen(deltas());
   const nf=samples.length>1?deltas().filter(x=>x.fault).length:0;
   $('#status').textContent = (port?'connected · ':'') + `${samples.length} samples` +
-    (buildTag?` · build ${buildTag}`:'') + (nf?` · ${nf} faulty sample${nf>1?'s':''}`:' · no faults');
+    (buildTag?` · build ${buildTag}`:'') +
+    (froz?' · counters frozen, nothing playing'
+         :(nf?` · ${nf} faulty sample${nf>1?'s':''}`:' · no faults'));
   if(samples.length<2){ $('#out').hidden=true; return; }
   const d=deltas(); $('#out').hidden=false;
   const v=verdict(d);
   $('#verdict').innerHTML=`<div class="verdict ${v.cls}"><div class="tag">${v.tag}</div>
     <h3>${v.h}</h3>${v.b.filter(Boolean).map(p=>`<p>${p}</p>`).join('')}</div>`;
 
-  const tot=k=>d.reduce((s,x)=>s+x[k],0);
-  const worst=d.reduce((m,x)=>Math.max(m,x.rduswin),0);
-  const rates=d.map(x=>x.rate).filter(x=>x>0);
-  const minRate=rates.length?Math.min(...rates):null;
   const last=samples[samples.length-1];
+  /* When nothing moved, summing deltas gives a page of zeros that reads as a
+     clean run. Fall back to the cumulative totals and label them as such --
+     they are the only real numbers such a capture contains. */
+  const tot=k=>froz?(last[k]??0):d.reduce((s,x)=>s+x[k],0);
+  const since=froz?' · since boot':'';
+  const worst=froz?(last.rdusmx??0):d.reduce((m,x)=>Math.max(m,x.rduswin),0);
+  const rates=(froz?[last.rate]:d.map(x=>x.rate)).filter(x=>x>0);
+  const minRate=rates.length?Math.min(...rates):null;
   $('#tiles').innerHTML=[
-    ['frames silenced',fmt(tot('sil')),`${(tot('sil')/SR*1000).toFixed(0)} ms of audio`,tot('sil')?'is-bad':'is-good'],
-    ['rejected groups',fmt(tot('corr')),'header did not match',tot('corr')?'is-bad':'is-good'],
-    ['underrun episodes',fmt(tot('und')),'transitions, not duration',tot('und')?'is-warn':'is-good'],
-    ['worst fetch',fmt(worst)+' µs',`budget ${SPAN_US} µs`,worst>SPAN_US?'is-bad':(worst>MODEL_R2_US*1.4?'is-warn':'is-good')],
+    ['frames silenced',fmt(tot('sil')),`${(tot('sil')/SR*1000).toFixed(0)} ms of audio${since}`,tot('sil')?'is-bad':'is-good'],
+    ['rejected groups',fmt(tot('corr')),'header did not match'+since,tot('corr')?'is-bad':'is-good'],
+    ['underrun episodes',fmt(tot('und')),'transitions, not duration'+since,tot('und')?'is-warn':'is-good'],
+    ['worst fetch',fmt(worst)+' µs',`budget ${SPAN_US} µs${since}`,worst>SPAN_US?'is-bad':(worst>MODEL_R2_US*1.4?'is-warn':'is-good')],
     ['lowest rate',minRate!==null?fmt(minRate)+' B/s':'—',`need ${fmt(NEED_BPS)}`,minRate!==null&&minRate<NEED_BPS?'is-bad':'is-good'],
     ['sticky max fetch',fmt(last.rdusmx)+' µs','since boot',last.rdusmx>SPAN_US?'is-warn':'is-good'],
   ].map(([k,val,s,c])=>`<div class="tile ${c}"><div class="k">${k}</div><div class="v">${val}</div>
@@ -380,7 +489,7 @@ function render(){
       <div class="scroller">${spark(vals,{color:col,threshold:th,thLabel:thl,markIdx})}</div></div>`;
   }).join('');
 
-  const cols=['#','sil Δ','corr Δ','und Δ','rduswin','rate','bytes Δ','reads Δ','hunt','dma','crc'];
+  const cols=['#','sil Δ','corr Δ','und Δ','rduswin','rate','bytes Δ','reads Δ','avg rd','hunt','spin','dma','crc'];
   $('#tbl').innerHTML=`<thead><tr>${cols.map(c=>`<th>${c}</th>`).join('')}</tr></thead><tbody>`+
     d.map(x=>`<tr class="${x.fault?'marked':''}"><td>${x.i}</td>
       <td class="${x.sil?'hot':''}">${fmt(x.sil)}</td>
@@ -389,7 +498,10 @@ function render(){
       <td class="${x.rduswin>SPAN_US?'hot':''}">${fmt(x.rduswin)}</td>
       <td class="${x.rate&&x.rate<NEED_BPS?'hot':''}">${fmt(x.rate)}</td>
       <td>${fmt(x.rdby)}</td><td>${fmt(x.rdc)}</td>
-      <td>${x.rd?fmt(x.rd.hunt):'—'}</td><td>${x.rd?fmt(x.rd.dma):'—'}</td>
+      <td class="${(x.rd&&x.rd.avg>R_BYTES/NEED_BPS*1e6)?'hot':''}">${x.rd&&x.rd.avg!=null?fmt(x.rd.avg):'—'}</td>
+      <td>${x.rd?fmt(x.rd.hunt):'—'}</td>
+      <td>${x.rd&&x.rd.spin!=null?fmt(x.rd.spin):'—'}</td>
+      <td>${x.rd?fmt(x.rd.dma):'—'}</td>
       <td>${x.rd?fmt(x.rd.crc):'—'}</td></tr>`).join('')+'</tbody>';
 }
 
@@ -472,21 +584,26 @@ $('#file').addEventListener('change',async e=>{
   rawText=await f.text(); parseAll(rawText);
   $('#raw').textContent=rawText.slice(-20000); render();
 });
-const DEMO=`STEMTAPE BUILD st40
-STEMIO rdby=8192 rdc=1 rdus=3820 rdusmx=3820 rduswin=3820 rate=1156000Bps sil=0 und=0 corr=0 reloadfail=0
-STEMRD hunt=1690us dma=2050us crc=1095us huntclk=4980
+const DEMO=`STEMTAPE BUILD st42
+LOOPER b=st42 48000Hz song=0 PLAY
+STEMIO rdby=8192 rdc=2 rdus=3520 rdusmx=3520 rduswin=3520 rate=1160000Bps sil=0 und=0 corr=0 reloadfail=0
+STEMRD n=2 avg=3520us hunt=1690us spin=1650us dma=352us crc=751us clk=4980
 STEMPS miss=0,0,0,0 bad=0,0,0,0
-STEMIO rdby=1048576 rdc=128 rdus=3840 rdusmx=4100 rduswin=4100 rate=1154000Bps sil=0 und=0 corr=0 reloadfail=0
-STEMRD hunt=1700us dma=2050us crc=1100us huntclk=5010
+LOOPER b=st42 48000Hz song=0 PLAY
+STEMIO rdby=1048576 rdc=256 rdus=3540 rdusmx=4100 rduswin=4100 rate=1157000Bps sil=0 und=0 corr=0 reloadfail=0
+STEMRD n=141 avg=3540us hunt=1700us spin=1660us dma=352us crc=755us clk=5010
 STEMPS miss=0,0,0,0 bad=0,0,0,0
-STEMIO rdby=2097152 rdc=256 rdus=3900 rdusmx=9800 rduswin=9800 rate=1101000Bps sil=1024 und=1 corr=2 reloadfail=0
-STEMRD hunt=6200us dma=2050us crc=1110us huntclk=18400
+LOOPER b=st42 48000Hz song=0 PLAY
+STEMIO rdby=2097152 rdc=512 rdus=3900 rdusmx=9800 rduswin=9800 rate=1101000Bps sil=1024 und=1 corr=2 reloadfail=0
+STEMRD n=141 avg=6200us hunt=4300us spin=1655us dma=352us crc=760us clk=5000
 STEMPS miss=0,0,0,0 bad=2,0,0,0
-STEMIO rdby=3145728 rdc=384 rdus=3870 rdusmx=9800 rduswin=4300 rate=1148000Bps sil=1024 und=1 corr=5 reloadfail=0
-STEMRD hunt=1710us dma=2050us crc=1100us huntclk=5020
+LOOPER b=st42 48000Hz song=0 PLAY
+STEMIO rdby=3145728 rdc=768 rdus=3870 rdusmx=9800 rduswin=4300 rate=1148000Bps sil=1024 und=1 corr=5 reloadfail=0
+STEMRD n=141 avg=3560us hunt=1710us spin=1665us dma=352us crc=752us clk=5020
 STEMPS miss=3,0,0,0 bad=5,0,0,0
-STEMIO rdby=4194304 rdc=512 rdus=3860 rdusmx=9800 rduswin=3990 rate=1152400Bps sil=3072 und=2 corr=9 reloadfail=0
-STEMRD hunt=1695us dma=2050us crc=1098us huntclk=4990
+LOOPER b=st42 48000Hz song=0 PLAY
+STEMIO rdby=4194304 rdc=1024 rdus=3860 rdusmx=9800 rduswin=3990 rate=1152400Bps sil=3072 und=2 corr=9 reloadfail=0
+STEMRD n=141 avg=3550us hunt=1695us spin=1658us dma=352us crc=751us clk=4990
 STEMPS miss=7,0,0,0 bad=9,0,0,0`;
 $('#demo').addEventListener('click',()=>{ $('#src').value=DEMO; rawText=DEMO; parseAll(DEMO);
   $('#raw').textContent=DEMO; render(); });

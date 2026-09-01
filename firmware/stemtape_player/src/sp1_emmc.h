@@ -71,6 +71,24 @@ extern volatile uint32_t emmc_dbg_rd_hunt_us;        /* bit-banged start-bit hun
 extern volatile uint32_t emmc_dbg_rd_dma_us;         /* SPIM3 DMA of the payloads, all blocks */
 extern volatile uint32_t emmc_dbg_rd_crc_us;         /* copy-out + CRC16 verify, all blocks */
 extern volatile uint32_t emmc_dbg_rd_hunt_clks;      /* clock pulses the hunts cost, all blocks */
+/* THE HUNT, SPLIT. hunt_us is wall time and therefore answers no question on
+ * its own: a hunt of 3892 us that issued only 375 clock pulses is either a
+ * loop costing 10 us per GPIO toggle (absurd) or a thread that was not
+ * running for most of that window, and those two have opposite fixes. So the
+ * window is measured twice:
+ *
+ *   spin_us  cycles actually spent inside the pulse burst, summed. Divided by
+ *            hunt_clks this is the true cost of one clock pulse.
+ *   gap_us   hunt_us - spin_us: the part of the hunt window in which no clock
+ *            was being issued at all -- the k_usleep(50) long-stall yield,
+ *            and any preemption landing between bursts.
+ *
+ * Preemption INSIDE a burst still lands in spin_us, which is why the ratio
+ * spin_us/hunt_clks is the number to read: at 64 MHz a pulse is a GPIO write,
+ * three nops and a GPIO read, so anything past ~0.5 us per pulse is not the
+ * loop. */
+extern volatile uint32_t emmc_dbg_rd_hunt_spin_us;   /* of hunt_us, spent issuing clock pulses */
+extern volatile uint32_t emmc_dbg_rd_hunt_gap_us;    /* of hunt_us, spent not issuing any */
 extern volatile uint32_t emmc_dbg_hpi_fires;         /* HPI aborts issued (maintenance ops cut short) */
 
 

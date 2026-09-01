@@ -272,14 +272,18 @@ volatile uint32_t emmc_dbg_rd_hunt_us;    /* start-bit hunt, bit-banged */
 volatile uint32_t emmc_dbg_rd_dma_us;     /* SPIM3 DMA of the 512+CRC payload */
 volatile uint32_t emmc_dbg_rd_crc_us;     /* copy-out + CRC16 verify */
 volatile uint32_t emmc_dbg_rd_hunt_clks;  /* clock pulses spent hunting, all blocks */
+volatile uint32_t emmc_dbg_rd_hunt_spin_us; /* of the hunt, spent issuing pulses */
+volatile uint32_t emmc_dbg_rd_hunt_gap_us;  /* of the hunt, spent issuing none */
 
 static uint32_t s_rd_hunt_cyc;
+static uint32_t s_rd_hunt_spin_cyc;
 static uint32_t s_rd_dma_cyc;
 static uint32_t s_rd_crc_cyc;
 
 /* 64 MHz core -> microseconds, the same conversion main.c's own DWT
  * diagnostics use. */
 #define CYC_TO_US(c) ((c) / 64u)
+#define US_TO_CYC(u) ((u) * 64u)
 
 /* Table-driven CRC16-CCITT: the bitwise version costs ~14% CPU at the 48 kHz
  * read rate; the table costs ~1%. Built once at init. */
@@ -469,15 +473,25 @@ static bool read_data_block(uint8_t *buf, bool can_overrun)
 	 * clock edges, so pausing the clock to yield can never miss the token. */
 	uint32_t phase_c0 = DWT->CYCCNT;
 	uint32_t hunt_clks = 0;
+	uint32_t spin_cyc = 0;
 	{
-		uint32_t t0 = k_cycle_get_32();
-		const uint32_t lim = k_us_to_cyc_ceil32(80000u);    /* 80 ms bound: rides real
-		                                                     * GC read delays, but caps the
-		                                                     * worst CMD18 at ~150+80 ms —
-		                                                     * under the 341 ms rec horizon */
-		const uint32_t yield_at = k_us_to_cyc_ceil32(500u);
+		/* DWT, NOT k_cycle_get_32(). This is the hottest bit-bang loop in
+		 * the firmware -- 2259 blocks a second during four-stem playback --
+		 * and every kernel time call inside it is paid per block. The two
+		 * bounds are compile-time constants in CPU cycles, the elapsed
+		 * check is a single core-register read, and DWT->CYCCNT is already
+		 * running for the phase timing three lines above. Wrap-safe
+		 * unsigned subtraction covers the counter's 67 s period; the
+		 * bounds here are 80 ms and 500 us. */
+		const uint32_t t0 = phase_c0;
+		const uint32_t lim = US_TO_CYC(80000u);      /* 80 ms bound: rides real
+		                                              * GC read delays, but caps the
+		                                              * worst CMD18 at ~150+80 ms —
+		                                              * under the 341 ms rec horizon */
+		const uint32_t yield_at = US_TO_CYC(500u);
 		bool got_start = false;
 		for (;;) {
+			uint32_t b0 = DWT->CYCCNT;
 			for (int burst = 0; burst < 64 && !got_start; burst++) {
 				RCLK_HIGH();
 				HALF(hd); EDGE_SETTLE();
@@ -489,9 +503,15 @@ static bool read_data_block(uint8_t *buf, bool can_overrun)
 				RCLK_LOW();
 				HALF(hd);
 			}
-			uint32_t el = k_cycle_get_32() - t0;
+			uint32_t now = DWT->CYCCNT;
+			uint32_t el = now - t0;
+
+			/* Charged to the burst, so spin_cyc/hunt_clks is the real
+			 * cost of one clock pulse and hunt-minus-spin is the time
+			 * this thread spent not clocking at all. */
+			spin_cyc += now - b0;
 			if (got_start) {
-				uint32_t us = k_cyc_to_us_floor32(el);
+				uint32_t us = CYC_TO_US(el);
 				if (us > emmc_dbg_rd_wait_us_max) emmc_dbg_rd_wait_us_max = us;
 				break;
 			}
@@ -509,6 +529,7 @@ static bool read_data_block(uint8_t *buf, bool can_overrun)
 		uint32_t now = DWT->CYCCNT;
 
 		s_rd_hunt_cyc += now - phase_c0;
+		s_rd_hunt_spin_cyc += spin_cyc;
 		emmc_dbg_rd_hunt_clks += hunt_clks;
 		phase_c0 = now;
 	}
@@ -1157,6 +1178,10 @@ bool emmc_pon_power_off_short(void)
 static void rd_phase_publish(void)
 {
 	emmc_dbg_rd_hunt_us = CYC_TO_US(s_rd_hunt_cyc);
+	emmc_dbg_rd_hunt_spin_us = CYC_TO_US(s_rd_hunt_spin_cyc);
+	/* Subtracted in cycles, not in microseconds, so the two truncations
+	 * cannot make gap read as nonzero when spin == hunt. */
+	emmc_dbg_rd_hunt_gap_us = CYC_TO_US(s_rd_hunt_cyc - s_rd_hunt_spin_cyc);
 	emmc_dbg_rd_dma_us = CYC_TO_US(s_rd_dma_cyc);
 	emmc_dbg_rd_crc_us = CYC_TO_US(s_rd_crc_cyc);
 }
@@ -1172,6 +1197,7 @@ bool emmc_read_blocks(uint32_t block_addr, uint8_t *buf, uint32_t count)
 	 * below, including the failing ones, because a slow failing read is
 	 * exactly as interesting as a slow succeeding one. */
 	s_rd_hunt_cyc = 0u;
+	s_rd_hunt_spin_cyc = 0u;
 	s_rd_dma_cyc = 0u;
 	s_rd_crc_cyc = 0u;
 	emmc_dbg_rd_hunt_clks = 0u;

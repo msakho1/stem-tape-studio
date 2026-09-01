@@ -157,9 +157,9 @@
 #define ST_RC_SWEEP_REPS 24u
 
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st41-VOLCAL"
+#define ST_BUILD_TAG "st42-VOLCAL"
 #else
-#define ST_BUILD_TAG "st41"
+#define ST_BUILD_TAG "st42"
 #endif
 #include "st_track_hold.h"
 #include "st_ladder.h"
@@ -1731,6 +1731,22 @@ static atomic_t g_stem_diag_read_us_max;   /* worst read attempt's wall time thi
 static atomic_t g_stem_diag_read_us_win;
 static atomic_t g_stem_diag_read_us_total; /* cumulative wall time of SUCCESSFUL reads only, us -- paired with
 					     * g_stem_diag_bytes_total for the sustained-rate calculation below */
+/* THE PHASE BREAKDOWN, SUMMED OVER A PRINT WINDOW rather than sampled from one
+ * read. sp1_emmc.c publishes hunt/spin/dma/crc for the LATEST call only, and a
+ * single call is not evidence: the first capture off real hardware showed
+ * hunt=3892us of a 5683us read while the session average read was 3790us, so
+ * the one sample the line printed was 50% worse than typical and every ratio
+ * taken from it was wrong by that much. These accumulate every read in the
+ * window and are read-and-cleared by the diagnostic printer, so STEMRD states
+ * an average over ~200 reads instead of whichever read happened to be last.
+ * Streamer-thread-only writers, like every counter above. */
+static atomic_t g_stem_diag_ph_reads;      /* reads contributing to the sums below */
+static atomic_t g_stem_diag_ph_us;         /* their total wall time, us */
+static atomic_t g_stem_diag_ph_hunt_us;    /* of that, the start-bit hunts */
+static atomic_t g_stem_diag_ph_spin_us;    /* of the hunts, spent issuing clock pulses */
+static atomic_t g_stem_diag_ph_dma_us;     /* SPIM payload transfer */
+static atomic_t g_stem_diag_ph_crc_us;     /* copy-out + CRC16 */
+static atomic_t g_stem_diag_ph_clks;       /* clock pulses the hunts issued */
 /*
  * FRAMES SILENCED BY UNDERRUNS, which is the number that says whether a
  * listener can hear anything. g_stem_underrun_count above records episodes --
@@ -6211,6 +6227,24 @@ static void streamer_thread(void *a, void *b, void *c)
 				if (read_us > (uint32_t)atomic_get(&g_stem_diag_read_us_win)) {
 					atomic_set(&g_stem_diag_read_us_win, (atomic_val_t)read_us);
 				}
+				/* Fold this read's phase breakdown into the window
+				 * sums BEFORE anything else can issue a read and
+				 * overwrite sp1_emmc.c's per-call globals. Every
+				 * outcome counts, failures included: a read that
+				 * timed out spent its time somewhere too, and
+				 * excluding it would flatter the average. */
+				(void)atomic_add(&g_stem_diag_ph_reads, 1);
+				(void)atomic_add(&g_stem_diag_ph_us, (atomic_val_t)read_us);
+				(void)atomic_add(&g_stem_diag_ph_hunt_us,
+						  (atomic_val_t)emmc_dbg_rd_hunt_us);
+				(void)atomic_add(&g_stem_diag_ph_spin_us,
+						  (atomic_val_t)emmc_dbg_rd_hunt_spin_us);
+				(void)atomic_add(&g_stem_diag_ph_dma_us,
+						  (atomic_val_t)emmc_dbg_rd_dma_us);
+				(void)atomic_add(&g_stem_diag_ph_crc_us,
+						  (atomic_val_t)emmc_dbg_rd_crc_us);
+				(void)atomic_add(&g_stem_diag_ph_clks,
+						  (atomic_val_t)emmc_dbg_rd_hunt_clks);
 
 				if (read_ok) {
 					/* PUBLISHED ONE GROUP AT A TIME, after
@@ -7014,24 +7048,47 @@ static void controls_diag(void)
 	       (unsigned)atomic_get(&g_stem_miss[2]), (unsigned)atomic_get(&g_stem_miss[3]),
 	       (unsigned)atomic_get(&g_stem_badhdr[0]), (unsigned)atomic_get(&g_stem_badhdr[1]),
 	       (unsigned)atomic_get(&g_stem_badhdr[2]), (unsigned)atomic_get(&g_stem_badhdr[3]));
-	/* WHERE THE LATEST SECTOR READ'S TIME WENT (see sp1_emmc.h's own
-	 * "READ-PATH PHASE BREAKDOWN"). A sector is 16 blocks = 8192 bytes =
-	 * 7.08 ms of audio, so a read that takes longer than 7.08 ms is a
-	 * playback deficit by definition, and these three numbers say which
-	 * phase to cut next instead of leaving it to be guessed:
-	 *   hunt= bit-banged start-bit search (GPIO-toggle bound, and the one
-	 *         phase whose cost is set by how long the CARD makes us wait --
-	 *         huntclk= is that same wait counted in clock pulses rather
-	 *         than time, which separates "the card is slow" from "our hunt
-	 *         loop is slow")
-	 *   dma=  SPIM3 hardware transfer of the payloads: 514 bytes x 16 at
-	 *         32 MHz is ~2.05 ms and cannot go lower on this bus
-	 *   crc=  copy-out + CRC16 verify, pure CPU
-	 * Their sum plus the CMD18/CMD12 handshake is the whole of rdus=; any
-	 * large remainder is audio-thread preemption. */
-	printk("STEMRD hunt=%uus dma=%uus crc=%uus huntclk=%u\n",
-	       (unsigned)emmc_dbg_rd_hunt_us, (unsigned)emmc_dbg_rd_dma_us,
-	       (unsigned)emmc_dbg_rd_crc_us, (unsigned)emmc_dbg_rd_hunt_clks);
+	/* WHERE A STEM READ'S TIME GOES, AVERAGED OVER THIS PRINT WINDOW (see
+	 * sp1_emmc.h's own "READ-PATH PHASE BREAKDOWN"). Every figure is
+	 * per-read: the window's sum divided by the reads in it, then the
+	 * counters are cleared. One read is R groups = 4R blocks, so n= says
+	 * how much this average rests on.
+	 *
+	 *   avg=  the whole read call. The identity that matters: four 24-bit
+	 *         stereo stems at 48 kHz need 1,152,000 B/s, a read delivers
+	 *         ST_PL_REFILL_GROUPS * 2048 bytes, so avg must stay under
+	 *         (bytes / 1152000) or the streamer cannot keep up even at
+	 *         100% duty. At R=2 that ceiling is 3555 us.
+	 *   hunt= the bit-banged start-bit search, all blocks, and
+	 *   spin= the part of it actually issuing clock pulses. hunt-spin is
+	 *         time this thread held the bus and clocked nothing -- the
+	 *         k_usleep long-stall yield, or preemption. clk= is the pulse
+	 *         count, so spin/clk is the true cost of one GPIO toggle and
+	 *         settles "the card makes us wait" against "our loop is slow"
+	 *         against "we were not running", which hunt= alone cannot.
+	 *   dma=  SPIM3 hardware transfer: 514 bytes per block at 32 MHz is
+	 *         ~129 us and cannot go lower on a 1-bit bus.
+	 *   crc=  copy-out + CRC16 verify, pure CPU, overlapped into the DMA
+	 *         window (which is why dma= reads lower than 129 us/block).
+	 * Their sum plus the CMD18/CMD12 handshake is the whole of avg=. */
+	{
+		uint32_t phn = (uint32_t)atomic_set(&g_stem_diag_ph_reads, 0);
+		uint32_t phus = (uint32_t)atomic_set(&g_stem_diag_ph_us, 0);
+		uint32_t phhunt = (uint32_t)atomic_set(&g_stem_diag_ph_hunt_us, 0);
+		uint32_t phspin = (uint32_t)atomic_set(&g_stem_diag_ph_spin_us, 0);
+		uint32_t phdma = (uint32_t)atomic_set(&g_stem_diag_ph_dma_us, 0);
+		uint32_t phcrc = (uint32_t)atomic_set(&g_stem_diag_ph_crc_us, 0);
+		uint32_t phclk = (uint32_t)atomic_set(&g_stem_diag_ph_clks, 0);
+		/* n=0 means no stem read happened in this window at all --
+		 * stopped, or between songs. Print it as such rather than
+		 * dividing by zero or repeating a stale average. */
+		uint32_t den = phn ? phn : 1u;
+
+		printk("STEMRD n=%u avg=%uus hunt=%uus spin=%uus dma=%uus crc=%uus clk=%u\n",
+		       (unsigned)phn, (unsigned)(phus / den), (unsigned)(phhunt / den),
+		       (unsigned)(phspin / den), (unsigned)(phdma / den),
+		       (unsigned)(phcrc / den), (unsigned)(phclk / den));
+	}
 	/* SUSTAINED REAL-TIME FEASIBILITY, stated in the terms the acceptance
 	 * test is judged in, so the physical run answers the question directly
 	 * instead of handing back raw counters to do arithmetic on afterwards.
@@ -7048,11 +7105,21 @@ static void controls_diag(void)
 	 *   need=   the stream rate four 24-bit stereo stems at 48 kHz demand:
 	 *           48000 * 24 = 1152000 B/s. Not a target, an identity.
 	 *   have=   the measured sustained read rate (STEMIO rate= above), and
-	 *           margin= have/need as a percentage. Below 100% the playhead
-	 *           is being starved faster than it is being fed, which shows
-	 *           up as a SLOW song rather than as dropouts, because
-	 *           st_stream_advance_frame() freezes the playhead on underrun
-	 *           instead of skipping frames.
+	 *           margin= have/need as a percentage. This is bytes divided by
+	 *           time spent INSIDE successful reads, so it is the read
+	 *           path's own capacity, not an idle-inclusive average: below
+	 *           100% the streamer cannot feed the playhead even at 100%
+	 *           duty, and no read-ahead depth changes that.
+	 *
+	 *           WHAT A SMALL SHORTFALL SOUNDS LIKE. An earlier version of
+	 *           this comment said it "shows up as a SLOW song rather than
+	 *           as dropouts", because st_stream_advance_frame() freezes the
+	 *           playhead on underrun instead of skipping frames. That is
+	 *           true of a large sustained deficit and wrong about a small
+	 *           one, and the hardware said so: at margin=93% the missing
+	 *           6.7% arrived as 3762 separate freezes averaging 91 frames
+	 *           (1.9 ms) each. Nobody hears 1.9 ms as tempo. It is heard as
+	 *           a constant crackle, which is exactly what was reported.
 	 *   ahead=  the read-ahead the ring actually holds when full, in whole
 	 *           sectors and in milliseconds of audio. This is the outage it
 	 *           can absorb, not evidence of throughput: a deeper ring buys
