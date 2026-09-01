@@ -196,6 +196,27 @@ still report all five correctly.
 
 Step 2 above is the check that closes that gap, and it reduces to one number.
 
+### RESULT: verified, both sides, 2026-09-01
+
+The companion returned all five checksums unchanged **and** the assembled
+image hash:
+
+```
+BYTES 352256  SECTORS 43
+SHA256 efd80d52351d04f00c206cb9ff2978bf4f720082c3db52e178e25a41af954ddf
+SECTOR10 (0,40) (0,41) (0,42) (1,0)
+```
+
+Byte-for-byte identical to what the firmware derives from the frozen v1.1
+recording, including the stem-boundary straddle in sector 10. Two independent
+implementations of v1.2 song-planar — the firmware's `st_pl_from_v11_sector()`
++ `st_pl_group_block()`, and the companion's `encodeSong()` — agree on every
+byte: addressing, group headers, ordering and padding.
+
+That is the strongest evidence obtainable without hardware, because the two
+paths share no code and were written from this document rather than from each
+other. **Step 2 is closed.**
+
 ### The reference: the assembled song region
 
 The firmware derives the whole v1.2 image from the frozen v1.1 recording,

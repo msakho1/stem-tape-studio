@@ -153,15 +153,19 @@ Two further prerequisites, both small:
 
 1. ~~Wire the v1.2 planar read path.~~ **DONE** — four per-stem group rings,
    RAM-neutral, output hash unchanged at `0xe9650dda`.
-2. Companion uploads v1.2 planar songs. **NEXT — and the firmware half of it
-   is done:** `st_ab_session`'s commit verification now dispatches on the
-   format version the index record declares, so a v1.2 upload is verified as
-   planar groups. What remains is the companion emitting them, which is a
-   Lovable change (`docs/stem-tape-v1.2-companion-handoff.md`).
-3. **Verify ordinary four-stem playback is still perfect.** Half of this is
-   already banked: CI proves the decoded audio is bit-identical to v1.1 over
-   the whole recorded song. What it cannot prove is the part that matters
-   most — that the SP-1 keeps up at 92% busy — which is what step 5 is for.
+2. ~~Companion uploads v1.2 planar songs.~~ **DONE, both sides verified.** The
+   firmware's commit check dispatches on the format version the record
+   declares; the companion emits planar groups; and the two implementations
+   produce a byte-identical 352,256-byte image for the reference song
+   (`efd80d52…`), straddle included. They share no code.
+3. **Verify ordinary four-stem playback is still perfect. UNBLOCKED — this is
+   the next thing to actually do.** Half is already banked: CI proves the
+   decoded audio is bit-identical to v1.1 over the whole recorded song. What
+   it cannot prove is the part that matters most — that the SP-1 keeps up at
+   92% streamer busy on real hardware. Procedure and pass/fail criteria:
+   `stem-tape-playback-physical-test.md`, "v1.2 song-planar" section.
+
+   Flash `bin=108928B sha256=114bc1b5…` (commit `0a73716`, build **st40**).
 4. Build one-track-at-a-time reverse.
    - **part 1 DONE** — the resampler's carried state is per-stem, audio
      bit-identical at `0xe9650dda`.

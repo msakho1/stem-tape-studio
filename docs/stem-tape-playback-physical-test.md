@@ -210,3 +210,100 @@ Recording, overdub and UAC2 remain absent. Zero occurrences of any UAC2
 symbol, `g_record_arm` or overdub state exist in compiled code, and the
 symbol gate proves their definitions are absent from the linked ELF rather
 than merely unreachable.
+
+---
+
+# v1.2 song-planar — the acceptance run
+
+Added 2026-09-01. Everything above still applies; this section is what
+changed and what to do about it.
+
+## What changed since the run above
+
+The storage format moved from v1.1 interleaved to **v1.2 song-planar**: each
+stem's whole timeline is contiguous in its own quarter of the song region, in
+2048-byte groups, so a stem can be read independently of the other three. That
+is the prerequisite for per-track reverse, and it is the only reason to touch
+the storage format at all.
+
+**Everything provable off-hardware has been proved:**
+
+- The decoded audio is **bit-identical** to v1.1 over the whole recorded song,
+  hash `0xe9650dda`, asserted as a literal in the playback gate.
+- RAM is **unchanged to the byte** — 219,486 used, 42,658 free — because the
+  four per-stem rings are the same allocation the one sector ring was
+  (4 × 6 × 2048 = 12 × 8192 = 49,152), held there by a `_Static_assert`.
+- The companion's encoder and the firmware's converter produce a
+  **byte-identical** 352,256-byte image for the reference song
+  (`efd80d52351d04f00c206cb9ff2978bf4f720082c3db52e178e25a41af954ddf`), from
+  two implementations that share no code.
+
+**What none of that can prove** is the thing this run exists for: that the
+SP-1 keeps up. The read pattern changed shape — four reads per span instead of
+one, batched two groups at a time (G=6/R=2) — and the modelled streamer busy
+figure is **92%**. That is a measured-good operating point from the level-1
+load test, not a comfortable one.
+
+## The image
+
+```
+commit    0a73716135340a3b45b2b8b3340131a8deb102a3
+build tag st40
+bin       108928 bytes
+sha256    114bc1b54ca0f0ae56e7d7dbdb2189c14c70047b3b6148d9546a588868421510
+RAM       219486 used / 42658 free of 262144
+```
+
+Confirm `STEMTAPE BUILD st40` on the console at boot before trusting any
+measurement — the device was last on st36, and a stale image is the easiest
+way to spend an evening measuring the wrong firmware.
+
+## Procedure
+
+1. **Flash st40** and confirm the build tag.
+2. **Upload a song from the companion.** It must be a v1.2 build; a v1.1
+   companion will be refused at the capability exchange, by design. Watch the
+   upload complete through *verify* and *commit* rather than just *sending*.
+3. **Power-cycle.** This proves the commit was durable rather than merely
+   accepted.
+4. **PLAY.** Listen to the whole song, all four stems.
+5. **Read the `STEMIO` line** repeatedly during playback.
+
+## Pass / fail
+
+The decision is made on `sil=`, not on impression:
+
+| reading | meaning |
+|---|---|
+| `sil=0` for the whole song | **PASS.** Not one frame was silenced. |
+| `sil` small and static | one early hiccup, then stable — note where |
+| `sil` climbing steadily | **FAIL — starvation.** The read pattern does not fit. |
+
+`rduswin=` is the worst single fetch since the last print, and it is the
+number that says *why* a failure happened. Against the measured model —
+`read_us(n) = 656.4 + 157.6n`, span = 7083 µs of audio — a batched two-group
+fetch should land near 3834 µs. A `rduswin=` far above that is contention, not
+arithmetic.
+
+**Also listen for what the meters cannot show:** pitch. If the song plays
+*slow*, that is the time-stretch signature described in section 1 above — the
+playhead freezing on underrun rather than dropping frames — and it means
+starvation even if `sil=` looks modest.
+
+## If it fails
+
+The useful thing is not to guess, it is to report `sil=`, `rduswin=`, `und=`
+and the `aud=`/`str=` shares together. Those four determine which of the
+knobs actually applies, and they point in different directions:
+
+- **`rduswin` near the model, `sil` climbing** → the budget is genuinely too
+  tight at G=6/R=2. R is the lever (more groups per read amortises the
+  656 µs fixed cost), and R must divide G.
+- **`rduswin` far above the model** → something is stealing the bus or the
+  CPU; the read cost itself is not the problem.
+- **`sil=0` but audibly wrong** → not starvation. That is the clipping
+  question from section 4, and it is the next thing to measure, separately.
+
+Do not change G, R or gain speculatively before those numbers exist. The whole
+reason the read-cost model was measured rather than estimated is so this
+decision is arithmetic.
