@@ -125,7 +125,7 @@ describe("interruption matrix — the previous song always survives", () => {
       const active = lib.active!;
       expect(active.songPresent).toBe(true);
       expect(active.frames).toBe(one.frames);
-      expect(active.sectorCount).toBe(Math.ceil(one.frames / 340));
+      expect(active.sectorCount).toBe(Math.ceil(one.frames / FRAMES_PER_GROUP));
 
       // The audio the surviving record points at is complete on the device.
       const audio = m2.songBytes(active.songSlot, active.sectorCount);

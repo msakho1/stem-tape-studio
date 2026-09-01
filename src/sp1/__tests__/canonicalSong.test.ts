@@ -101,10 +101,10 @@ describe("canonical stereo 24-bit song", () => {
     expect(song.lengthSpreadSeconds).toBeCloseTo(700 / 48000, 6);
   });
 
-  it("checksums and peak are computed on the final 24-bit values", async () => {
+  it("checksums are taken from the stored 16-bit values, peak from the 24-bit ones", async () => {
     const song = await prep([512, 512, 512, 512]);
     for (const s of song.stems) {
-      expect(s.checksum).toBe(checksum32(s.pcm24));
+      expect(s.checksum).toBe(checksum32(stemPcm16(s)));
       expect(s.peak).toBeGreaterThan(0);
       expect(s.peak).toBeLessThanOrEqual(1);
       expect(s.clipped).toBe(false);

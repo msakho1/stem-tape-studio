@@ -176,9 +176,10 @@ export function buildAppendix(formatMinor: number = FORMAT_MINOR): string {
     "| --- | ---: | --- |",
   );
   for (const [name, bit] of Object.entries(CAP_FLAG)) {
-    L.push(
-      `| ${name} | ${Math.log2(bit)} | ${(REQUIRED_CAP_FLAGS & bit) === bit ? "yes" : "no"} |`,
-    );
+    // Bit 3 asserts the storage sample width, so its NAME moved with the
+    // format: DEPTH_24 in v1.1, DEPTH_16 in v1.3. Same bit, same position.
+    const shown = v11 && name === "DEPTH_16" ? "DEPTH_24" : name;
+    L.push(`| ${shown} | ${Math.log2(bit)} | ${(REQUIRED_CAP_FLAGS & bit) === bit ? "yes" : "no"} |`);
   }
   L.push(
     `| **REQUIRED_CAP_FLAGS** | | ${hex(REQUIRED_CAP_FLAGS)} |`,
