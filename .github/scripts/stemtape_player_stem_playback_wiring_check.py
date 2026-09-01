@@ -181,8 +181,24 @@ REQUIRED_CALLS = {
         "stem_audio_block",
         "master_vol_ramp",
         "audio_block_epilogue",
+        # ONE LEVEL OF INDIRECTION, AND BOTH LINKS ARE CHECKED. Per-track
+        # reverse made these four streams, and PLAY/STOP are facts about the
+        # SONG rather than about any one head -- so they go through helpers
+        # that cannot reach three heads and miss one. Requiring the helper
+        # here and its own call to the real API below is STRICTLY stronger
+        # than the old single check: it proves the caller reaches the helper
+        # AND that the helper still does the thing.
+        "stem_streams_play",
+        "stem_streams_stop",
+    ],
+    "stem_streams_play": [
         "st_stream_play",
+    ],
+    "stem_streams_stop": [
         "st_stream_stop",
+    ],
+    "stem_streams_init": [
+        "st_stream_init",
     ],
     "stem_audio_block": [
         # THE LOOP'S WRAP AND EXIT BOTH GO THROUGH THE REAL SEEK. Requiring
@@ -229,7 +245,10 @@ REQUIRED_CALLS = {
         "st_stem_mix_frame_prepared_inline",
     ],
     "streamer_thread": [
-        "st_stream_init",
+        # Same indirection, same reasoning as PLAY/STOP above: a song load is
+        # a fact about the song, and stem_streams_init() is checked separately
+        # to still call the real st_stream_init().
+        "stem_streams_init",
         # v1.2 REPLACES THE SECTOR-HEADER CHECK WITH A GROUP-HEADER ONE, and
         # it is a stronger check, not a weaker one. A v1.1 STSC header could
         # say "I am sector 7"; it could not say which stem it was, because a
@@ -400,7 +419,14 @@ REQUIRED_SUBSTRINGS = {
         # would silently never wrap, which is worse than a click because it
         # looks like nothing happened.
         "lp_end = lp_lo + ((pos - lp_lo) / len + 1u) * len;",
-        "run > left_in_loop",
+        # THE LOOP WINDOW BOUNDS THE RUN, now once per HEAD and in the
+        # direction that head is travelling: forward it stops at loop_end,
+        # backward at loop_start. Both spellings are required, because
+        # dropping either one is a head that runs out of the window --
+        # silently unrolling the loop into the following material forward, or
+        # off the front of it backward.
+        "rk = lp_end - pos_k;",
+        "rk = pos_k - lp_lo + 1u;",
         "trk[s].vol_q8",
         "trk[s].muted",
         "trk[s].solo",
