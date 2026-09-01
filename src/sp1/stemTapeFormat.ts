@@ -146,14 +146,18 @@ export function planarBlockOf(
 /* ---------- versions ---------- */
 
 export const PROTOCOL_MAJOR = 1;
-/** Minimum protocol minor that carries the A/B capability structure. */
-export const PROTOCOL_MINOR = 1;
+/** v1.3 firmware speaks exactly protocol minor 3; older minors are refused. */
+export const PROTOCOL_MINOR = 3;
 export const FORMAT_MAJOR = 1;
-/** 1.2 = A/B storage with PLANAR per-stem groups. 1.1 (mixed frames) and
- *  1.0 (single index) are both refused, in both directions. */
-export const FORMAT_MINOR = 2;
+/** 1.3 = A/B storage, PLANAR per-stem groups of 510 signed-16-bit frames.
+ *  1.2 (planar 24-bit) and 1.1 (mixed 24-bit frames) are both refused, in
+ *  both directions — neither fails safe by accident. */
+export const FORMAT_MINOR = 3;
+/** The v1.2 planar 24-bit layout. Refused; named only for diagnosis. */
+export const FORMAT_MINOR_V12 = 2;
 /** The v1.1 mixed-frame layout, kept only to audit the frozen v1.1 bundle. */
 export const FORMAT_MINOR_V11 = 1;
+
 /** STIX index record version. v1 (the unsafe array index) is refused. */
 export const STIX_VERSION = 2;
 
