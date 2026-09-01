@@ -117,7 +117,6 @@ footer{color:var(--ink-faint);font-size:12px;border-top:1px solid var(--rule);pa
       <span class="dot" id="dot"></span>
       <button class="primary" id="conn">Connect to SP-1</button>
       <button id="disc" disabled>Disconnect</button>
-      <button class="mark" id="mark" disabled>Mark — I hear it now</button>
       <button id="save" disabled>Save capture</button>
       <span class="status" id="status">not connected</span>
     </div>
@@ -136,6 +135,12 @@ footer{color:var(--ink-faint);font-size:12px;border-top:1px solid var(--rule);pa
 
   <div id="out" hidden>
     <div id="verdict"></div>
+    <section class="panel" style="margin-top:20px" id="perstem-wrap" hidden>
+      <h2>Per stem — which one is failing</h2>
+      <div class="tiles" id="perstem"></div>
+      <p class="note">A single column moving is a per-stem fault: that one track drops while the other
+        three play on. All four moving together is an ordinary shared stall.</p>
+    </section>
     <section class="panel" style="margin-top:20px">
       <h2>Totals across the capture</h2>
       <div class="tiles" id="tiles"></div>
@@ -196,6 +201,10 @@ function feedLine(line){
     samples.push(pendingIO);
   } else if(line.includes('STEMRD') && pendingIO && !pendingIO.rd){
     pendingIO.rd={hunt:num(line,'hunt'),dma:num(line,'dma'),crc:num(line,'crc'),huntclk:num(line,'huntclk')};
+  } else if(line.includes('STEMPS') && pendingIO && !pendingIO.ps){
+    const four=(k)=>{const m=line.match(new RegExp('\\b'+k+'=(\\d+),(\\d+),(\\d+),(\\d+)'));
+      return m?[+m[1],+m[2],+m[3],+m[4]]:null;};
+    pendingIO.ps={miss:four('miss'),bad:four('bad')};
   }
 }
 function parseAll(text){
@@ -207,9 +216,17 @@ function deltas(){
   for(let i=1;i<samples.length;i++){
     const a=samples[i-1],b=samples[i];
     const dv=k=>(b[k]==null||a[k]==null)?0:Math.max(0,b[k]-a[k]);
-    d.push({i,t:b.t,sil:dv('sil'),und:dv('und'),corr:dv('corr'),rdby:dv('rdby'),rdc:dv('rdc'),
+    const dv4=(k,j)=>(b.ps&&a.ps&&b.ps[k]&&a.ps[k])?Math.max(0,b.ps[k][j]-a.ps[k][j]):0;
+    const miss=[0,1,2,3].map(j=>dv4('miss',j)), bad=[0,1,2,3].map(j=>dv4('bad',j));
+    const row={i,t:b.t,sil:dv('sil'),und:dv('und'),corr:dv('corr'),rdby:dv('rdby'),rdc:dv('rdc'),
       reloadfail:dv('reloadfail'),rduswin:b.rduswin??0,rate:b.rate??0,rd:b.rd,
-      marked:marks.some(m=>m>=a.t&&m<=b.t)});
+      miss,bad,ps:b.ps};
+    /* AUTOMATIC. A fault is a counter that moved or a budget that was missed --
+       the firmware already knows, so nobody has to press anything. */
+    row.fault = row.sil>0 || row.corr>0 || row.und>0 || row.reloadfail>0 ||
+                row.rduswin>SPAN_US || (row.rate>0 && row.rate<NEED_BPS) ||
+                miss.some(x=>x>0) || bad.some(x=>x>0);
+    d.push(row);
   }
   return d;
 }
@@ -223,10 +240,23 @@ function verdict(d){
   const rates=d.map(x=>x.rate).filter(x=>x>0);
   const minRate=rates.length?Math.min(...rates):null;
   const silMs=sil/SR*1000;
-  const atMark=d.filter(x=>x.marked);
-  const markNote=atMark.length?`<p><strong>At the moment you marked</strong>, the sample showed
-      <code>corr Δ${atMark[0].corr}</code>, <code>sil Δ${atMark[0].sil}</code>,
-      <code>rduswin ${fmt(atMark[0].rduswin)} µs</code>.</p>`:'';
+  const faults=d.filter(x=>x.fault);
+  const t0=samples[0]?.t;
+  const first=faults[0];
+  const markNote=first?`<p><strong>First fault automatically caught at sample ${first.i}</strong>${
+      (t0&&first.t)?` (+${((first.t-t0)/1000).toFixed(1)}s)`:''}: <code>sil Δ${first.sil}</code>,
+      <code>corr Δ${first.corr}</code>, <code>und Δ${first.und}</code>,
+      <code>rduswin ${fmt(first.rduswin)} µs</code>. ${faults.length} of ${d.length} samples show a fault.</p>`:'';
+  const NAMES=['vocal','drums','bass','instrument'];
+  const missTot=[0,1,2,3].map(j=>d.reduce((s2,x)=>s2+x.miss[j],0));
+  const badTot=[0,1,2,3].map(j=>d.reduce((s2,x)=>s2+x.bad[j],0));
+  const anyPS=missTot.some(x=>x>0)||badTot.some(x=>x>0);
+  const worstStem=anyPS?NAMES[missTot.map((m,j)=>m+badTot[j]).reduce((bi,v,j,arr)=>v>arr[bi]?j:bi,0)]:null;
+  const psNote=anyPS?`<p><strong>Per stem:</strong> misses ${missTot.map((v,j)=>`${NAMES[j]} ${v}`).join(' · ')};
+      bad headers ${badTot.map((v,j)=>`${NAMES[j]} ${v}`).join(' · ')}.
+      ${missTot.filter(x=>x>0).length===1||badTot.filter(x=>x>0).length===1
+        ?`<strong>Only ${worstStem} is failing</strong> — a per-stem fault, not a shared stall.`
+        :`All stems affected — a shared stall rather than one ring.`}</p>`:'';
 
   if(corr>0) return {cls:'bad',tag:'group validation failing',h:`${fmt(corr)} rejected group batches`,
     b:[`The read path fetched bytes whose group header was not the stem and span it asked for, so
@@ -234,30 +264,30 @@ function verdict(d){
         the affected stem went silent until the next good fetch.`,
        `This is <strong>not</strong> a throughput problem. It is an addressing or ring-synchronisation
         fault in the v1.2 planar read path, and it is what "one stem disappears and comes back" sounds
-        like.${sil>0?` There is also <code>sil=${fmt(sil)}</code> (${silMs.toFixed(0)} ms silenced) as the downstream effect.`:''}`,markNote]};
+        like.${sil>0?` There is also <code>sil=${fmt(sil)}</code> (${silMs.toFixed(0)} ms silenced) as the downstream effect.`:''}`,markNote,psNote]};
   if(sil>0) return {cls:'bad',tag:'starvation',h:`${fmt(sil)} frames silenced — ${silMs.toFixed(0)} ms`,
     b:[`The streamer could not keep the audio thread fed, across ${fmt(und)} underrun episode${und===1?'':'s'}.
         The playhead freezes rather than dropping frames, so this presents as the song running
         <strong>slow</strong> and dragging.`,
        `Worst fetch ${fmt(worst)} µs against a ${SPAN_US} µs span budget (batched R=2 should be near
-        ${MODEL_R2_US} µs).${minRate!==null?` Lowest sustained rate ${fmt(minRate)} B/s against ${fmt(NEED_BPS)} required.`:''}`,markNote]};
+        ${MODEL_R2_US} µs).${minRate!==null?` Lowest sustained rate ${fmt(minRate)} B/s against ${fmt(NEED_BPS)} required.`:''}`,markNote,psNote]};
   if(minRate!==null&&minRate<NEED_BPS) return {cls:'warn',tag:'under rate, no silence yet',
     h:`Sustained read dipped to ${fmt(minRate)} B/s`,
     b:[`Below the ${fmt(NEED_BPS)} B/s four-stem requirement, but no frames were silenced — read-ahead
-        absorbed it. There is no margin left.`,markNote]};
+        absorbed it. There is no margin left.`,markNote,psNote]};
   if(worst>SPAN_US) return {cls:'warn',tag:'fetch over budget',h:`Worst fetch ${fmt(worst)} µs`,
     b:[`Longer than the ${SPAN_US} µs a group of audio lasts, so that fetch was a deficit by definition,
         absorbed by read-ahead this time. Expected for batched R=2 is about ${MODEL_R2_US} µs; far above
-        that is contention rather than arithmetic.`,markNote]};
+        that is contention rather than arithmetic.`,markNote,psNote]};
   if(rf>0) return {cls:'warn',tag:'reload rejected',h:`${fmt(rf)} post-commit reloads refused`,
     b:[`The audio thread rejected a reload after a commit — the song being played may not be the one on
-        the device.`,markNote]};
+        the device.`,markNote,psNote]};
   return {cls:'good',tag:'read path clean',h:'No starvation and no rejected groups',
     b:[`Every read-path fault counter stayed flat across ${samples.length} samples:
         <code>sil=0</code>, <code>und=0</code>, <code>corr=0</code>. Worst fetch ${fmt(worst)} µs inside
         the ${SPAN_US} µs budget${minRate!==null?`, lowest rate ${fmt(minRate)} B/s`:''}.`,
        `If it still sounds wrong, the fault is downstream of the reader — the mixer, the gain structure
-        or the output stage — not the eMMC path.`,markNote]};
+        or the output stage — not the eMMC path.`,markNote,psNote]};
 }
 
 /* ---------- charts ---------- */
@@ -288,8 +318,9 @@ function scheduleRender(){ if(rafPending) return; rafPending=true;
   requestAnimationFrame(()=>{rafPending=false;render();}); }
 
 function render(){
+  const nf=samples.length>1?deltas().filter(x=>x.fault).length:0;
   $('#status').textContent = (port?'connected · ':'') + `${samples.length} samples` +
-    (buildTag?` · build ${buildTag}`:'') + (marks.length?` · ${marks.length} mark${marks.length>1?'s':''}`:'');
+    (buildTag?` · build ${buildTag}`:'') + (nf?` · ${nf} faulty sample${nf>1?'s':''}`:' · no faults');
   if(samples.length<2){ $('#out').hidden=true; return; }
   const d=deltas(); $('#out').hidden=false;
   const v=verdict(d);
@@ -311,7 +342,19 @@ function render(){
   ].map(([k,val,s,c])=>`<div class="tile ${c}"><div class="k">${k}</div><div class="v">${val}</div>
     <div class="s">${s}</div></div>`).join('');
 
-  const markIdx=d.map((x,i)=>x.marked?i:-1).filter(i=>i>=0);
+  const NAMES=['vocal','drums','bass','instrument'];
+  const missTot=[0,1,2,3].map(j=>d.reduce((s2,x)=>s2+x.miss[j],0));
+  const badTot=[0,1,2,3].map(j=>d.reduce((s2,x)=>s2+x.bad[j],0));
+  const havePS=samples.some(x=>x.ps);
+  $('#perstem-wrap').hidden=!havePS;
+  if(havePS){
+    $('#perstem').innerHTML=NAMES.map((n,j)=>{
+      const m=missTot[j],bd=badTot[j];
+      return `<div class="tile ${(m||bd)?'is-bad':'is-good'}"><div class="k">${n}</div>
+        <div class="v">${fmt(m+bd)}</div>
+        <div class="s">${fmt(m)} miss · ${fmt(bd)} bad hdr</div></div>`;}).join('');
+  }
+  const markIdx=d.map((x,i)=>x.fault?i:-1).filter(i=>i>=0);
   $('#charts').innerHTML=[
     ['Frames silenced per sample','sil','var(--bad)',null,''],
     ['Rejected group batches per sample','corr','var(--bad)',null,''],
@@ -326,7 +369,7 @@ function render(){
 
   const cols=['#','sil Δ','corr Δ','und Δ','rduswin','rate','bytes Δ','reads Δ','hunt','dma','crc'];
   $('#tbl').innerHTML=`<thead><tr>${cols.map(c=>`<th>${c}</th>`).join('')}</tr></thead><tbody>`+
-    d.map(x=>`<tr class="${x.marked?'marked':''}"><td>${x.i}</td>
+    d.map(x=>`<tr class="${x.fault?'marked':''}"><td>${x.i}</td>
       <td class="${x.sil?'hot':''}">${fmt(x.sil)}</td>
       <td class="${x.corr?'hot':''}">${fmt(x.corr)}</td>
       <td class="${x.und?'hot':''}">${fmt(x.und)}</td>
@@ -353,7 +396,7 @@ async function connect(){
   keep=true;
   $('#dot').className='dot on';
   $('#conn').disabled=true; $('#disc').disabled=false;
-  $('#mark').disabled=false; $('#save').disabled=false;
+  $('#save').disabled=false;
   samples=[];marks=[];rawText='';pendingIO=null;
   readLoop();
 }
@@ -394,17 +437,15 @@ async function disconnect(){
   try{ if(port) await port.close(); }catch(_){}
   port=null;
   $('#dot').className='dot';
-  $('#conn').disabled=false; $('#disc').disabled=true; $('#mark').disabled=true;
+  $('#conn').disabled=false; $('#disc').disabled=true;
   render();
 }
 
 /* ---------- wiring ---------- */
 $('#conn').addEventListener('click',connect);
 $('#disc').addEventListener('click',disconnect);
-$('#mark').addEventListener('click',()=>{ marks.push(Date.now()); render(); });
 $('#save').addEventListener('click',()=>{
-  const meta=`# SP-1 capture ${new Date().toISOString()}\n`+
-    marks.map((m,i)=>`# mark ${i+1} at +${((m-(samples[0]?.t??m))/1000).toFixed(1)}s\n`).join('');
+  const meta=`# SP-1 capture ${new Date().toISOString()}\n`;
   const blob=new Blob([meta+rawText],{type:'text/plain'});
   const a=document.createElement('a');
   a.href=URL.createObjectURL(blob);
@@ -421,14 +462,19 @@ $('#file').addEventListener('change',async e=>{
 const DEMO=`STEMTAPE BUILD st40
 STEMIO rdby=8192 rdc=1 rdus=3820 rdusmx=3820 rduswin=3820 rate=1156000Bps sil=0 und=0 corr=0 reloadfail=0
 STEMRD hunt=1690us dma=2050us crc=1095us huntclk=4980
+STEMPS miss=0,0,0,0 bad=0,0,0,0
 STEMIO rdby=1048576 rdc=128 rdus=3840 rdusmx=4100 rduswin=4100 rate=1154000Bps sil=0 und=0 corr=0 reloadfail=0
 STEMRD hunt=1700us dma=2050us crc=1100us huntclk=5010
+STEMPS miss=0,0,0,0 bad=0,0,0,0
 STEMIO rdby=2097152 rdc=256 rdus=3900 rdusmx=9800 rduswin=9800 rate=1101000Bps sil=1024 und=1 corr=2 reloadfail=0
 STEMRD hunt=6200us dma=2050us crc=1110us huntclk=18400
+STEMPS miss=0,0,0,0 bad=2,0,0,0
 STEMIO rdby=3145728 rdc=384 rdus=3870 rdusmx=9800 rduswin=4300 rate=1148000Bps sil=1024 und=1 corr=5 reloadfail=0
 STEMRD hunt=1710us dma=2050us crc=1100us huntclk=5020
+STEMPS miss=3,0,0,0 bad=5,0,0,0
 STEMIO rdby=4194304 rdc=512 rdus=3860 rdusmx=9800 rduswin=3990 rate=1152400Bps sil=3072 und=2 corr=9 reloadfail=0
-STEMRD hunt=1695us dma=2050us crc=1098us huntclk=4990`;
+STEMRD hunt=1695us dma=2050us crc=1098us huntclk=4990
+STEMPS miss=7,0,0,0 bad=9,0,0,0`;
 $('#demo').addEventListener('click',()=>{ $('#src').value=DEMO; rawText=DEMO; parseAll(DEMO);
   $('#raw').textContent=DEMO; render(); });
 </script>

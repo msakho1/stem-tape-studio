@@ -157,9 +157,9 @@
 #define ST_RC_SWEEP_REPS 24u
 
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st40-VOLCAL"
+#define ST_BUILD_TAG "st41-VOLCAL"
 #else
-#define ST_BUILD_TAG "st40"
+#define ST_BUILD_TAG "st41"
 #endif
 #include "st_track_hold.h"
 #include "st_ladder.h"
@@ -1742,6 +1742,29 @@ static atomic_t g_stem_underrun_frames;
 
 static atomic_t g_stem_underrun_count;     /* mirrors g_stem_stream.underrun_count, atomically, for cross-thread
 					     * reads (g_stem_stream itself is audio-thread-exclusive -- see above) */
+/*
+ * PER-STEM FAULT COUNTERS, because the global ones cannot answer the
+ * question the symptom asks.
+ *
+ * sil=/und=/corr= say a span was not playable, or that a fetch was rejected.
+ * Under v1.1 that was the whole story: one sector carried all four stems, so
+ * a fault was necessarily a fault for all four. v1.2 gives every stem its own
+ * ring, its own read and its own mailbox -- so "the vocal disappeared and came
+ * back while the other three kept playing" became a state the hardware can be
+ * in and the diagnostics could not describe.
+ *
+ *   g_stem_miss[k]    the consumer needed stem k's group for the span it was
+ *                     about to render and the mailbox did not have it.
+ *   g_stem_badhdr[k]  a fetch for stem k came back with a group header that
+ *                     was not the stem and span it asked for, so
+ *                     stem_read_groups() published nothing.
+ *
+ * Two counters, four stems, eight words. They are the difference between
+ * "something is wrong with playback" and "stem 2's ring is the one failing".
+ */
+static atomic_t g_stem_miss[ST_PL_STEMS];
+static atomic_t g_stem_badhdr[ST_PL_STEMS];
+
 static atomic_t g_stem_corrupt_count;      /* validated-but-wrong sectors (st_stream_validate_sector() == false);
 					     * distinct from a failed physical read, which is not itself proof the
 					     * sector's DATA is bad (see the prefetch step's own comment) */
@@ -3058,6 +3081,13 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 			for (k = 0; k < ST_PL_STEMS; k++) {
 				if (!st_stem_mbox_try_acquire(&g_stem_mbox[k], needed,
 							       &acquired_slot)) {
+					/* WHICH STEM WAS NOT THERE. The global
+					 * underrun counters say a span was not
+					 * playable; only this says whose group
+					 * was missing, which is the whole
+					 * question when one stem drops out and
+					 * the other three keep playing. */
+					(void)atomic_add(&g_stem_miss[k], 1);
 					break;
 				}
 				g_stem_active_slot_local[k] = (uint8_t)acquired_slot;
@@ -6209,6 +6239,7 @@ static void streamer_thread(void *a, void *b, void *c)
 					 * bytes that are not this stem's group g"
 					 * lands here rather than being played. */
 					(void)atomic_add(&g_stem_corrupt_count, 1);
+					(void)atomic_add(&g_stem_badhdr[stem], 1);
 				}
 			}
 		}
@@ -6972,6 +7003,17 @@ static void controls_diag(void)
 	       (unsigned)stem_diag_sustained_read_bytes_per_sec(),
 	       (unsigned)atomic_get(&g_stem_underrun_frames), (unsigned)atomic_get(&g_stem_underrun_count),
 	       (unsigned)atomic_get(&g_stem_corrupt_count), (unsigned)atomic_get(&g_stem_reload_fail_count));
+	/* THE SAME FAULTS, BROKEN OUT BY STEM, in stem order
+	 * (0 vocal, 1 drums, 2 bass, 3 instrument). miss= is "the group this
+	 * stem needed was not resident"; bad= is "the fetch came back as some
+	 * other stem or span". A single non-zero column is a per-stem fault --
+	 * exactly the shape of one track dropping out while the rest play on --
+	 * and four columns moving together is an ordinary shared stall. */
+	printk("STEMPS miss=%u,%u,%u,%u bad=%u,%u,%u,%u\n",
+	       (unsigned)atomic_get(&g_stem_miss[0]), (unsigned)atomic_get(&g_stem_miss[1]),
+	       (unsigned)atomic_get(&g_stem_miss[2]), (unsigned)atomic_get(&g_stem_miss[3]),
+	       (unsigned)atomic_get(&g_stem_badhdr[0]), (unsigned)atomic_get(&g_stem_badhdr[1]),
+	       (unsigned)atomic_get(&g_stem_badhdr[2]), (unsigned)atomic_get(&g_stem_badhdr[3]));
 	/* WHERE THE LATEST SECTOR READ'S TIME WENT (see sp1_emmc.h's own
 	 * "READ-PATH PHASE BREAKDOWN"). A sector is 16 blocks = 8192 bytes =
 	 * 7.08 ms of audio, so a read that takes longer than 7.08 ms is a
