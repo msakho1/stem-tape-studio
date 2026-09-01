@@ -94,7 +94,7 @@ for (let s = 0; s < STEM_COUNT; s++) {
 
 /* ---------- real upload against the mock, committed STIX record ---------- */
 const seqs: number[] = [];
-const m2 = new MockSp1({ bulk: true, sectorsPerSong: 40, onBulk: ({ seq }) => void seqs.push(seq) });
+const m2 = new MockSp1({ stemTape: true, bulk: true, sectorsPerSong: 40, onBulk: ({ seq }) => void seqs.push(seq) });
 const t2 = await attach(m2);
 await t2.initialiseLibrary();
 const res = await t2.uploadSong({ song });
