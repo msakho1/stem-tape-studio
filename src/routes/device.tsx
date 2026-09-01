@@ -1248,12 +1248,22 @@ function DevicePage() {
 
           {upload.phase === "idle" && !result?.ok && (
             <p className="font-mono text-[12px] leading-relaxed text-[var(--ink-dim)]" data-testid="no-song">
-              Uploading replaces the song on the SP-1. The song already on it keeps playing until
-              the new one is completely stored and checked.
-              {connection.status === "ready" &&
-                ` Largest song that fits: ${fmtMiB(storage.maxSongBytes)}.`}
+              {canAddAnother ? (
+                <>
+                  Adding a song keeps the songs already on the SP-1.
+                  {connection.status === "ready" && ` Up to ${fmtMiB(storage.freeBytes)}.`}
+                </>
+              ) : (
+                <>
+                  Uploading replaces the song on the SP-1. The song already on it keeps playing
+                  until the new one is completely stored and checked.
+                  {connection.status === "ready" &&
+                    ` Replaces the current song. Up to ${fmtMiB(storage.maxSongBytes)}.`}
+                </>
+              )}
             </p>
           )}
+
 
           {result?.ok ? (
             <div data-testid="success">
