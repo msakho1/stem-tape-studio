@@ -217,8 +217,42 @@ void st_pl_decode_frame(const uint8_t *const groups[ST_PL_STEMS],
 /* The loads below are open-coded three bytes at a time; if the sample width
  * ever stops being 24-bit little-endian they must be rewritten, not adjusted. */
 _Static_assert(ST11_BYTES_PER_SAMPLE == 3u,
-		"st_pl_decode_frame_shared() open-codes 24-bit little-endian loads");
+		"st_pl_decode_stem_inline() open-codes 24-bit little-endian loads");
 
+/*
+ * ONE STEM, ONE FRAME, INLINE -- the primitive both decode paths are built
+ * from, and the reason it is in the header rather than st_planar.c.
+ *
+ * st_pl_decode_stem() is the same arithmetic out of line. That is right for
+ * the callers that cross a translation unit anyway, and wrong for the two
+ * that run 48,000 times a second: the VARIABLE-RATE render path decodes a
+ * frame and then, at rates at or above 1x, walks one further frame per stem
+ * to keep the interpolator's "frame behind the cursor" -- so the semitone
+ * rocker turned every output frame into several non-inlinable calls, on the
+ * deadline thread, while unity playback (fixed in st45) made none.
+ *
+ * Hardware said so directly: with ordinary playback clean, moving the pitch
+ * rocker off centre brought the crackle straight back.
+ */
+static inline void st_pl_decode_stem_inline(const uint8_t *group,
+					     uint32_t frame_in_group,
+					     int32_t *out_l, int32_t *out_r)
+{
+	const uint32_t off = st_pl_frame_off(frame_in_group);
+	uint32_t l = (uint32_t)group[off + 0u] | ((uint32_t)group[off + 1u] << 8) |
+		     ((uint32_t)group[off + 2u] << 16);
+	uint32_t r = (uint32_t)group[off + 3u] | ((uint32_t)group[off + 4u] << 8) |
+		     ((uint32_t)group[off + 5u] << 16);
+
+	if (l & 0x800000u) {
+		l |= 0xFF000000u;
+	}
+	if (r & 0x800000u) {
+		r |= 0xFF000000u;
+	}
+	*out_l = (int32_t)l;
+	*out_r = (int32_t)r;
+}
 static inline void st_pl_decode_frame_shared(const uint8_t *const groups[ST_PL_STEMS],
 					      uint32_t frame_in_group,
 					      st11_audio_frame_t *out)
@@ -246,25 +280,11 @@ static inline void st_pl_decode_frame_shared(const uint8_t *const groups[ST_PL_S
 	 * at the same offsets, in the same order. tests/test_planar.c asserts
 	 * the two forms agree, and the full-playback gate hashes the result.
 	 */
-	const uint32_t off = st_pl_frame_off(frame_in_group);
-	const uint32_t ro = off + ST11_BYTES_PER_SAMPLE;
 	uint32_t k;
 
 	for (k = 0u; k < ST_PL_STEMS; k++) {
-		const uint8_t *g = groups[k];
-		uint32_t l = (uint32_t)g[off + 0u] | ((uint32_t)g[off + 1u] << 8) |
-			     ((uint32_t)g[off + 2u] << 16);
-		uint32_t r = (uint32_t)g[ro + 0u] | ((uint32_t)g[ro + 1u] << 8) |
-			     ((uint32_t)g[ro + 2u] << 16);
-
-		if (l & 0x800000u) {
-			l |= 0xFF000000u;
-		}
-		if (r & 0x800000u) {
-			r |= 0xFF000000u;
-		}
-		out->stem_l[k] = (int32_t)l;
-		out->stem_r[k] = (int32_t)r;
+		st_pl_decode_stem_inline(groups[k], frame_in_group,
+					  &out->stem_l[k], &out->stem_r[k]);
 	}
 }
 

@@ -24,6 +24,30 @@
 #define FILT_A1 (-28205)
 #define FILT_A2   12622
 
+/*
+ * -O2 FOR THE WHOLE PER-SAMPLE RACK.
+ *
+ * st_fx_process() and the four helpers below run ONCE PER OUTPUT FRAME at
+ * 48 kHz whenever any effect is engaged -- a biquad per channel, the delay
+ * line read/write, the distortion table lookup and the gate envelope -- on
+ * the thread with a hard 5.333 ms deadline. This file carried no
+ * optimization attribute at all, so every one of them was built for size,
+ * exactly as st_planar.c was before st45 and stem_audio_block() was before
+ * st46.
+ *
+ * On this device audio-thread CPU is not spare capacity: it comes straight
+ * out of the streamer's read throughput. Hardware reported it unambiguously
+ * -- with normal playback finally clean, engaging ANY effect brought back
+ * the crackle AND made the song slow down, which is the starvation
+ * signature (st_stream_advance_frames() freezes the playhead rather than
+ * skipping frames, so a large deficit drags the transport).
+ *
+ * Pure fixed-point computation with no timing or aliasing dependency: -O2
+ * can only change how fast it runs, not what it produces. The FX DSP
+ * reference gate compares this path's output against the committed
+ * reference and is the proof.
+ */
+__attribute__((optimize("O2")))
 static int32_t biquad(st_fx_biquad_t *s, int ch, int32_t x,
 		       int32_t b0, int32_t b1, int32_t b2, int32_t a1, int32_t a2)
 {
@@ -108,6 +132,7 @@ int32_t st_fx_shape_dirt(int32_t x_q23)
 /* ---------------------------------------------------------------------- *
  * helpers
  * ---------------------------------------------------------------------- */
+__attribute__((optimize("O2")))
 static int32_t clamp_q23(int32_t v)
 {
 	if (v > ST_FX_FULLSCALE - 1) return ST_FX_FULLSCALE - 1;
@@ -118,6 +143,7 @@ static int32_t clamp_q23(int32_t v)
 /* Correlated complementary mix: dry = 1 - wet. NOT equal power -- both legs
  * carry the same source, which is exactly the case where equal-power is
  * wrong (banks.ts:867-871). */
+__attribute__((optimize("O2")))
 static int32_t mix_wet(int32_t dry, int32_t wet, uint16_t w)
 {
 	int32_t d = ST_FX_WET_UNITY - (int32_t)w;
@@ -175,6 +201,7 @@ bool st_fx_running(const st_fx_t *fx)
 }
 
 /* Advance one effect's engage ramp by one frame and return the gain to use. */
+__attribute__((optimize("O2")))
 static uint16_t wet_step(st_fx_t *fx, uint8_t e)
 {
 	const uint16_t target = ((fx->active & ST_FX_BIT(e)) != 0u)
@@ -191,6 +218,7 @@ static uint16_t wet_step(st_fx_t *fx, uint8_t e)
 	return w;
 }
 
+__attribute__((optimize("O2")))
 void st_fx_process(st_fx_t *fx, int32_t *l, int32_t *r, uint32_t song_frame)
 {
 	int32_t dl = *l, dr = *r;

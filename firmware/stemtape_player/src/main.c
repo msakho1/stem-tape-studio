@@ -157,9 +157,9 @@
 #define ST_RC_SWEEP_REPS 24u
 
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st46-VOLCAL"
+#define ST_BUILD_TAG "st47-VOLCAL"
 #else
-#define ST_BUILD_TAG "st46"
+#define ST_BUILD_TAG "st47"
 #endif
 #include "st_track_hold.h"
 
@@ -2448,12 +2448,33 @@ static void stem_render_run(const uint8_t *const grp[ST_PL_STEMS],
 								 : cur[sp];
 				idx[sp] += frame_in_group;
 			}
-			/* THE ARRAY FORM, one index per stem. Bit-identical to
-			 * st_pl_decode_frame_shared() when all four indices are
-			 * equal -- which a test in tests/test_planar.c asserts
-			 * rather than this comment claiming it -- so today's
-			 * output is unchanged. */
-			st_pl_decode_frame(grp, idx, &nxt);
+			/* THE ARRAY FORM, one index per stem -- but only when the
+			 * four indices actually differ, which today they never
+			 * do.
+			 *
+			 * st_pl_decode_frame() lives in st_planar.c, so this was
+			 * a call across a translation unit once per output frame
+			 * at 48 kHz, on the deadline thread, for the ENTIRE
+			 * variable-rate path. Unity playback stopped paying it in
+			 * st45 and this path kept paying it, which is exactly
+			 * what the hardware reported: ordinary playback clean,
+			 * the pitch rocker off centre crackling again.
+			 *
+			 * One rate and one direction means all four cursors are
+			 * the same number, so the equal case is 100% of today's
+			 * traffic and takes the inline decode. The array call
+			 * REMAINS, reached the moment a stem's cursor genuinely
+			 * diverges -- which is per-track reverse, and is why the
+			 * array form exists at all. Three compares per frame buy
+			 * back a call plus a four-element array construction, and
+			 * tests/test_planar.c already asserts the two forms agree
+			 * when the indices are equal. */
+			if (idx[0] == idx[1] && idx[1] == idx[2] &&
+			    idx[2] == idx[3]) {
+				st_pl_decode_frame_shared(grp, idx[0], &nxt);
+			} else {
+				st_pl_decode_frame(grp, idx, &nxt);
+			}
 			for (sp = 0; sp < ST_PL_STEMS; sp++) {
 				if (!s_rs_prev_valid[sp]) {
 					s_rs_prev.stem_l[sp] = nxt.stem_l[sp];
@@ -2528,7 +2549,14 @@ static void stem_render_run(const uint8_t *const grp[ST_PL_STEMS],
 						if (pidx >= src_avail) {
 							pidx = src_avail - 1u;
 						}
-						st_pl_decode_stem(
+						/* Inline: at any rate at or above
+						 * 1x this runs for every stem on
+						 * every output frame, and it was
+						 * the second per-frame call across
+						 * a translation unit on this
+						 * path. Same arithmetic, same
+						 * bytes, no call. */
+						st_pl_decode_stem_inline(
 							grp[sp],
 							frame_in_group + pidx,
 							&s_rs_prev.stem_l[sp],
