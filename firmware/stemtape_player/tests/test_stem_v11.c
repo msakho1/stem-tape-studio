@@ -1975,6 +1975,163 @@ static void test_incompatible_versions_are_refused(void)
 	free(v11_b);
 }
 
+/*
+ * THE CROSS-PARTY v1.3 INDEX RECORD, and the one residual risk it retires.
+ *
+ * docs/stem-tape-v11-conformance-retirement.md's residual risk 1 is that
+ * every v1.3 fixture in this repository was produced by this side of the
+ * contract. Two implementations agreeing is not two PARTIES agreeing: if the
+ * firmware's serializer and tools/stemtape-v13-convert.py were wrong in the
+ * same way, the fixture cases would pass anyway.
+ *
+ * handoff/v1.3/binaries/index-companion-committed.bin closes that for the
+ * index record. It is 512 bytes read back out of stored index memory after a
+ * real upload through the COMPANION's own StemTapeTransport.uploadSong() --
+ * an independent implementation, in a different language, that has never seen
+ * st_stix.c. Nothing here recomputes it; the bytes are the artefact.
+ *
+ * WHAT THIS PROVES that the reissued fixtures cannot: the field offsets, the
+ * endianness, the CRC polynomial and its [0,4)-zeroed span, the songChecksum
+ * derivation from the four stem digests, and the [256,512) zero-tail rule are
+ * all agreed by a party that could have got any of them wrong independently.
+ *
+ * WHAT IT DOES NOT PROVE: the bounds rule. A record's region is checked
+ * against the DEVICE's capability-reported geometry, and this record was made
+ * against the companion's mock, whose regions are its own. The bounds passed
+ * here are the record's own declaration, so this case exercises every rule
+ * except that one -- said plainly rather than left to be inferred from a
+ * passing test.
+ *
+ * NOTE THE SLOT PAIR. slotIdentity is B and songSlot is A: the record lives
+ * in index slot B and describes the song in region A. That is the ordinary
+ * shape of a second-generation upload (index-b-valid.bin has it too), and it
+ * is the field a companion is most likely to get backwards, because reading
+ * it as "slot A" is wrong in a way that still looks self-consistent. The
+ * firmware refuses a slot-identity mismatch outright, so it is checked here
+ * from BOTH slots: valid from B, ERR_SLOT_IDENTITY from A.
+ */
+static void test_stix_companion_produced_record(void)
+{
+	size_t len;
+	uint8_t *block = read_fixture("handoff/v1.3/binaries/index-companion-committed.bin", &len);
+	st_stix_record_t r;
+	uint32_t song_a_start, song_a_blocks, song_b_start, song_b_blocks;
+	bool tail_zero = true;
+	size_t i;
+
+	CHECK(len == ST11_PHYSICAL_BLOCK_BYTES,
+	      "index-companion-committed.bin is exactly one 512-byte physical block");
+
+	st_stix_deserialize(block, &r);
+
+	/* The record's own integrity CRC, recomputed here by st_crc32.c over the
+	 * companion's bytes. This is the single strongest cross-party claim in
+	 * the file: two independent CRC implementations over the same 252 bytes,
+	 * with the same magic-zeroing rule. */
+	CHECK(st_stix_block_crc(block) == r.crc32,
+	      "companion record: CRC-32(record[0,252) with magic zeroed) == its own crc32 field "
+	      "(0x%08x), computed by a different implementation on each side",
+	      r.crc32);
+
+	CHECK(r.magic == ST11_INDEX_MAGIC, "companion record: magic == 'STIX' (committed)");
+	CHECK(r.index_version == 2u, "companion record: indexVersion == 2");
+	CHECK(r.format_major == 1u && r.format_minor == ST11_FORMAT_MINOR,
+	      "companion record: declares stored format 1.%u -- THIS build's", ST11_FORMAT_MINOR);
+	CHECK(r.bit_depth == ST11_PCM_BIT_DEPTH,
+	      "companion record: %u-bit samples, the width v1.3 stores", ST11_PCM_BIT_DEPTH);
+	CHECK(r.sample_rate == ST11_SAMPLE_RATE_HZ && r.channels == 2u,
+	      "companion record: 48 kHz stereo");
+
+	CHECK(r.slot_identity == ST11_SLOT_B, "companion record: slotIdentity == B");
+	CHECK(r.song_slot == ST11_SLOT_A, "companion record: songSlot == A");
+	CHECK((r.flags & ST11_IX_FLAG_SONG_PRESENT) != 0u, "companion record: SONG_PRESENT set");
+	CHECK(r.generation_lo == 2u && r.generation_hi == 0u, "companion record: generation == 2");
+
+	/*
+	 * THE GEOMETRY, AGREED INDEPENDENTLY. The companion computed 29 groups
+	 * per stem and 464 blocks from 14,592 frames; st_pl_groups_for_frames()
+	 * and st_pl_blocks_for_groups() are asked the same question here. A
+	 * disagreement would mean the two sides lay a song out at different
+	 * sizes, which no checksum could ever catch.
+	 */
+	{
+		const uint32_t groups = st_pl_groups_for_frames(r.frames);
+
+		CHECK(r.frames == 14592u, "companion record: frames == 14592");
+		CHECK(r.sector_count == 29u && groups == 29u,
+		      "companion record: sectorCount 29, and st_pl_groups_for_frames(14592) agrees");
+		CHECK(r.song_block_count == st_pl_song_blocks(groups),
+		      "companion record: songBlockCount %u == st_pl_song_blocks(29)",
+		      r.song_block_count);
+		CHECK(r.song_start_block % ST11_BLOCKS_PER_SECTOR == 0u,
+		      "companion record: songStartBlock %u is sector-aligned", r.song_start_block);
+	}
+
+	CHECK(r.bpm_q8 == 120u * 256u, "companion record: bpmQ8 == 120*256");
+
+	/*
+	 * THE FIVE CHECKSUMS. The four stem values are the companion's, folded
+	 * over its own stored 16-bit image; the song value is recomputed HERE
+	 * from them by the firmware's own st_checksum32_compute() over the
+	 * 16-byte little-endian digest, so the derivation rule itself is what is
+	 * under test rather than a copied constant.
+	 */
+	{
+		uint8_t digest[ST11_STEM_COUNT * 4];
+		uint32_t si;
+
+		for (si = 0; si < ST11_STEM_COUNT; si++) {
+			digest[si * 4 + 0] = (uint8_t)(r.stem_checksums[si] & 0xffu);
+			digest[si * 4 + 1] = (uint8_t)((r.stem_checksums[si] >> 8) & 0xffu);
+			digest[si * 4 + 2] = (uint8_t)((r.stem_checksums[si] >> 16) & 0xffu);
+			digest[si * 4 + 3] = (uint8_t)((r.stem_checksums[si] >> 24) & 0xffu);
+		}
+		CHECK(st_checksum32_compute(digest, sizeof digest) == r.song_checksum,
+		      "companion record: songChecksum 0x%08x is exactly FNV-1a over the four stem "
+		      "checksums as LE u32 -- the derivation the firmware uses, agreed by the companion",
+		      r.song_checksum);
+	}
+
+	/*
+	 * AND THE SAME SONG. These are the reference song's per-stem checksums,
+	 * the ones handoff/v1.3/decoded/song-sectors-four-stem.json declares and
+	 * test_song_sectors_fixture() already matches by decoding the audio. So
+	 * this record is not merely well-formed -- it describes the very song
+	 * this suite decodes elsewhere, which is what makes the agreement about
+	 * THIS contract rather than about some other song's numbers.
+	 */
+	CHECK(r.stem_checksums[0] == 2642900572u && r.stem_checksums[1] == 4238229877u &&
+		      r.stem_checksums[2] == 3150049925u && r.stem_checksums[3] == 962109097u,
+	      "companion record: the four stemChecksums are the reference song's own declared values");
+
+	for (i = ST11_INDEX_RECORD_BYTES; i < ST11_PHYSICAL_BLOCK_BYTES; i++) {
+		if (block[i] != 0u) {
+			tail_zero = false;
+		}
+	}
+	CHECK(tail_zero, "companion record: bytes [256,512) past the record are zero");
+
+	/*
+	 * FULL VALIDATION, from both index slots. Bounds are the record's own
+	 * declared region (see this case's own note above on why).
+	 */
+	song_a_start  = r.song_start_block;
+	song_a_blocks = r.song_block_count;
+	song_b_start  = r.song_start_block + r.song_block_count;
+	song_b_blocks = r.song_block_count;
+
+	CHECK(st_stix_validate(block, ST11_SLOT_B, song_a_start, song_a_blocks, song_b_start,
+			        song_b_blocks, &r) == ST_STIX_VALID,
+	      "companion record read from index slot B: ST_STIX_VALID -- magic, CRC, version, slot "
+	      "identity, song metadata and bounds all pass against a record this side never wrote");
+	CHECK(st_stix_validate(block, ST11_SLOT_A, song_a_start, song_a_blocks, song_b_start,
+			        song_b_blocks, &r) == ST_STIX_ERR_SLOT_IDENTITY,
+	      "and the SAME bytes read from index slot A are refused as ERR_SLOT_IDENTITY -- the "
+	      "misaddressed-write rule, exercised on a real record rather than a synthesized one");
+
+	free(block);
+}
+
 int main(void)
 {
 	RUN(test_song_sectors_fixture);
@@ -1999,6 +2156,7 @@ int main(void)
 	RUN(test_ab_session_open_errors);
 	RUN(test_ab_session_v12_planar_verification);
 	RUN(test_incompatible_versions_are_refused);
+	RUN(test_stix_companion_produced_record);
 
 	printf("\n");
 	printf("%d distinct test cases, %d assertion checks\n", g_test_cases, g_checks);

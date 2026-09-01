@@ -123,6 +123,81 @@ material, not a bug.
    - an `unknown` transfer outcome never leaves the device with a damaged
      song, only with an unconfirmed one.
 
+## Result — verified
+
+The companion returned all three. Checked here against the production code,
+not read:
+
+**1. Layout.** All four 32-byte runs are byte-identical to the reference above,
+byte 3 = `0x03` included, and the flag byte was confirmed *written* across all
+116 groups (29 × 4) with zero header or index faults. `diff` against the
+firmware-derived reference: no differences.
+
+**2. The index record.** Run through the real `st_stix_deserialize()`,
+`st_stix_block_crc()` and `st_stix_validate()`:
+
+```
+stored CRC 0x2a2abafb  recomputed 0x2a2abafb  MATCH
+st_stix_validate, read from index slot B -> ST_STIX_VALID
+st_stix_validate, read from index slot A -> ERR_SLOT_IDENTITY
+```
+
+Everything passes: magic, CRC, version 1.3, slot identity, song-metadata
+consistency (frames ↔ sectors ↔ blocks, 48000/2/16), bounds, and the
+`[256,512)` zero tail. `st_pl_groups_for_frames(14592)` and
+`st_pl_song_blocks(29)` independently return the record's own 29 and 464.
+
+The record is now a permanent fixture at
+`handoff/v1.3/binaries/index-companion-committed.bin`, checked by
+`test_stix_companion_produced_record` in CI. It retires most of residual risk 1
+in `docs/stem-tape-v11-conformance-retirement.md` — until now every v1.3
+fixture in this repository was produced by the firmware side.
+
+**3. Behaviours.** Padding (792 B all-zero per stem = 198 frames × 4),
+ascending `seq` 0…28 with destination enforcement, and the 13 `unknown`-outcome
+cases — all accepted as described.
+
+### One correction, in the prose only
+
+The write-up says *"slotIdentity/songSlot A"*. The bytes say **slotIdentity = B**
+(offset 10 = `0x01`), songSlot = A (offset 11 = `0x00`).
+
+The **bytes are right** — a record living in index slot B and describing the
+song in region A is the ordinary shape of a second-generation upload, and it is
+exactly `index-b-valid.bin`'s shape in the frozen fixtures (slotIdentity B,
+songSlot A, generation 2, committed). Only the description is off.
+
+It is worth naming because the firmware refuses a slot-identity mismatch
+outright, before anything else is considered. So: **please confirm the block
+was physically read from index slot B.** If a B-identity record were ever
+written into index slot A, `st_stix_validate()` returns `ERR_SLOT_IDENTITY`
+and the device boots to no song — which is the correct fail-closed behaviour,
+but it would look like a mysterious rejection of a record whose CRC is perfect.
+
+### The one thing still open, and the number that closes it
+
+The four 32-byte runs are the *head* of each stem, and the checksums are
+layout-independent by construction, so every group after the first — 115 of the
+116 — is still attested by one side only. Not urgent, and not a blocker for
+flashing.
+
+One number closes it. Digest the whole assembled region, all 237,568 bytes in
+storage order (stem 0's 29 groups, then stem 1's, then 2, then 3 — each group
+its 8-byte header followed by 510 frames, padding included):
+
+```
+bytes    237568
+SHA-256  05cb5a20cb8023c93497fb617ece163c5827979422bb9cfb7c404a0d5563b8e0
+FNV-1a   1708154556   0x65d05ebc
+```
+
+Both computed here by running the shipped `st_pl_from_v11_sector()` over all 29
+sectors of the frozen fixture and laying the groups out song-planar. If
+`scripts/v13-layout-proof.ts` prints either digest for its assembled region and
+it matches, every byte of the layout is agreed by both parties and this risk is
+closed entirely. If it does not match, the digest alone won't say where — send
+the first differing group index and we'll have it immediately.
+
 ## What has not changed
 
 Nothing in the wire protocol, the storage layout, the checksums or the

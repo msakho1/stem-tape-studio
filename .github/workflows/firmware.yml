@@ -972,6 +972,17 @@ jobs:
             firmware/stemtape_player/tests/test_stem_v11.c \
             -o audit/test_stem_v11
           ./audit/test_stem_v11 | tee audit/stem-v11-fixture-selftest.txt
+
+          # THE CROSS-PARTY CASE MUST HAVE RUN. Every other v1.3 fixture in
+          # this repository was produced by this side of the contract; this
+          # one is 512 bytes read back out of the COMPANION's own stored
+          # index after a real upload. It is the only thing standing between
+          # "two implementations agree" and "two parties agree" (see
+          # docs/stem-tape-v11-conformance-retirement.md, residual risk 1),
+          # and a silently-dropped case would take that back without a
+          # failing test anywhere.
+          grep -q 'a record this side never wrote' audit/stem-v11-fixture-selftest.txt \
+            || { echo "the companion-produced index record case did not run"; exit 1; }
           {
             echo '### Stem Tape storage-contract conformance'
             echo '```text'
