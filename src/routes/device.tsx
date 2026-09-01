@@ -972,10 +972,23 @@ function DevicePage() {
                     }}
                   />
                 </div>
+                {/* On a one-song device free space cannot be spent, so the
+                    headline leads with what is used. Multi-song firmware leads
+                    with what is still available. */}
                 <p className="mt-2 font-mono text-[12px] text-[var(--ink-dim)]" data-testid="storage-line">
-                  <span className="text-[var(--ink)]">{fmtMiB(storage.freeBytes)} free</span> of{" "}
-                  {fmtMiB(storage.capacityBytes)}
+                  {canAddAnother ? (
+                    <>
+                      <span className="text-[var(--ink)]">{fmtMiB(storage.freeBytes)} free</span> of{" "}
+                      {fmtMiB(storage.capacityBytes)}
+                    </>
+                  ) : (
+                    <>
+                      <span className="text-[var(--ink)]">{fmtMiB(storage.usedBytes)}</span> of{" "}
+                      {fmtMiB(storage.capacityBytes)} used
+                    </>
+                  )}
                 </p>
+
               </div>
 
               {canAddAnother && <span data-testid="add-song" />}
