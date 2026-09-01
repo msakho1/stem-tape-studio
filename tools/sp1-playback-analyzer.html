@@ -216,6 +216,17 @@ function feedLine(line){
      Latched so the verdict can say whether a 5 ms block recurs or happened
      once at startup -- the two are indistinguishable in aus= alone. */
   if(line.startsWith('STEMRT')){ aus=num(line,'aus'); auswin=num(line,'auswin'); }
+  /* st49: the per-stem silence detector. A run here means a stem decoded as
+     exactly zero for a second or more while its gain was up -- which an
+     underrun cannot cause, because residency is all-four-or-none. */
+  if(line.startsWith('STEMZ') && pendingIO){
+    /* Attached to the sample being built, NOT latched forward: STEMZ is
+       printed AFTER STEMIO, so a latched value would land on the next
+       sample and the last block's reading would be lost entirely. */
+    const f=(k)=>{const m=line.match(new RegExp('\\b'+k+'=(\\d+),(\\d+),(\\d+),(\\d+)'));
+      return m?[+m[1],+m[2],+m[3],+m[4]]:null;};
+    pendingIO.stemz={ms:f('zeroms'),at:f('at')};
+  }
   if(line.startsWith('CPU')){
     cpu={aud:num(line,'aud'),str:num(line,'str'),midi:num(line,'midi'),
          main:num(line,'main'),diag:num(line,'diag')};
@@ -228,7 +239,7 @@ function feedLine(line){
       rdusmx:num(line,'rdusmx'),rduswin:num(line,'rduswin'),rate:num(line,'rate'),
       sil:num(line,'sil'),und:num(line,'und'),corr:num(line,'corr'),
       aus:aus,auswin:auswin,
-      reloadfail:num(line,'reloadfail'),rd:null,transport,cpu,prio};
+      reloadfail:num(line,'reloadfail'),rd:null,transport,cpu,prio,stemz:null};
     samples.push(pendingIO);
   } else if(line.includes('STEMRD') && pendingIO && !pendingIO.rd){
     /* st42 made this a per-read AVERAGE over the print window (n= reads,
@@ -302,6 +313,28 @@ function verdict(d){
          `<strong>To catch a dropout, the capture has to be running while the song is.</strong> Connect,
           then press PLAY, then let it run through the part that fails — this tool differences
           consecutive samples, so it can only see a fault that happens between two of them.`]};
+  }
+  /* A STEM WENT SILENT ON ITS OWN. Reported before the streaming verdicts
+     because it is a different defect with a different owner: an underrun
+     silences all four stems at once, so a single-stem zero run cannot be one. */
+  {
+    const L=lastSample();
+    const NM=['vocal','drums','bass','instrument'];
+    if(L&&L.stemz&&L.stemz.ms&&L.stemz.ms.some(v=>v>0)){
+      const hits=L.stemz.ms.map((v,i)=>({n:NM[i],ms:v,at:L.stemz.at?L.stemz.at[i]:null}))
+                           .filter(h=>h.ms>0);
+      return {cls:'bad',tag:'a stem went silent by itself',
+        h:hits.map(h=>`${h.n} silent for ${(h.ms/1000).toFixed(1)} s`).join(' · '),
+        b:[`${hits.map(h=>`<strong>${h.n}</strong> decoded as exactly zero for
+            <code>${fmt(h.ms)} ms</code> starting at song frame <code>${fmt(h.at)}</code>
+            (${(h.at/48000/60|0)}:${String(Math.floor(h.at/48000)%60).padStart(2,'0')})`).join('; ')}.`,
+           `<strong>This is not an underrun.</strong> Residency is all-four-or-none, so a missing
+            read silences the whole block — every stem together. One stem alone going to digital
+            zero while the others play means the samples being decoded ARE zero.`,
+           `The bytes on the device were verified at commit time against the companion's own
+            per-stem checksums, so the storage holds what was uploaded. That points at the
+            uploaded stem itself: solo that stem in the companion at the timestamp above.`]};
+    }
   }
   const tot=k=>d.reduce((s,x)=>s+x[k],0);
   const corr=tot('corr'),sil=tot('sil'),und=tot('und'),rf=tot('reloadfail');

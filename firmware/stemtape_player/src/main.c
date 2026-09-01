@@ -157,9 +157,9 @@
 #define ST_RC_SWEEP_REPS 24u
 
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st48-VOLCAL"
+#define ST_BUILD_TAG "st49-VOLCAL"
 #else
-#define ST_BUILD_TAG "st48"
+#define ST_BUILD_TAG "st49"
 #endif
 #include "st_track_hold.h"
 
@@ -1913,6 +1913,43 @@ static atomic_t g_stem_peak_pub[ST11_STEM_COUNT];
  */
 #define ST_STEM_METER_STRIDE 32u
 
+/*
+ * PER-STEM SILENCE DETECTION -- the measurement that settles "one stem drops
+ * out while the others keep playing".
+ *
+ * That symptom cannot be an underrun: residency is all-four-or-none and a miss
+ * silences the WHOLE block, all four stems together. Every other firmware-side
+ * cause has been eliminated on hardware too -- corr=0 across 27,544 reads,
+ * rerr=0/werr=0, mut=0000 and stv=[0 0 0 0] in every sample of two full
+ * captures, and the device's own commit check re-read the committed song off
+ * eMMC and matched all four per-stem checksums. What that leaves is the
+ * uploaded audio itself, and arguing about it is worse than measuring it.
+ *
+ * So the render loop watches what it actually decodes. A stem whose decoded
+ * samples are exactly zero for a long stretch is reported with the song frame
+ * the stretch began at. Two readings, two different conclusions, no debate:
+ *
+ *   zero run in the vocal plane at the timestamp it disappears  -> the stem
+ *       that was uploaded has a gap in it; no firmware change can fill it.
+ *   NO zero run while it is audibly missing -> the bytes are fine and
+ *       something downstream of the decoder is silencing it, which is a real
+ *       firmware bug and a completely different hunt.
+ *
+ * Sampled on the METER stride, not per frame: this rides the 1-in-32 test the
+ * meters already pay for, so it adds a compare to a branch that is already
+ * taken and nothing to the other 31 frames. A dropout worth hearing is tens of
+ * thousands of frames long; 0.67 ms resolution is four orders of magnitude
+ * finer than it needs to be. Audio-thread-exclusive, published atomically for
+ * the diagnostic printer, never printed from the audio path.
+ *
+ * A stem whose prepared gain is zero is SKIPPED, not counted: muted and
+ * solo-silenced stems are supposed to be silent and are not dropouts.
+ */
+#define ST_STEM_ZERO_RUN_MIN 1500u   /* ~1 s of stride samples before reporting */
+static uint32_t s_stem_zero_run[ST11_STEM_COUNT];      /* audio thread only */
+static atomic_t g_stem_zero_worst[ST11_STEM_COUNT];    /* longest run, stride samples */
+static atomic_t g_stem_zero_at[ST11_STEM_COUNT];       /* song frame it began at */
+
 static st_stem_meter_t s_stem_meters[ST11_STEM_COUNT];
 static uint32_t        s_meter_last_ms;   /* 0 == no previous pass */
 
@@ -2644,6 +2681,26 @@ static void stem_render_run(const uint8_t *const grp[ST_PL_STEMS],
 				mag = (uint32_t)((l > r) ? l : r);
 				if (mag > peak[sp]) {
 					peak[sp] = mag;
+				}
+				/* SILENCE RUN -- see ST_STEM_ZERO_RUN_MIN.
+				 * mag is already the magnitude this branch
+				 * computed for the meter, so the whole check
+				 * is one compare against a value in hand. */
+				if (mag == 0u) {
+					if (s_stem_zero_run[sp] == 0u) {
+						/* remember where it began */
+						atomic_set(&g_stem_zero_at[sp],
+							   (atomic_val_t)(song_frame + cur[sp]));
+					}
+					s_stem_zero_run[sp]++;
+					if (s_stem_zero_run[sp] >= ST_STEM_ZERO_RUN_MIN &&
+					    s_stem_zero_run[sp] >
+					    (uint32_t)atomic_get(&g_stem_zero_worst[sp])) {
+						atomic_set(&g_stem_zero_worst[sp],
+							   (atomic_val_t)s_stem_zero_run[sp]);
+					}
+				} else {
+					s_stem_zero_run[sp] = 0u;
 				}
 			}
 		}
@@ -7378,6 +7435,32 @@ static void controls_diag(void)
 	       (unsigned)atomic_get(&g_stem_miss[2]), (unsigned)atomic_get(&g_stem_miss[3]),
 	       (unsigned)atomic_get(&g_stem_badhdr[0]), (unsigned)atomic_get(&g_stem_badhdr[1]),
 	       (unsigned)atomic_get(&g_stem_badhdr[2]), (unsigned)atomic_get(&g_stem_badhdr[3]));
+	/* THE DROPOUT LINE. zeroms= is the longest stretch each stem decoded as
+	 * pure silence, in milliseconds; at= is the song frame it started on.
+	 * Only runs past ST_STEM_ZERO_RUN_MIN are reported, so ordinary quiet
+	 * passages and gaps between notes never appear here -- an entry means a
+	 * stem was digitally, exactly zero for about a second or more while its
+	 * gain was up. See ST_STEM_ZERO_RUN_MIN for what each reading proves. */
+	{
+		/* Stride samples -> ms. FRAMES FIRST, then divide: one stride
+		 * is 32 frames and 32*1000/48000 is ZERO in integer arithmetic,
+		 * so a per-sample constant would have reported every dropout as
+		 * 0 ms. Multiplying first keeps it exact and cannot overflow --
+		 * a full hour of silence is 5.4 million frames. */
+		uint32_t zw[ST11_STEM_COUNT], za[ST11_STEM_COUNT], zi;
+		uint32_t zms[ST11_STEM_COUNT];
+
+		for (zi = 0; zi < ST11_STEM_COUNT; zi++) {
+			zw[zi] = (uint32_t)atomic_get(&g_stem_zero_worst[zi]);
+			za[zi] = (uint32_t)atomic_get(&g_stem_zero_at[zi]);
+			zms[zi] = (zw[zi] * ST_STEM_METER_STRIDE) /
+				  (ST11_SAMPLE_RATE_HZ / 1000u);
+		}
+		printk("STEMZ zeroms=%u,%u,%u,%u at=%u,%u,%u,%u\n",
+		       (unsigned)zms[0], (unsigned)zms[1],
+		       (unsigned)zms[2], (unsigned)zms[3],
+		       (unsigned)za[0], (unsigned)za[1], (unsigned)za[2], (unsigned)za[3]);
+	}
 	/* WHERE A STEM READ'S TIME GOES, AVERAGED OVER THIS PRINT WINDOW (see
 	 * sp1_emmc.h's own "READ-PATH PHASE BREAKDOWN"). Every figure is
 	 * per-read: the window's sum divided by the reads in it, then the
