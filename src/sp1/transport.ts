@@ -52,6 +52,7 @@ import {
   type StemTapeIndexDraft,
 } from "./stemIndex";
 import { checksum32, type CanonicalSong } from "./song";
+import { songChecksumFromStems, stemChecksums16 } from "./pcm16";
 import { crc32 } from "./crc32";
 import {
   BULK_STATUS,
@@ -175,7 +176,7 @@ class FatalBulkError extends Error {}
 
 export class ReadOnlyDeviceError extends Error {
   constructor(op: string) {
-    super(`${op} is refused: this device is not a compatible Stem Tape v1.1 device and stays read-only.`);
+    super(`${op} is refused: this device is not a compatible Stem Tape v1.3 device and stays read-only.`);
   }
 }
 
@@ -242,10 +243,10 @@ export class StemTapeTransport {
     const l = this.session.layout!;
     const c = this.caps;
     return {
-      deviceName: this.writable ? "Stem Tape SP-1 (v1.1 A/B)" : "SP-1 (stock / Tape Looper firmware)",
+      deviceName: this.writable ? "Stem Tape SP-1 (v1.3 A/B)" : "SP-1 (stock / Tape Looper firmware)",
       transport: "Tape Looper block protocol · 512-byte blocks @ 115200",
       audioFormat: this.writable
-        ? "48 kHz · stereo · signed 24-bit · 8 KiB logical sectors"
+        ? "48 kHz · stereo · signed 16-bit · planar stem groups · 8 KiB logical sectors"
         : "mono int16 (Tape Looper)",
       slots: 2,
       songRegions: c ? [c.song[0], c.song[1]] : [],
@@ -724,15 +725,16 @@ export class StemTapeTransport {
       report("checksums", 0.9, "recomputing per-stem checksums from device data");
       const decoded = decodeSectors(readBack, song.frames);
       const stemChecksums = decoded.stems.map((s) => checksum32(s));
+      const expectedStemChecksums = stemChecksums16(song);
       for (let t = 0; t < 4; t++) {
-        if (stemChecksums[t] !== song.stems[t]!.checksum) {
+        if (stemChecksums[t] !== expectedStemChecksums[t]) {
           throw new Error(`checksum mismatch on ${song.stems[t]!.name}: device data does not match the prepared stem`);
         }
       }
-      const songChecksum = checksum32(
-        Uint8Array.from(stemChecksums.flatMap((v) => [v & 255, (v >>> 8) & 255, (v >>> 16) & 255, (v >>> 24) & 255])),
-      );
-      if (songChecksum !== song.checksum) throw new Error("song-level checksum mismatch");
+      const songChecksum = songChecksumFromStems(stemChecksums);
+      if (songChecksum !== songChecksumFromStems(expectedStemChecksums)) {
+        throw new Error("song-level checksum mismatch");
+      }
 
       // 11/12. Next-generation record for the inactive index slot, magic absent.
       const draft: StemTapeIndexDraft = {
