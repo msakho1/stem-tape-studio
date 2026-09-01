@@ -125,6 +125,10 @@ function DevicePage() {
   const [caps, setCaps] = useState<StemTapeCapabilities | null>(null);
   const [library, setLibrary] = useState<LibraryState | null>(null);
   const [readingDevice, setReadingDevice] = useState(false);
+  const [settingUp, setSettingUp] = useState(false);
+  const [setupDone, setSetupDone] = useState(false);
+  const [setupError, setSetupError] = useState<string | null>(null);
+  const [confirmSetup, setConfirmSetup] = useState(false);
   const [upload, setUpload] = useState<UploadState>({ phase: "idle" });
 
 
