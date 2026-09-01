@@ -291,7 +291,9 @@ export function validateIndexRecord(
   }
   if (rec.sampleRate !== SAMPLE_RATE) return bad(`sample rate ${rec.sampleRate} is not 48000`);
   if (rec.channels !== CHANNELS) return bad(`channel count ${rec.channels} is not 2`);
-  if (rec.bitDepth !== PCM_BIT_DEPTH) return bad(`bit depth ${rec.bitDepth} is not 24`);
+  if (rec.bitDepth !== PCM_BIT_DEPTH) {
+    return bad(`bit depth ${rec.bitDepth} disagrees with format 1.${rec.formatMinor} (expected ${PCM_BIT_DEPTH})`);
+  }
   if (rec.bpm <= 0) return bad("bpm metadata missing");
   if (rec.downbeatFrame > rec.frames) return bad("downbeat lies past the end of the song");
   return { valid: true, reason: "valid" };
