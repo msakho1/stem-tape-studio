@@ -34,19 +34,27 @@ export const SECTOR_BYTES = PHYSICAL_BLOCK_BYTES * BLOCKS_PER_SECTOR; // 8192
 /** Every A/B region start and length is expressed in whole 512-byte blocks. */
 export const REQUIRED_ALIGNMENT = PHYSICAL_BLOCK_BYTES;
 
-/** Audio format — fixed by the Stem Tape contract. */
+/** Audio format — fixed by the Stem Tape v1.3 contract. */
 export const STEM_COUNT = 4;
 export const CHANNELS = 2;
-export const PCM_BIT_DEPTH = 24;
-export const BYTES_PER_SAMPLE = PCM_BIT_DEPTH / 8;
+/** v1.3 stores signed 16-bit LE samples. */
+export const PCM_BIT_DEPTH = 16;
+export const BYTES_PER_SAMPLE = PCM_BIT_DEPTH / 8; // 2
 export const SAMPLE_RATE = 48000;
-/** One frame carries all four stems, both channels: 4*2*3 = 24 bytes. */
-export const BYTES_PER_FRAME = STEM_COUNT * CHANNELS * BYTES_PER_SAMPLE;
 
+/* ---------- frozen v1.1 mixed-frame geometry (audit only) ---------- */
+
+export const PCM_BIT_DEPTH_V11 = 24;
+export const BYTES_PER_SAMPLE_V11 = 3;
+/** One v1.1 frame carried all four stems, both channels: 4*2*3 = 24 bytes. */
+export const BYTES_PER_FRAME_V11 = STEM_COUNT * CHANNELS * BYTES_PER_SAMPLE_V11;
 /** Sector header: reserved timing / tempo / LED bytes, then the frame payload. */
 export const SECTOR_HEADER_BYTES = 32;
 export const SECTOR_PAYLOAD_BYTES = SECTOR_BYTES - SECTOR_HEADER_BYTES; // 8160
-export const FRAMES_PER_SECTOR = SECTOR_PAYLOAD_BYTES / BYTES_PER_FRAME; // 340
+export const FRAMES_PER_SECTOR_V11 = SECTOR_PAYLOAD_BYTES / BYTES_PER_FRAME_V11; // 340
+/** v1.2 planar groups held 340 frames of 24-bit stereo. */
+export const FRAMES_PER_GROUP_V12 = 340;
+
 
 /**
  * v1.1 mixed-sector magic. Retained ONLY so the frozen v1.1 handoff bundle can
@@ -64,38 +72,44 @@ export const SECTOR_OFF = {
   reserved: 28,
 } as const;
 
-export function sectorsForFrames(frames: number): number {
-  return Math.ceil(frames / FRAMES_PER_SECTOR);
+/** Frozen v1.1 sector count (340 mixed frames per sector). Audit only. */
+export function sectorsForFramesV11(frames: number): number {
+  return Math.ceil(frames / FRAMES_PER_SECTOR_V11);
 }
 
-/* ---------- v1.2 planar stem groups ---------- */
+/* ---------- v1.3 planar stem groups ---------- */
 
 /**
- * v1.2 stores each stem's whole timeline contiguously in its own quarter of
+ * v1.3 stores each stem's whole timeline contiguously in its own quarter of
  * the song region. The addressable unit is a 2,048-byte GROUP = exactly four
- * 512-byte blocks = 340 frames of ONE stem:
+ * 512-byte blocks = 510 frames of ONE stem:
  *
  *   0   u8    'P'
  *   1   u8    'L'
  *   2   u8    stem index 0..3
- *   3   u8    flags, must be 0
+ *   3   u8    flags, must be 3 (the format version; 0 is reserved forever
+ *             as "not this format")
  *   4   u32   groupIndex, little-endian
- *   8   2040  340 frames x 6 bytes (L,R signed 24-bit LE)
+ *   8   2040  510 frames x 4 bytes (L,R signed 16-bit LE)
  *
- * 8 + 340*6 = 2048. Every v1.2 read is a group read, so the header makes a
+ * 8 + 510*4 = 2048. Every v1.3 read is a group read, so the header makes a
  * group-only read self-validating.
  */
 export const GROUP_BYTES = 2048;
 export const GROUP_HEADER_BYTES = 8;
 export const GROUP_PAYLOAD_BYTES = GROUP_BYTES - GROUP_HEADER_BYTES; // 2040
-/** One stem, one frame: L,R signed 24-bit LE. */
-export const BYTES_PER_STEM_FRAME = CHANNELS * BYTES_PER_SAMPLE; // 6
-export const FRAMES_PER_GROUP = GROUP_PAYLOAD_BYTES / BYTES_PER_STEM_FRAME; // 340
+/** One stem, one frame: L,R signed 16-bit LE. */
+export const BYTES_PER_STEM_FRAME = CHANNELS * BYTES_PER_SAMPLE; // 4
+export const FRAMES_PER_GROUP = GROUP_PAYLOAD_BYTES / BYTES_PER_STEM_FRAME; // 510
 export const BLOCKS_PER_GROUP = GROUP_BYTES / PHYSICAL_BLOCK_BYTES; // 4
 export const GROUPS_PER_SECTOR = SECTOR_BYTES / GROUP_BYTES; // 4
+/** v1.2 groups carried 6 bytes per frame. Audit only. */
+export const BYTES_PER_STEM_FRAME_V12 = CHANNELS * BYTES_PER_SAMPLE_V11; // 6
 
 export const GROUP_MAGIC_0 = 0x50; // 'P'
 export const GROUP_MAGIC_1 = 0x4c; // 'L'
+/** The group flags byte IS the format version and must be exactly 3. */
+export const GROUP_FLAGS_V13 = 3;
 export const GROUP_OFF = {
   magic0: 0,
   magic1: 1,
@@ -105,10 +119,19 @@ export const GROUP_OFF = {
   payload: 8,
 } as const;
 
-/** Groups per stem. Identical to v1.1's sectorCount — 340 frames either way. */
+/** Groups per stem: ceil(frames / 510). */
 export function groupsForFrames(frames: number): number {
   return Math.ceil(frames / FRAMES_PER_GROUP);
 }
+
+/**
+ * Logical 8 KiB sectors a song occupies. Four stems x groupsPerStem groups,
+ * four groups per sector, so this equals groupsForFrames() exactly.
+ */
+export function sectorsForFrames(frames: number): number {
+  return groupsForFrames(frames);
+}
+
 
 /** Absolute block address of one stem's group inside a song region. */
 export function planarBlockOf(
@@ -123,14 +146,18 @@ export function planarBlockOf(
 /* ---------- versions ---------- */
 
 export const PROTOCOL_MAJOR = 1;
-/** Minimum protocol minor that carries the A/B capability structure. */
-export const PROTOCOL_MINOR = 1;
+/** v1.3 firmware speaks exactly protocol minor 3; older minors are refused. */
+export const PROTOCOL_MINOR = 3;
 export const FORMAT_MAJOR = 1;
-/** 1.2 = A/B storage with PLANAR per-stem groups. 1.1 (mixed frames) and
- *  1.0 (single index) are both refused, in both directions. */
-export const FORMAT_MINOR = 2;
+/** 1.3 = A/B storage, PLANAR per-stem groups of 510 signed-16-bit frames.
+ *  1.2 (planar 24-bit) and 1.1 (mixed 24-bit frames) are both refused, in
+ *  both directions — neither fails safe by accident. */
+export const FORMAT_MINOR = 3;
+/** The v1.2 planar 24-bit layout. Refused; named only for diagnosis. */
+export const FORMAT_MINOR_V12 = 2;
 /** The v1.1 mixed-frame layout, kept only to audit the frozen v1.1 bundle. */
 export const FORMAT_MINOR_V11 = 1;
+
 /** STIX index record version. v1 (the unsafe array index) is refused. */
 export const STIX_VERSION = 2;
 
@@ -173,7 +200,8 @@ export const CAP_FLAG = {
   FOUR_STEMS: 1 << 0,
   STEREO: 1 << 1,
   RATE_48K: 1 << 2,
-  DEPTH_24: 1 << 3,
+  /** Sample width the storage format carries — 16-bit in v1.3. */
+  DEPTH_16: 1 << 3,
   INDEX_EXTENSION: 1 << 4,
   BPM_DOWNBEAT: 1 << 5,
   STAGING_COW: 1 << 6,
@@ -192,7 +220,7 @@ export const REQUIRED_CAP_FLAGS =
   CAP_FLAG.FOUR_STEMS |
   CAP_FLAG.STEREO |
   CAP_FLAG.RATE_48K |
-  CAP_FLAG.DEPTH_24 |
+  CAP_FLAG.DEPTH_16 |
   CAP_FLAG.INDEX_EXTENSION |
   CAP_FLAG.BPM_DOWNBEAT |
   CAP_FLAG.EXPLICIT_INIT |

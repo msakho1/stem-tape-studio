@@ -1,11 +1,11 @@
 /**
- * Stem Tape compatibility gate (contract v1.1, A/B storage).
+ * Stem Tape compatibility gate (contract v1.3, A/B storage).
  *
  * Answering the classic `SP1XFER!` magic proves only that an SP-1-class device
  * with the Tape Looper transfer build is listening. It authorizes NOTHING here.
  * Physical mutation requires the Stem Tape capability reply ('Q' -> "STCP") to
  * positively report firmware identity, protocol version, storage-format
- * version 1.1, STIX index version 2, four-stem/stereo/48 kHz/24-bit support,
+ * version 1.3, STIX index version 2, four-stem/stereo/48 kHz/16-bit support,
  * BPM+downbeat metadata, explicit-init support AND the four crash-safety
  * capabilities: dual song slots, dual index slots, generation-based commit and
  * crash-safe replacement.
@@ -39,7 +39,7 @@ import {
 import { joinGeneration, splitGeneration } from "./stemIndex";
 
 export const READ_ONLY_NOTICE =
-  "This device answers the Tape Looper transfer protocol but does not report Stem Tape v1.1 A/B firmware. It stays read-only: no initialization, no writes, no delete.";
+  "This device answers the Tape Looper transfer protocol but does not report Stem Tape v1.3 firmware. It stays read-only: no initialization, no writes, no delete.";
 
 export interface StemTapeCapabilities {
   firmwareId: number;
@@ -269,8 +269,8 @@ export function evaluate(caps: StemTapeCapabilities | null, demand?: CapacityDem
     ),
     req(
       "protocol",
-      `transfer protocol ${PROTOCOL_MAJOR}.${PROTOCOL_MINOR} or newer`,
-      caps?.protoMajor === PROTOCOL_MAJOR && (caps?.protoMinor ?? -1) >= PROTOCOL_MINOR,
+      `transfer protocol exactly ${PROTOCOL_MAJOR}.${PROTOCOL_MINOR}`,
+      caps?.protoMajor === PROTOCOL_MAJOR && caps?.protoMinor === PROTOCOL_MINOR,
       caps ? `${caps.protoMajor}.${caps.protoMinor}` : "not reported",
     ),
     req(
@@ -293,7 +293,7 @@ export function evaluate(caps: StemTapeCapabilities | null, demand?: CapacityDem
       has(CAP_FLAG.RATE_48K) && caps?.sampleRate === 48000,
       caps ? `${caps.sampleRate} Hz` : "not reported",
     ),
-    req("depth", "24-bit support", has(CAP_FLAG.DEPTH_24), has(CAP_FLAG.DEPTH_24) ? "yes" : "not reported"),
+    req("depth", "16-bit support", has(CAP_FLAG.DEPTH_16), has(CAP_FLAG.DEPTH_16) ? "yes" : "not reported"),
     req(
       "index-ext",
       "index-extension support",

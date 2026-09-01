@@ -14,7 +14,7 @@ import { Sp1Session, Sp1Transport, type SerialLikePort } from "../protocol";
 import { parseCapabilities } from "../compatibility";
 import { StemTapeTransport } from "../transport";
 import { prepareCanonicalSong, type CanonicalSong } from "../song";
-import { SLOT_A, SLOT_B } from "../stemTapeFormat";
+import { FRAMES_PER_GROUP, SLOT_A, SLOT_B } from "../stemTapeFormat";
 import { FORBIDDEN_INTERRUPTION_PHRASES, interruptedWording } from "../wording";
 
 const NAMES = ["vocal", "drums", "bass", "instrument"] as const;
@@ -61,7 +61,7 @@ async function withFirstSong() {
   const mock = new MockSp1({ stemTape: true, sectorsPerSong: 16 });
   const t = await attach(mock);
   await t.initialiseLibrary();
-  const one = await song("ONE", 2040, 3);
+  const one = await song("ONE", FRAMES_PER_GROUP * 6, 3);
   const first = await t.uploadSong({ song: one });
   expect(first.ok).toBe(true);
   expect(first.generation).toBe(2);
@@ -95,6 +95,8 @@ describe("interruption matrix — the previous song always survives", () => {
    * sequence: early audio, late audio, the uncommitted index, and the validity
    * magic itself.
    */
+  // Six groups per stem = 96 audio block writes, so 95/96/97 straddle the last
+  // audio write, the uncommitted index write and the magic write.
   const points = [1, 5, 40, 95, 96, 97];
   for (const n of points) {
     it(`disconnect after write #${n} of the replacement leaves ONE valid`, async () => {
@@ -102,7 +104,7 @@ describe("interruption matrix — the previous song always survives", () => {
       const base = mock.writes;
       mock.opts.onWrite = ({ n: w }) => (w > base + n ? { disconnect: true } : undefined);
 
-      const two = await song("TWO", 2040, 11);
+      const two = await song("TWO", FRAMES_PER_GROUP * 6, 11);
       const res = await t.uploadSong({ song: two });
       expect(res.ok).toBe(false);
       expect(["failed", "unknown"]).toContain(res.outcome);
@@ -125,7 +127,7 @@ describe("interruption matrix — the previous song always survives", () => {
       const active = lib.active!;
       expect(active.songPresent).toBe(true);
       expect(active.frames).toBe(one.frames);
-      expect(active.sectorCount).toBe(Math.ceil(one.frames / 340));
+      expect(active.sectorCount).toBe(Math.ceil(one.frames / FRAMES_PER_GROUP));
 
       // The audio the surviving record points at is complete on the device.
       const audio = m2.songBytes(active.songSlot, active.sectorCount);
@@ -147,7 +149,7 @@ describe("interruption matrix — the previous song always survives", () => {
       return undefined;
     };
     mock.opts.onFlush = () => (magicSeen ? { disconnect: true } : undefined);
-    const two = await song("TWO", 2040, 11);
+    const two = await song("TWO", FRAMES_PER_GROUP * 6, 11);
     const res = await t.uploadSong({ song: two });
     expect(res.ok).toBe(false);
     expect(res.outcome).toBe("unknown");
@@ -176,7 +178,7 @@ describe("interruption matrix — the previous song always survives", () => {
       }
       return undefined;
     };
-    const two = await song("TWO", 2040, 11);
+    const two = await song("TWO", FRAMES_PER_GROUP * 6, 11);
     const res = await t.uploadSong({ song: two });
     expect(res.ok).toBe(false);
     expect(lastIndexWrite).toBeGreaterThan(0);
@@ -193,7 +195,7 @@ describe("interruption matrix — the previous song always survives", () => {
     const { mock, t } = await withFirstSong();
     const seen: { song: number | null; index: number | null; gen: number }[] = [];
     for (let i = 0; i < 4; i++) {
-      const s = await song(`S${i}`, 2040, 20 + i);
+      const s = await song(`S${i}`, FRAMES_PER_GROUP * 6, 20 + i);
       const r = await t.uploadSong({ song: s });
       expect(r.ok).toBe(true);
       seen.push({ song: r.targetSongSlot, index: r.targetIndexSlot, gen: r.generation });
@@ -206,7 +208,7 @@ describe("interruption matrix — the previous song always survives", () => {
 
   it("a completed upload resolves to committed on reconnect", async () => {
     const { mock, t } = await withFirstSong();
-    const two = await song("TWO", 2040, 11);
+    const two = await song("TWO", FRAMES_PER_GROUP * 6, 11);
     const res = await t.uploadSong({ song: two });
     expect(res.outcome).toBe("committed");
     const { t: t2 } = await reconnect(mock);
@@ -218,7 +220,7 @@ describe("interruption matrix — the previous song always survives", () => {
 
   it("a different song's checksum never resolves as committed", async () => {
     const { mock, t } = await withFirstSong();
-    const two = await song("TWO", 2040, 11);
+    const two = await song("TWO", FRAMES_PER_GROUP * 6, 11);
     const res = await t.uploadSong({ song: two });
     const { t: t2 } = await reconnect(mock);
     const wrong = await t2.resolveOutcome({ frames: two.frames, songChecksum: res.songChecksum ^ 0xff });

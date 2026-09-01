@@ -15,7 +15,7 @@ import { describe, expect, it } from "vitest";
 import { buildAppendix } from "./docAppendix";
 import {
   BLOCKS_PER_SECTOR,
-  BYTES_PER_FRAME,
+  BYTES_PER_FRAME_V11,
   CAPS_BYTES,
   CHANNELS,
   CRC_RANGE,
@@ -23,10 +23,10 @@ import {
   FORMAT_MAJOR,
   FORMAT_MINOR,
   FORMAT_MINOR_V11,
-  FRAMES_PER_SECTOR,
+  FRAMES_PER_SECTOR_V11,
   INDEX_RECORD_BYTES,
   IX_OFF,
-  PCM_BIT_DEPTH,
+  PCM_BIT_DEPTH_V11,
   PHYSICAL_BLOCK_BYTES,
   REQUIRED_CAP_FLAGS,
   SAMPLE_RATE,
@@ -78,11 +78,11 @@ describe("published contract matches the implementation", () => {
       ],
       [
         "frames per sector",
-        doc.includes(`${FRAMES_PER_SECTOR} frames/sector at ${BYTES_PER_FRAME} B/frame`),
+        doc.includes(`${FRAMES_PER_SECTOR_V11} frames/sector at ${BYTES_PER_FRAME_V11} B/frame`),
       ],
       [
         "audio format",
-        doc.includes(`${SAMPLE_RATE / 1000} kHz · stereo · signed ${PCM_BIT_DEPTH}-bit LE`),
+        doc.includes(`${SAMPLE_RATE / 1000} kHz · stereo · signed ${PCM_BIT_DEPTH_V11}-bit LE`),
       ],
       ["retry budget", doc.includes(`max ${MAX_CHUNK_RETRIES}`)],
       ["sector size rule", doc.includes(`${BLOCKS_PER_SECTOR} × ${PHYSICAL_BLOCK_BYTES} B`)],
@@ -129,7 +129,7 @@ describe("published contract matches the implementation", () => {
       expect(rec.formatMinor).toBe(FORMAT_MINOR_V11); // frozen v1.1 fixture
       expect(rec.sampleRate).toBe(SAMPLE_RATE);
       expect(rec.channels).toBe(CHANNELS);
-      expect(rec.bitDepth).toBe(PCM_BIT_DEPTH);
+      expect(rec.bitDepth).toBe(PCM_BIT_DEPTH_V11);
       expect(rec.generation).toBeGreaterThanOrEqual(1);
     }
     // The only difference between the two images is the four magic bytes.

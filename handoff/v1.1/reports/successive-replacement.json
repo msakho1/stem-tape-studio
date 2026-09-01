@@ -6,8 +6,8 @@
       "songSlot": "A",
       "indexSlot": "B",
       "generation": 2,
-      "songRegionSha256": "26571907bfbc1448f526f64acf7e75233ddf1b909a32573b9b0864c916039196",
-      "indexSha256": "12d8b9a248d91d16afc5cee6c2bea5aa1673242c6e06449f13f9ae4bad582efb",
+      "songRegionSha256": "a3e2e373819e60c47143e76aea953e11b632479ec63c84be5665eb2e709bbb82",
+      "indexSha256": "2ef68b0105b9d7cf109378e48bb1f4e4f01a085629fc21d84257d66f38ddd333",
       "selectedGenerationAfterReboot": 2,
       "rollbackGeneration": 1
     },
@@ -17,8 +17,8 @@
       "songSlot": "B",
       "indexSlot": "A",
       "generation": 3,
-      "songRegionSha256": "c9afed446524f902681c6652216907c40064d4ace8339197f7673b7ecf57c50b",
-      "indexSha256": "68162d9e51cb0d6c6802fd6383ed07b573957b82aac7c029597c49e98239df6a",
+      "songRegionSha256": "c1031c66288cb62cc59c7cb6f895b1d2137b51ff71935105ec6ff6548b4a529a",
+      "indexSha256": "be1c80914ac253c32b1e78d6fcb13c5f1519cb36350e579919475cbc074ee8be",
       "selectedGenerationAfterReboot": 3,
       "rollbackGeneration": 2
     },
@@ -28,8 +28,8 @@
       "songSlot": "A",
       "indexSlot": "B",
       "generation": 4,
-      "songRegionSha256": "e0c3f66977078a1eff915c5f80aaf23ad26d159912c15bc1fb22aaac2cfcd000",
-      "indexSha256": "0f3a0aea74bdbecf1c1616a0b22063864a8feb850a430cc05c6478d54053cd1d",
+      "songRegionSha256": "ab7fc289f86489a15795ab27406c74931fded4731a33b242294bbdfeab04afb3",
+      "indexSha256": "e8c4bba4eff154d935aa353ffc8af7e610e70f3a0a74b2f433bc30031e28d8b8",
       "selectedGenerationAfterReboot": 4,
       "rollbackGeneration": 3
     },
@@ -39,8 +39,8 @@
       "songSlot": "B",
       "indexSlot": "A",
       "generation": 5,
-      "songRegionSha256": "232e9291a6de2e13b561258d46c3857e5ec4a43887fc759af46fcc383b1fd303",
-      "indexSha256": "fe952535d7e0a1d3a0259295d88a182e7ebcbfa1ba56fb0a27b670c44621a2b5",
+      "songRegionSha256": "c24ea1b0a88991adb5c37d0957a608386b0166a293181937bdaba4958ea3620e",
+      "indexSha256": "73623185c9d96959b4c690e8ab5b39ba0862d62c29fa9b8e06f6861b85568e42",
       "selectedGenerationAfterReboot": 5,
       "rollbackGeneration": 4
     },
@@ -50,8 +50,8 @@
       "songSlot": "A",
       "indexSlot": "B",
       "generation": 6,
-      "songRegionSha256": "da67438e54f907a5eb783a15e4e579c3950ab5c45cdda9f3714e1910400b5cab",
-      "indexSha256": "0c06ecd33afcf1db726602661edf77630b39a1d1b09928949b3f77a76fb05349",
+      "songRegionSha256": "8e95453d47acb1016a71b2c7c42bdb999d9a74fb106268a252406fc1f60e7419",
+      "indexSha256": "38447c8a1a8fbc0d4d53145a174bef6a7285337c2847afca8b55fab32e9a0901",
       "selectedGenerationAfterReboot": 6,
       "rollbackGeneration": 5
     }
@@ -62,8 +62,8 @@
     "selectedIndexSlot": "A",
     "selectedGeneration": 5,
     "selectedSongSlot": "B",
-    "selectedSongSha256": "232e9291a6de2e13b561258d46c3857e5ec4a43887fc759af46fcc383b1fd303",
+    "selectedSongSha256": "c24ea1b0a88991adb5c37d0957a608386b0166a293181937bdaba4958ea3620e",
     "requiresInitialization": false,
-    "explanation": "Only index A is valid (generation 5); index B is ignored: CRC mismatch (stored 0xa75a871d, computed 0xa75a87e2)."
+    "explanation": "Only index A is valid (generation 5); index B is ignored: CRC mismatch (stored 0x70585cf8, computed 0x70585c07)."
   }
 }

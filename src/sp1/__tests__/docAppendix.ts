@@ -6,8 +6,10 @@
  */
 import {
   BLOCKS_PER_SECTOR,
-  BYTES_PER_FRAME,
+  BYTES_PER_FRAME_V11,
   BYTES_PER_SAMPLE,
+  BYTES_PER_SAMPLE_V11,
+  BYTES_PER_STEM_FRAME,
   CAPS_BYTES,
   CAPS_OFF,
   CAPS_TAG,
@@ -18,13 +20,15 @@ import {
   CRC_ZEROED,
   FORMAT_MAJOR,
   FORMAT_MINOR,
-  FRAMES_PER_SECTOR,
+  FRAMES_PER_SECTOR_V11,
+  FRAMES_PER_GROUP,
   INDEX_MAGIC,
   INDEX_RECORD_BYTES,
   IX_FLAG,
   IX_OFF,
   NO_SLOT,
   PCM_BIT_DEPTH,
+  PCM_BIT_DEPTH_V11,
   PHYSICAL_BLOCK_BYTES,
   PROTOCOL_MAJOR,
   PROTOCOL_MINOR,
@@ -104,9 +108,19 @@ const IX_WIDTH: Record<keyof typeof IX_OFF, number> = {
   crc32: 4,
 };
 
-/** `formatMinor` is a parameter so the frozen v1.1 contract can still be
- *  regenerated verbatim after the companion moved to v1.2 (planar groups). */
+/**
+ * `formatMinor` is a parameter so the frozen v1.1 contract can still be
+ * regenerated verbatim after the companion moved to v1.3 (planar 16-bit
+ * groups). Version 1 selects the frozen mixed-frame 24-bit geometry and the
+ * protocol minor that shipped with it; anything else describes v1.3.
+ */
 export function buildAppendix(formatMinor: number = FORMAT_MINOR): string {
+  const v11 = formatMinor === 1;
+  const protocolMinor = v11 ? 1 : PROTOCOL_MINOR;
+  const bitDepth = v11 ? PCM_BIT_DEPTH_V11 : PCM_BIT_DEPTH;
+  const bytesPerSample = v11 ? BYTES_PER_SAMPLE_V11 : BYTES_PER_SAMPLE;
+  const bytesPerFrame = v11 ? BYTES_PER_FRAME_V11 : BYTES_PER_STEM_FRAME;
+  const framesPerUnit = v11 ? FRAMES_PER_SECTOR_V11 : FRAMES_PER_GROUP;
   const L: string[] = [];
   L.push(
     "## 12. Generated numeric appendix",
@@ -136,7 +150,7 @@ export function buildAppendix(formatMinor: number = FORMAT_MINOR): string {
     "| item | value |",
     "| --- | --- |",
     `| firmware id | ${hex(STEM_TAPE_FIRMWARE_ID)} \`STFW\` |`,
-    `| protocol | ${PROTOCOL_MAJOR}.${PROTOCOL_MINOR} |`,
+    `| protocol | ${PROTOCOL_MAJOR}.${protocolMinor} |`,
     `| format | ${FORMAT_MAJOR}.${formatMinor} |`,
     `| STIX index version | ${STIX_VERSION} |`,
     `| index magic | ${hex(INDEX_MAGIC)} \`STIX\` |`,
@@ -149,11 +163,11 @@ export function buildAppendix(formatMinor: number = FORMAT_MINOR): string {
     "| --- | --- |",
     `| sample rate | ${SAMPLE_RATE} Hz |`,
     `| stems x channels | ${STEM_COUNT} x ${CHANNELS} |`,
-    `| bit depth | ${PCM_BIT_DEPTH}-bit (${BYTES_PER_SAMPLE} B/sample) |`,
-    `| bytes per frame | ${BYTES_PER_FRAME} |`,
+    `| bit depth | ${bitDepth}-bit (${bytesPerSample} B/sample) |`,
+    `| bytes per frame | ${bytesPerFrame} |`,
     `| blocks per sector | ${BLOCKS_PER_SECTOR} |`,
     `| sector | ${SECTOR_BYTES} B = ${SECTOR_HEADER_BYTES} B header + ${SECTOR_PAYLOAD_BYTES} B payload |`,
-    `| frames per sector | ${FRAMES_PER_SECTOR} |`,
+    `| frames per sector | ${framesPerUnit} |`,
     `| region alignment | ${REQUIRED_ALIGNMENT} B |`,
     "",
     "### 12.4 Capability flags",
@@ -162,9 +176,10 @@ export function buildAppendix(formatMinor: number = FORMAT_MINOR): string {
     "| --- | ---: | --- |",
   );
   for (const [name, bit] of Object.entries(CAP_FLAG)) {
-    L.push(
-      `| ${name} | ${Math.log2(bit)} | ${(REQUIRED_CAP_FLAGS & bit) === bit ? "yes" : "no"} |`,
-    );
+    // Bit 3 asserts the storage sample width, so its NAME moved with the
+    // format: DEPTH_24 in v1.1, DEPTH_16 in v1.3. Same bit, same position.
+    const shown = v11 && name === "DEPTH_16" ? "DEPTH_24" : name;
+    L.push(`| ${shown} | ${Math.log2(bit)} | ${(REQUIRED_CAP_FLAGS & bit) === bit ? "yes" : "no"} |`);
   }
   L.push(
     `| **REQUIRED_CAP_FLAGS** | | ${hex(REQUIRED_CAP_FLAGS)} |`,

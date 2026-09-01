@@ -27,8 +27,10 @@ import {
   type BlockRegion,
   CHANNELS,
   PCM_BIT_DEPTH,
+  PCM_BIT_DEPTH_V11,
   regionEnd,
   sectorsForFrames,
+  sectorsForFramesV11,
   BLOCKS_PER_SECTOR,
 } from "./stemTapeFormat";
 
@@ -277,7 +279,13 @@ export function validateIndexRecord(
   const region = regions.song[rec.songSlot];
   if (!region) return bad(`song slot ${rec.songSlot} is not reported by the device`);
   if (rec.frames < 1) return bad("song present but frame count is zero");
-  if (rec.sectorCount !== sectorsForFrames(rec.frames)) {
+  // Geometry is per format version: v1.1/v1.2 packed 340 frames per unit at
+  // 24-bit, v1.3 packs 510 at 16-bit. A frozen fixture must still validate
+  // against the version it was written under.
+  const legacyGeometry = expectFormatMinor < FORMAT_MINOR;
+  const expectedSectors = legacyGeometry ? sectorsForFramesV11(rec.frames) : sectorsForFrames(rec.frames);
+  const expectedDepth = legacyGeometry ? PCM_BIT_DEPTH_V11 : PCM_BIT_DEPTH;
+  if (rec.sectorCount !== expectedSectors) {
     return bad(`sector count ${rec.sectorCount} does not match ${rec.frames} frames`);
   }
   if (rec.songBlockCount !== rec.sectorCount * BLOCKS_PER_SECTOR) {
@@ -291,7 +299,9 @@ export function validateIndexRecord(
   }
   if (rec.sampleRate !== SAMPLE_RATE) return bad(`sample rate ${rec.sampleRate} is not 48000`);
   if (rec.channels !== CHANNELS) return bad(`channel count ${rec.channels} is not 2`);
-  if (rec.bitDepth !== PCM_BIT_DEPTH) return bad(`bit depth ${rec.bitDepth} is not 24`);
+  if (rec.bitDepth !== expectedDepth) {
+    return bad(`bit depth ${rec.bitDepth} disagrees with format 1.${rec.formatMinor} (expected ${expectedDepth})`);
+  }
   if (rec.bpm <= 0) return bad("bpm metadata missing");
   if (rec.downbeatFrame > rec.frames) return bad("downbeat lies past the end of the song");
   return { valid: true, reason: "valid" };

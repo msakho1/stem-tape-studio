@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { stemPcm16 } from "../pcm16";
 import { MockSp1, type MockOptions } from "./mockSerial";
 import { Sp1Transport, Sp1Session } from "../protocol";
 import {
@@ -14,7 +15,9 @@ import { evaluate, parseCapabilities, readOnlyVerdict, READ_ONLY_NOTICE } from "
 import { ReadOnlyDeviceError, StemTapeTransport } from "../transport";
 import {
   CAP_FLAG,
-  FRAMES_PER_SECTOR,
+  BYTES_PER_STEM_FRAME,
+  FRAMES_PER_GROUP,
+  GROUP_FLAGS_V13,
   GROUP_BYTES,
   GROUP_HEADER_BYTES,
   REQUIRED_CAP_FLAGS,
@@ -98,10 +101,10 @@ describe("canonical stereo 24-bit song", () => {
     expect(song.lengthSpreadSeconds).toBeCloseTo(700 / 48000, 6);
   });
 
-  it("checksums and peak are computed on the final 24-bit values", async () => {
+  it("checksums are taken from the stored 16-bit values, peak from the 24-bit ones", async () => {
     const song = await prep([512, 512, 512, 512]);
     for (const s of song.stems) {
-      expect(s.checksum).toBe(checksum32(s.pcm24));
+      expect(s.checksum).toBe(checksum32(stemPcm16(s)));
       expect(s.peak).toBeGreaterThan(0);
       expect(s.peak).toBeLessThanOrEqual(1);
       expect(s.clipped).toBe(false);
@@ -136,7 +139,7 @@ async function connect(opts: MockOptions = {}) {
 
 describe("logical 8 KiB sector mapping", () => {
   it("maps one sector onto sixteen ascending 512-byte blocks and round-trips", async () => {
-    const song = await prep([FRAMES_PER_SECTOR * 2 + 7]);
+    const song = await prep([FRAMES_PER_GROUP * 2 + 7]);
     const sectors = encodeSong(song);
     expect(sectors.length).toBe(sectorsForFrames(song.frames));
     expect(sectors[0]!.length).toBe(SECTOR_BYTES);
@@ -147,9 +150,9 @@ describe("logical 8 KiB sector mapping", () => {
 
     const decodedSong = decodeSectors(sectors, song.frames);
     for (let t = 0; t < 4; t++) {
-      expect(checksum32(decodedSong.stems[t]!)).toBe(song.stems[t]!.checksum);
+      expect(checksum32(decodedSong.stems[t]!)).toBe(checksum32(stemPcm16(song.stems[t]!)));
     }
-    // v1.2 planar: three groups per stem, laid out stem-major. Global group
+    // v1.3 planar: three groups per stem, laid out stem-major. Global group
     // stream index g maps to stem = floor(g/3), groupIndex = g % 3.
     const groups = groupsForFrames(song.frames);
     expect(groups).toBe(3);
@@ -159,15 +162,15 @@ describe("logical 8 KiB sector mapping", () => {
       const h = readGroupHeader(g);
       expect(g.length).toBe(GROUP_BYTES);
       expect(h.magicOk).toBe(true);
-      expect(h.flags).toBe(0);
+      expect(h.flags).toBe(GROUP_FLAGS_V13);
       expect(h.stemIndex).toBe(Math.floor(i / groups));
       expect(h.groupIndex).toBe(i % groups);
     });
 
-    // Every stem's last group is partial (7 of 340 frames) and zero-padded.
+    // Every stem's last group is partial (7 of 510 frames) and zero-padded.
     for (let stem = 0; stem < 4; stem++) {
       const last = all[stem * groups + (groups - 1)]!;
-      const tail = last.subarray(GROUP_HEADER_BYTES + 7 * 6);
+      const tail = last.subarray(GROUP_HEADER_BYTES + 7 * BYTES_PER_STEM_FRAME);
       expect(tail.every((b) => b === 0)).toBe(true);
     }
 
@@ -177,7 +180,9 @@ describe("logical 8 KiB sector mapping", () => {
       for (let g = 0; g < groups; g++) {
         flat.set(all[stem * groups + g]!.subarray(GROUP_HEADER_BYTES), g * (GROUP_BYTES - GROUP_HEADER_BYTES));
       }
-      expect(Array.from(flat.subarray(0, song.frames * 6))).toEqual(Array.from(song.stems[stem]!.pcm24));
+      expect(Array.from(flat.subarray(0, song.frames * BYTES_PER_STEM_FRAME))).toEqual(
+        Array.from(stemPcm16(song.stems[stem]!)),
+      );
     }
   });
 });
@@ -254,7 +259,7 @@ describe("Stem Tape transport upload", () => {
     const { t, mock } = await connect({ stemTape: true });
     await t.initialiseLibrary();
     expect(t.indexInitialised).toBe(true);
-    const song = await prep([FRAMES_PER_SECTOR + 40]);
+    const song = await prep([FRAMES_PER_GROUP + 40]);
     const stages: string[] = [];
     const out = await t.uploadSong({ song, onProgress: (p) => stages.push(p.stage) });
     expect(out.ok).toBe(true);
@@ -292,7 +297,7 @@ describe("Stem Tape transport upload", () => {
     const { t } = await connect({ stemTape: true });
     await t.initialiseLibrary();
     const before = (await t.readIndex())!.generation;
-    const song = await prep([FRAMES_PER_SECTOR * 2]);
+    const song = await prep([FRAMES_PER_GROUP * 2]);
     const out = await t.uploadSong({ song, signal: { aborted: true } });
     expect(out.ok).toBe(false);
     const after = await t.readIndex();
@@ -304,7 +309,7 @@ describe("Stem Tape transport upload", () => {
     const { t, mock } = await connect({ stemTape: true, sectorsPerSong: 1 });
     await t.initialiseLibrary();
     const writesBefore = mock.writes;
-    const song = await prep([FRAMES_PER_SECTOR * 2]);
+    const song = await prep([FRAMES_PER_GROUP * 2]);
     const out = await t.uploadSong({ song });
     expect(out.ok).toBe(false);
     expect(out.detail).toMatch(/Insufficient safe staging capacity/);
