@@ -14,7 +14,9 @@ import { evaluate, parseCapabilities, readOnlyVerdict, READ_ONLY_NOTICE } from "
 import { ReadOnlyDeviceError, StemTapeTransport } from "../transport";
 import {
   CAP_FLAG,
+  BYTES_PER_STEM_FRAME,
   FRAMES_PER_GROUP,
+  GROUP_FLAGS_V13,
   GROUP_BYTES,
   GROUP_HEADER_BYTES,
   REQUIRED_CAP_FLAGS,
@@ -147,9 +149,9 @@ describe("logical 8 KiB sector mapping", () => {
 
     const decodedSong = decodeSectors(sectors, song.frames);
     for (let t = 0; t < 4; t++) {
-      expect(checksum32(decodedSong.stems[t]!)).toBe(song.stems[t]!.checksum);
+      expect(checksum32(decodedSong.stems[t]!)).toBe(checksum32(stemPcm16(song.stems[t]!)));
     }
-    // v1.2 planar: three groups per stem, laid out stem-major. Global group
+    // v1.3 planar: three groups per stem, laid out stem-major. Global group
     // stream index g maps to stem = floor(g/3), groupIndex = g % 3.
     const groups = groupsForFrames(song.frames);
     expect(groups).toBe(3);
@@ -159,15 +161,15 @@ describe("logical 8 KiB sector mapping", () => {
       const h = readGroupHeader(g);
       expect(g.length).toBe(GROUP_BYTES);
       expect(h.magicOk).toBe(true);
-      expect(h.flags).toBe(0);
+      expect(h.flags).toBe(GROUP_FLAGS_V13);
       expect(h.stemIndex).toBe(Math.floor(i / groups));
       expect(h.groupIndex).toBe(i % groups);
     });
 
-    // Every stem's last group is partial (7 of 340 frames) and zero-padded.
+    // Every stem's last group is partial (7 of 510 frames) and zero-padded.
     for (let stem = 0; stem < 4; stem++) {
       const last = all[stem * groups + (groups - 1)]!;
-      const tail = last.subarray(GROUP_HEADER_BYTES + 7 * 6);
+      const tail = last.subarray(GROUP_HEADER_BYTES + 7 * BYTES_PER_STEM_FRAME);
       expect(tail.every((b) => b === 0)).toBe(true);
     }
 
@@ -177,7 +179,9 @@ describe("logical 8 KiB sector mapping", () => {
       for (let g = 0; g < groups; g++) {
         flat.set(all[stem * groups + g]!.subarray(GROUP_HEADER_BYTES), g * (GROUP_BYTES - GROUP_HEADER_BYTES));
       }
-      expect(Array.from(flat.subarray(0, song.frames * 6))).toEqual(Array.from(song.stems[stem]!.pcm24));
+      expect(Array.from(flat.subarray(0, song.frames * BYTES_PER_STEM_FRAME))).toEqual(
+        Array.from(stemPcm16(song.stems[stem]!)),
+      );
     }
   });
 });
