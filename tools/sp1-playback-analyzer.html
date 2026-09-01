@@ -195,7 +195,7 @@ let samples=[], rawText='', marks=[], port=null, reader=null, keep=false;
 
 /* ---------- parsing ---------- */
 const num=(s,k)=>{const m=s.match(new RegExp('\\b'+k+'=(-?\\d+)'));return m?+m[1]:null;};
-let pendingIO=null, buildTag=null, transport=null;
+let pendingIO=null, buildTag=null, transport=null, cpu=null, prio=null;
 
 function feedLine(line){
   line=line.trim(); if(!line) return;
@@ -209,12 +209,21 @@ function feedLine(line){
      as silence. */
   const lp=line.match(/LOOPER\b.*?\b(PLAY|STOP)\b/);
   if(lp) transport=lp[1];
+  /* st44 splits main() into control work and the act of printing, and states
+     the scheduling the capture was taken under. Both are latched per sample so
+     a log can never be read against the wrong assumptions. */
+  if(line.startsWith('CPU')){
+    cpu={aud:num(line,'aud'),str:num(line,'str'),midi:num(line,'midi'),
+         main:num(line,'main'),diag:num(line,'diag')};
+    const pm=line.match(/prio=(\d+)\/(\d+)\/(\d+)\/(\d+)/);
+    if(pm) prio={aud:+pm[1],str:+pm[2],main:+pm[3],midi:+pm[4]};
+  }
   if(line.includes('STEMIO')){
     pendingIO={t:Date.now(),
       rdby:num(line,'rdby'),rdc:num(line,'rdc'),rdus:num(line,'rdus'),
       rdusmx:num(line,'rdusmx'),rduswin:num(line,'rduswin'),rate:num(line,'rate'),
       sil:num(line,'sil'),und:num(line,'und'),corr:num(line,'corr'),
-      reloadfail:num(line,'reloadfail'),rd:null,transport};
+      reloadfail:num(line,'reloadfail'),rd:null,transport,cpu,prio};
     samples.push(pendingIO);
   } else if(line.includes('STEMRD') && pendingIO && !pendingIO.rd){
     /* st42 made this a per-read AVERAGE over the print window (n= reads,
@@ -233,7 +242,7 @@ function feedLine(line){
   }
 }
 function parseAll(text){
-  samples=[];marks=[];pendingIO=null;buildTag=null;transport=null;
+  samples=[];marks=[];pendingIO=null;buildTag=null;transport=null;cpu=null;prio=null;
   for(const l of text.split(/\r?\n/)) feedLine(l);
 }
 function deltas(){
@@ -397,13 +406,35 @@ function verdict(d){
                })()}`
             : ` across ${fmt(clk)} clock pulses (build st41 and earlier cannot split it further).`}</p>`;
     })();
+    /* WHO HAS THE CPU. From st44 the capture states the scheduling it was
+       taken under and how much of main() was the act of printing, so the
+       "is the streamer starved or is the bus slow" question is answered on
+       the page instead of by hand. */
+    const budget=(()=>{
+      const L=lastSample(); if(!L||!L.cpu||L.cpu.str==null) return '';
+      const c=L.cpu, tot=(c.aud||0)+(c.str||0)+(c.midi||0)+(c.main||0);
+      const p=L.prio;
+      const inv=p&&p.str>p.main;
+      const real=(c.main!=null&&c.diag!=null)?(c.main-c.diag):null;
+      return `<p><strong>CPU budget.</strong> audio <code>${c.aud}%</code> · streamer
+        <code>${c.str}%</code> · main <code>${c.main}%</code>${c.diag!=null
+          ? ` (of which <code>${c.diag}%</code> is printing this log, leaving <code>${real}%</code> of
+             real control work)` : ''} · midi <code>${c.midi}%</code> — <strong>${tot}% used</strong>.
+        ${tot>=95
+          ? `The CPU is saturated, so the streamer cannot simply read more: every extra point it needs
+             has to come from somewhere else.`
+          : `There is CPU headroom, so a shortfall here is not contention.`}
+        ${p?` Priorities audio/streamer/main/midi = <code>${p.aud}/${p.str}/${p.main}/${p.midi}</code>${
+          inv?` — <strong>the streamer sits below control work</strong>, so an ADC read or a print can
+               interrupt a sector read anywhere in it.`:'.'}`:''}</p>`;
+    })();
     return {cls:'bad',tag:'starvation',h:`${fmt(sil)} frames silenced — ${silMs.toFixed(0)} ms`,
     b:[`The streamer could not keep the audio thread fed, across ${fmt(und)} underrun episode${und===1?'':'s'}.
         The playhead freezes rather than dropping frames.`,
        shape,
        `Worst fetch ${fmt(worst)} µs against a ${SPAN_US} µs span budget (batched R=2 should be near
         ${MODEL_R2_US} µs).${minRate!==null?` Lowest sustained rate ${fmt(minRate)} B/s against ${fmt(NEED_BPS)} required.`:''}`,
-       cap,markNote,psNote]};
+       cap,budget,markNote,psNote]};
   }
   if(minRate!==null&&minRate<NEED_BPS) return {cls:'warn',tag:'under rate, no silence yet',
     h:`Sustained read dipped to ${fmt(minRate)} B/s`,

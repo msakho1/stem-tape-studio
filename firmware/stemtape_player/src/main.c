@@ -157,11 +157,40 @@
 #define ST_RC_SWEEP_REPS 24u
 
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st43-VOLCAL"
+#define ST_BUILD_TAG "st44-VOLCAL"
 #else
-#define ST_BUILD_TAG "st43"
+#define ST_BUILD_TAG "st44"
 #endif
 #include "st_track_hold.h"
+
+/*
+ * THE FOUR THREAD PRIORITIES, IN ONE PLACE, because the last time they were
+ * spread across three k_thread_create() call sites one of them went stale
+ * against a comment and cost the streamer half its CPU (see main()'s own note
+ * where ST_PRIO_MAIN is applied). Lower number = higher priority.
+ *
+ *   AUDIO     outranks everything. It has a hard 5.333 ms deadline.
+ *   STREAMER  level with control work, and yields to it once per read.
+ *   MAIN      control loop, LEDs, watchdog feed. Self-throttled at 8 ms.
+ *   MIDI      below all audio-critical work, as specified.
+ *
+ * Reported live on the CPU= diagnostic line as prio=, so a capture always
+ * says which scheduling it was taken under.
+ */
+#define ST_PRIO_AUDIO     0
+#define ST_PRIO_STREAMER  1
+#define ST_PRIO_MAIN      1
+#define ST_PRIO_MIDI      6
+_Static_assert(ST_PRIO_AUDIO < ST_PRIO_STREAMER && ST_PRIO_AUDIO < ST_PRIO_MAIN,
+		"audio must outrank the streamer and the control loop");
+_Static_assert(ST_PRIO_MIDI > ST_PRIO_AUDIO && ST_PRIO_MIDI > ST_PRIO_STREAMER,
+		"MIDI must sit below all audio-critical work");
+_Static_assert(ST_PRIO_STREAMER <= ST_PRIO_MAIN,
+		"the streamer must not sit below non-time-critical control work");
+
+/* The diagnostic print interval in force right now, in ms -- the denominator
+ * the CPU line's diag= percentage is taken over. Set by main(). */
+static volatile uint32_t g_diag_window_ms = 500u;
 #include "st_ladder.h"
 #include "st_vol_ladder.h"
 #include "st_latency.h"
@@ -1121,6 +1150,21 @@ static volatile uint32_t g_stored_glitch_cnt;    /* diag: wfail advance-anyway c
                                                   * what previous crackle hunts were missing. */
 static volatile uint32_t g_i2s_wfail_cnt;        /* diag: I2S write failures (audio-path exoneration) */
 static volatile uint32_t g_audio_us_max;         /* diag: worst looper_audio_block exec time, us (DWT, session) */
+/*
+ * THE COST OF WATCHING, SEPARATED FROM THE COST OF WORKING.
+ *
+ * main() measured 8% of the CPU during four-stem playback and the streamer
+ * needs about 3 of those points. Some unknown share of the 8 is the diagnostic
+ * block itself -- seven printk lines over USB CDC, twice a second -- which
+ * exists only while somebody is attached and is not part of what the device
+ * does. Optimising main() without knowing the split would mean optimising the
+ * act of measuring.
+ *
+ * DWT cycles spent inside controls_diag() + its feed_wdt(), accumulated by
+ * main() and read-and-cleared by the NEXT print. So diag= reports the PREVIOUS
+ * window's cost, which is the only order that does not have the print trying
+ * to include itself. */
+static volatile uint32_t g_diag_cyc_win;
 static volatile int32_t  g_play_lowat = 0x7FFFFFFF; /* diag: window MIN play-ring margin, samples */
 static volatile uint32_t g_rec_hiwat;            /* diag: window MAX rec-ring fill, samples */
 static volatile uint8_t  g_extcsd_dump[9];       /* diag: EXT_CSD[167,166,231,502,503,198,246,192,175] */
@@ -4197,7 +4241,13 @@ static void streamer_start(void)
 	g_streamer_started = 1;
 	k_thread_create(&streamer_tcb, streamer_stack, K_THREAD_STACK_SIZEOF(streamer_stack),
 			streamer_thread, NULL, NULL, NULL,
-			K_PRIO_PREEMPT(5), 0, K_NO_WAIT);
+			/* PREEMPT(1): the same priority as main(), NOT above it --
+			 * see streamer_breathe() for the whole argument. Audio at
+			 * PREEMPT(0) still preempts this instantly and anywhere;
+			 * control work now waits for a yield point instead of
+			 * landing in the middle of a sector read. Was (5), under
+			 * main(1), which cost the streamer half its wall time. */
+			K_PRIO_PREEMPT(ST_PRIO_STREAMER), 0, K_NO_WAIT);
 }
 static volatile uint8_t g_usb_up;    /* usb_audio_start() completed (gates xfer polling) */
 
@@ -5699,24 +5749,54 @@ _Static_assert((ST_PL_STEMS & (ST_PL_STEMS - 1u)) == 0u,
 		"the refill rotation masks the stem index; ST_PL_STEMS must be a power of two");
 
 /*
- * ONE 0.5 ms BREATHER PER 64 UNITS OF PRODUCER WORK.
+ * HANDING THE CPU BACK, IN TWO FORMS, FOR TWO DIFFERENT REASONS.
  *
- * The streamer runs at PREEMPT(5) and outranks main() at (8), which is the
- * watchdog feeder, so a stretch of back-to-back work that never sleeps can
- * starve the feeder into a reset. This is the same guarantee the pre-rounds
- * code had -- but counted per READ instead of per PASS, because a pass no
- * longer means one read. With batched rounds a pass can now issue up to
- * ROUNDS x STEMS reads, and a per-pass counter would silently stretch the
- * worst case between breathers by that factor: at the measured 3790 us read
- * that is the difference between one yield per ~243 ms and one per ~3.8 s,
- * and the watchdog window is 4 s.
+ * ---- WHY THE PRIORITIES CHANGED (st44) ----------------------------------
  *
- * Cost is unchanged at well under 1%.
+ * main() ran at PREEMPT(1) and the streamer at PREEMPT(5), so every ladder
+ * read, LED pass and diagnostic print interrupted a sector read wherever it
+ * happened to land. Hardware showed the cost: a read that takes 1829 us
+ * unpreempted (p50) averaged 3750 us, and the streamer -- inside a read 98.6%
+ * of the wall clock -- held the CPU for only 49% of it.
+ *
+ * The comment that justified PREEMPT(1) said "preempting the streamer is
+ * harmless NOW: the rings ride 341 ms". That is the TAPE LOOPER's ring.
+ * Stem Tape's is G-R = 4 groups = 28.3 ms, twelve times shallower, and the
+ * justification did not survive the format change with it.
+ *
+ * EQUAL PRIORITY, NOT INVERSION. Both now run at PREEMPT(1) and the streamer
+ * yields once per read. That gives the property asked for -- control work
+ * cannot interrupt a sector read midway -- without the waste a demotion would
+ * cost: to let a strictly LOWER-priority main run, the streamer would have to
+ * k_sleep() for a fixed span whether main needed it or not, and main's own
+ * 0.64 ms of work per 8 ms pass would have to be paid for in dead time on top
+ * of itself. k_yield() costs nothing when nobody is waiting.
+ *
+ * Audio stays at PREEMPT(0) and still preempts both, instantly, anywhere.
+ * MIDI stays at PREEMPT(6), below all audio-critical work.
+ *
+ * ---- THE TWO CALLS ------------------------------------------------------
+ *
+ * yield  once per read. Bounds how long main() can wait to run at one read
+ *        (p50 1.8 ms, worst 25 ms) -- far inside its own 8 ms k_msleep()
+ *        cadence, and four orders of magnitude inside the 4 s watchdog.
+ *        Reschedules only to READY threads at PREEMPT(1) or above, so it is
+ *        free when main() is in its sleep, which is 92% of the time.
+ *
+ * sleep  a 0.5 ms breather per 64 reads. k_yield() cannot reach anything
+ *        BELOW PREEMPT(1) -- MIDI at (6) and the idle thread -- so a real
+ *        sleep still has to happen periodically. Counted per read rather
+ *        than per pass because a pass now issues up to ROUNDS x STEMS reads:
+ *        a per-pass counter would stretch the worst gap by that factor, and
+ *        at 3750 us a read that is one sleep per ~3.8 s against a 4 s
+ *        watchdog. Well under 1%.
  */
 static void streamer_breathe(void)
 {
 	static uint32_t units;
 
+	/* Free when main() is sleeping; a scheduling point when it is not. */
+	k_yield();
 	if ((++units & 0x3Fu) == 0u) {
 		k_usleep(500);
 	}
@@ -6756,7 +6836,7 @@ static void audio_init(void)
 	k_msleep(5);
 	k_thread_create(&audio_tcb, audio_stack, K_THREAD_STACK_SIZEOF(audio_stack),
 			audio_thread, NULL, NULL, NULL,
-			K_PRIO_PREEMPT(0), 0, K_NO_WAIT);
+			K_PRIO_PREEMPT(ST_PRIO_AUDIO), 0, K_NO_WAIT);
 	/* PREEMPT(0), not COOP(7): still outranks every other app thread (main 8,
 	 * streamer 5, MIDI 6 — none can preempt it), but the COOP USB/UDC stack
 	 * threads can now interrupt the mixer for their ~100 us ISO service.
@@ -6780,7 +6860,7 @@ static void audio_init(void)
 	midi_timer_init();
 	k_thread_create(&midi_tcb, midi_stack, K_THREAD_STACK_SIZEOF(midi_stack),
 			midi_thread, NULL, NULL, NULL,
-			K_PRIO_PREEMPT(6), 0, K_NO_WAIT);
+			K_PRIO_PREEMPT(ST_PRIO_MIDI), 0, K_NO_WAIT);
 #endif
 
 	/* Wait until the audio thread has the I2S stream running (BCLK live), then
@@ -7064,11 +7144,26 @@ static void controls_diag(void)
 		if (!k_thread_runtime_stats_all_get(&rs))            all = rs.execution_cycles;
 		uint64_t d_all = all - l_all;
 		if (d_all) {
-			printk("CPU aud=%u%% str=%u%% midi=%u%% main=%u%%\n",
+			/* diag= is main's own share spent PRINTING, as a
+			 * percentage of the window it was measured over -- so
+			 * main-minus-diag is the real control workload, and the
+			 * question "is the deficit partly the act of measuring"
+			 * is answered by one number instead of inferred.
+			 *
+			 * prio= makes the capture self-describing: audio /
+			 * streamer / main / midi, so a log can never be read
+			 * against the wrong scheduling assumption again. */
+			uint32_t dcyc = g_diag_cyc_win;
+			uint32_t dwin_us = (uint32_t)(g_diag_window_ms * 1000);
+
+			g_diag_cyc_win = 0u;
+			printk("CPU aud=%u%% str=%u%% midi=%u%% main=%u%% diag=%u%% prio=%d/%d/%d/%d\n",
 			       (unsigned)((aud - l_aud) * 100u / d_all),
 			       (unsigned)((str - l_str) * 100u / d_all),
 			       (unsigned)((mid - l_mid) * 100u / d_all),
-			       (unsigned)((mai - l_mai) * 100u / d_all));
+			       (unsigned)((mai - l_mai) * 100u / d_all),
+			       (unsigned)(dwin_us ? ((dcyc / 64u) * 100u) / dwin_us : 0u),
+			       ST_PRIO_AUDIO, ST_PRIO_STREAMER, ST_PRIO_MAIN, ST_PRIO_MIDI);
 		}
 		l_aud = aud; l_str = str; l_mid = mid; l_mai = mai; l_all = all;
 	}
@@ -7097,6 +7192,12 @@ static void controls_diag(void)
 		(void)k_thread_stack_space_get(&streamer_tcb, &un_str);
 		(void)k_thread_stack_space_get(&midi_tcb, &un_mid);
 		(void)k_thread_stack_space_get(k_current_get(), &un_mai);
+		/* NOT WHILE PLAYING. Unused-stack watermarks are a development
+		 * metric that moves once a boot, and this is the one line of the
+		 * block that no diagnosis needs at playback time -- so it is the
+		 * one line that can be dropped for free when the CPU is the
+		 * scarce resource. Everything the analyzer parses stays. */
+		if (!g_playing)
 		printk("STACK unused aud=%u/%u str=%u/%u midi=%u/%u main=%u/%u\n",
 		       (unsigned)un_aud, (unsigned)K_THREAD_STACK_SIZEOF(audio_stack),
 		       (unsigned)un_str, (unsigned)K_THREAD_STACK_SIZEOF(streamer_stack),
@@ -8252,17 +8353,32 @@ int main(void)
 	CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
 	DWT->CYCCNT = 0;
 	DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
-	/* Main runs at PREEMPT(1): BELOW the audio engine (0), ABOVE the streamer
-	 * (5) and MIDI (6). History: main once defaulted to 0 and its blocking
-	 * ladder-ADC reads preempting the streamer caused rec overflows, so a
-	 * rescue round demoted it to (8) — but that turned "streamer busy" into
-	 * "lights, buttons and the WATCHDOG FEED all crawl", and a 4 s busy
-	 * stretch (easy with 4 independent tracks + record at 48 kHz) became a
-	 * watchdog reset: the field-reported freeze/crash (rr=2, lights slow).
-	 * Preempting the streamer is harmless NOW: the rings ride 341 ms and
-	 * every bus wait is fail-safe/time-bounded — a few ms of ladder reads or
-	 * CDC prints cannot overflow anything. Responsiveness is structural. */
-	k_thread_priority_set(k_current_get(), K_PRIO_PREEMPT(1));
+	/* Main runs at PREEMPT(1): BELOW the audio engine (0), LEVEL WITH the
+	 * streamer, ABOVE MIDI (6).
+	 *
+	 * History, kept because both previous settings failed in a way this one
+	 * has to avoid. main once defaulted to 0 and its blocking ladder-ADC
+	 * reads preempting the streamer caused rec overflows; a rescue round
+	 * demoted it to (8), which turned "streamer busy" into "lights, buttons
+	 * and the WATCHDOG FEED all crawl" and made a 4 s busy stretch a
+	 * watchdog reset -- the field-reported freeze (rr=2, lights slow). It
+	 * was then raised to (1), above the streamer at (5).
+	 *
+	 * WHAT WENT STALE. The comment justifying (1) said "preempting the
+	 * streamer is harmless NOW: the rings ride 341 ms". That is the Tape
+	 * Looper's 16384-sample ring. Stem Tape's read-ahead is G-R = 4 groups
+	 * = 28.3 ms, twelve times shallower, and the justification did not
+	 * survive the format change. Hardware measured the consequence: reads
+	 * that take 1829 us unpreempted averaged 3750 us, and the streamer held
+	 * the CPU 49% of a wall clock it was busy for 98.6% of.
+	 *
+	 * SO: LEVEL, not inverted. The streamer no longer sits below control
+	 * work, and control work no longer sits below the streamer -- which is
+	 * what would re-create the (8) watchdog failure. main() keeps its own
+	 * 8 ms k_msleep() cadence and now waits at most one sector read to be
+	 * scheduled, because the streamer yields after every read. Neither
+	 * thread can starve the other, and audio outranks both. */
+	k_thread_priority_set(k_current_get(), K_PRIO_PREEMPT(ST_PRIO_MAIN));
 
 	const struct device *wdt = DEVICE_DT_GET(WDT_NODE);
 
@@ -8586,10 +8702,36 @@ int main(void)
 		 * exists only because the diag print itself can be slow. */
 		(void)last_diag;
 #else
-		if (now - last_diag >= 500) {
+		/*
+		 * PRODUCTION-STYLE RATE WHILE PLAYING.
+		 *
+		 * Seven printk lines over USB CDC twice a second is a monitoring
+		 * rate, not a shipping one, and playback is exactly when the CPU
+		 * cannot spare it: audio 41% + streamer 49% + main 8% measured at
+		 * 98% used, with the streamer about 3 points short of real time.
+		 * Every one of those points spent printing is a point the reader
+		 * does not get.
+		 *
+		 * Four times slower while the transport runs. That is still 30
+		 * samples a minute -- ample for the analyzer, which differences
+		 * consecutive samples and needs density, not rate -- and it cuts
+		 * the CDC work per second by the same factor. Stopped, the old
+		 * 500 ms cadence stays: nothing is competing for the CPU then,
+		 * and that is when a person is reading the console live.
+		 *
+		 * The cost that remains is MEASURED rather than assumed: the DWT
+		 * span below feeds diag= on the CPU line, so the next capture
+		 * says how much of main() is control work and how much is the
+		 * act of watching.
+		 */
+		g_diag_window_ms = g_playing ? 2000u : 500u;
+		if (now - last_diag >= (int64_t)g_diag_window_ms) {
+			uint32_t d0 = DWT->CYCCNT;
+
 			last_diag = now;
 			controls_diag();
 			feed_wdt();      /* the diag print path can be slow; never starve the WDT */
+			g_diag_cyc_win += DWT->CYCCNT - d0;
 		}
 #endif
 
