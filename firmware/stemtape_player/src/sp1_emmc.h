@@ -89,6 +89,13 @@ extern volatile uint32_t emmc_dbg_rd_hunt_clks;      /* clock pulses the hunts c
  * loop. */
 extern volatile uint32_t emmc_dbg_rd_hunt_spin_us;   /* of hunt_us, spent issuing clock pulses */
 extern volatile uint32_t emmc_dbg_rd_hunt_gap_us;    /* of hunt_us, spent not issuing any */
+/* WORST SINGLE CLOCK PULSE of this read, in nanoseconds -- the number that
+ * separates the last two candidates once spin_us is known. spin_us/hunt_clks is
+ * an AVERAGE, and a burst preempted in its middle averages to the same figure
+ * as a loop that is uniformly slow. This is per-burst cycles over that burst's
+ * own pulse count, maximised, so: a uniformly slow loop gives max ~= average;
+ * one descheduling gives exactly one enormous pulse and max >> average. */
+extern volatile uint32_t emmc_dbg_rd_pulse_max_ns;
 extern volatile uint32_t emmc_dbg_hpi_fires;         /* HPI aborts issued (maintenance ops cut short) */
 
 

@@ -157,9 +157,9 @@
 #define ST_RC_SWEEP_REPS 24u
 
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st42-VOLCAL"
+#define ST_BUILD_TAG "st43-VOLCAL"
 #else
-#define ST_BUILD_TAG "st42"
+#define ST_BUILD_TAG "st43"
 #endif
 #include "st_track_hold.h"
 #include "st_ladder.h"
@@ -1747,6 +1747,7 @@ static atomic_t g_stem_diag_ph_spin_us;    /* of the hunts, spent issuing clock 
 static atomic_t g_stem_diag_ph_dma_us;     /* SPIM payload transfer */
 static atomic_t g_stem_diag_ph_crc_us;     /* copy-out + CRC16 */
 static atomic_t g_stem_diag_ph_clks;       /* clock pulses the hunts issued */
+static atomic_t g_stem_diag_ph_pulse_ns;   /* worst single clock pulse in the window, ns (max, not sum) */
 /*
  * FRAMES SILENCED BY UNDERRUNS, which is the number that says whether a
  * listener can hear anything. g_stem_underrun_count above records episodes --
@@ -5686,6 +5687,41 @@ static uint32_t stem_prime_read_ahead(void)
 }
 #endif /* SP1_XFER_ENABLE */
 
+/* ROUNDS PER PASS. A round that finds nothing to do ends the loop, so this is
+ * a livelock guard rather than a tuning knob: refilling one stem's ring from
+ * completely empty takes SLOTS/R batches, and past that a round provably finds
+ * every slot resident and returns nothing. */
+#define ST_STEM_REFILL_ROUNDS ((ST_STEM_MBOX_SLOTS / ST_PL_REFILL_GROUPS) + 1u)
+
+/* The rotating sweep indexes stems with a mask, which is only the same thing as
+ * a modulo while the count is a power of two. */
+_Static_assert((ST_PL_STEMS & (ST_PL_STEMS - 1u)) == 0u,
+		"the refill rotation masks the stem index; ST_PL_STEMS must be a power of two");
+
+/*
+ * ONE 0.5 ms BREATHER PER 64 UNITS OF PRODUCER WORK.
+ *
+ * The streamer runs at PREEMPT(5) and outranks main() at (8), which is the
+ * watchdog feeder, so a stretch of back-to-back work that never sleeps can
+ * starve the feeder into a reset. This is the same guarantee the pre-rounds
+ * code had -- but counted per READ instead of per PASS, because a pass no
+ * longer means one read. With batched rounds a pass can now issue up to
+ * ROUNDS x STEMS reads, and a per-pass counter would silently stretch the
+ * worst case between breathers by that factor: at the measured 3790 us read
+ * that is the difference between one yield per ~243 ms and one per ~3.8 s,
+ * and the watchdog window is 4 s.
+ *
+ * Cost is unchanged at well under 1%.
+ */
+static void streamer_breathe(void)
+{
+	static uint32_t units;
+
+	if ((++units & 0x3Fu) == 0u) {
+		k_usleep(500);
+	}
+}
+
 static void streamer_thread(void *a, void *b, void *c)
 {
 	ARG_UNUSED(a); ARG_UNUSED(b); ARG_UNUSED(c);
@@ -6181,18 +6217,95 @@ static void streamer_thread(void *a, void *b, void *c)
 			 * pass and FEWER reads per span: a batch of R groups
 			 * carries R spans of that stem, so the four stems
 			 * between them cost 4/R reads per span instead of 1 --
-			 * 2 reads at R=2, moving 8 blocks each, 3834 us against
-			 * v1.1's 3178. 92% busy against 83%, which is an
-			 * operating point this device has already run with zero
-			 * silence frames.
+			 * 2 reads at R=2, moving 8 blocks each.
+			 *
+			 * THAT COST ESTIMATE WAS WRONG, and hardware said so.
+			 * It predicted 3834 us per read and "92% busy against
+			 * v1.1's 83%, an operating point this device has already
+			 * run with zero silence frames". The measured average is
+			 * 3790 us per read -- close -- but the arithmetic built
+			 * on it was not: 4096 bytes per read against the
+			 * 1,152,000 B/s four stems demand needs an average under
+			 * 3556 us, so R=2 is 6.6% SHORT with the streamer already
+			 * at 100% duty, not 92% busy with margin. The run that
+			 * proved it returned rate=1080852Bps, sil=344507 frames
+			 * across und=3762 episodes.
+			 *
+			 * The deficit is not in this scheduling. 68% of every
+			 * read is the bit-banged start-bit hunt, issuing about 47
+			 * clock pulses per block for ~288 us -- roughly 6 us per
+			 * GPIO toggle, which no register write plus register read
+			 * can cost. st42 splits that window (STEMRD spin= against
+			 * clk=) to say whether it is the loop or this thread not
+			 * being scheduled. Until that lands, no depth, layout or
+			 * batch size should be chosen from the numbers above.
 			 *
 			 * What it buys is that a stem's address is now
 			 * independent of the others', which is the whole
 			 * precondition for reversing one of them.
+			 *
+			 * ---- TWO FIXES LIFTED FROM THE TAPE LOOPER'S OWN
+			 * ---- STREAMER, WHICH HIT THIS EXACTLY (src/main.c)
+			 *
+			 * That firmware serves four per-track rings from the same
+			 * card and its comments record both pathologies by name,
+			 * with the measurements that found them:
+			 *
+			 *   "the track that sorted LAST got locked out entirely
+			 *    whenever the round kept terminating early, and one
+			 *    track would sit at ZERO delivered blocks for whole
+			 *    takes while its siblings stayed fat"   (main.c:2949)
+			 *
+			 *   "one-chunk-per-pass measured out at only ~18 passes/s,
+			 *    pinning refill throughput to exactly consumption with
+			 *    zero surplus to rebuild margins"       (main.c:2963)
+			 *
+			 * Both were reintroduced here. A fixed `for (stem = 0..3)`
+			 * refills stem 3 a whole read AFTER stem 0 on every pass --
+			 * at the measured 3790 us average read that is 11.4 ms of
+			 * standing phase lag against a G-R = 4 group (28.3 ms)
+			 * runway, and the hardware shows it: STEMPS came back
+			 * miss=31,73,285,2077, monotone in the stem index. A shared
+			 * stall cannot produce that shape, because the consumer's
+			 * acquire loop BREAKS at the first missing stem and would
+			 * therefore pile every count on stem 0.
+			 *
+			 * So, exactly as the Tape Looper does it:
+			 *
+			 *   ROTATION -- the sweep starts at a different stem each
+			 *   round, so no stem is permanently last in line and
+			 *   recovery after a stall is not serialised in the same
+			 *   order every time.
+			 *
+			 *   ROUNDS -- the sweep repeats while it is still finding
+			 *   work, instead of falling through to the rest of the
+			 *   pass after one batch per stem. This is what lets a pass
+			 *   rebuild surplus after a stall rather than delivering
+			 *   exactly one batch and starting over.
+			 *
+			 * NEITHER ADDS THROUGHPUT, and neither is the fix for the
+			 * measured 6.6% read-rate deficit -- that is the start-bit
+			 * hunt, which st42 instruments. These remove a structural
+			 * unfairness that would otherwise become severe the moment
+			 * one stem's head genuinely diverges under reverse, and
+			 * they cost one uint32_t.
 			 */
-			uint32_t stem;
+			uint32_t round;
+			bool round_work;
+			/* Rotating first-served stem. The ONLY state either fix
+			 * adds. */
+			static uint32_t s_refill_rr;
 
-			for (stem = 0; stem < ST_PL_STEMS; stem++) {
+			round = 0u;
+			do {
+			uint32_t stem_k;
+
+			round_work = false;
+			s_refill_rr = (s_refill_rr + 1u) & (ST_PL_STEMS - 1u);
+
+			for (stem_k = 0; stem_k < ST_PL_STEMS; stem_k++) {
+				const uint32_t stem =
+					(s_refill_rr + stem_k) & (ST_PL_STEMS - 1u);
 				uint32_t first, target_slot, n, i;
 				uint32_t read_t0, read_us;
 				bool read_ok;
@@ -6245,6 +6358,14 @@ static void streamer_thread(void *a, void *b, void *c)
 						  (atomic_val_t)emmc_dbg_rd_crc_us);
 				(void)atomic_add(&g_stem_diag_ph_clks,
 						  (atomic_val_t)emmc_dbg_rd_hunt_clks);
+				/* A MAX, not a sum: one preempted burst anywhere
+				 * in the window is the whole finding, and summing
+				 * would bury it under hundreds of healthy reads. */
+				if ((uint32_t)emmc_dbg_rd_pulse_max_ns >
+				    (uint32_t)atomic_get(&g_stem_diag_ph_pulse_ns)) {
+					atomic_set(&g_stem_diag_ph_pulse_ns,
+						   (atomic_val_t)emmc_dbg_rd_pulse_max_ns);
+				}
 
 				if (read_ok) {
 					/* PUBLISHED ONE GROUP AT A TIME, after
@@ -6263,6 +6384,7 @@ static void streamer_thread(void *a, void *b, void *c)
 							st_stem_mbox_slot_of(first + i));
 					}
 					work = true;
+					round_work = true;
 				} else {
 					/* A failed or misaddressed batch publishes
 					 * NOTHING, so the slots stay stale and
@@ -6274,8 +6396,26 @@ static void streamer_thread(void *a, void *b, void *c)
 					 * lands here rather than being played. */
 					(void)atomic_add(&g_stem_corrupt_count, 1);
 					(void)atomic_add(&g_stem_badhdr[stem], 1);
+					/* A failed read means the card is busy or
+					 * the batch was misaddressed. Neither is
+					 * improved by hammering it again inside
+					 * this pass: end the round and let the
+					 * outer loop come back in a few ms, which
+					 * is what the pre-rounds code did by
+					 * construction. */
+					round_work = false;
+					break;
 				}
+				/* The watchdog guarantee, per READ rather than per
+				 * pass -- see streamer_breathe(). */
+				streamer_breathe();
 			}
+			/* Stop the moment a whole round finds nothing to do (the
+			 * steady-state case, and the common one). The cap is a
+			 * livelock guard only: refilling one stem's ring from
+			 * completely empty takes SLOTS/R batches, so beyond that
+			 * there is provably nothing left for a round to find. */
+			} while (round_work && ++round < ST_STEM_REFILL_ROUNDS);
 		}
 #endif
 
@@ -6360,11 +6500,11 @@ static void streamer_thread(void *a, void *b, void *c)
 			/* ANTI-STARVATION: the streamer at PREEMPT(5) outranks main(8),
 			 * the WDT feeder. A long stretch of back-to-back work (or any
 			 * future livelock in this loop) must NEVER be able to hold main
-			 * off the CPU for the 4 s watchdog window — one 0.5 ms breather
-			 * per 64 working passes costs <1% and guarantees it. */
-			static uint32_t workpass;
-			if ((++workpass & 0x3Fu) == 0u)
-				k_usleep(500);
+			 * off the CPU for the 4 s watchdog window. Same guarantee as
+			 * before, now counted per unit of work rather than per pass --
+			 * see streamer_breathe(), which the batched refill rounds also
+			 * call, so the two share one budget. */
+			streamer_breathe();
 		}
 	}
 }
@@ -7062,10 +7202,24 @@ static void controls_diag(void)
 	 *   hunt= the bit-banged start-bit search, all blocks, and
 	 *   spin= the part of it actually issuing clock pulses. hunt-spin is
 	 *         time this thread held the bus and clocked nothing -- the
-	 *         k_usleep long-stall yield, or preemption. clk= is the pulse
-	 *         count, so spin/clk is the true cost of one GPIO toggle and
-	 *         settles "the card makes us wait" against "our loop is slow"
-	 *         against "we were not running", which hunt= alone cannot.
+	 *         k_usleep long-stall yield, or preemption between bursts.
+	 *   clk=  the pulse count, and pulseavg= = spin/clk is the average cost
+	 *         of one GPIO toggle. pulsemax= is the worst SINGLE pulse in
+	 *         the window. Together these three settle the 30x anomaly:
+	 *
+	 *           hunt >> spin            -> not clocking. Descheduled
+	 *                                      between bursts, or yielding.
+	 *           pulseavg ~= pulsemax    -> the loop itself is slow, and
+	 *             and both large           uniformly so. A bus/GPIO cost.
+	 *           pulsemax >> pulseavg    -> preemption INSIDE the burst.
+	 *                                      One pulse ate the whole window.
+	 *           pulseavg ~ 300 ns       -> the loop is fine and the hunt is
+	 *             and hunt ~= spin         genuinely the card making us
+	 *                                      clock. Then clk= is the story.
+	 *
+	 *         A pulse is a GPIO write, three nops and a GPIO read: at
+	 *         64 MHz that is roughly 300-400 ns. The measured hunt implies
+	 *         ~6000 ns, which is why this split exists.
 	 *   dma=  SPIM3 hardware transfer: 514 bytes per block at 32 MHz is
 	 *         ~129 us and cannot go lower on a 1-bit bus.
 	 *   crc=  copy-out + CRC16 verify, pure CPU, overlapped into the DMA
@@ -7079,15 +7233,22 @@ static void controls_diag(void)
 		uint32_t phdma = (uint32_t)atomic_set(&g_stem_diag_ph_dma_us, 0);
 		uint32_t phcrc = (uint32_t)atomic_set(&g_stem_diag_ph_crc_us, 0);
 		uint32_t phclk = (uint32_t)atomic_set(&g_stem_diag_ph_clks, 0);
+		uint32_t phpk = (uint32_t)atomic_set(&g_stem_diag_ph_pulse_ns, 0);
 		/* n=0 means no stem read happened in this window at all --
 		 * stopped, or between songs. Print it as such rather than
 		 * dividing by zero or repeating a stale average. */
 		uint32_t den = phn ? phn : 1u;
 
-		printk("STEMRD n=%u avg=%uus hunt=%uus spin=%uus dma=%uus crc=%uus clk=%u\n",
+		printk("STEMRD n=%u avg=%uus hunt=%uus spin=%uus dma=%uus crc=%uus clk=%u "
+		       "pulseavg=%uns pulsemax=%uns\n",
 		       (unsigned)phn, (unsigned)(phus / den), (unsigned)(phhunt / den),
 		       (unsigned)(phspin / den), (unsigned)(phdma / den),
-		       (unsigned)(phcrc / den), (unsigned)(phclk / den));
+		       (unsigned)(phcrc / den), (unsigned)(phclk / den),
+		       /* spin is us and clk is a count, so ns per pulse is
+		        * spin*1000/clk. Guarded: a window with no pulses at
+		        * all reports 0 rather than dividing by zero. */
+		       (unsigned)(phclk ? (uint32_t)(((uint64_t)phspin * 1000ull) / phclk) : 0u),
+		       (unsigned)phpk);
 	}
 	/* SUSTAINED REAL-TIME FEASIBILITY, stated in the terms the acceptance
 	 * test is judged in, so the physical run answers the question directly

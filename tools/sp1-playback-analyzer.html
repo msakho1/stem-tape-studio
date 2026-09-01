@@ -224,7 +224,8 @@ function feedLine(line){
     pendingIO.rd={n:num(line,'n'),avg:num(line,'avg'),
       hunt:num(line,'hunt'),spin:num(line,'spin'),
       dma:num(line,'dma'),crc:num(line,'crc'),
-      clk:num(line,'clk')??num(line,'huntclk')};
+      clk:num(line,'clk')??num(line,'huntclk'),
+      pavg:num(line,'pulseavg'),pmax:num(line,'pulsemax')};
   } else if(line.includes('STEMPS') && pendingIO && !pendingIO.ps){
     const four=(k)=>{const m=line.match(new RegExp('\\b'+k+'=(\\d+),(\\d+),(\\d+),(\\d+)'));
       return m?[+m[1],+m[2],+m[3],+m[4]]:null;};
@@ -360,7 +361,12 @@ function verdict(d){
       const hunt=Math.round(rr.reduce((s,r)=>s+r.hunt,0)/rr.length);
       const spin=rr[0].spin!=null?Math.round(rr.reduce((s,r)=>s+(r.spin||0),0)/rr.length):null;
       const clk=Math.round(rr.reduce((s,r)=>s+(r.clk||0),0)/rr.length);
-      const perPulse=(spin!==null&&clk>0)?(spin*1000/clk):null;
+      /* st43 reports these directly; on st42 derive the average and leave the
+         max unknown (it needs the per-burst measurement the firmware makes). */
+      const pavg=rr[0].pavg!=null?Math.round(rr.reduce((s,r)=>s+(r.pavg||0),0)/rr.length)
+                : ((spin!==null&&clk>0)?Math.round(spin*1000/clk):null);
+      const pmax=rr.reduce((m,r)=>Math.max(m,r.pmax??0),0)||null;
+      const perPulse=pavg;
       return `<p><strong>Where the time goes.</strong> A read moves ${fmt(R_BYTES)} bytes and must
         therefore average under <code>${fmt(ceil)} µs</code> to sustain ${fmt(NEED_BPS)} B/s at 100%
         duty. Measured average <code>${fmt(avg)} µs</code> — ${avg>ceil
@@ -369,13 +375,26 @@ function verdict(d){
           : `inside the ceiling, so the shortfall is duty cycle, not read cost`}.
         Of that, the start-bit hunt is <code>${fmt(hunt)} µs</code> (${(100*hunt/avg).toFixed(0)}%)${
           perPulse!==null
-            ? `, of which <code>${fmt(spin)} µs</code> was actually issuing its ${fmt(clk)} clock pulses —
-               <strong>${perPulse.toFixed(0)} ns per pulse</strong>. ${perPulse>500
-                 ? `A pulse is a GPIO write, three nops and a GPIO read, so this is far too slow to be the
-                    loop: the CPU is being taken away inside it.`
-                 : `That is the right cost for a GPIO write, three nops and a GPIO read, so the loop is
-                    fine — the other <code>${fmt(hunt-spin)} µs</code> of the hunt is time this thread
-                    held the bus and clocked nothing at all.`}`
+            ? `, of which <code>${fmt(spin)} µs</code> was actually issuing its ${fmt(clk)} clock pulses.
+               ${(()=>{
+                 /* A pulse is a GPIO write, three nops and a GPIO read: ~300-400 ns at 64 MHz.
+                    These four branches are the decision table the firmware header documents. */
+                 const gap=hunt-spin, notClocking=gap>spin;
+                 const pm=pmax!==null?`Worst single pulse <code>${fmt(pmax)} ns</code>.`:'';
+                 if(notClocking) return `<strong>${fmt(gap)} µs of the hunt issued no clock at all</strong>
+                   — this thread was not running, or was in the long-stall yield. The loop is not the
+                   problem; scheduling is. ${pm}`;
+                 if(pavg<=600) return `<strong>${pavg} ns per pulse — the loop is healthy.</strong> ${pm}
+                   The hunt is then genuinely the card making us clock, and <code>clk=${fmt(clk)}</code>
+                   is the story.`;
+                 if(pmax!==null&&pmax>pavg*4) return `Average <strong>${pavg} ns</strong> per pulse but the
+                   worst was <strong>${fmt(pmax)} ns</strong> — ${(pmax/pavg).toFixed(0)}× the mean.
+                   <strong>Preemption inside the burst</strong>: one pulse absorbed the window, which a
+                   uniformly slow loop cannot produce.`;
+                 return `<strong>${pavg} ns per pulse, uniformly</strong> (worst ${pmax!==null?fmt(pmax)+' ns':'n/a'})
+                   — far too slow for a GPIO write plus read, and consistent across bursts. This is a
+                   <strong>cost in the loop itself</strong>, not preemption.`;
+               })()}`
             : ` across ${fmt(clk)} clock pulses (build st41 and earlier cannot split it further).`}</p>`;
     })();
     return {cls:'bad',tag:'starvation',h:`${fmt(sil)} frames silenced — ${silMs.toFixed(0)} ms`,
@@ -587,23 +606,23 @@ $('#file').addEventListener('change',async e=>{
 const DEMO=`STEMTAPE BUILD st42
 LOOPER b=st42 48000Hz song=0 PLAY
 STEMIO rdby=8192 rdc=2 rdus=3520 rdusmx=3520 rduswin=3520 rate=1160000Bps sil=0 und=0 corr=0 reloadfail=0
-STEMRD n=2 avg=3520us hunt=1690us spin=1650us dma=352us crc=751us clk=4980
+STEMRD n=2 avg=3520us hunt=1690us spin=1650us dma=352us crc=751us clk=4980 pulseavg=331ns pulsemax=402ns
 STEMPS miss=0,0,0,0 bad=0,0,0,0
 LOOPER b=st42 48000Hz song=0 PLAY
 STEMIO rdby=1048576 rdc=256 rdus=3540 rdusmx=4100 rduswin=4100 rate=1157000Bps sil=0 und=0 corr=0 reloadfail=0
-STEMRD n=141 avg=3540us hunt=1700us spin=1660us dma=352us crc=755us clk=5010
+STEMRD n=141 avg=3540us hunt=1700us spin=1660us dma=352us crc=755us clk=5010 pulseavg=331ns pulsemax=398ns
 STEMPS miss=0,0,0,0 bad=0,0,0,0
 LOOPER b=st42 48000Hz song=0 PLAY
 STEMIO rdby=2097152 rdc=512 rdus=3900 rdusmx=9800 rduswin=9800 rate=1101000Bps sil=1024 und=1 corr=2 reloadfail=0
-STEMRD n=141 avg=6200us hunt=4300us spin=1655us dma=352us crc=760us clk=5000
+STEMRD n=141 avg=6200us hunt=4300us spin=1655us dma=352us crc=760us clk=5000 pulseavg=331ns pulsemax=2100000ns
 STEMPS miss=0,0,0,0 bad=2,0,0,0
 LOOPER b=st42 48000Hz song=0 PLAY
 STEMIO rdby=3145728 rdc=768 rdus=3870 rdusmx=9800 rduswin=4300 rate=1148000Bps sil=1024 und=1 corr=5 reloadfail=0
-STEMRD n=141 avg=3560us hunt=1710us spin=1665us dma=352us crc=752us clk=5020
+STEMRD n=141 avg=3560us hunt=1710us spin=1665us dma=352us crc=752us clk=5020 pulseavg=331ns pulsemax=405ns
 STEMPS miss=3,0,0,0 bad=5,0,0,0
 LOOPER b=st42 48000Hz song=0 PLAY
 STEMIO rdby=4194304 rdc=1024 rdus=3860 rdusmx=9800 rduswin=3990 rate=1152400Bps sil=3072 und=2 corr=9 reloadfail=0
-STEMRD n=141 avg=3550us hunt=1695us spin=1658us dma=352us crc=751us clk=4990
+STEMRD n=141 avg=3550us hunt=1695us spin=1658us dma=352us crc=751us clk=4990 pulseavg=332ns pulsemax=401ns
 STEMPS miss=7,0,0,0 bad=9,0,0,0`;
 $('#demo').addEventListener('click',()=>{ $('#src').value=DEMO; rawText=DEMO; parseAll(DEMO);
   $('#raw').textContent=DEMO; render(); });

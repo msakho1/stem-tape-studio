@@ -274,9 +274,11 @@ volatile uint32_t emmc_dbg_rd_crc_us;     /* copy-out + CRC16 verify */
 volatile uint32_t emmc_dbg_rd_hunt_clks;  /* clock pulses spent hunting, all blocks */
 volatile uint32_t emmc_dbg_rd_hunt_spin_us; /* of the hunt, spent issuing pulses */
 volatile uint32_t emmc_dbg_rd_hunt_gap_us;  /* of the hunt, spent issuing none */
+volatile uint32_t emmc_dbg_rd_pulse_max_ns; /* worst single clock pulse, ns */
 
 static uint32_t s_rd_hunt_cyc;
 static uint32_t s_rd_hunt_spin_cyc;
+static uint32_t s_rd_pulse_max_cyc;
 static uint32_t s_rd_dma_cyc;
 static uint32_t s_rd_crc_cyc;
 
@@ -474,6 +476,7 @@ static bool read_data_block(uint8_t *buf, bool can_overrun)
 	uint32_t phase_c0 = DWT->CYCCNT;
 	uint32_t hunt_clks = 0;
 	uint32_t spin_cyc = 0;
+	uint32_t pulse_base = 0;   /* hunt_clks at the end of the previous burst */
 	{
 		/* DWT, NOT k_cycle_get_32(). This is the hottest bit-bang loop in
 		 * the firmware -- 2259 blocks a second during four-stem playback --
@@ -505,11 +508,29 @@ static bool read_data_block(uint8_t *buf, bool can_overrun)
 			}
 			uint32_t now = DWT->CYCCNT;
 			uint32_t el = now - t0;
+			uint32_t bcyc = now - b0;
 
 			/* Charged to the burst, so spin_cyc/hunt_clks is the real
 			 * cost of one clock pulse and hunt-minus-spin is the time
 			 * this thread spent not clocking at all. */
-			spin_cyc += now - b0;
+			spin_cyc += bcyc;
+			/* WORST PULSE, which is what separates the last two
+			 * candidates. spin/clk is an AVERAGE, and a burst that was
+			 * preempted in the middle averages out to the same number
+			 * as a loop that is uniformly slow. This is the per-burst
+			 * cost divided by the pulses that burst actually issued,
+			 * maximised: a uniformly slow loop makes every burst equal,
+			 * so max == average; one descheduling makes exactly one
+			 * burst enormous, so max >> average. One UDIV per block. */
+			if (hunt_clks > pulse_base) {
+				uint32_t bpulses = hunt_clks - pulse_base;
+				uint32_t per = bcyc / bpulses;
+
+				if (per > s_rd_pulse_max_cyc) {
+					s_rd_pulse_max_cyc = per;
+				}
+				pulse_base = hunt_clks;
+			}
 			if (got_start) {
 				uint32_t us = CYC_TO_US(el);
 				if (us > emmc_dbg_rd_wait_us_max) emmc_dbg_rd_wait_us_max = us;
@@ -1182,6 +1203,11 @@ static void rd_phase_publish(void)
 	/* Subtracted in cycles, not in microseconds, so the two truncations
 	 * cannot make gap read as nonzero when spin == hunt. */
 	emmc_dbg_rd_hunt_gap_us = CYC_TO_US(s_rd_hunt_cyc - s_rd_hunt_spin_cyc);
+	/* Cycles -> ns at 64 MHz: 1 cycle = 15.625 ns = 125/8. Integer, and no
+	 * overflow below ~34 ms in one pulse. */
+	emmc_dbg_rd_pulse_max_ns = (s_rd_pulse_max_cyc <= 0x02000000u)
+				   ? (s_rd_pulse_max_cyc * 125u) / 8u
+				   : 0xFFFFFFFFu;
 	emmc_dbg_rd_dma_us = CYC_TO_US(s_rd_dma_cyc);
 	emmc_dbg_rd_crc_us = CYC_TO_US(s_rd_crc_cyc);
 }
@@ -1198,6 +1224,7 @@ bool emmc_read_blocks(uint32_t block_addr, uint8_t *buf, uint32_t count)
 	 * exactly as interesting as a slow succeeding one. */
 	s_rd_hunt_cyc = 0u;
 	s_rd_hunt_spin_cyc = 0u;
+	s_rd_pulse_max_cyc = 0u;
 	s_rd_dma_cyc = 0u;
 	s_rd_crc_cyc = 0u;
 	emmc_dbg_rd_hunt_clks = 0u;
