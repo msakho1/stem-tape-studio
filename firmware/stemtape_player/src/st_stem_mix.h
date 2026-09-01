@@ -139,6 +139,69 @@ void st_stem_mix_frame_prepared(const st11_audio_frame_t *frame,
 				 int16_t *out_l, int16_t *out_r);
 
 /*
+ * THE SAME MIXDOWN, INLINE -- and by st50 the last remaining out-of-line
+ * cross-translation-unit call in the 48 kHz inner loop.
+ *
+ * WHY THIS EXISTS. st45 moved the planar decode into a header for exactly
+ * this reason and the measurement was unambiguous; st_seam_gain()/
+ * st_seam_tick() were already inline; st46 removed the mixer's eight signed
+ * divides. What was left was the call itself, and the call is not the
+ * expensive part -- the ARGUMENT is. `frame` is an st11_audio_frame_t: eight
+ * int32_t the decoder has just produced, in registers. Handing a POINTER to
+ * it across a translation unit obliges the compiler to spill all eight to the
+ * stack, and obliges the callee to load all eight back, once per output
+ * frame, 48,000 times a second. The two int16_t out-pointers force the same
+ * round trip in the other direction. None of that traffic computes anything.
+ *
+ * Inlining lets the decode, the mixdown and the seam stage stay in registers
+ * end to end. It changes no arithmetic: this is a literal copy of
+ * st_stem_mix_frame_prepared()'s body -- see st_stem_mix.c for the full
+ * derivation of the round-toward-zero identity and the overflow bound -- and
+ * the .c function is now a one-line wrapper around it, so there is ONE
+ * implementation and the host tests, the FX gate and the full-playback hash
+ * all still exercise the same code the audio thread runs.
+ *
+ * WHY IT MATTERS HERE AND NOT ELSEWHERE. On this device audio-thread CPU is
+ * not spare capacity: the eMMC read path is CPU-bound, so every cycle the
+ * audio thread takes is a cycle the streamer does not get, and sustained read
+ * throughput falls in direct proportion. Below 100% of the 1,152,000 B/s four
+ * 24-bit stereo stems demand, the playhead freezes in short bursts -- heard as
+ * a crackle, not as a slow song. That is the margin the FX rack and the pitch
+ * rocker each eat into, which is why they crackle while unity playback is
+ * clean.
+ */
+static inline void st_stem_mix_frame_prepared_inline(
+		const st11_audio_frame_t *frame,
+		const st_stem_mix_prepared_t *prepared,
+		int16_t *out_l, int16_t *out_r)
+{
+	int32_t acc_l = 0;
+	int32_t acc_r = 0;
+	int32_t vl, vr;
+	uint32_t s;
+
+	for (s = 0; s < ST11_STEM_COUNT; s++) {
+		const int32_t g = prepared->gain_q8[s];
+		const int32_t pl = frame->stem_l[s] * g;
+		const int32_t pr = frame->stem_r[s] * g;
+
+		acc_l += (pl + ((pl >> 31) & (ST_STEM_MIX_GAIN_UNITY_Q8 - 1))) >>
+			 ST_STEM_MIX_GAIN_UNITY_SHIFT;
+		acc_r += (pr + ((pr >> 31) & (ST_STEM_MIX_GAIN_UNITY_Q8 - 1))) >>
+			 ST_STEM_MIX_GAIN_UNITY_SHIFT;
+	}
+
+	vl = acc_l >> (ST11_PCM_BIT_DEPTH - 16u);
+	vr = acc_r >> (ST11_PCM_BIT_DEPTH - 16u);
+	if (vl > INT16_MAX) vl = INT16_MAX;
+	else if (vl < INT16_MIN) vl = INT16_MIN;
+	if (vr > INT16_MAX) vr = INT16_MAX;
+	else if (vr < INT16_MIN) vr = INT16_MIN;
+	*out_l = (int16_t)vl;
+	*out_r = (int16_t)vr;
+}
+
+/*
  * Mixes one decoded frame's ST11_STEM_COUNT stems down to one stereo
  * sample pair, applying `channels[s]`'s gain/mute/solo state to
  * `frame->stem_l[s]`/`stem_r[s]` (see this header's own doc comment for

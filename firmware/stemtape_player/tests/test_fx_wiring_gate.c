@@ -457,6 +457,184 @@ static void t_global_shift_roundtrip_is_identity(void)
 	printf("     all 65536 int16 values survive unchanged\n");
 }
 
+/* ======================================================================
+ *    A LATCHED EFFECT SURVIVES THE OVERLAY CLOSING, AND ITS RELEASE IS A
+ *    RAMP RATHER THAN A STEP.
+ *
+ *    st_fx_ctl.c's own close path says so in its own words: "Latches and
+ *    scope are NOT cleared: latched effects keep sounding in the rack's
+ *    last scope, and reopening restores them." bank_service() backs it up,
+ *    clearing `momentary` and leaving `latch` standing.
+ *
+ *    main.c did not honour it. Both insertion flags were computed as
+ *    `fx_out.fx_open && scope == ...`, so closing the overlay stopped the
+ *    rack being called at all while the latch bit was still set: a latched
+ *    effect went from FULL WET to FULLY DRY in one sample, wet[] could
+ *    never reach zero so the st48 stale-state reset never fired, and
+ *    reopening snapped straight back to full wet. Every toggle of an
+ *    ADC-ladder-decoded volume chord was therefore a full-scale step
+ *    discontinuity -- heard as a click, and as crackling when the chord
+ *    decoded intermittently, on every effect equally.
+ *
+ *    THIS GATE ALREADY MODELLED THE CONTRACT (`scope == X &&
+ *    st_fx_running(&fx)`, see render()), which is exactly why it did not
+ *    catch the divergence: the model was right and the production wiring
+ *    was not. So this case asserts the CONTROL side of the contract
+ *    directly, and the CI step that runs this binary asserts the
+ *    production side by reading main.c's own assignment.
+ *
+ *    Two measurements, neither taken from the code under test:
+ *      1. st_fx_ctl, driven through open -> latch -> close, still reports
+ *         the latch bit in active_mask after the close.
+ *      2. With the mask then dropped to zero, the ENVELOPE of the wet
+ *         contribution -- max |wet - dry| per 32-frame window -- decays
+ *         across the release rather than vanishing in the first window,
+ *         and the rack goes idle after about ST_FX_ENGAGE_FRAMES.
+ *
+ *    THE ENVELOPE, NOT THE SAMPLE STEP. The first version of this case
+ *    measured the largest single-frame change in (wet - dry), and it could
+ *    not distinguish anything: a lowpass's contribution IS the high
+ *    frequency content it removes, so that difference legitimately swings
+ *    at full audio bandwidth on every frame whether the release is ramped
+ *    or not. The ramp lives in the ENVELOPE of that difference, so that is
+ *    what is measured.
+ * ====================================================================== */
+static void t_latch_outlives_the_overlay(void)
+{
+	st_fx_ctl_t ctl;
+	st_fx_in_t in;
+	st_fx_out_t out;
+	st_fx_t fx;
+	uint32_t k;
+	int32_t worst_held_diff = 0;
+	uint32_t settled = 0;
+	/* Release envelope: max |wet - dry| per 32-frame window. */
+#define REL_WIN   32u
+#define REL_NWIN  40u
+	int32_t rel_env[REL_NWIN];
+	uint32_t rel_seen = 0, release_at = 0, nonzero_wins = 0, w;
+
+	printf("\n-- a latched effect outlives the overlay, and releases on a ramp\n");
+
+	/* ---- 1. the control contract ---- */
+	memset(&ctl, 0, sizeof(ctl));
+	memset(&in, 0, sizeof(in));
+
+	/* Volume chord down, then both released inside the window: opens. */
+	in.now_ms = 100u; in.vol_minus_down = true; in.vol_plus_down = true;
+	st_fx_ctl_service(&ctl, &in, &out);
+	in.now_ms = 200u; in.vol_minus_down = false; in.vol_plus_down = false;
+	st_fx_ctl_service(&ctl, &in, &out);
+	CHECK(out.fx_open, "the volume chord did not open the FX overlay");
+
+	/* FUNCTION held, then Track 1 down: LATCH the filter. */
+	in.now_ms = 300u; in.function_down = true; in.track_down = 0x1u;
+	st_fx_ctl_service(&ctl, &in, &out);
+	in.now_ms = 320u; in.track_down = 0u; in.function_down = false;
+	st_fx_ctl_service(&ctl, &in, &out);
+	CHECK((out.latch_mask & ST_FX_BIT(ST_FX_FILTER)) != 0u,
+	      "FUNCTION + Track 1 did not latch the filter (latch_mask=0x%02x)",
+	      (unsigned)out.latch_mask);
+
+	/* Close the overlay with the same chord. */
+	in.now_ms = 500u; in.vol_minus_down = true; in.vol_plus_down = true;
+	st_fx_ctl_service(&ctl, &in, &out);
+	in.now_ms = 600u; in.vol_minus_down = false; in.vol_plus_down = false;
+	st_fx_ctl_service(&ctl, &in, &out);
+	CHECK(!out.fx_open, "the volume chord did not close the FX overlay");
+	CHECK((out.active_mask & ST_FX_BIT(ST_FX_FILTER)) != 0u,
+	      "the latch did not survive the close -- active_mask=0x%02x, so "
+	      "st_fx_ctl.c's own \"latched effects keep sounding\" contract is "
+	      "broken at the source", (unsigned)out.active_mask);
+	printf("     after close: fx_open=%d active_mask=0x%02x\n",
+	       (int)out.fx_open, (unsigned)out.active_mask);
+
+	/* ---- 2. the release is a ramp ---- */
+	memset(rel_env, 0, sizeof(rel_env));
+	st_fx_reset(&fx);
+	for (k = 0; k < 4u * ST_FX_ENGAGE_FRAMES; k++) {
+		uint32_t src = k % g_fix_frames;
+		uint32_t sec = src / ST11_FRAMES_PER_SECTOR;
+		uint32_t fis = src % ST11_FRAMES_PER_SECTOR;
+		st11_audio_frame_t frame;
+		int32_t dry, wet;
+		/* Held for the first half, then the mask goes to zero -- which
+		 * is precisely what unlatching, or closing the overlay under
+		 * the OLD wiring, presented to the rack. */
+		const bool held = (k < 2u * ST_FX_ENGAGE_FRAMES);
+
+		st11_sector_decode_frame(g_fix + (size_t)sec * ST11_SECTOR_BYTES,
+					  fis, &frame);
+		dry = frame.stem_l[0];
+		wet = dry;
+
+		if ((k % 256u) == 0u) {
+			st_fx_prepare(&fx, 24000u, 0u,
+				       held ? ST_FX_BIT(ST_FX_FILTER) : 0u);
+		}
+		if (st_fx_running(&fx)) {
+			int32_t r = frame.stem_r[0];
+
+			st_fx_process(&fx, &wet, &r, k);
+		}
+
+		if (held && k > ST_FX_ENGAGE_FRAMES) {
+			int32_t d = wet - dry;
+
+			if (d < 0) d = -d;
+			if (d > worst_held_diff) worst_held_diff = d;
+		}
+		if (!held) {
+			int32_t d = wet - dry;
+			uint32_t idx;
+
+			if (release_at == 0u) release_at = k;
+			if (d < 0) d = -d;
+			idx = (k - release_at) / REL_WIN;
+			if (idx < REL_NWIN) {
+				if (d > rel_env[idx]) rel_env[idx] = d;
+				if (idx + 1u > rel_seen) rel_seen = idx + 1u;
+			}
+			if (settled == 0u && !st_fx_running(&fx)) settled = k;
+		}
+	}
+
+	CHECK(worst_held_diff > 0,
+	      "the latched filter never altered the signal, so this case "
+	      "measured nothing");
+	CHECK(settled != 0u,
+	      "the rack never stopped running after the mask went to zero -- "
+	      "st_fx_running() stayed true, so nothing ever released");
+	/* THE RAMP, AS AN ENVELOPE. ST_FX_ENGAGE_FRAMES is 576, so at 32
+	 * frames per window a correct release spans about 18 windows in which
+	 * the wet contribution is still nonzero. A STEP release leaves at most
+	 * one -- the coefficient goes straight to zero and every window after
+	 * the first reads exactly 0. Requiring a quarter of the ramp's windows
+	 * is far above what a step can produce and far below the full 18, so
+	 * it cannot be met accidentally and cannot fail on material that
+	 * happens to be quiet. */
+	for (w = 0; w < rel_seen; w++) {
+		if (rel_env[w] != 0) nonzero_wins++;
+	}
+	CHECK(nonzero_wins * REL_WIN * 4u >= ST_FX_ENGAGE_FRAMES,
+	      "the wet contribution was still audible in only %u windows of %u "
+	      "frames after the mask cleared -- that is a step, not a %u-frame "
+	      "ramp", (unsigned)nonzero_wins, (unsigned)REL_WIN,
+	      (unsigned)ST_FX_ENGAGE_FRAMES);
+	/* And it must actually finish: a rack that never releases would also
+	 * satisfy the bound above. */
+	CHECK(settled != 0u && settled - release_at < 2u * ST_FX_ENGAGE_FRAMES,
+	      "the rack took %u frames to go idle after the mask cleared, "
+	      "against a %u-frame ramp",
+	      settled ? (unsigned)(settled - release_at) : 0u,
+	      (unsigned)ST_FX_ENGAGE_FRAMES);
+	printf("     held wet/dry difference %d; release audible across %u of "
+	       "%u windows (%u frames); rack idle %u frames after release\n",
+	       (int)worst_held_diff, (unsigned)nonzero_wins, (unsigned)rel_seen,
+	       (unsigned)(nonzero_wins * REL_WIN),
+	       settled ? (unsigned)(settled - release_at) : 0u);
+}
+
 int main(void)
 {
 	printf("== Stem Tape FX PRODUCTION WIRING gate ==\n");
@@ -475,6 +653,7 @@ int main(void)
 	t_stem_scope_reaches_audio();
 	t_every_stem_target_is_reachable();
 	t_global_shift_roundtrip_is_identity();
+	t_latch_outlives_the_overlay();
 
 	printf("\n%d checks, %d failures\n", g_checks, g_failures);
 	if (g_failures) {

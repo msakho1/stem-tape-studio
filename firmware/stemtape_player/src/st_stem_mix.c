@@ -6,27 +6,6 @@
 
 #include <limits.h>
 
-/* Clamps the accumulator straight to the int16_t range -- taking the
- * comparison/clamp on the FULL-WIDTH value, never on an already-narrowed
- * one, so the reduction to 16 bits can never hit implementation-defined
- * narrowing-cast overflow before the clamp gets a chance to run.
- *
- * int32_t is genuinely full width here now: with every applied gain
- * clamped to ST_STEM_MIX_GAIN_MAX_Q8 and every stem sample a signed
- * 24-bit value, each stem's contribution is bounded by 2^23 and the sum
- * of ST11_STEM_COUNT of them by 2^25 -- decades below int32_t's range.
- * See st_stem_mix.h's own "GAIN CEILING" note for why that bound exists. */
-static int16_t saturate_s16(int32_t v)
-{
-	if (v > INT16_MAX) {
-		return INT16_MAX;
-	}
-	if (v < INT16_MIN) {
-		return INT16_MIN;
-	}
-	return (int16_t)v;
-}
-
 static bool any_channel_soloed(const st_stem_mix_channel_t channels[ST11_STEM_COUNT])
 {
 	uint32_t s;
@@ -78,85 +57,62 @@ bool st_stem_mix_channel_audible(const st_stem_mix_channel_t channels[ST11_STEM_
 	return channel_active(channels, index, any_channel_soloed(channels));
 }
 
-/* -O2 FOR THIS FUNCTION ONLY, same justification as sp1_emmc.c's crc16()
- * (see that file's own note): this is pure computation with no timing or
- * aliasing dependency, so -O2 can only make it faster and cannot change
- * the value it produces. It matters because it is the single hottest
- * function in the firmware -- called once per output frame at 48 kHz --
- * and because on this device audio-thread CPU is not free: the eMMC read
- * path is CPU-bound (bit-banged start-bit hunt, SPIM setup, CRC), so
- * every cycle spent here is a cycle the streamer does not get, and read
- * throughput falls in direct proportion. Measured on hardware: with the
- * audio thread at 51% the streamer got 40% and sustained only 644 kB/s
- * against the 1,152 kB/s that 48 kHz four-stem playback requires. */
-__attribute__((optimize("O2")))
+/*
+ * THE ARITHMETIC ITSELF NOW LIVES IN THE HEADER, as
+ * st_stem_mix_frame_prepared_inline() -- see st_stem_mix.h for why the audio
+ * thread needs it inline. This out-of-line symbol REMAINS, and calls it, so
+ * that there is exactly one implementation: the host tests, the FX reference
+ * gate and the firmware symbol gate all name this function, and every one of
+ * them therefore exercises the same code the 48 kHz path runs.
+ *
+ * Everything the numbers rest on is recorded here rather than in the header,
+ * because this is where it was derived:
+ *
+ * NO MUTE/SOLO BRANCH. An inaudible stem arrives with gain 0 and contributes
+ * 0. There is no second audibility rule anywhere.
+ *
+ * ROUND-TOWARD-ZERO WITHOUT A DIVIDE. This was `(x * g) / 256`, and the
+ * comment defending it said the division "rounds toward zero, which is what
+ * this mixdown has always produced, so this rewrite changes the cost and
+ * nothing else". Both halves were true and the cost was much larger than it
+ * looks: a SIGNED division cannot become an arithmetic shift, because >>
+ * rounds toward negative infinity and / rounds toward zero, so the compiler is
+ * obliged to emit SDIV. That is EIGHT hardware divides per output frame --
+ * four stems, two channels -- 384,000 a second at 48 kHz, on the thread with a
+ * hard 5.333 ms deadline, on a device where audio CPU comes straight out of
+ * the streamer's read throughput.
+ *
+ * THE IDENTITY. For a power-of-two divisor, adding (divisor-1) to a negative
+ * numerator before an arithmetic shift converts floor into truncation:
+ *
+ *     x >= 0 :  x / 2^k  ==  x >> k
+ *     x <  0 :  x / 2^k  ==  (x + (2^k - 1)) >> k
+ *
+ * (x >> 31) is 0 for non-negative and -1 for negative, so the mask picks the
+ * bias with no branch. Three single-cycle ALU ops replace a multi-cycle
+ * divide, and the result is EQUAL for every representable input, not merely
+ * close.
+ *
+ * NO OVERFLOW, at the bias or at the multiply. gain_q8 is clamped to
+ * ST_STEM_MIX_GAIN_MAX_Q8 (256) and a stem sample is a sign-extended 24-bit
+ * value, so the product is bounded by [-2^23 * 256, (2^23 - 1) * 256] =
+ * [INT32_MIN, INT32_MAX-255]. The largest positive product plus the 255 bias
+ * is exactly INT32_MAX; the bias is only ever added to negative values anyway,
+ * and the most negative product plus 255 is well inside range.
+ *
+ * THE FINAL REDUCTION happens BEFORE the clamp: the 24-bit stem-storage domain
+ * comes down to the 16-bit I2S output domain audio_thread() consumes (an
+ * 8-bit shift == ST11_PCM_BIT_DEPTH - 16), and only then saturates.
+ * ST11_STEM_COUNT stems summed near full-scale can legitimately push past the
+ * original 24-bit domain; that is the one place clamped rather than silently
+ * wrapped, and the comparison is taken on the FULL-WIDTH value so the
+ * narrowing cast can never hit implementation-defined overflow first.
+ */
 void st_stem_mix_frame_prepared(const st11_audio_frame_t *frame,
 				 const st_stem_mix_prepared_t *prepared,
 				 int16_t *out_l, int16_t *out_r)
 {
-	uint32_t s;
-
-	int32_t acc_l = 0;
-	int32_t acc_r = 0;
-
-	for (s = 0; s < ST11_STEM_COUNT; s++) {
-		const int32_t g = prepared->gain_q8[s];
-
-		/* No mute/solo branch: an inaudible stem arrives here with
-		 * gain 0 and contributes 0.
-		 *
-		 * ROUND-TOWARD-ZERO WITHOUT A DIVIDE.
-		 *
-		 * This was `(x * g) / 256`, and the comment defending it said
-		 * the division "rounds toward zero, which is what this mixdown
-		 * has always produced, so this rewrite changes the cost and
-		 * nothing else". Both halves were true and the cost was much
-		 * larger than it looks: a SIGNED division cannot become an
-		 * arithmetic shift, because >> rounds toward negative infinity
-		 * and / rounds toward zero, so the compiler is obliged to emit
-		 * SDIV. That is EIGHT hardware divides per output frame --
-		 * four stems, two channels -- 384,000 a second at 48 kHz, on
-		 * the thread with a hard 5.333 ms deadline, on a device where
-		 * this function's own comment above records that audio CPU
-		 * comes straight out of the streamer's read throughput.
-		 *
-		 * THE IDENTITY. For a power-of-two divisor, adding (divisor-1)
-		 * to a negative numerator before an arithmetic shift converts
-		 * floor into truncation:
-		 *
-		 *     x >= 0 :  x / 2^k  ==  x >> k
-		 *     x <  0 :  x / 2^k  ==  (x + (2^k - 1)) >> k
-		 *
-		 * (x >> 31) is 0 for non-negative and -1 for negative, so the
-		 * mask picks the bias with no branch. Three single-cycle ALU
-		 * ops replace a multi-cycle divide, and the result is EQUAL
-		 * for every representable input, not merely close.
-		 *
-		 * NO OVERFLOW, at the bias or at the multiply. gain_q8 is
-		 * clamped to ST_STEM_MIX_GAIN_MAX_Q8 (256) and a stem sample is
-		 * a sign-extended 24-bit value, so the product is bounded by
-		 * [-2^23 * 256, (2^23 - 1) * 256] = [INT32_MIN, INT32_MAX-255].
-		 * The largest positive product plus the 255 bias is exactly
-		 * INT32_MAX; the bias is only ever added to negative values
-		 * anyway, and the most negative product plus 255 is well inside
-		 * range. Asserted below rather than argued only here. */
-		const int32_t pl = frame->stem_l[s] * g;
-		const int32_t pr = frame->stem_r[s] * g;
-
-		acc_l += (pl + ((pl >> 31) & (ST_STEM_MIX_GAIN_UNITY_Q8 - 1))) >>
-			 ST_STEM_MIX_GAIN_UNITY_SHIFT;
-		acc_r += (pr + ((pr >> 31) & (ST_STEM_MIX_GAIN_UNITY_Q8 - 1))) >>
-			 ST_STEM_MIX_GAIN_UNITY_SHIFT;
-	}
-
-	/* Reduce the 24-bit stem-storage domain down to the 16-bit I2S
-	 * output domain main.c's existing, unchanged audio_thread() actually
-	 * consumes (an 8-bit shift == ST11_PCM_BIT_DEPTH - 16), THEN
-	 * saturate -- ST11_STEM_COUNT stems summed near full-scale can
-	 * legitimately push past the original 24-bit domain; this is the one
-	 * place that gets clamped rather than silently wrapped. */
-	*out_l = saturate_s16(acc_l >> (ST11_PCM_BIT_DEPTH - 16u));
-	*out_r = saturate_s16(acc_r >> (ST11_PCM_BIT_DEPTH - 16u));
+	st_stem_mix_frame_prepared_inline(frame, prepared, out_l, out_r);
 }
 
 void st_stem_mix_frame(const st11_audio_frame_t *frame, const st_stem_mix_channel_t channels[ST11_STEM_COUNT],

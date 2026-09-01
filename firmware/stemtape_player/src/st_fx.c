@@ -146,7 +146,32 @@ static int32_t clamp_q23(int32_t v)
 __attribute__((optimize("O2")))
 static int32_t mix_wet(int32_t dry, int32_t wet, uint16_t w)
 {
-	int32_t d = ST_FX_WET_UNITY - (int32_t)w;
+	int32_t d;
+
+	/* THE ENDPOINTS ARE EXACT, so take them without the arithmetic.
+	 *
+	 * At w == ST_FX_WET_UNITY the dry coefficient is 0 and the expression
+	 * below reduces to (wet << 15) >> 15 == wet; at w == 0 it reduces to
+	 * dry. These are identities, not approximations -- the shortcut cannot
+	 * change a single output sample.
+	 *
+	 * It is worth taking because full wet is the STEADY STATE, not a
+	 * corner: ST_FX_ENGAGE_FRAMES is 576 frames, so an effect reaches
+	 * w == UNITY 12 ms after it is pressed and stays there for as long as
+	 * it is held. Every frame after those 12 ms was paying two 64-bit
+	 * multiplies, a 64-bit add and a 64-bit shift, per channel, per
+	 * engaged effect, to compute a value it already had. At 48 kHz with
+	 * one effect held that is 192,000 multiplies a second spent on an
+	 * identity -- and on this device audio-thread cycles come straight out
+	 * of the streamer's read throughput, which is the margin that decides
+	 * whether the transport crackles. */
+	if (w == ST_FX_WET_UNITY) {
+		return wet;
+	}
+	if (w == 0u) {
+		return dry;
+	}
+	d = ST_FX_WET_UNITY - (int32_t)w;
 
 	return (int32_t)(((int64_t)dry * d + (int64_t)wet * (int32_t)w)
 			  >> ST_FX_WET_SHIFT);

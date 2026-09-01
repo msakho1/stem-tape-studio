@@ -157,9 +157,9 @@
 #define ST_RC_SWEEP_REPS 24u
 
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st49-VOLCAL"
+#define ST_BUILD_TAG "st50-VOLCAL"
 #else
-#define ST_BUILD_TAG "st49"
+#define ST_BUILD_TAG "st50"
 #endif
 #include "st_track_hold.h"
 
@@ -2384,6 +2384,50 @@ static st_inertia_t       s_stem_inertia;
  */
 static st_fx_t   g_stem_fx;
 static uint8_t   s_fx_target;         /* 0..3, STEM scope */
+/*
+ * WHERE THE RACK IS INSERTED -- and NOT whether the overlay happens to be
+ * open. That distinction is the whole of a real defect, so it is recorded
+ * here rather than at the assignment.
+ *
+ * THE CONTRACT. st_fx_ctl.c closes the overlay with this comment, in its own
+ * words: "Latches and scope are NOT cleared: latched effects keep sounding in
+ * the rack's last scope, and reopening restores them." bank_service() backs it
+ * up -- closing clears `momentary` and deliberately leaves `latch` standing,
+ * and `active_mask` is momentary|latch.
+ *
+ * WHAT THE WIRING DID INSTEAD. These two flags were computed as
+ * `fx_out.fx_open && scope == ...`, so the instant the overlay closed the rack
+ * stopped being called at all -- while s_fx_active_mask still carried the
+ * latch bit. Four things followed, every one of them audible:
+ *
+ *   1. A latched effect went from FULL WET to FULLY DRY in one sample, with no
+ *      ramp. The 12 ms engage ramp exists precisely so that transition is not
+ *      a step; skipping the call skips the ramp. That is a click.
+ *   2. Reopening re-inserted the rack with wet[] still latched at
+ *      ST_FX_WET_UNITY, so it snapped back to full wet. Another click.
+ *   3. wet[] could never reach zero, so st48's "clear the biquad state at full
+ *      disengage" reset never fired: the filter and the distortion's taming
+ *      lowpass resumed from frozen history belonging to an unrelated moment in
+ *      the song, ringing through the re-entry.
+ *   4. The echo's release tail never ran.
+ *
+ * AND IT IS NOT ONE CLICK. The overlay is toggled by a VOLUME CHORD decoded
+ * off an ADC ladder with a 120 ms arrival window and a 600 ms release window.
+ * Every toggle of fx_open with an effect latched is a full-scale wet<->dry
+ * step. A chord that decodes intermittently is a TRAIN of those steps -- which
+ * is heard as crackling, on every effect equally, regardless of which effect
+ * is held, because the discontinuity is in the insertion and not in any
+ * effect's DSP. That is exactly the reported symptom, and it is why the -O2
+ * pass (st47) and the stale-state resets (st48) could not touch it.
+ *
+ * THE FIX IS TO ASK THE RACK. st_fx_running() is true while anything is
+ * active, while any wet leg is still ramping, and while the echo tail is
+ * circulating -- so the insertion now follows the rack's own life, and the
+ * scope is the one the control module remembered. With nothing latched and the
+ * overlay shut, active_mask is 0, wet[] ramps down over 12 ms, st_fx_running()
+ * goes false and the rack costs one test per block again. A ramped release
+ * instead of a step, which is what the ramp was written for.
+ */
 static bool      s_fx_stem_scope;     /* rack runs on s_fx_target, pre-mix */
 static bool      s_fx_global_scope;   /* rack runs on the mix, post-mix */
 static uint8_t   s_fx_active_mask;    /* momentary | latch, button order */
@@ -2656,7 +2700,14 @@ static void stem_render_run(const uint8_t *const grp[ST_PL_STEMS],
 			frame.stem_r[s_fx_target] = fr;
 		}
 
-		st_stem_mix_frame_prepared(&frame, prep, &stem_l, &stem_r);
+		/* INLINE, from st_stem_mix.h -- the last out-of-line
+		 * cross-translation-unit call this loop made. The decode
+		 * (st45) and the seam were already inline; what was left was
+		 * eight int32_t being spilled to the stack purely so a pointer
+		 * to them could cross a TU boundary 48,000 times a second.
+		 * Identical arithmetic, same single implementation: the
+		 * out-of-line st_stem_mix_frame_prepared() now calls this. */
+		st_stem_mix_frame_prepared_inline(&frame, prep, &stem_l, &stem_r);
 
 		/* BEAT PULSE: per-stem peak, sampled one frame in 32. The
 		 * meters are read by led_service() at ~40 Hz, so 1.5 kHz is
@@ -7239,6 +7290,41 @@ static uint32_t semitone_next(uint32_t sp, int dir)
  * nothing else in this tree uses that macro, so whether it reaches this
  * translation unit is unverified, and the only way to find out would be a
  * CI round. The attribute is unconditionally available on this toolchain. */
+/*
+ * THE MEASUREMENT WAS CAUSING THE THING IT MEASURED.
+ *
+ * st49's capture settled this by arithmetic rather than by argument. Per
+ * 2-second diagnostic window, 35 of 52 windows moved sil by EXACTLY 120
+ * frames and und by exactly 1 -- one episode, one quantum, once per print.
+ * That periodicity is not contention; contention is not quantised. And iwf
+ * was 0 in all 52 samples, so the audio block was never missing its I2S
+ * deadline: the frames were silenced because the STREAMER had not delivered,
+ * not because the renderer was late.
+ *
+ * The mechanism is scheduling. main and the streamer both run at PREEMPT(1),
+ * so a k_yield() from the streamer's per-read breather hands main the CPU --
+ * and main then holds it for the WHOLE print burst, nine printk lines into a
+ * CDC ring, measured at 2% of a 2000 ms window (~40 ms). The stem ring holds
+ * G-R = 4 groups = 28.3 ms. Forty milliseconds of no reads empties it, once
+ * per window, for exactly as long as it takes the streamer to get back in.
+ *
+ * A yield between the lines is the whole fix. Each printk becomes its own
+ * scheduling point, so the streamer interleaves with the burst instead of
+ * queueing behind it, and no single gap can approach the ring's depth. It
+ * costs nothing when no thread is ready, and it cannot reorder or drop a
+ * line: printk is atomic per call and the yield sits strictly between calls.
+ *
+ * WORTH SAYING PLAINLY: this affects CAPTURES, not the product. controls_diag()
+ * returns at its own DTR check when no host has the port open, so a device
+ * playing without a console attached never ran any of this. The reason to fix
+ * it anyway is that every remaining diagnosis is read off these captures, and
+ * a diagnostic that manufactures its own underruns poisons the evidence.
+ */
+static void diag_breathe(void)
+{
+	k_yield();
+}
+
 static void controls_diag(void) __attribute__((unused));
 static void controls_diag(void)
 {
@@ -7276,6 +7362,7 @@ static void controls_diag(void)
 	       (unsigned)trk[0].start_blk, (unsigned)trk[1].start_blk, (unsigned)trk[2].start_blk, (unsigned)trk[3].start_blk,
 	       emmc_spim_active() ? 1 : 0, g_cache_on ? 1 : 0, (unsigned)g_cache_kb, (unsigned)emmc_dbg_wr_busy_max,
 	       (unsigned)g_chop_div, (unsigned)g_chop_off);
+	diag_breathe();
 	{
 		/* CPU= per-thread share of the last window, in percent: audio,
 		 * streamer, midi, main, everything-else(usb/idle/isr). Answers
@@ -7310,6 +7397,7 @@ static void controls_diag(void)
 			       (unsigned)((mai - l_mai) * 100u / d_all),
 			       (unsigned)(dwin_us ? ((dcyc / 64u) * 100u) / dwin_us : 0u),
 			       ST_PRIO_AUDIO, ST_PRIO_STREAMER, ST_PRIO_MAIN, ST_PRIO_MIDI);
+			diag_breathe();
 		}
 		l_aud = aud; l_str = str; l_mid = mid; l_mai = mai; l_all = all;
 	}
@@ -7349,6 +7437,7 @@ static void controls_diag(void)
 		       (unsigned)un_str, (unsigned)K_THREAD_STACK_SIZEOF(streamer_stack),
 		       (unsigned)un_mid, (unsigned)K_THREAD_STACK_SIZEOF(midi_stack),
 		       (unsigned)un_mai, (unsigned)CONFIG_MAIN_STACK_SIZE);
+		diag_breathe();
 	}
 	/* The PASS2 line is GONE with PASS 2 itself. Every counter it printed
 	 * (per-track refilled blocks, dead-history snaps, round aborts, read
@@ -7383,6 +7472,7 @@ static void controls_diag(void)
 		       g_extcsd_dump[0], g_extcsd_dump[1], g_extcsd_dump[2],
 		       g_extcsd_dump[3], g_extcsd_dump[4], g_extcsd_dump[5],
 		       g_extcsd_dump[6], g_extcsd_dump[7], g_extcsd_dump[8]);
+		diag_breathe();
 	}
 	/* STEM TAPE: the "USBIN" diag block (UAC2 receive-rate/ring/feedback
 	 * health) is REMOVED along with UAC2 itself -- see this file's own
@@ -7424,6 +7514,7 @@ static void controls_diag(void)
 	       (unsigned)stem_diag_sustained_read_bytes_per_sec(),
 	       (unsigned)atomic_get(&g_stem_underrun_frames), (unsigned)atomic_get(&g_stem_underrun_count),
 	       (unsigned)atomic_get(&g_stem_corrupt_count), (unsigned)atomic_get(&g_stem_reload_fail_count));
+	diag_breathe();
 	/* THE SAME FAULTS, BROKEN OUT BY STEM, in stem order
 	 * (0 vocal, 1 drums, 2 bass, 3 instrument). miss= is "the group this
 	 * stem needed was not resident"; bad= is "the fetch came back as some
@@ -7435,6 +7526,7 @@ static void controls_diag(void)
 	       (unsigned)atomic_get(&g_stem_miss[2]), (unsigned)atomic_get(&g_stem_miss[3]),
 	       (unsigned)atomic_get(&g_stem_badhdr[0]), (unsigned)atomic_get(&g_stem_badhdr[1]),
 	       (unsigned)atomic_get(&g_stem_badhdr[2]), (unsigned)atomic_get(&g_stem_badhdr[3]));
+	diag_breathe();
 	/* THE DROPOUT LINE. zeroms= is the longest stretch each stem decoded as
 	 * pure silence, in milliseconds; at= is the song frame it started on.
 	 * Only runs past ST_STEM_ZERO_RUN_MIN are reported, so ordinary quiet
@@ -7460,6 +7552,7 @@ static void controls_diag(void)
 		       (unsigned)zms[0], (unsigned)zms[1],
 		       (unsigned)zms[2], (unsigned)zms[3],
 		       (unsigned)za[0], (unsigned)za[1], (unsigned)za[2], (unsigned)za[3]);
+		diag_breathe();
 	}
 	/* WHERE A STEM READ'S TIME GOES, AVERAGED OVER THIS PRINT WINDOW (see
 	 * sp1_emmc.h's own "READ-PATH PHASE BREAKDOWN"). Every figure is
@@ -7522,6 +7615,7 @@ static void controls_diag(void)
 		        * all reports 0 rather than dividing by zero. */
 		       (unsigned)(phclk ? (uint32_t)(((uint64_t)phspin * 1000ull) / phclk) : 0u),
 		       (unsigned)phpk);
+		diag_breathe();
 	}
 	/* SUSTAINED REAL-TIME FEASIBILITY, stated in the terms the acceptance
 	 * test is judged in, so the physical run answers the question directly
@@ -7588,6 +7682,7 @@ static void controls_diag(void)
 		       (unsigned)(uint32_t)(((uint64_t)have * 100ull) / need),
 		       (unsigned)ahead_sectors, (unsigned)ahead_us,
 		       (unsigned)atomic_get(&g_stem_underrun_count));
+		diag_breathe();
 	}
 #endif
 	emmc_dbg_wr_busy_max = 0u;   /* per-window worst, reset each print */
@@ -9047,10 +9142,13 @@ int main(void)
 			st_fx_ctl_service(&g_stem_fx_ctl, &fi, &g_stem_fx_out);
 
 			s_fx_target       = g_stem_fx_out.target_stem;
-			s_fx_stem_scope   = g_stem_fx_out.fx_open &&
-					     g_stem_fx_out.scope == ST_FX_SCOPE_STEM;
-			s_fx_global_scope = g_stem_fx_out.fx_open &&
-					     g_stem_fx_out.scope == ST_FX_SCOPE_GLOBAL;
+			/* NO fx_open TERM. The overlay decides which effects
+			 * are ACTIVE; the rack decides how long it is still
+			 * making sound. Gating the insertion on the overlay
+			 * cut a latched effect off mid-ramp -- see these two
+			 * flags' own declaration for the whole defect. */
+			s_fx_stem_scope   = g_stem_fx_out.scope == ST_FX_SCOPE_STEM;
+			s_fx_global_scope = g_stem_fx_out.scope == ST_FX_SCOPE_GLOBAL;
 			s_fx_active_mask  = g_stem_fx_out.active_mask;
 
 			/* CONSUMPTION. A volume press the overlay claimed must

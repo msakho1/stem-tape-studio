@@ -1808,7 +1808,30 @@ jobs:
             echo "FAIL: main.c never publishes s_fx_active_mask to the rack"
             exit 1
           fi
-          echo "FX production wiring: 2 process sites, 1 prepare site, mask published"
+          # THE INSERTION MAY NOT BE GATED ON THE OVERLAY BEING OPEN.
+          #
+          # st_fx_ctl.c's close path keeps latches deliberately -- "latched
+          # effects keep sounding in the rack's last scope" -- and the
+          # wiring gate's t_latch_outlives_the_overlay() asserts that
+          # contract on the control side. This asserts the production side,
+          # which the host gate structurally cannot reach: it models the
+          # insertion as `scope == X && st_fx_running(&fx)`, so a main.c
+          # that ALSO required fx_open diverged from the model with every
+          # gate still green. That divergence made every overlay toggle a
+          # full-scale wet<->dry step on a latched effect -- a click, and a
+          # train of clicks whenever the ADC volume chord decoded
+          # intermittently.
+          #
+          # The rack's own st_fx_running() is what bounds the insertion.
+          # fx_open must not appear in either scope assignment.
+          if grep -nE 's_fx_(stem|global)_scope[[:space:]]*=' "$M" | grep -q 'fx_open'; then
+            echo "FAIL: the FX insertion is gated on fx_open, so a latched"
+            echo "      effect is cut off the moment the overlay closes --"
+            echo "      a full-scale step where a 576-frame ramp belongs."
+            grep -nE 's_fx_(stem|global)_scope[[:space:]]*=' "$M"
+            exit 1
+          fi
+          echo "FX production wiring: 2 process sites, 1 prepare site, mask published, insertion not gated on fx_open"
           {
             echo '### Stem Tape FX production wiring'
             echo '```text'
