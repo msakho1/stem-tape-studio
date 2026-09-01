@@ -84,9 +84,25 @@ interface DeviceState {
 **Why `maxSongBytes` is separate from `freeBytes`, and please keep it
 separate.** On today's firmware they are *not* the same number, and on the
 future firmware they mostly will be. Rendering one number where the meaning
-differs is how this screen would come to lie later. Ask the device for both,
-show "free" as the headline and `maxSongBytes` wherever the user is choosing a
-file to upload.
+differs is how this screen would come to lie later.
+
+**But do NOT put "free" in the headline on this firmware.** On a one-song
+device nothing can consume free space — the only operation is *replace* — so
+"9.9 MiB free of 32.0 MiB" sitting next to "largest song that fits: 32.0 MiB"
+reads as a contradiction, and the free figure implies an "add another song"
+that does not exist.
+
+Make the headline capability-driven, the same way the controls already are:
+
+| | `capabilities.multiSong === false` (today) | `true` (v1.3) |
+|---|---|---|
+| headline | **"22.1 MiB of 32.0 MiB used"** | **"9.9 MiB free of 32.0 MiB"** |
+| upload copy | "Replaces the current song. Up to 32.0 MiB." | "Up to 9.9 MiB." |
+| bar | fill = used / capacity | fill = used / capacity |
+
+Both figures stay in the model in both versions; only which one leads
+changes. On a device with no song the two framings coincide — "0 of 32.0 MiB
+used" — so the empty state reads correctly either way.
 
 **`capabilities` drives the UI, not the version number.** Please branch on
 `capabilities.deleteSong` rather than on `format.minor === 2`. When the
@@ -142,6 +158,18 @@ maxSongBytes  = capacityBytes          // a new song replaces, so it gets the wh
 
 Please **do not** add the two song regions together. A song cannot span them,
 so the sum promises roughly twice what actually fits.
+
+`capacityBytes` must come from `songABlocks` **on every path, including the
+empty-device path**. It is a property of the device's layout, not of whether a
+song happens to be stored — so a device with no song must report the same
+capacity it will report one second after a song lands on it. If the
+no-song path reaches capacity by a different route (falling back to
+`deviceBlocks`, or summing both regions because "nothing is using B"), it will
+report double, and the error only shows up on an empty device — the one state
+nobody looks at twice.
+
+Worth a test: **the same mock device must report the same `capacityBytes`
+before and after a song is stored.**
 
 ### Upload: show the phases, not one bar
 
