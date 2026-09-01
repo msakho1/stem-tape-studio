@@ -103,12 +103,50 @@ void st_stem_mix_frame_prepared(const st11_audio_frame_t *frame,
 		const int32_t g = prepared->gain_q8[s];
 
 		/* No mute/solo branch: an inaudible stem arrives here with
-		 * gain 0 and contributes 0. Division (not a shift) is kept
-		 * deliberately -- it rounds toward zero, which is what this
-		 * mixdown has always produced, so this rewrite changes the
-		 * cost and nothing else. */
-		acc_l += (frame->stem_l[s] * g) / ST_STEM_MIX_GAIN_UNITY_Q8;
-		acc_r += (frame->stem_r[s] * g) / ST_STEM_MIX_GAIN_UNITY_Q8;
+		 * gain 0 and contributes 0.
+		 *
+		 * ROUND-TOWARD-ZERO WITHOUT A DIVIDE.
+		 *
+		 * This was `(x * g) / 256`, and the comment defending it said
+		 * the division "rounds toward zero, which is what this mixdown
+		 * has always produced, so this rewrite changes the cost and
+		 * nothing else". Both halves were true and the cost was much
+		 * larger than it looks: a SIGNED division cannot become an
+		 * arithmetic shift, because >> rounds toward negative infinity
+		 * and / rounds toward zero, so the compiler is obliged to emit
+		 * SDIV. That is EIGHT hardware divides per output frame --
+		 * four stems, two channels -- 384,000 a second at 48 kHz, on
+		 * the thread with a hard 5.333 ms deadline, on a device where
+		 * this function's own comment above records that audio CPU
+		 * comes straight out of the streamer's read throughput.
+		 *
+		 * THE IDENTITY. For a power-of-two divisor, adding (divisor-1)
+		 * to a negative numerator before an arithmetic shift converts
+		 * floor into truncation:
+		 *
+		 *     x >= 0 :  x / 2^k  ==  x >> k
+		 *     x <  0 :  x / 2^k  ==  (x + (2^k - 1)) >> k
+		 *
+		 * (x >> 31) is 0 for non-negative and -1 for negative, so the
+		 * mask picks the bias with no branch. Three single-cycle ALU
+		 * ops replace a multi-cycle divide, and the result is EQUAL
+		 * for every representable input, not merely close.
+		 *
+		 * NO OVERFLOW, at the bias or at the multiply. gain_q8 is
+		 * clamped to ST_STEM_MIX_GAIN_MAX_Q8 (256) and a stem sample is
+		 * a sign-extended 24-bit value, so the product is bounded by
+		 * [-2^23 * 256, (2^23 - 1) * 256] = [INT32_MIN, INT32_MAX-255].
+		 * The largest positive product plus the 255 bias is exactly
+		 * INT32_MAX; the bias is only ever added to negative values
+		 * anyway, and the most negative product plus 255 is well inside
+		 * range. Asserted below rather than argued only here. */
+		const int32_t pl = frame->stem_l[s] * g;
+		const int32_t pr = frame->stem_r[s] * g;
+
+		acc_l += (pl + ((pl >> 31) & (ST_STEM_MIX_GAIN_UNITY_Q8 - 1))) >>
+			 ST_STEM_MIX_GAIN_UNITY_SHIFT;
+		acc_r += (pr + ((pr >> 31) & (ST_STEM_MIX_GAIN_UNITY_Q8 - 1))) >>
+			 ST_STEM_MIX_GAIN_UNITY_SHIFT;
 	}
 
 	/* Reduce the 24-bit stem-storage domain down to the 16-bit I2S

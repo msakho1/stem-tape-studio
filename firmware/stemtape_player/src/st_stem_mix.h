@@ -71,6 +71,11 @@
 #include "st_v11_format.h"
 
 #define ST_STEM_MIX_GAIN_UNITY_Q8 256
+/* log2 of the unity gain, so the mixer's round-toward-zero shift and the
+ * divisor can never drift apart. Asserted, not assumed. */
+#define ST_STEM_MIX_GAIN_UNITY_SHIFT 8
+_Static_assert((1 << ST_STEM_MIX_GAIN_UNITY_SHIFT) == ST_STEM_MIX_GAIN_UNITY_Q8,
+		"the mixer's shift must equal log2 of its unity gain");
 
 /*
  * The ceiling every applied gain is clamped to (see this header's own

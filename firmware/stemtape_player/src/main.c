@@ -157,9 +157,9 @@
 #define ST_RC_SWEEP_REPS 24u
 
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st45-VOLCAL"
+#define ST_BUILD_TAG "st46-VOLCAL"
 #else
-#define ST_BUILD_TAG "st45"
+#define ST_BUILD_TAG "st46"
 #endif
 #include "st_track_hold.h"
 
@@ -2800,7 +2800,15 @@ atomic_set(&g_stem_song_frame_pub, (atomic_val_t)g_stem_stream.song_frame);
  * suffix. This function also has exactly one call site, which is precisely
  * what made looper_audio_block() vanish from the ELF the moment it shrank --
  * so the attribute is what keeps that from silently happening here too. */
-__attribute__((noinline, noclone))
+/* -O2, and it was missing for the same reason st_planar.c's was: the
+ * attribute was applied to the INNER loop (stem_render_run, above) and to the
+ * mixer, but not to the function that owns the block. This one runs the
+ * residency acquire, the six run bounds, the seam arithmetic, the meter
+ * publish and the loop-wrap backstop -- once or twice per 5.333 ms block, on
+ * the deadline thread -- and was still being built for size. Pure computation;
+ * -O2 can only change how fast it is, not what it produces, and the
+ * full-playback gate's 0xe9650dda hash is the proof. */
+__attribute__((optimize("O2"), noinline, noclone))
 static void stem_audio_block(int16_t *s, int32_t m0, int32_t md, int32_t mv)
 {
 	/* Audio-thread-EXCLUSIVE, and now genuinely private to this function:
@@ -3519,6 +3527,10 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 }
 #endif /* SP1_XFER_ENABLE */
 
+/* -O2 for the same reason as stem_audio_block() just above: this is its only
+ * caller, it runs once per 5.333 ms block on the deadline thread, and it was
+ * the last function on that path still built for size. */
+__attribute__((optimize("O2")))
 static void looper_audio_block(int16_t *s)
 {
 #if SP1_XFER_ENABLE
