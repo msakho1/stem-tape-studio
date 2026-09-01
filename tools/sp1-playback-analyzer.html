@@ -195,7 +195,7 @@ let samples=[], rawText='', marks=[], port=null, reader=null, keep=false;
 
 /* ---------- parsing ---------- */
 const num=(s,k)=>{const m=s.match(new RegExp('\\b'+k+'=(-?\\d+)'));return m?+m[1]:null;};
-let pendingIO=null, buildTag=null, transport=null, cpu=null, prio=null;
+let pendingIO=null, buildTag=null, transport=null, cpu=null, prio=null, aus=null, auswin=null;
 
 function feedLine(line){
   line=line.trim(); if(!line) return;
@@ -212,6 +212,10 @@ function feedLine(line){
   /* st44 splits main() into control work and the act of printing, and states
      the scheduling the capture was taken under. Both are latched per sample so
      a log can never be read against the wrong assumptions. */
+  /* st45: aus= is a session watermark, auswin= is this window's worst block.
+     Latched so the verdict can say whether a 5 ms block recurs or happened
+     once at startup -- the two are indistinguishable in aus= alone. */
+  if(line.startsWith('STEMRT')){ aus=num(line,'aus'); auswin=num(line,'auswin'); }
   if(line.startsWith('CPU')){
     cpu={aud:num(line,'aud'),str:num(line,'str'),midi:num(line,'midi'),
          main:num(line,'main'),diag:num(line,'diag')};
@@ -223,6 +227,7 @@ function feedLine(line){
       rdby:num(line,'rdby'),rdc:num(line,'rdc'),rdus:num(line,'rdus'),
       rdusmx:num(line,'rdusmx'),rduswin:num(line,'rduswin'),rate:num(line,'rate'),
       sil:num(line,'sil'),und:num(line,'und'),corr:num(line,'corr'),
+      aus:aus,auswin:auswin,
       reloadfail:num(line,'reloadfail'),rd:null,transport,cpu,prio};
     samples.push(pendingIO);
   } else if(line.includes('STEMRD') && pendingIO && !pendingIO.rd){
@@ -242,7 +247,7 @@ function feedLine(line){
   }
 }
 function parseAll(text){
-  samples=[];marks=[];pendingIO=null;buildTag=null;transport=null;cpu=null;prio=null;
+  samples=[];marks=[];pendingIO=null;buildTag=null;transport=null;cpu=null;prio=null;aus=null;auswin=null;
   for(const l of text.split(/\r?\n/)) feedLine(l);
 }
 function deltas(){

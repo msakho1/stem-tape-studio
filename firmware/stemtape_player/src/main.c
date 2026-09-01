@@ -157,9 +157,9 @@
 #define ST_RC_SWEEP_REPS 24u
 
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st44-VOLCAL"
+#define ST_BUILD_TAG "st45-VOLCAL"
 #else
-#define ST_BUILD_TAG "st44"
+#define ST_BUILD_TAG "st45"
 #endif
 #include "st_track_hold.h"
 
@@ -1150,6 +1150,23 @@ static volatile uint32_t g_stored_glitch_cnt;    /* diag: wfail advance-anyway c
                                                   * what previous crackle hunts were missing. */
 static volatile uint32_t g_i2s_wfail_cnt;        /* diag: I2S write failures (audio-path exoneration) */
 static volatile uint32_t g_audio_us_max;         /* diag: worst looper_audio_block exec time, us (DWT, session) */
+/*
+ * THE SAME QUANTITY, PER WINDOW, and it exists because the session watermark
+ * above cannot answer the question anyone asks of it.
+ *
+ * aus= reported 5052 us and then 4978 us across two builds and never moved
+ * again inside either run -- so "the audio block occasionally takes 5 ms" was
+ * never actually established: ONE early block can set a session maximum and
+ * every later sample simply repeats it. A recurring spike and a single startup
+ * transient are indistinguishable in that number, and they have completely
+ * different fixes.
+ *
+ * Read-and-cleared by each print, so auswin= is the worst block in THIS
+ * window. Steady near 5000 => a real recurring spike. Steady near the mean
+ * while only aus= stays high => the watermark was one event and there is
+ * nothing there to chase.
+ */
+static volatile uint32_t g_audio_us_win;
 /*
  * THE COST OF WATCHING, SEPARATED FROM THE COST OF WORKING.
  *
@@ -6798,6 +6815,7 @@ static void audio_thread(void *a, void *b, void *c)
 		looper_audio_block(blk);
 		uint32_t _cus = (DWT->CYCCNT - _c0) / 64u;   /* 64 MHz -> us */
 		if (_cus > g_audio_us_max) g_audio_us_max = _cus;
+		if (_cus > g_audio_us_win) g_audio_us_win = _cus;
 
 		int wrc = i2s_write(i2s_dev, blk, BLK_BYTES);
 		if (wrc != 0) {
@@ -7393,6 +7411,9 @@ static void controls_diag(void)
 	 *           number on this line. */
 	{
 		uint32_t aus = g_audio_us_max;
+		uint32_t auswin = g_audio_us_win;
+
+		g_audio_us_win = 0u;
 		uint32_t have = stem_diag_sustained_read_bytes_per_sec();
 		/* Whole-percent integer math throughout: no floating point in
 		 * this firmware's diagnostics, and none needed. BLK_FRAMES
@@ -7403,9 +7424,10 @@ static void controls_diag(void)
 		uint32_t ahead_us = (uint32_t)((1000000ull * (uint64_t)ahead_sectors *
 						 (uint64_t)ST11_FRAMES_PER_SECTOR) / ST11_SAMPLE_RATE_HZ);
 
-		printk("STEMRT aus=%uus budget=%u%% need=%uBps have=%uBps margin=%u%% "
+		printk("STEMRT aus=%uus auswin=%uus budget=%u%% need=%uBps have=%uBps margin=%u%% "
 		       "ahead=%usec/%uus und=%u\n",
-		       (unsigned)aus, (unsigned)((aus * 100u) / budget_us),
+		       (unsigned)aus, (unsigned)auswin,
+		       (unsigned)((aus * 100u) / budget_us),
 		       (unsigned)need, (unsigned)have,
 		       /* need is a nonzero compile-time constant (48000 * 24),
 		        * so no divide-by-zero guard is possible or needed. */

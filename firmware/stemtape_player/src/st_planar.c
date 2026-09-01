@@ -179,6 +179,19 @@ bool st_pl_from_v11_sector(const uint8_t sector[ST11_SECTOR_BYTES],
  * Duplicated rather than exported because the two codecs are deliberately
  * separate types (see st_sector_v11.h), and a test pins the two decoders equal
  * on real recorded audio rather than trusting this comment. */
+/*
+ * -O2 ON THE DECODE PATH, for exactly the reason sp1_emmc.c, st_stem_mix.c,
+ * st_sector_v11.c and st_stem_stream.c already carry the same attribute: this
+ * project builds at Zephyr's default size optimisation, and these three
+ * functions run 48,000 times a second on the thread with a hard 5.333 ms
+ * deadline. st_planar.c was the ONLY file left in the audio hot path without
+ * it -- an omission from the v1.2 port, not a decision.
+ *
+ * This changes no arithmetic. The full-playback gate hashes the decoded audio
+ * over the whole recorded song (0xe9650dda) and is the mechanical proof that
+ * it did not.
+ */
+__attribute__((optimize("O2")))
 static int32_t pl_i24le(const uint8_t *in, uint32_t off)
 {
 	uint32_t v = (uint32_t)in[off + 0] | ((uint32_t)in[off + 1] << 8) |
@@ -190,6 +203,7 @@ static int32_t pl_i24le(const uint8_t *in, uint32_t off)
 	return (int32_t)v;
 }
 
+__attribute__((optimize("O2")))
 void st_pl_decode_stem(const uint8_t *group, uint32_t frame_in_group,
 			int32_t *out_l, int32_t *out_r)
 {
@@ -199,6 +213,7 @@ void st_pl_decode_stem(const uint8_t *group, uint32_t frame_in_group,
 	*out_r = pl_i24le(group, off + ST11_BYTES_PER_SAMPLE);
 }
 
+__attribute__((optimize("O2")))
 void st_pl_decode_frame(const uint8_t *const groups[ST_PL_STEMS],
 			 const uint32_t frame_in_group[ST_PL_STEMS],
 			 st11_audio_frame_t *out)

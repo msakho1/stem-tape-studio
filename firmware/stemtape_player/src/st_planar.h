@@ -214,15 +214,58 @@ void st_pl_decode_frame(const uint8_t *const groups[ST_PL_STEMS],
  * stem's caller moves to the array form and the other three can keep using
  * this.
  */
+/* The loads below are open-coded three bytes at a time; if the sample width
+ * ever stops being 24-bit little-endian they must be rewritten, not adjusted. */
+_Static_assert(ST11_BYTES_PER_SAMPLE == 3u,
+		"st_pl_decode_frame_shared() open-codes 24-bit little-endian loads");
+
 static inline void st_pl_decode_frame_shared(const uint8_t *const groups[ST_PL_STEMS],
 					      uint32_t frame_in_group,
 					      st11_audio_frame_t *out)
 {
-	const uint32_t idx[ST_PL_STEMS] = {
-		frame_in_group, frame_in_group, frame_in_group, frame_in_group
-	};
+	/*
+	 * DECODED HERE, NOT DELEGATED. This used to build the four-element idx[]
+	 * array and hand it to st_pl_decode_frame() -- which lives in
+	 * st_planar.c, so the call could not be inlined, and every one of the
+	 * 48,000 output frames a second paid a cross-translation-unit call plus
+	 * a stack array whose four elements were the same number.
+	 *
+	 * The comment above already said building that array was "real work
+	 * spent representing a distinction that does not exist yet". It was
+	 * right, and removing three of the four constructions did not remove
+	 * the call. This removes both.
+	 *
+	 * The offset is the same for all four stems by definition of this
+	 * function, so it is computed ONCE rather than four times.
+	 *
+	 * st_pl_decode_frame() is untouched and still linked -- the variable-
+	 * rate path calls it, and it is what the reversed stem will use, which
+	 * is the whole reason the array form exists.
+	 *
+	 * Bit-identical by construction: the same two pl_i24le loads per stem
+	 * at the same offsets, in the same order. tests/test_planar.c asserts
+	 * the two forms agree, and the full-playback gate hashes the result.
+	 */
+	const uint32_t off = st_pl_frame_off(frame_in_group);
+	const uint32_t ro = off + ST11_BYTES_PER_SAMPLE;
+	uint32_t k;
 
-	st_pl_decode_frame(groups, idx, out);
+	for (k = 0u; k < ST_PL_STEMS; k++) {
+		const uint8_t *g = groups[k];
+		uint32_t l = (uint32_t)g[off + 0u] | ((uint32_t)g[off + 1u] << 8) |
+			     ((uint32_t)g[off + 2u] << 16);
+		uint32_t r = (uint32_t)g[ro + 0u] | ((uint32_t)g[ro + 1u] << 8) |
+			     ((uint32_t)g[ro + 2u] << 16);
+
+		if (l & 0x800000u) {
+			l |= 0xFF000000u;
+		}
+		if (r & 0x800000u) {
+			r |= 0xFF000000u;
+		}
+		out->stem_l[k] = (int32_t)l;
+		out->stem_r[k] = (int32_t)r;
+	}
 }
 
 /* ---- the read-ahead ring's geometry ------------------------------- */
