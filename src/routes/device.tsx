@@ -781,7 +781,7 @@ function DevicePage() {
         </div>
         <div className="flex flex-wrap items-center gap-x-8 gap-y-3 px-4 pb-5 pt-3 md:px-8">
           <Link to="/" className="flex items-center gap-4">
-            <img src={stemTapeLogo.url} alt="Stem Tape logo" width={96} height={96} className="h-[96px] w-[96px] object-contain" />
+            <img src={stemTapeLogo.url} alt="Stem Tape logo" width={120} height={120} className="h-[120px] w-[120px] object-contain" />
             <div>
               <h1 className="font-mono text-[28px] leading-none tracking-tight text-[var(--ink)]">
                 stem tape uploader
