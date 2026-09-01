@@ -90,7 +90,7 @@ export interface CanonicalStem {
   frames: number;
   /** Interleaved signed 24-bit LE PCM: frames * 2 * 3 bytes exactly. */
   pcm24: Uint8Array;
-  /** Peak measured on the final 24-bit values actually sent to the device. */
+  /** Peak measured on the final 24-bit values, before the 16-bit storage step. */
   peak: number;
   clipped: boolean;
   padFrames: number;
@@ -154,7 +154,7 @@ export function packStereo24(left: Float32Array, right: Float32Array, frames: nu
   return out;
 }
 
-/** Peak and clipping measured on the final 24-bit values, not on the float source. */
+/** Peak and clipping measured on the packed 24-bit values, not on the float source. */
 export function peakOfPcm24(pcm: Uint8Array): { peak: number; clipped: boolean } {
   let peak = 0;
   let clipped = false;
