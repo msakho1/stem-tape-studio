@@ -86,8 +86,17 @@
  * the whole stereo pair is ONE aligned word load. At 24 bits the 6-byte
  * stride alternates alignment and each sample is a three-byte assemble with
  * a sign-extend. Asserted in st_planar.h, where the decode lives.
+ *
+ * OVERRIDABLE FOR THE SAME ONE REASON ST11_FORMAT_MINOR is (see below): the
+ * frozen handoff fixtures are byte-exact records of a CONTRACT, and testing
+ * a contract means testing it at its own width. test_stem_v11.c compiles at
+ * -DST11_PCM_BIT_DEPTH=24u -DST11_FORMAT_MINOR=1u and keeps proving exactly
+ * what it always proved about v1.1. The shipped firmware's value is asserted
+ * separately in CI, so this cannot be used to quietly ship the wrong width.
  */
+#ifndef ST11_PCM_BIT_DEPTH
 #define ST11_PCM_BIT_DEPTH        16u
+#endif
 #define ST11_BYTES_PER_SAMPLE     (ST11_PCM_BIT_DEPTH / 8u) /* 2 */
 /* One frame carries all four stems, both channels: 4*2*2 = 16 bytes. */
 #define ST11_BYTES_PER_FRAME      (ST11_STEM_COUNT * ST11_CHANNELS_PER_STEM * ST11_BYTES_PER_SAMPLE)
@@ -165,8 +174,17 @@ _Static_assert(ST11_PCM_BIT_DEPTH >= 16u,
  * Skipping 2 is deliberate: v1.2 is the 24-bit song-planar format this
  * replaces, and reusing its number for a different payload width is exactly
  * the ambiguity these fields exist to prevent.
+ *
+ * Overridable on the same terms as ST11_PCM_BIT_DEPTH and ST11_FORMAT_MINOR:
+ * the frozen 100-byte stcp-capability-response.bin in handoff/v1.1 is a
+ * byte-exact record of what a v1.1 firmware answered, and the conformance
+ * harness compiles at -DST11_PROTOCOL_MINOR=1u so it keeps checking that
+ * st11_stcp_build() still reproduces it. CI asserts the shipped value
+ * separately, so this cannot quietly ship the wrong one.
  */
+#ifndef ST11_PROTOCOL_MINOR
 #define ST11_PROTOCOL_MINOR 3u
+#endif
 #define ST11_FORMAT_MAJOR   1u
 /*
  * THE STORAGE FORMAT VERSION, AND WHY IT IS OVERRIDABLE.

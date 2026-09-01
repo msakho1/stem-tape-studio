@@ -20,10 +20,13 @@ static uint32_t get_u32le(const uint8_t *in, uint32_t off)
 	       ((uint32_t)in[off + 2] << 16) | ((uint32_t)in[off + 3] << 24);
 }
 
-/* Conventional signed 24-bit little-endian: byte0=LSB, byte1=mid,
- * byte2=MSB -- matching src/sp1/song.ts's packStereo24()/readInt24LE(). */
 /*
- * v1.3 SAMPLE ACCESS: signed 16-bit little-endian.
+ * SAMPLE ACCESS: signed little-endian at ST11_PCM_BIT_DEPTH -- 16 bits as
+ * v1.3 ships, 24 in the v1.1 conformance harness, which compiles this file
+ * at its own width. Written as a loop over ST11_BYTES_PER_SAMPLE rather than
+ * hand-unrolled at one width, because the width is a named constant and a
+ * codec that silently means something else than that constant is exactly the
+ * bug the migration went looking for. byte0=LSB, matching src/sp1/song.ts.
  *
  * Byte-wise on purpose, unlike the planar decode's single aligned word load.
  * That one runs 48,000 times a second on the deadline thread and earns the
@@ -32,20 +35,27 @@ static uint32_t get_u32le(const uint8_t *in, uint32_t off)
  * than the instruction. Both produce identical bytes, which is what the
  * planar/sector parity test asserts.
  */
-static void put_i16le(uint8_t *out, uint32_t off, int32_t v)
+static void put_sample_le(uint8_t *out, uint32_t off, int32_t v)
 {
-	uint32_t u = (uint32_t)v & 0xFFFFu; /* low 16 bits; caller guarantees in-range */
+	uint32_t u = (uint32_t)v; /* caller guarantees in-range for the width */
+	uint32_t b;
 
-	out[off + 0] = (uint8_t)(u & 0xffu);
-	out[off + 1] = (uint8_t)((u >> 8) & 0xffu);
+	for (b = 0u; b < ST11_BYTES_PER_SAMPLE; b++) {
+		out[off + b] = (uint8_t)((u >> (8u * b)) & 0xffu);
+	}
 }
 
-static int32_t get_i16le(const uint8_t *in, uint32_t off)
+static int32_t get_sample_le(const uint8_t *in, uint32_t off)
 {
-	uint32_t v = (uint32_t)in[off + 0] | ((uint32_t)in[off + 1] << 8);
+	uint32_t v = 0u;
+	uint32_t b;
 
-	if (v & 0x8000u) {
-		v |= 0xFFFF0000u; /* sign-extend into the top half */
+	for (b = 0u; b < ST11_BYTES_PER_SAMPLE; b++) {
+		v |= ((uint32_t)in[off + b]) << (8u * b);
+	}
+	if (v & (1u << (ST11_PCM_BIT_DEPTH - 1u))) {
+		/* sign-extend the stored width out to 32 bits */
+		v |= ~((1u << ST11_PCM_BIT_DEPTH) - 1u);
 	}
 	return (int32_t)v;
 }
@@ -78,8 +88,8 @@ void st11_sector_encode(uint32_t sector_index, uint32_t first_frame, uint32_t fr
 		for (s = 0; s < ST11_STEM_COUNT; s++) {
 			uint32_t stem_off = frame_off + s * ST11_STEM_FRAME_BYTES;
 
-			put_i16le(out, stem_off, frames[f].stem_l[s]);
-			put_i16le(out, stem_off + ST11_BYTES_PER_SAMPLE, frames[f].stem_r[s]);
+			put_sample_le(out, stem_off, frames[f].stem_l[s]);
+			put_sample_le(out, stem_off + ST11_BYTES_PER_SAMPLE, frames[f].stem_r[s]);
 		}
 	}
 }
@@ -102,7 +112,7 @@ bool st11_sector_read_header(const uint8_t in[ST11_SECTOR_BYTES], st11_sector_he
 /* -O2 FOR THIS FUNCTION ONLY -- see st_stem_mix.c's matching note and
  * sp1_emmc.c's crc16() for the established precedent. Pure computation,
  * no timing or aliasing dependency, called once per output frame at
- * 48 kHz alongside st_stem_mix_frame(); the eight 24-bit little-endian
+ * 48 kHz alongside st_stem_mix_frame(); the eight little-endian
  * sign-extending loads it performs are exactly the shape -Os pessimises
  * and -O2 does not. */
 __attribute__((optimize("O2")))
@@ -115,7 +125,7 @@ void st11_sector_decode_frame(const uint8_t in[ST11_SECTOR_BYTES], uint32_t fram
 	for (s = 0; s < ST11_STEM_COUNT; s++) {
 		uint32_t stem_off = frame_off + s * ST11_STEM_FRAME_BYTES;
 
-		frame_out->stem_l[s] = get_i16le(in, stem_off);
-		frame_out->stem_r[s] = get_i16le(in, stem_off + ST11_BYTES_PER_SAMPLE);
+		frame_out->stem_l[s] = get_sample_le(in, stem_off);
+		frame_out->stem_r[s] = get_sample_le(in, stem_off + ST11_BYTES_PER_SAMPLE);
 	}
 }

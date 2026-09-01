@@ -260,7 +260,16 @@ void st_pl_decode_frame(const uint8_t *const groups[ST_PL_STEMS],
  * ever changes, this function must be REWRITTEN, not adjusted -- the same
  * warning the 24-bit version carried, and the reason the change was caught
  * loudly here rather than miscompiled silently when the width moved.
+ *
+ * The #if is not a portability hedge and it is not dead code kept "just in
+ * case": ST11_PCM_BIT_DEPTH is overridable for exactly one purpose (see
+ * st_v11_format.h), and the v1.1 conformance harness compiles this header at
+ * 24-bit. Only ONE arm is ever compiled, chosen at build time, so the shipped
+ * binary is byte-identical to a file with the 24-bit arm deleted. Keeping the
+ * asserts INSIDE the 4-byte arm is the point -- at the shipped width they
+ * still fail loudly if the geometry moves.
  */
+#if ST11_STEM_FRAME_BYTES == 4u
 _Static_assert(ST11_STEM_FRAME_BYTES == 4u,
 		"st_pl_decode_stem_inline() loads a stereo frame as one 32-bit word");
 _Static_assert(ST_PL_OFF_FRAMES % 4u == 0u,
@@ -274,6 +283,7 @@ _Static_assert(ST_PL_OFF_FRAMES % 4u == 0u,
 _Static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__,
 		"st_pl_decode_stem_inline() reads L from the low half of the word");
 #endif
+#endif /* ST11_STEM_FRAME_BYTES == 4u */
 
 /*
  * ONE STEM, ONE FRAME, INLINE -- the primitive both decode paths are built
@@ -295,6 +305,7 @@ static inline void st_pl_decode_stem_inline(const uint8_t *group,
 					     int32_t *out_l, int32_t *out_r)
 {
 	const uint32_t off = st_pl_frame_off(frame_in_group);
+#if ST11_STEM_FRAME_BYTES == 4u
 	uint32_t w;
 
 	/* memcpy, not a cast through uint32_t*: `group` is a uint8_t* and the
@@ -307,6 +318,30 @@ static inline void st_pl_decode_stem_inline(const uint8_t *group,
 	 * are what sign-extend, in one instruction each. */
 	*out_l = (int32_t)(int16_t)(uint16_t)(w & 0xFFFFu);
 	*out_r = (int32_t)(int16_t)(uint16_t)(w >> 16);
+#else
+	/* The general, endian-neutral, byte-at-a-time form -- what every width
+	 * other than 16-bit gets, and what the whole file used before v1.3.
+	 * It is here only so the v1.1 conformance harness can compile this
+	 * header at its own width; the shipped build never sees it. */
+	const uint8_t *p = group + off;
+	uint32_t ch;
+	uint32_t acc;
+	uint32_t b;
+	int32_t  out[ST11_CHANNELS_PER_STEM];
+
+	for (ch = 0u; ch < ST11_CHANNELS_PER_STEM; ch++) {
+		acc = 0u;
+		for (b = 0u; b < ST11_BYTES_PER_SAMPLE; b++) {
+			acc |= ((uint32_t)p[ch * ST11_BYTES_PER_SAMPLE + b]) << (8u * b);
+		}
+		/* Sign-extend from ST11_PCM_BIT_DEPTH by shifting the sign bit
+		 * up to bit 31 and back down arithmetically. */
+		out[ch] = (int32_t)(acc << (32u - ST11_PCM_BIT_DEPTH)) >>
+			  (32u - ST11_PCM_BIT_DEPTH);
+	}
+	*out_l = out[0];
+	*out_r = out[1];
+#endif
 }
 static inline void st_pl_decode_frame_shared(const uint8_t *const groups[ST_PL_STEMS],
 					      uint32_t frame_in_group,

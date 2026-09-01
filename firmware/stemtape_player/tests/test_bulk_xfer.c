@@ -49,6 +49,11 @@
 #define FIXTURE_SONG_A_BLOCKS 128u
 #define FIXTURE_SONG_B_START  144u
 #define FIXTURE_SONG_B_BLOCKS 128u
+/* The frozen four-stem fixture's frame count, and the sector count that
+ * implies at whatever width this build stores. */
+#define FIXTURE_FRAMES        14592u
+#define FIXTURE_SECTORS       ((FIXTURE_FRAMES + ST11_FRAMES_PER_SECTOR - 1u) / \
+			        ST11_FRAMES_PER_SECTOR)
 
 static int g_checks;
 static int g_failures;
@@ -132,7 +137,12 @@ static void test_real_frozen_sector_through_parser(void)
 	size_t len;
 	uint8_t *song = read_fixture("handoff/v1.3/binaries/song-sectors-four-stem.bin", &len);
 
-	CHECK(len == 43u * ST_BULK_PAYLOAD_BYTES, "song-sectors-four-stem.bin is exactly 43 real STSC sectors");
+	/* DERIVED, not snapshotted: the fixture is 14592 frames of the same
+	 * audio at every stored width, and how many 8192-byte sectors that
+	 * takes is a property of ST11_FRAMES_PER_SECTOR -- 43 at v1.2's 340,
+	 * 29 at v1.3's 510. */
+	CHECK(len == (size_t)FIXTURE_SECTORS * ST_BULK_PAYLOAD_BYTES,
+	      "song-sectors-four-stem.bin is exactly %u real STSC sectors", FIXTURE_SECTORS);
 
 	/* Sector 0's own real bytes -- the exact payload a real companion
 	 * would send in a 'U' request for the first sector of a real song. */

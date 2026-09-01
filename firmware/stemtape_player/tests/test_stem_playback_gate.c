@@ -204,7 +204,16 @@ static uint32_t hash_stereo_sample(uint32_t h, int16_t l, int16_t r)
  *
  * The selector itself is not left unproven. tests/test_stem_v11.c exercises
  * the whole generation/slot/rollback contract against these same fixtures,
- * compiled at -DST11_FORMAT_MINOR=1u -- the version they are a record OF.
+ * compiled at -DST11_FORMAT_MINOR=1u -DST11_PCM_BIT_DEPTH=24u
+ * -DST11_PROTOCOL_MINOR=1u -- the version, width and protocol they are a
+ * record OF.
+ *
+ * Those three overrides are the reason the three CHECKs below exist. Each
+ * constant is #ifndef-guarded so that harness can compile the production
+ * sources at the v1.1 contract; the guard is only safe if something asserts
+ * the SHIPPED value in a build that takes no overrides. This gate is that
+ * build. Without these, a stray -D in the wrong CI step could ship 24-bit
+ * decode against 16-bit media and no test would notice.
  */
 static void test_boot_refuses_a_v11_library(void)
 {
@@ -216,6 +225,12 @@ static void test_boot_refuses_a_v11_library(void)
 	      "both real index fixtures are exactly one physical block (512 bytes)");
 	CHECK(ST11_FORMAT_MINOR == 3u,
 	      "this build really is v1.3 -- otherwise the refusal below proves nothing");
+	CHECK(ST11_PCM_BIT_DEPTH == 16u,
+	      "the SHIPPED stored width is 16-bit -- the v1.1 harness's "
+	      "-DST11_PCM_BIT_DEPTH=24u override did not leak into a real build");
+	CHECK(ST11_PROTOCOL_MINOR == 3u,
+	      "the SHIPPED STCP transport version is 3 -- what the companion "
+	      "negotiates against before it is allowed to upload 16-bit media");
 
 	st_stix_library_state_t lib;
 
@@ -223,7 +238,7 @@ static void test_boot_refuses_a_v11_library(void)
 			      FIXTURE_SONG_B_BLOCKS, &lib);
 
 	CHECK(lib.status != ST_STIX_LIB_OK,
-	      "a REAL, byte-exact, otherwise-valid v1.1 library is REFUSED by v1.2 "
+	      "a REAL, byte-exact, otherwise-valid v1.1 library is REFUSED by v1.3 "
 	      "firmware -- generation 3, slot A, checksums all intact, and still "
 	      "rejected purely on its format version");
 	CHECK((lib.active.flags & ST11_IX_FLAG_SONG_PRESENT) == 0u,

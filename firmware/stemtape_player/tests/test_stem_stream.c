@@ -120,8 +120,14 @@ static uint32_t hash_stereo_sample(uint32_t h, int16_t l, int16_t r)
 	return st_checksum32_update(h, b, sizeof(b));
 }
 
+/* The frozen four-stem fixture's real length, and the sector count it occupies
+ * DERIVED from it rather than snapshotted. 14592 frames was 43 sectors at
+ * v1.2's 340 frames per sector and is 29 at v1.3's 510 -- the same audio in
+ * the same 8192-byte sectors. A hard-coded 43 read 14 sectors past the end of
+ * the fixture, which is a segfault, not a diagnosis. */
 #define SONG_FRAMES 14592u
-#define SONG_SECTOR_COUNT 43u
+#define SONG_SECTOR_COUNT ((SONG_FRAMES + ST11_FRAMES_PER_SECTOR - 1u) / \
+			    ST11_FRAMES_PER_SECTOR)
 #define SONG_BLOCK_COUNT_EXACT (SONG_SECTOR_COUNT * ST11_BLOCKS_PER_SECTOR) /* 688: exact-fit capacity */
 
 /* ========================================================================
