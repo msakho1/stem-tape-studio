@@ -1,18 +1,18 @@
 /**
- * Stem Tape v1.2 PLANAR song encode / decode.
+ * Stem Tape v1.3 PLANAR song encode / decode.
  *
  * The transport unit is unchanged: one logical sector = 8,192 bytes = sixteen
  * consecutive 512-byte block writes, and block k of a sector carries bytes
  * [k*512, (k+1)*512).
  *
- * What changed in v1.2 is what those bytes contain. v1.1 interleaved all four
+ * What changed in v1.3 is what those bytes contain. v1.1 interleaved all four
  * stems into every 24-byte frame, so fetching one stem at a divergent position
- * cost a whole 8,192-byte sector to obtain 2,048 useful bytes. v1.2 stores each
+ * cost a whole 8,192-byte sector to obtain 2,048 useful bytes. v1.3 stores each
  * stem's entire timeline contiguously in its own quarter of the song region:
  *
  *   | stem 0 timeline | stem 1 timeline | stem 2 timeline | stem 3 timeline |
  *
- * The unit is a 2,048-byte GROUP (four blocks) holding 340 frames of ONE stem,
+ * The unit is a 2,048-byte GROUP (four blocks) holding 510 frames of ONE stem,
  * with an 8-byte self-validating header ('P','L', stemIndex, flags, groupIndex).
  * A sector is simply four consecutive groups of that stem-major stream, so
  *
@@ -29,12 +29,14 @@
 
 import {
   BLOCKS_PER_SECTOR,
-  BYTES_PER_FRAME,
-  BYTES_PER_SAMPLE,
+  BYTES_PER_FRAME_V11,
+  BYTES_PER_SAMPLE_V11,
   BYTES_PER_STEM_FRAME,
+  BYTES_PER_STEM_FRAME_V12,
+  GROUP_FLAGS_V13,
   CHANNELS,
   FRAMES_PER_GROUP,
-  FRAMES_PER_SECTOR,
+  FRAMES_PER_SECTOR_V11,
   GROUPS_PER_SECTOR,
   GROUP_BYTES,
   GROUP_HEADER_BYTES,
@@ -50,7 +52,8 @@ import {
   groupsForFrames,
   sectorsForFrames,
 } from "./stemTapeFormat";
-import { readInt24LE, type CanonicalSong } from "./song";
+import { type CanonicalSong } from "./song";
+import { readInt16LE, stemPcm16 } from "./pcm16";
 
 function put32(a: Uint8Array, off: number, v: number) {
   a[off] = v & 255;
@@ -77,7 +80,7 @@ export interface GroupHeader {
 }
 
 /**
- * Encode one 2,048-byte planar group: 340 frames of a single stem, starting at
+ * Encode one 2,048-byte planar group: 510 frames of a single stem, starting at
  * frame groupIndex * 340. A partial final group is zero-padded with silence.
  */
 export function encodeGroup(song: CanonicalSong, stemIndex: number, groupIndex: number): Uint8Array {
@@ -85,12 +88,12 @@ export function encodeGroup(song: CanonicalSong, stemIndex: number, groupIndex: 
   out[GROUP_OFF.magic0] = GROUP_MAGIC_0;
   out[GROUP_OFF.magic1] = GROUP_MAGIC_1;
   out[GROUP_OFF.stemIndex] = stemIndex & 255;
-  out[GROUP_OFF.flags] = 0;
+  out[GROUP_OFF.flags] = GROUP_FLAGS_V13;
   put32(out, GROUP_OFF.groupIndex, groupIndex);
 
   const firstFrame = groupIndex * FRAMES_PER_GROUP;
   const frameCount = Math.max(0, Math.min(FRAMES_PER_GROUP, song.frames - firstFrame));
-  const pcm = song.stems[stemIndex]!.pcm24;
+  const pcm = stemPcm16(song.stems[stemIndex]!);
   for (let f = 0; f < frameCount; f++) {
     const dst = GROUP_HEADER_BYTES + f * BYTES_PER_STEM_FRAME;
     const src = (firstFrame + f) * BYTES_PER_STEM_FRAME;
@@ -179,7 +182,9 @@ export function decodeSectors(sectors: Uint8Array[], frames: number): DecodedSon
       const group = sector.subarray(k * GROUP_BYTES, (k + 1) * GROUP_BYTES);
       const h = readGroupHeader(group);
       if (!h.magicOk) throw new Error(`group ${gIndex} magic mismatch (expected 'PL')`);
-      if (h.flags !== 0) throw new Error(`group ${gIndex} has non-zero flags ${h.flags}`);
+      if (h.flags !== GROUP_FLAGS_V13) {
+        throw new Error(`group ${gIndex} carries flags ${h.flags}, expected ${GROUP_FLAGS_V13} (v1.3)`);
+      }
       if (h.stemIndex !== stem) throw new Error(`group ${gIndex} reports stem ${h.stemIndex}, expected ${stem}`);
       if (h.groupIndex !== expectGroup) {
         throw new Error(`group ${gIndex} reports groupIndex ${h.groupIndex}, expected ${expectGroup}`);
@@ -193,14 +198,14 @@ export function decodeSectors(sectors: Uint8Array[], frames: number): DecodedSon
       }
     }
   }
-  // v1.2 song data carries no tempo: bpm and downbeat live in the STIX record.
+  // v1.3 song data carries no tempo: bpm and downbeat live in the STIX record.
   return { frames, stems, bpm: 0, downbeatFrame: 0 };
 }
 
 /** v1.1 mixed-frame decoder. Frozen v1.1 handoff-bundle audit only. */
 export function decodeSectorsV11(sectors: Uint8Array[], frames: number): DecodedSong {
   const stems: Uint8Array[] = [];
-  for (let s = 0; s < STEM_COUNT; s++) stems.push(new Uint8Array(frames * CHANNELS * BYTES_PER_SAMPLE));
+  for (let s = 0; s < STEM_COUNT; s++) stems.push(new Uint8Array(frames * CHANNELS * BYTES_PER_SAMPLE_V11));
   let bpmQ8 = 0;
   let downbeatFrame = 0;
   for (const sector of sectors) {
@@ -210,11 +215,11 @@ export function decodeSectorsV11(sectors: Uint8Array[], frames: number): Decoded
     bpmQ8 = h.bpmQ8;
     downbeatFrame = h.downbeatFrame;
     for (let f = 0; f < h.frameCount; f++) {
-      const src = SECTOR_HEADER_BYTES + f * BYTES_PER_FRAME;
-      const dst = (h.firstFrame + f) * CHANNELS * BYTES_PER_SAMPLE;
+      const src = SECTOR_HEADER_BYTES + f * BYTES_PER_FRAME_V11;
+      const dst = (h.firstFrame + f) * CHANNELS * BYTES_PER_SAMPLE_V11;
       for (let s = 0; s < STEM_COUNT; s++) {
-        for (let b = 0; b < CHANNELS * BYTES_PER_SAMPLE; b++) {
-          stems[s]![dst + b] = sector[src + s * CHANNELS * BYTES_PER_SAMPLE + b]!;
+        for (let b = 0; b < BYTES_PER_STEM_FRAME_V12; b++) {
+          stems[s]![dst + b] = sector[src + s * BYTES_PER_STEM_FRAME_V12 + b]!;
         }
       }
     }
@@ -241,5 +246,5 @@ export function blocksToSector(blocks: Uint8Array[]): Uint8Array {
 
 /** Convenience for tests: one sample from a decoded stem. */
 export function sampleAt(stem: Uint8Array, frame: number, channel: number): number {
-  return readInt24LE(stem, frame * CHANNELS * BYTES_PER_SAMPLE + channel * BYTES_PER_SAMPLE);
+  return readInt16LE(stem, frame * BYTES_PER_STEM_FRAME + channel * 2);
 }
