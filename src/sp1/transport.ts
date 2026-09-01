@@ -353,6 +353,29 @@ export class StemTapeTransport {
   }
 
   /**
+   * User-confirmed "Set up this SP-1": write the generation-1 empty STIX v2
+   * record, flush, then re-send 'Q' and confirm the firmware itself now reports
+   * generation 1. The capability reply is authoritative for that confirmation;
+   * the record read-back is checked separately by initialiseLibrary().
+   */
+  async setUpLibrary(): Promise<{
+    library: LibraryState;
+    /** Generation reported by the fresh 'Q' reply, or null when unavailable. */
+    reportedGeneration: number | null;
+    confirmed: boolean;
+  }> {
+    const library = await this.initialiseLibrary();
+    let reportedGeneration: number | null = null;
+    try {
+      const raw = await this.session.queryCapabilities();
+      if (raw) reportedGeneration = parseCapabilities(raw).activeGeneration;
+    } catch {
+      reportedGeneration = null;
+    }
+    return { library, reportedGeneration, confirmed: reportedGeneration === 1 };
+  }
+
+  /**
    * True only when the device's own 'Q' reply carried the "STBC" extension
    * with the supported flag set. Never inferred from a version number.
    */
