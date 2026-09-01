@@ -281,6 +281,35 @@ function DevicePage() {
   }, [say]);
 
 
+  /* ---- set up (explicit initialization) -------------------------------- */
+
+  const setUpDevice = useCallback(async () => {
+    const t = transportRef.current;
+    if (!t) return;
+    setSettingUp(true);
+    setSetupError(null);
+    say("Setting up this SP-1: writing a fresh index record to index A…");
+    try {
+      const { library: lib, reportedGeneration, confirmed } = await t.setUpLibrary();
+      setLibrary(lib);
+      setSetupDone(true);
+      say(
+        confirmed
+          ? `Set up. The SP-1 now reports generation ${reportedGeneration}. The next upload will commit at generation 2.`
+          : `Index written and read back at generation ${lib.generation}. The capability reply reported ${
+              reportedGeneration === null ? "no generation" : `generation ${reportedGeneration}`
+            }.`,
+        confirmed ? "success" : "warning",
+      );
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setSetupError(msg);
+      say(`Setting up did not complete: ${msg}`, "error");
+    } finally {
+      setSettingUp(false);
+    }
+  }, [say]);
+
   useEffect(() => () => void transportRef.current?.disconnect().catch(() => {}), []);
 
   /* ------------------------------------------------------------ step 2 */
