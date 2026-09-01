@@ -105,8 +105,24 @@
 #ifndef ST_LATENCY_H_
 #define ST_LATENCY_H_
 
-/* Microseconds of audio in one 8192-byte sector: 340 frames at 48 kHz. */
-#define ST_LAT_SECTOR_US 7083u
+#include "st_v11_format.h"
+
+/*
+ * Microseconds of audio in one 8192-byte sector -- DERIVED, because the frame
+ * count inside a sector is a property of the stored sample width.
+ *
+ * This was the literal 7083, which is 340 frames at 48 kHz: correct for
+ * v1.1/v1.2's 24-bit samples and silently wrong for v1.3's 16-bit ones,
+ * where the same 8192 bytes hold 510 frames and therefore 10,625 us. Every
+ * depth in this header is expressed in sectors and converted through this
+ * constant, so a stale value understates the read-ahead cover by a third --
+ * and understates it in the SAFE direction, which is exactly why nothing
+ * would have failed loudly. tests/test_loop_playback_gate.c caught it only
+ * because it asserts the derived depth is MINIMAL, and a depth that is
+ * secretly 1.5x deeper than believed stops being minimal.
+ */
+#define ST_LAT_SECTOR_US \
+	((ST11_FRAMES_PER_SECTOR * 1000000u) / ST11_SAMPLE_RATE_HZ)
 
 /* Measured on real hardware. See the header comment for provenance. */
 #define ST_LAT_READ_TYP_US    5073u
@@ -138,7 +154,44 @@
 
 /* Ring slots: the one the consumer holds, D ahead of it, and one the producer
  * may never target because the consumer holds it. */
-#define ST_LAT_RING_SLOTS (ST_LAT_READAHEAD_SECTORS + 2u)
+#define ST_LAT_RING_SLOTS_MIN (ST_LAT_READAHEAD_SECTORS + 2u)
+
+/*
+ * THE REFILL BATCH, and why the ring is rounded UP to a multiple of it.
+ *
+ * A batch is one emmc_read_blocks() only while its destination slots are
+ * contiguous, and slot is sector % G, so a run that crosses the end of the
+ * ring becomes two reads. When R divides G, runs aligned to a multiple of R
+ * never cross it -- that rule is why G=7/R=3 is worse than it looks, its
+ * batches cycling 3,3,1.
+ *
+ * R lives here rather than in st_planar.h because the ring size depends on
+ * it, and the ring size is depth policy, which is this header's subject. R=3
+ * is a hardware measurement: tools/sp1-readcost-sweep.py fitted
+ * us = 650 + 159*blocks on real hardware, so half of a single-group read is
+ * fixed command overhead and batching pays. See st_planar.h for the full
+ * derivation and the worst-case CPU table that picked 3 over 2 and 6.
+ *
+ * WHY THE ROUND-UP EXISTS AT ALL. ST_LAT_RING_SLOTS_MIN is derived from the
+ * stall budget divided by a sector's DURATION, and v1.3 made a sector 510
+ * frames instead of 340 -- so the same real-time cover now needs 5 slots
+ * where it needed 6. Five is correct as a minimum and unusable as a ring:
+ * 3 does not divide 5, so every batch would straddle the wrap and cost two
+ * reads instead of one. Rounding up to 6 restores the divisibility, costs
+ * exactly the RAM the ring already had, and spends the surplus on read-ahead
+ * rather than throwing it away.
+ */
+#define ST_LAT_REFILL_GROUPS 3u
+#define ST_LAT_RING_SLOTS \
+	(ST_LAT_CEIL_DIV(ST_LAT_RING_SLOTS_MIN, ST_LAT_REFILL_GROUPS) * \
+	 ST_LAT_REFILL_GROUPS)
+
+#if !defined(__cplusplus)
+_Static_assert(ST_LAT_RING_SLOTS >= ST_LAT_RING_SLOTS_MIN,
+	       "the ring may be rounded up for batch alignment, never down");
+_Static_assert((ST_LAT_RING_SLOTS % ST_LAT_REFILL_GROUPS) == 0u,
+	       "R must divide G or every refill batch straddles the ring wrap");
+#endif
 
 /* What a given residency depth actually covers, in microseconds, for tests
  * and reports: (n-1) whole sectors plus the single frame the target sits on. */

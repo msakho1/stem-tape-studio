@@ -164,7 +164,7 @@ static void test_init_rejects_invalid_geometry(void)
 static void test_validate_sector_real_fixture_and_corrupt_header(void)
 {
 	size_t len;
-	uint8_t *data = read_fixture("handoff/v1.1/binaries/song-sectors-four-stem.bin", &len);
+	uint8_t *data = read_fixture("handoff/v1.3/binaries/song-sectors-four-stem.bin", &len);
 
 	CHECK(len == (size_t)SONG_SECTOR_COUNT * ST11_SECTOR_BYTES,
 	      "song-sectors-four-stem.bin is exactly 43 * 8192 = 352256 bytes");
@@ -356,7 +356,7 @@ static void test_loop_transition(void)
 static void test_full_song_walk_transitions_and_hash(void)
 {
 	size_t len;
-	uint8_t *data = read_fixture("handoff/v1.1/binaries/song-sectors-four-stem.bin", &len);
+	uint8_t *data = read_fixture("handoff/v1.3/binaries/song-sectors-four-stem.bin", &len);
 
 	CHECK(len == (size_t)SONG_SECTOR_COUNT * ST11_SECTOR_BYTES, "fixture is the expected 43-sector size");
 
@@ -506,7 +506,7 @@ static void test_full_song_walk_transitions_and_hash(void)
 static void test_run_form_matches_frame_form(void)
 {
 	size_t len;
-	uint8_t *data = read_fixture("handoff/v1.1/binaries/song-sectors-four-stem.bin", &len);
+	uint8_t *data = read_fixture("handoff/v1.3/binaries/song-sectors-four-stem.bin", &len);
 	st_stream_t a, b;
 	st_stem_mix_channel_t channels[ST11_STEM_COUNT];
 	st_stem_mix_prepared_t prep;

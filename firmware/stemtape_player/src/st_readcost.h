@@ -81,6 +81,8 @@
 #ifndef STEMTAPE_PLAYER_READCOST_H_
 #define STEMTAPE_PLAYER_READCOST_H_
 
+#include "st_v11_format.h"
+
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -93,7 +95,11 @@
 /* Audio one sector holds, us. Mirrors ST_LAT_SECTOR_US; kept as its own
  * constant so this module stays free of the latency header and can be host
  * built on its own. A static assert in the test pins them equal. */
-#define ST_RC_SECTOR_US 7083u
+/* Same quantity as ST_LAT_SECTOR_US and asserted equal to it in
+ * tests/test_readcost.c -- derived here for the same reason: 7083 was 340
+ * frames' worth, and a v1.3 sector holds 510. */
+#define ST_RC_SECTOR_US \
+	((ST11_FRAMES_PER_SECTOR * 1000000u) / ST11_SAMPLE_RATE_HZ)
 
 /* The fit, in Q8 microseconds so a fractional per-block slope survives
  * without floating point on the target. */

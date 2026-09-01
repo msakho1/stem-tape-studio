@@ -39,7 +39,7 @@ void st_pl_write_header(uint8_t group[ST_PL_GROUP_BYTES], uint32_t stem,
 	group[ST_PL_OFF_MAGIC_0] = ST_PL_MAGIC_0;
 	group[ST_PL_OFF_MAGIC_1] = ST_PL_MAGIC_1;
 	group[ST_PL_OFF_STEM]    = (uint8_t)stem;
-	group[ST_PL_OFF_FLAGS]   = 0u;
+	group[ST_PL_OFF_FLAGS]   = (uint8_t)ST_PL_FORMAT_V13;
 	group[ST_PL_OFF_GROUP + 0u] = (uint8_t)(group_index & 0xffu);
 	group[ST_PL_OFF_GROUP + 1u] = (uint8_t)((group_index >> 8) & 0xffu);
 	group[ST_PL_OFF_GROUP + 2u] = (uint8_t)((group_index >> 16) & 0xffu);
@@ -65,11 +65,19 @@ bool st_pl_read_header(const uint8_t group[ST_PL_GROUP_BYTES],
 	if (out->stem >= ST_PL_STEMS) {
 		return false;
 	}
-	/* Flags are reserved and must be zero. A future format that sets one
-	 * is a format this build does not understand, and playing it as though
-	 * the byte meant nothing is exactly the silent misread the version
-	 * gates exist to prevent. */
-	if (out->flags != 0u) {
+	/* THE FLAGS BYTE IS THE PAYLOAD-WIDTH VERSION, and only the version
+	 * this build decodes is accepted.
+	 *
+	 * It used to be "reserved, must be zero", with the right reasoning
+	 * attached: a format this build does not understand must not be played
+	 * as though the byte meant nothing. v1.3 gives the byte a value instead
+	 * of reserving it, and the rule is unchanged -- an unrecognised version
+	 * is refused. What that now also catches is the case the old rule could
+	 * not: a v1.2 group, whose flags are 0, whose magic and stem and group
+	 * index are all correct, and whose 24-bit samples would otherwise be
+	 * decoded as 16-bit ones and played at full scale. See
+	 * ST_PL_FORMAT_V13. */
+	if (out->flags != ST_PL_FORMAT_V13) {
 		return false;
 	}
 	return true;
@@ -188,29 +196,24 @@ bool st_pl_from_v11_sector(const uint8_t sector[ST11_SECTOR_BYTES],
  * it -- an omission from the v1.2 port, not a decision.
  *
  * This changes no arithmetic. The full-playback gate hashes the decoded audio
- * over the whole recorded song (0xe9650dda) and is the mechanical proof that
+ * over the whole recorded song (0x2a737e00) and is the mechanical proof that
  * it did not.
  */
-__attribute__((optimize("O2")))
-static int32_t pl_i24le(const uint8_t *in, uint32_t off)
-{
-	uint32_t v = (uint32_t)in[off + 0] | ((uint32_t)in[off + 1] << 8) |
-		     ((uint32_t)in[off + 2] << 16);
-
-	if (v & 0x800000u) {
-		v |= 0xFF000000u;
-	}
-	return (int32_t)v;
-}
-
+/*
+ * ONE IMPLEMENTATION, NOT TWO. This is the out-of-line entry point, and it
+ * calls the header's inline primitive rather than repeating its arithmetic.
+ *
+ * The v1.2 version open-coded a three-byte little-endian assemble HERE and
+ * again in st_planar.h, so the two could drift and only a test standing
+ * between them said otherwise. With the payload now a single aligned word
+ * there is even less reason to write it twice: see st_pl_decode_stem_inline()
+ * for why the load is one instruction and what is asserted to keep it so.
+ */
 __attribute__((optimize("O2")))
 void st_pl_decode_stem(const uint8_t *group, uint32_t frame_in_group,
 			int32_t *out_l, int32_t *out_r)
 {
-	const uint32_t off = st_pl_frame_off(frame_in_group);
-
-	*out_l = pl_i24le(group, off);
-	*out_r = pl_i24le(group, off + ST11_BYTES_PER_SAMPLE);
+	st_pl_decode_stem_inline(group, frame_in_group, out_l, out_r);
 }
 
 __attribute__((optimize("O2")))

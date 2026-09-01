@@ -212,6 +212,9 @@ static uint32_t g_fill_credit_q8;
 #define STALL_BLOCKS_FOR_GUARANTEE \
 	((ST_LAT_GUARANTEE_US + BLOCK_US - 1u) / BLOCK_US)
 static uint32_t g_stall_blocks;
+/* The depth case_pin_depth_is_minimal() actually tested with, so the failure
+ * message quotes the number used rather than re-deriving it. */
+static uint32_t g_deficient_pins;
 
 static void audio_block(st_stream_t *st, ring_t *r, emitted_t *e,
 			 bool lp_on, uint32_t lp_lo, uint32_t lp_hi,
@@ -749,7 +752,38 @@ static void case_exit_at_sector_end(void)
 		(void)st_stream_seek(&st, lo);
 		ring_pin(&r, PIN_ENTRY, lo / ST11_FRAMES_PER_SECTOR);
 		ring_pin(&r, PIN_EXIT, hi / ST11_FRAMES_PER_SECTOR);
-		r.pin_count[PIN_EXIT] = ST_LAT_RESIDENCY_SECTORS - 1u;
+		/*
+		 * THE SHALLOWEST DEPTH THAT IS GENUINELY SHORT, FOUND rather
+		 * than assumed.
+		 *
+		 * This used to hard-code ST_LAT_RESIDENCY_SECTORS - 1 and
+		 * assert that it silences, on the reasoning that one sector
+		 * less than the derived depth must be insufficient. That held
+		 * while a sector was 340 frames. A v1.3 sector is 510, so
+		 * N-1 sectors now cover 21,249 us against a 21,173 us
+		 * guarantee -- sufficient by a hair -- and the case failed
+		 * saying the depth was not minimal, when what had actually
+		 * happened is that the same sector count buys half again as
+		 * much time.
+		 *
+		 * So the case computes the deficient depth from the guarantee
+		 * instead: the largest pin count whose cover falls SHORT.
+		 * That is the claim the case was always making, now stated in
+		 * the terms it is actually true in, and it survives the next
+		 * width change without editing.
+		 */
+		{
+			uint32_t deficient = ST_LAT_RESIDENCY_SECTORS;
+
+			while (deficient > 1u &&
+			       ST_LAT_RESIDENCY_COVER_US(deficient) >= ST_LAT_GUARANTEE_US) {
+				deficient--;
+			}
+			CHECK(ST_LAT_RESIDENCY_COVER_US(deficient) < ST_LAT_GUARANTEE_US,
+			      "a genuinely short depth exists to test with");
+			r.pin_count[PIN_EXIT] = deficient;
+			g_deficient_pins = deficient;
+		}
 
 		memset(&e, 0, sizeof(e));
 		e.frames = buf;
@@ -760,7 +794,8 @@ static void case_exit_at_sector_end(void)
 				     &enter_req, lo, &exit_req, hi);
 		}
 		CHECK(e.silent == 0u,
-		      "one sector shallower: the loop itself still runs clean");
+		      "at the short depth the loop ITSELF still runs clean -- the "
+		      "deficit only shows under the stall");
 		exit_req = true;
 		g_stall_blocks = STALL_BLOCKS_FOR_GUARANTEE;
 		for (i = 0; i < 20u; i++) {
@@ -768,11 +803,12 @@ static void case_exit_at_sector_end(void)
 				     &enter_req, lo, &exit_req, hi);
 		}
 		CHECK(e.silent > 0u,
-		      "one sector shallower DOES emit silence (%u frames) under "
-		      "the same stall -- %u us of cover against a %u us guarantee "
-		      "-- so the derived depth is the minimum, not a preference",
+		      "a genuinely short pin depth DOES emit silence (%u frames) "
+		      "under the same stall -- %u us of cover against a %u us "
+		      "guarantee -- so the derived depth is the minimum, not a "
+		      "preference",
 		      e.silent,
-		      ST_LAT_RESIDENCY_COVER_US(ST_LAT_RESIDENCY_SECTORS - 1u),
+		      ST_LAT_RESIDENCY_COVER_US(g_deficient_pins),
 		      ST_LAT_GUARANTEE_US);
 	}
 }

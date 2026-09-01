@@ -70,7 +70,7 @@ static uint32_t g_fix_sectors, g_fix_frames;
 
 static void load_fixture(void)
 {
-	const char *path = "handoff/v1.1/binaries/song-sectors-four-stem.bin";
+	const char *path = "handoff/v1.3/binaries/song-sectors-four-stem.bin";
 	FILE *f = fopen(path, "rb");
 	long sz;
 
@@ -163,12 +163,17 @@ static void render(int scope, uint8_t mask, uint32_t target_stem,
 
 		/* ---- main.c:1956-1963, STEM SCOPE ---- */
 		if (scope == SCOPE_STEM && st_fx_running(&fx)) {
-			int32_t fl = frame.stem_l[target_stem];
-			int32_t fr = frame.stem_r[target_stem];
+			/* Into the rack's Q23 domain and back -- see main.c's
+			 * own comment at this insertion point. A v1.3 stem
+			 * sample is Q15; handing it over unshifted would put
+			 * every sample in the linear bottom of the distortion
+			 * curve and the rack would quietly do almost nothing. */
+			int32_t fl = frame.stem_l[target_stem] << ST_FX_STEM_SHIFT;
+			int32_t fr = frame.stem_r[target_stem] << ST_FX_STEM_SHIFT;
 
 			st_fx_process(&fx, &fl, &fr, f);
-			frame.stem_l[target_stem] = fl;
-			frame.stem_r[target_stem] = fr;
+			frame.stem_l[target_stem] = fl >> ST_FX_STEM_SHIFT;
+			frame.stem_r[target_stem] = fr >> ST_FX_STEM_SHIFT;
 		}
 
 		st_stem_mix_frame_prepared(&frame, &prep, &stem_l, &stem_r);

@@ -97,7 +97,7 @@ static uint8_t *read_fixture(const char *path, size_t *len_out)
 }
 
 /* ========================================================================
- * STSC sector codec vs handoff/v1.1/binaries/song-sectors-four-stem.bin
+ * STSC sector codec vs handoff/v1.3/binaries/song-sectors-four-stem.bin
  *
  * Ground truth (handoff/v1.1/decoded/song-sectors-four-stem.json, verified
  * SHA-256/CRC32 against handoff/v1.1/SHA256SUMS.txt + CRC32SUMS.txt before
@@ -126,7 +126,7 @@ static uint8_t *read_fixture(const char *path, size_t *len_out)
 static void test_song_sectors_fixture(void)
 {
 	size_t len;
-	uint8_t *data = read_fixture("handoff/v1.1/binaries/song-sectors-four-stem.bin", &len);
+	uint8_t *data = read_fixture("handoff/v1.3/binaries/song-sectors-four-stem.bin", &len);
 
 	CHECK(len == (size_t)SONG_SECTOR_COUNT * ST11_SECTOR_BYTES,
 	      "song-sectors-four-stem.bin is exactly 43 * 8192 = 352256 bytes");

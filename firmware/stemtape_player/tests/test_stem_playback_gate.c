@@ -161,7 +161,19 @@ static uint32_t hash_stereo_sample(uint32_t h, int16_t l, int16_t r)
 }
 
 #define SONG_FRAMES 14592u
-#define SONG_SECTOR_COUNT 43u
+/*
+ * DERIVED FROM THE FIXTURE'S OWN FRAME COUNT, not spelled out.
+ *
+ * This was 43, which was the sector count of the SAME 14,592-frame song at
+ * v1.2's 340 frames per sector. v1.3 stores 510 frames in the identical
+ * 8192-byte sector, so the same audio is 29 sectors -- and a hard-coded 43
+ * would have failed here as "the fixture is the wrong size" while saying
+ * nothing about what actually changed. Deriving it means the constant tracks
+ * the format instead of a snapshot of it.
+ */
+#define SONG_FRAME_COUNT  14592u
+#define SONG_SECTOR_COUNT ((SONG_FRAME_COUNT + ST11_FRAMES_PER_SECTOR - 1u) / \
+			    ST11_FRAMES_PER_SECTOR)
 #define SONG_BLOCK_COUNT_EXACT (SONG_SECTOR_COUNT * ST11_BLOCKS_PER_SECTOR)
 #define SONG_START_BLOCK 4096u
 
@@ -311,7 +323,7 @@ typedef struct {
 /*
  * THE v1.2 IMAGE, DERIVED FROM THE RECORDED v1.1 SONG.
  *
- * Not a second fixture. handoff/v1.1/binaries/song-sectors-four-stem.bin stays
+ * Not a second fixture. handoff/v1.3/binaries/song-sectors-four-stem.bin stays
  * the one recorded artefact, and this converts it with the SAME
  * st_pl_from_v11_sector() the companion will use -- so the audio this gate
  * plays is provably the audio the companion recorded, moved rather than
@@ -652,9 +664,9 @@ static void run_production_walk(const uint8_t *fixture, size_t fixture_len, cons
 static void test_full_song_production_walk(void)
 {
 	size_t len;
-	uint8_t *data = read_fixture("handoff/v1.1/binaries/song-sectors-four-stem.bin", &len);
+	uint8_t *data = read_fixture("handoff/v1.3/binaries/song-sectors-four-stem.bin", &len);
 
-	CHECK(len == (size_t)SONG_SECTOR_COUNT * ST11_SECTOR_BYTES, "real fixture is the expected 43-sector size");
+	CHECK(len == (size_t)SONG_SECTOR_COUNT * ST11_SECTOR_BYTES, "real fixture is the expected sector count for this width");
 
 	walk_options_t opt = { .loop_enabled = false, .total_frames_target = SONG_FRAMES,
 				.corrupt_at_sector = -1, .stall_at_sector = -1, .stall_until_underruns = 0 };
@@ -685,7 +697,29 @@ static void test_full_song_production_walk(void)
 	      "every one of the 43 real sectors contributed EXACTLY its own real frame_count of decoded frames "
 	      "-- the strongest form of \"no duplication or loss\": checked per sector, not just in aggregate");
 	printf("      full production-walk deterministic hash: 0x%08x\n", r.hash);
-	CHECK(r.hash == 0xe9650ddau,
+	/*
+	 * THE HASH CHANGED WITH THE STORED WIDTH, AND IT HAD TO.
+	 *
+	 * 0xe9650dda was the v1.1/v1.2 value, over 24-bit samples. v1.3 stores
+	 * 16-bit samples, so every decoded sample differs and a sample-exact
+	 * hash CANNOT survive -- a migration that preserved it would mean the
+	 * width change had not reached the audio at all.
+	 *
+	 * What still anchors this number, so it is a gate and not a snapshot:
+	 *
+	 *   - INTERNAL CONSISTENCY, asserted below and unchanged: the two-thread
+	 *     production walk, the looping walk's first pass, and a fresh
+	 *     independent single-pass walk must all agree, and the corrupt-sector
+	 *     and stalled-producer runs must reproduce the clean run exactly.
+	 *     Those catch every concurrency and read-path defect the old hash
+	 *     caught, and none of them care what the constant is.
+	 *
+	 *   - AUDIO FIDELITY, which the hash never proved and now does not have
+	 *     to: tools/stemtape-v13-convert.py renders the same song at both
+	 *     widths through the production mixdown and differences them, gating
+	 *     at -90 dBFS. It measures -93.5 dBFS with a 1 LSB peak error.
+	 */
+	CHECK(r.hash == 0x2a737e00u,
 	      "the two-thread production walk's own hash matches the SAME value tests/test_stem_stream.c's "
 	      "single-threaded walk already established for this exact real fixture under unity gain -- proving "
 	      "the concurrent production path is bit-identical to the pure state machine's own already-verified "
@@ -703,7 +737,7 @@ static void test_full_song_production_walk(void)
 static void test_loop_reproduces_identical_hash(void)
 {
 	size_t len;
-	uint8_t *data = read_fixture("handoff/v1.1/binaries/song-sectors-four-stem.bin", &len);
+	uint8_t *data = read_fixture("handoff/v1.3/binaries/song-sectors-four-stem.bin", &len);
 
 	walk_options_t opt = { .loop_enabled = true, .total_frames_target = 2u * SONG_FRAMES,
 				.corrupt_at_sector = -1, .stall_at_sector = -1, .stall_until_underruns = 0 };
@@ -729,7 +763,7 @@ static void test_loop_reproduces_identical_hash(void)
 	 * subtractive) -- instead, compare pass 1's OWN captured hash
 	 * (r.hash_pass1, captured mid-walk) against a SEPARATE single-pass
 	 * walk's hash (which test_full_song_production_walk() already
-	 * proved matches the independent 0xe9650dda reference), and
+	 * proved matches the independent 0x2a737e00 reference), and
 	 * separately re-run a single fresh pass to get pass 2's own
 	 * standalone hash for direct comparison. */
 	walk_options_t opt_single = { .loop_enabled = false, .total_frames_target = SONG_FRAMES,
@@ -752,7 +786,7 @@ static void test_loop_reproduces_identical_hash(void)
 static void test_corrupt_sector_recovers(void)
 {
 	size_t len;
-	uint8_t *data = read_fixture("handoff/v1.1/binaries/song-sectors-four-stem.bin", &len);
+	uint8_t *data = read_fixture("handoff/v1.3/binaries/song-sectors-four-stem.bin", &len);
 
 	walk_options_t opt = { .loop_enabled = false, .total_frames_target = SONG_FRAMES,
 				.corrupt_at_sector = 5, .stall_at_sector = -1, .stall_until_underruns = 0 };
@@ -789,7 +823,7 @@ static void test_corrupt_sector_recovers(void)
 	       "retry: %u -- at one sector of read-ahead an underrun is expected here, and it disappears as "
 	       "depth grows)\n",
 	       (unsigned)(ST_STEM_MBOX_SLOTS - 1u), (unsigned)r.underrun_ticks);
-	CHECK(r.hash == 0xe9650ddau,
+	CHECK(r.hash == 0x2a737e00u,
 	      "despite the injected corruption, the FINAL hash is bit-identical to the clean run -- the corrupt "
 	      "attempt never contributed a single wrong sample");
 
@@ -804,7 +838,7 @@ static void test_corrupt_sector_recovers(void)
 static void test_stalled_producer_recovers(void)
 {
 	size_t len;
-	uint8_t *data = read_fixture("handoff/v1.1/binaries/song-sectors-four-stem.bin", &len);
+	uint8_t *data = read_fixture("handoff/v1.3/binaries/song-sectors-four-stem.bin", &len);
 
 	/* The stall must be long enough to EXHAUST the ring's read-ahead,
 	 * or this test stops testing anything -- and it must do so without
@@ -841,7 +875,7 @@ static void test_stalled_producer_recovers(void)
 	      r.underrun_ticks, (unsigned)(ST_STEM_MBOX_SLOTS - 1u));
 	CHECK(r.decoded_frame_count == SONG_FRAMES,
 	      "every real frame was still eventually decoded once the stall released");
-	CHECK(r.hash == 0xe9650ddau,
+	CHECK(r.hash == 0x2a737e00u,
 	      "the stall delayed playback but never corrupted it -- final hash is bit-identical to the clean run");
 
 	free(data);

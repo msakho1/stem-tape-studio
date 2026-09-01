@@ -1,0 +1,29 @@
+{
+ "note": "v1.3 16-bit STSC sectors, derived from the frozen handoff/v1.1 24-bit fixture by tools/stemtape-v13-convert.py (round-to-nearest, no dither). Checksums are computed by an INDEPENDENT implementation of st_checksum32.c's ALGORITHM, not copied from its output, so the firmware test still cross-checks two implementations rather than agreeing with itself.",
+ "derivedFrom": "handoff/v1.1/binaries/song-sectors-four-stem.bin",
+ "frames": 14592,
+ "sampleRate": 48000,
+ "channels": 2,
+ "pcmDepth": 16,
+ "framesPerSector": 510,
+ "sectorCount": 29,
+ "bytes": 237568,
+ "stems": [
+  {
+   "name": "vocal",
+   "checksum": 2642900572
+  },
+  {
+   "name": "drums",
+   "checksum": 4238229877
+  },
+  {
+   "name": "bass",
+   "checksum": 3150049925
+  },
+  {
+   "name": "instrument",
+   "checksum": 962109097
+  }
+ ]
+}

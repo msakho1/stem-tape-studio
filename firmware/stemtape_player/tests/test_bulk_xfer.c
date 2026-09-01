@@ -130,7 +130,7 @@ static void test_header_round_trip_arbitrary_values(void)
 static void test_real_frozen_sector_through_parser(void)
 {
 	size_t len;
-	uint8_t *song = read_fixture("handoff/v1.1/binaries/song-sectors-four-stem.bin", &len);
+	uint8_t *song = read_fixture("handoff/v1.3/binaries/song-sectors-four-stem.bin", &len);
 
 	CHECK(len == 43u * ST_BULK_PAYLOAD_BYTES, "song-sectors-four-stem.bin is exactly 43 real STSC sectors");
 
@@ -179,7 +179,7 @@ static void test_real_frozen_sector_through_parser(void)
 static void test_crc_detects_real_corruption(void)
 {
 	size_t len;
-	uint8_t *song = read_fixture("handoff/v1.1/binaries/song-sectors-four-stem.bin", &len);
+	uint8_t *song = read_fixture("handoff/v1.3/binaries/song-sectors-four-stem.bin", &len);
 	uint32_t original_crc = st_crc32_compute(song, ST_BULK_PAYLOAD_BYTES);
 
 	uint8_t corrupted[ST_BULK_PAYLOAD_BYTES];

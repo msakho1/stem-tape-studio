@@ -117,7 +117,7 @@ static void unity_channels(st_stem_mix_channel_t out[ST11_STEM_COUNT])
 }
 
 /*
- * handoff/v1.1/binaries/song-sectors-four-stem.bin's own sector 0, frame 0
+ * handoff/v1.3/binaries/song-sectors-four-stem.bin's own sector 0, frame 0
  * -- the same real fixture and the same st11_sector_read_header()/
  * st11_sector_decode_frame() calls test_stem_v11.c's own
  * test_song_sectors_fixture() already proves decode correctly (matching
@@ -128,7 +128,7 @@ static void unity_channels(st_stem_mix_channel_t out[ST11_STEM_COUNT])
 static void test_mix_real_decoded_frame_unity_gain(void)
 {
 	size_t len;
-	uint8_t *data = read_fixture("handoff/v1.1/binaries/song-sectors-four-stem.bin", &len);
+	uint8_t *data = read_fixture("handoff/v1.3/binaries/song-sectors-four-stem.bin", &len);
 
 	CHECK(len >= ST11_SECTOR_BYTES, "song-sectors-four-stem.bin has at least one full sector");
 
@@ -195,7 +195,7 @@ static void test_mix_real_decoded_frame_unity_gain(void)
 static void test_playback_path_replays_production_sequence_over_full_sector(void)
 {
 	size_t len;
-	uint8_t *data = read_fixture("handoff/v1.1/binaries/song-sectors-four-stem.bin", &len);
+	uint8_t *data = read_fixture("handoff/v1.3/binaries/song-sectors-four-stem.bin", &len);
 
 	CHECK(len >= ST11_SECTOR_BYTES, "song-sectors-four-stem.bin has at least one full sector");
 

@@ -68,7 +68,7 @@ static uint32_t g_fix_frames;
 
 static void load_fixture(void)
 {
-	const char *path = "handoff/v1.1/binaries/song-sectors-four-stem.bin";
+	const char *path = "handoff/v1.3/binaries/song-sectors-four-stem.bin";
 	FILE *f = fopen(path, "rb");
 	long sz;
 

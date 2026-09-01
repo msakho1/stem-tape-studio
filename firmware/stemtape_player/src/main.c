@@ -157,9 +157,9 @@
 #define ST_RC_SWEEP_REPS 24u
 
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st50-VOLCAL"
+#define ST_BUILD_TAG "st51-VOLCAL"
 #else
-#define ST_BUILD_TAG "st50"
+#define ST_BUILD_TAG "st51"
 #endif
 #include "st_track_hold.h"
 
@@ -1428,9 +1428,23 @@ _Static_assert(sizeof(g_stem_group_bufs) ==
 _Static_assert((ST_STEM_MBOX_SLOTS % ST_PL_REFILL_GROUPS) == 0u,
 		"R must divide G or a refill batch straddles the ring's end and "
 		"becomes two reads -- see st_stem_mbox_producer_next_run()");
-_Static_assert(ST_STEM_MBOX_SLOTS - ST_PL_REFILL_GROUPS >= 4u,
-		"fewer than 4 spans buffered is thinner than one MEASURED "
-		"worst-case fetch (21.6-23.6 ms against a 7.083 ms span)");
+/* READ-AHEAD RUNWAY, IN MILLISECONDS -- not in groups.
+ *
+ * This used to require G-R >= 4 groups. That was the right quantity in the
+ * wrong unit: a v1.3 group holds 510 frames where a v1.2 group held 340, so
+ * "4 groups" means 28.3 ms before the migration and 42.5 ms after, and a
+ * count cannot notice the difference. R rose from 2 to 3 here and the runway
+ * still went UP, from 28.3 ms to 31.9 ms -- which a group-count assertion
+ * would have reported as a regression from 4 to 3.
+ *
+ * The bound is the worst SINGLE read ever observed on this hardware during
+ * live playback: rdusmx = 9316 us. Three times that is the floor, so a
+ * stall of nearly ten milliseconds cannot empty the ring even if it lands
+ * immediately after a refill. */
+_Static_assert(((ST_STEM_MBOX_SLOTS - ST_PL_REFILL_GROUPS) *
+		 ST_PL_FRAMES_PER_GROUP * 1000u) / ST11_SAMPLE_RATE_HZ >= 28u,
+		"read-ahead runway must stay at or above 3x the 9.3 ms worst "
+		"observed single read");
 
 /* The lock-free SPSC handoff (st_stem_bufmbox.h) -- see this block's own
  * comment above for the producer/consumer role split. */
@@ -2686,8 +2700,27 @@ static void stem_render_run(const uint8_t *const grp[ST_PL_STEMS],
 		 * returns to dry with nothing to tear down. The decoder's Q23
 		 * domain is the rack's domain, so nothing is scaled here. */
 		if (s_fx_stem_scope && fx_on) {
-			int32_t fl = frame.stem_l[s_fx_target];
-			int32_t fr = frame.stem_r[s_fx_target];
+			/* INTO THE RACK'S OWN DOMAIN, AND BACK.
+			 *
+			 * The rack is Q23 throughout (ST_FX_SHIFT) -- the
+			 * distortion's tanh table is indexed against 2^23 full
+			 * scale, the gate's edge ramp and the echo's damping
+			 * coefficient are all fixed point against it. A v1.2
+			 * stem sample WAS Q23, so the stem-scope insertion could
+			 * hand it over untouched; a v1.3 sample is Q15, which is
+			 * 256x smaller.
+			 *
+			 * Handing that straight to the rack would not fail
+			 * loudly. It would work, quietly and wrongly: every
+			 * sample lands in the bottom 1/256 of the shaper's
+			 * curve, where tanh(15x) is indistinguishable from a
+			 * straight line, so "distortion" would become a gain
+			 * stage that does nothing. The GLOBAL scope below has
+			 * always done this shift, because the mixer has always
+			 * handed it int16 -- v1.3 simply makes both insertion
+			 * points the same shape. */
+			int32_t fl = frame.stem_l[s_fx_target] << ST_FX_STEM_SHIFT;
+			int32_t fr = frame.stem_r[s_fx_target] << ST_FX_STEM_SHIFT;
 
 			/* THE RACK'S TIME INDEX IS ITS TARGET'S OWN POSITION.
 			 * STEM scope processes exactly one stem, so the echo's
@@ -2696,8 +2729,11 @@ static void stem_render_run(const uint8_t *const grp[ST_PL_STEMS],
 			 * backwards, and was indistinguishable from the shared
 			 * cursor while all four moved together. */
 			st_fx_process(&g_stem_fx, &fl, &fr, song_frame + cur[s_fx_target]);
-			frame.stem_l[s_fx_target] = fl;
-			frame.stem_r[s_fx_target] = fr;
+			/* st_fx_process() clamps its output to the Q23 range, so
+			 * the shift back cannot exceed the stored sample's own
+			 * range and needs no second saturation. */
+			frame.stem_l[s_fx_target] = fl >> ST_FX_STEM_SHIFT;
+			frame.stem_r[s_fx_target] = fr >> ST_FX_STEM_SHIFT;
 		}
 
 		/* INLINE, from st_stem_mix.h -- the last out-of-line
@@ -2974,7 +3010,7 @@ atomic_set(&g_stem_song_frame_pub, (atomic_val_t)g_stem_stream.song_frame);
  * publish and the loop-wrap backstop -- once or twice per 5.333 ms block, on
  * the deadline thread -- and was still being built for size. Pure computation;
  * -O2 can only change how fast it is, not what it produces, and the
- * full-playback gate's 0xe9650dda hash is the proof. */
+ * full-playback gate's 0x2a737e00 hash is the proof. */
 __attribute__((optimize("O2"), noinline, noclone))
 static void stem_audio_block(int16_t *s, int32_t m0, int32_t md, int32_t mv)
 {

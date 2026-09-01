@@ -121,25 +121,50 @@ static void case_the_hypotheses_diverge(void)
 	CHECK(st_readcost_fits(&a, ST_RC_STEMS, 100000u),
 	      "under A four reversed should still leave 10 points spare");
 	/*
-	 * UNDER B, ONE REVERSED TRACK "FITS" AT 98.6% -- AND THAT IS A REFUSAL.
+	 * THE TWO HYPOTHESES MUST STILL REACH OPPOSITE CONCLUSIONS SOMEWHERE.
 	 *
-	 * Bare arithmetic says 98.6% is under 100%, so an earlier version of
-	 * this check asserted it would not fit at all, and was simply wrong.
-	 * The real statement is about HEADROOM. Every duty figure here assumes
-	 * the streamer gets the whole wall clock, which it never does: it runs
-	 * against the audio thread, the MIDI thread and the control loop, and
-	 * docs/stem-tape-playback-physical-test.md records what happens when
-	 * its share drops -- reads stretched from 5073 us to ~12500 us and the
-	 * song played slow and crushed. A design left with 1.4 points spare is
-	 * one scheduling hiccup from that. Ten points is the least that could
-	 * honestly be called viable, and under B one reversed track does not
-	 * have it.
+	 * That is this file's whole design, stated in its own header: a model
+	 * that says "feasible" under both hypotheses is telling us nothing.
+	 * It used to be pinned at ONE reversed track, where B gave 98.6% duty
+	 * -- under 100% on bare arithmetic, but with 1.4 points of headroom
+	 * against a streamer that never gets the whole wall clock, which is a
+	 * refusal.
+	 *
+	 * v1.3 changed the units underneath that. A 16-bit sector carries 510
+	 * frames instead of 340, so a sector lasts 10,625 us instead of 7,083
+	 * and every duty figure falls by a third: under B one reversed track is
+	 * now 65.8%, genuinely affordable, and the old assertion started
+	 * demanding that a comfortable design be refused.
+	 *
+	 * So the case finds the divergence point instead of naming it. It is
+	 * still the same claim -- the model discriminates -- and it no longer
+	 * encodes a snapshot of which track count it discriminates at.
+	 *
+	 * (The hunt question the two hypotheses represent is now settled by
+	 * measurement: tools/sp1-readcost-sweep.py fitted us = 650 + 159*blocks
+	 * on hardware, so the hunt is per BLOCK at 5.6 us and hypothesis A is
+	 * the real one. This case is kept because it proves the MODEL can tell
+	 * them apart, which is what makes that measurement worth trusting.)
 	 */
-	printf("     B, one reversed: %.1f%% duty -- fits on paper, no headroom\n",
-	       st_readcost_planar_duty_ppm(&b, 1u) / 10000.0);
-	CHECK(!st_readcost_fits(&b, 1u, 100000u),
-	      "under B one reversed track must be refused for lack of headroom "
-	      "(%.1f%% duty)", st_readcost_planar_duty_ppm(&b, 1u) / 10000.0);
+	{
+		uint32_t n, diverge = 0u;
+
+		for (n = 1u; n <= ST_RC_STEMS; n++) {
+			if (st_readcost_fits(&a, n, 100000u) &&
+			    !st_readcost_fits(&b, n, 100000u)) {
+				diverge = n;
+				break;
+			}
+		}
+		printf("     hypotheses diverge at %u reversed track(s): "
+		       "A %.1f%%, B %.1f%%\n", diverge,
+		       diverge ? st_readcost_planar_duty_ppm(&a, diverge) / 10000.0 : 0.0,
+		       diverge ? st_readcost_planar_duty_ppm(&b, diverge) / 10000.0 : 0.0);
+		CHECK(diverge != 0u,
+		      "the two hypotheses must disagree about SOME number of "
+		      "reversed tracks, or the model cannot gate the format "
+		      "decision it exists for");
+	}
 	CHECK(st_readcost_fits(&a, 1u, 200000u),
 	      "under A one reversed track should leave 20 points spare");
 }

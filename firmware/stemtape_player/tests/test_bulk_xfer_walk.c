@@ -24,7 +24,7 @@
  * machinery holds at real scale, not re-proving audio-content CRC
  * correctness against real bytes -- that is st_bulk_xfer.h's own
  * test_bulk_xfer.c, exercised against a REAL frozen sector from
- * handoff/v1.1/binaries/song-sectors-four-stem.bin.
+ * handoff/v1.3/binaries/song-sectors-four-stem.bin.
  *
  * Every pure function this test calls is the EXACT SAME one main.c's
  * real xfer_bulk_write_sector() calls (st_bulk_seq_check/advance,

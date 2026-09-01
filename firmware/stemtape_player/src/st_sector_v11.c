@@ -22,22 +22,30 @@ static uint32_t get_u32le(const uint8_t *in, uint32_t off)
 
 /* Conventional signed 24-bit little-endian: byte0=LSB, byte1=mid,
  * byte2=MSB -- matching src/sp1/song.ts's packStereo24()/readInt24LE(). */
-static void put_i24le(uint8_t *out, uint32_t off, int32_t v)
+/*
+ * v1.3 SAMPLE ACCESS: signed 16-bit little-endian.
+ *
+ * Byte-wise on purpose, unlike the planar decode's single aligned word load.
+ * That one runs 48,000 times a second on the deadline thread and earns the
+ * alignment assumption; this one encodes and decodes whole sectors off the
+ * real-time path, where being endian- and alignment-neutral is worth more
+ * than the instruction. Both produce identical bytes, which is what the
+ * planar/sector parity test asserts.
+ */
+static void put_i16le(uint8_t *out, uint32_t off, int32_t v)
 {
-	uint32_t u = (uint32_t)v & 0xFFFFFFu; /* keep low 24 bits; caller guarantees in-range */
+	uint32_t u = (uint32_t)v & 0xFFFFu; /* low 16 bits; caller guarantees in-range */
 
 	out[off + 0] = (uint8_t)(u & 0xffu);
 	out[off + 1] = (uint8_t)((u >> 8) & 0xffu);
-	out[off + 2] = (uint8_t)((u >> 16) & 0xffu);
 }
 
-static int32_t get_i24le(const uint8_t *in, uint32_t off)
+static int32_t get_i16le(const uint8_t *in, uint32_t off)
 {
-	uint32_t v = (uint32_t)in[off + 0] | ((uint32_t)in[off + 1] << 8) |
-		     ((uint32_t)in[off + 2] << 16);
+	uint32_t v = (uint32_t)in[off + 0] | ((uint32_t)in[off + 1] << 8);
 
-	if (v & 0x800000u) {
-		v |= 0xFF000000u; /* sign-extend into the top byte */
+	if (v & 0x8000u) {
+		v |= 0xFFFF0000u; /* sign-extend into the top half */
 	}
 	return (int32_t)v;
 }
@@ -70,8 +78,8 @@ void st11_sector_encode(uint32_t sector_index, uint32_t first_frame, uint32_t fr
 		for (s = 0; s < ST11_STEM_COUNT; s++) {
 			uint32_t stem_off = frame_off + s * ST11_STEM_FRAME_BYTES;
 
-			put_i24le(out, stem_off, frames[f].stem_l[s]);
-			put_i24le(out, stem_off + ST11_BYTES_PER_SAMPLE, frames[f].stem_r[s]);
+			put_i16le(out, stem_off, frames[f].stem_l[s]);
+			put_i16le(out, stem_off + ST11_BYTES_PER_SAMPLE, frames[f].stem_r[s]);
 		}
 	}
 }
@@ -107,7 +115,7 @@ void st11_sector_decode_frame(const uint8_t in[ST11_SECTOR_BYTES], uint32_t fram
 	for (s = 0; s < ST11_STEM_COUNT; s++) {
 		uint32_t stem_off = frame_off + s * ST11_STEM_FRAME_BYTES;
 
-		frame_out->stem_l[s] = get_i24le(in, stem_off);
-		frame_out->stem_r[s] = get_i24le(in, stem_off + ST11_BYTES_PER_SAMPLE);
+		frame_out->stem_l[s] = get_i16le(in, stem_off);
+		frame_out->stem_r[s] = get_i16le(in, stem_off + ST11_BYTES_PER_SAMPLE);
 	}
 }

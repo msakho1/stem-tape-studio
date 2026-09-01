@@ -54,6 +54,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "st_v11_format.h"
+
 #include "st_fx_ctl.h"   /* ST_FX_FILTER/ECHO/DIRT/GATE, ST_FX_COUNT */
 
 /* ---- sample domain ---------------------------------------------------- */
@@ -65,6 +67,22 @@
 #define ST_FX_ENGAGE_FRAMES 576u
 #define ST_FX_WET_SHIFT 15
 #define ST_FX_WET_UNITY (1 << ST_FX_WET_SHIFT)   /* 32768 */
+
+/*
+ * STORED-SAMPLE DOMAIN -> RACK DOMAIN, as a derived constant rather than a
+ * literal 8, so it cannot drift from the stored width.
+ *
+ * The rack is Q23: ST_FX_FULLSCALE is 2^ST_FX_SHIFT and every coefficient in
+ * this file is fixed point against it. A stored sample is signed at
+ * ST11_PCM_BIT_DEPTH bits, so its full scale is 2^(depth-1). At v1.2's 24-bit
+ * width that difference was zero and the stem-scope insertion passed samples
+ * through untouched; at v1.3's 16 bits it is 8, and passing them through
+ * would put every sample in the bottom 1/256 of the distortion curve, where
+ * it is linear. Silent wrongness, which is why this is derived and asserted.
+ */
+#define ST_FX_STEM_SHIFT (ST_FX_SHIFT - (ST11_PCM_BIT_DEPTH - 1u))
+_Static_assert(ST_FX_SHIFT >= (ST11_PCM_BIT_DEPTH - 1u),
+		"a stored sample must not be wider than the FX rack's own domain");
 
 /* ---- echo ------------------------------------------------------------- */
 /* 0.375 beat, as 3/8, in integer arithmetic. */

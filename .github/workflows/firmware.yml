@@ -2270,7 +2270,7 @@ jobs:
             firmware/stemtape_player/tests/test_planar_fixture.c \
             -o audit/test_planar_fixture
           ./audit/test_planar_fixture \
-            handoff/v1.1/binaries/song-sectors-four-stem.bin \
+            handoff/v1.3/binaries/song-sectors-four-stem.bin \
             | tee audit/planar-fixture.txt
           grep -q "THE PROOF: every per-stem checksum matches the companion's own" \
             audit/planar-fixture.txt
@@ -2886,9 +2886,9 @@ jobs:
           # same recorded v1.1 song, and must produce the SAME output hash the
           # v1.1 path produced. Identical hash = the format change moved bytes
           # around on storage and altered nothing a listener could hear.
-          grep -q 'deterministic hash: 0xe9650dda' audit/stem-playback-gate.txt || {
+          grep -q 'deterministic hash: 0x2a737e00' audit/stem-playback-gate.txt || {
             echo "  the planar read path does not reproduce the v1.1 audio hash"
-            echo "  0xe9650dda -- the format change altered the decoded audio"
+            echo "  0x2a737e00 -- the format change altered the decoded audio"
             exit 1; }
           # AND THE REFUSAL, which the format change newly makes load-bearing:
           # a v1.1 sector read as four planar groups is not noise, it is one

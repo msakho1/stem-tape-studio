@@ -88,6 +88,30 @@ static int g_cases, g_checks, g_failures;
 #define SONG_SECTORS 48u
 #define TONE_HZ      1000.0
 
+/*
+ * STEM 0's TONE AMPLITUDE -- ONE definition, because it was three.
+ *
+ * The rig wrote the tone at 2000000.0, the interpolation case built its
+ * ideal waveform at 2000000.0, and the semitone AND slow-mode cases each
+ * required the level to stay above 1900000.0. FOUR copies of one number,
+ * each a fraction of 24-bit full scale, none of them saying so -- and they
+ * did not all fail at once, so fixing them one at a time found a fourth
+ * only after the third was green.
+ *
+ * At v1.3's 16-bit storage that literal does not clip, it WRAPS in the
+ * encoder's low-16-bit store, so the sine became a sawtooth: the reference
+ * tone measured 5.3 frames per cycle against an expected 48, and the
+ * interpolation case reported the waveform 99.6% away from where it claimed
+ * to be. Neither message pointed at an amplitude.
+ *
+ * Now derived from ST11_PCM_BIT_DEPTH and referenced everywhere, so a future
+ * width change moves all three together or fails to compile.
+ * 0.238 of full scale keeps stem 0 comfortably clear of saturation while
+ * leaving room for the quieter stems below it.
+ */
+#define TONE_FULLSCALE ((double)(1u << (ST11_PCM_BIT_DEPTH - 1u)))
+#define TONE_AMP       (TONE_FULLSCALE * 0.238)
+
 static uint8_t  g_song[SONG_SECTORS][ST11_SECTOR_BYTES];
 static uint32_t g_song_frames;
 
@@ -104,9 +128,7 @@ static void build_song(void)
 			const double   v  = sin(ph);
 
 			for (sp = 0; sp < ST11_STEM_COUNT; sp++) {
-				/* Distinct amplitude per stem, well inside the
-				 * 24-bit range so nothing clips or saturates. */
-				const double a = 2000000.0 / (double)(sp + 1u);
+				const double a = TONE_AMP / (double)(sp + 1u);
 
 				fr[k].stem_l[sp] = (int32_t)(v * a);
 				fr[k].stem_r[sp] = (int32_t)(v * a);
@@ -649,7 +671,7 @@ static void case_the_blend_actually_interpolates(void)
 	}
 	for (i = 1; i < g_nout; i++) {
 		const double want = sin(2.0 * M_PI * TONE_HZ * g_pos_at[i] / SR) *
-				     2000000.0;
+				     TONE_AMP;
 		const double d = g_out[i] - want;
 
 		err += d * d;
@@ -728,7 +750,7 @@ static void case_semitones_reach_the_tape(void)
 		      err);
 		/* The level must not move with the pitch: this is a transport
 		 * rate, not a gain. */
-		CHECK(amp > 1900000.0,
+		CHECK(amp > TONE_AMP * 0.95,
 		      "the level fell to %.0f at %+.1f semitones -- pitch must "
 		      "not touch gain", amp, steps[i] * 0.5);
 	}
@@ -794,7 +816,7 @@ static void case_slow_playback_reaches_the_tape(void)
 		      "2.0 -- the pitch did not drop with the speed",
 		      steps[i] * 0.5, ratio);
 		/* Slow is a transport rate, not a fade. */
-		CHECK(amp_s > 1900000.0,
+		CHECK(amp_s > TONE_AMP * 0.95,
 		      "the level fell to %.0f in slow mode at %+.1f semitones "
 		      "-- slow must not touch gain", amp_s, steps[i] * 0.5);
 	}

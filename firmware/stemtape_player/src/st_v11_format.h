@@ -54,11 +54,44 @@
 #define ST11_SAMPLE_RATE_HZ       48000u
 #define ST11_STEM_COUNT           4u
 #define ST11_CHANNELS_PER_STEM    2u
-#define ST11_PCM_BIT_DEPTH        24u
-#define ST11_BYTES_PER_SAMPLE     (ST11_PCM_BIT_DEPTH / 8u) /* 3 */
-/* One frame carries all four stems, both channels: 4*2*3 = 24 bytes. */
+/*
+ * ======================================================================
+ * v1.3: 16-BIT STORED SAMPLES. Measured, not chosen by taste.
+ * ======================================================================
+ * The stems were stored at 24 bits and the I2S output has always been 16
+ * (see main.c's `struct i2s_config` `.word_size = 16`), so the top 8 bits
+ * of every stored sample were discarded at the last step of the mixdown.
+ * They were not free: four 24-bit stereo stems at 48 kHz are 1,152,000 B/s,
+ * and a hardware capture measured the streamer delivering 1,155,072 B/s
+ * with 6% CPU idle -- consumption exactly matched, no surplus at all. Pitch,
+ * FX and the reverse feature each need surplus, so each of them pushed the
+ * transport into starvation, heard as crackle and as the song dragging.
+ *
+ * 16-bit storage is 768,000 B/s, a third less, and it costs essentially
+ * nothing audible. Measured on the frozen four-stem fixture, converting the
+ * stems to 16-bit and rendering both widths through the production mixdown:
+ *
+ *     residual RMS -93.5 dBFS, peak error 1 LSB, against a -6.4 dBFS mix.
+ *
+ * ROUND-TO-NEAREST, AND DELIBERATELY NO DITHER. Truncation is genuinely
+ * wrong -- it leaves a +0.44 LSB DC bias and 2 LSB peak error -- but dither
+ * measured WORSE (-89.3 dBFS) and, swept from 0 to -60 dB of source level,
+ * its residual stayed flat. Dither decorrelates a FINAL quantisation; this
+ * one is not final, because the mixer re-quantises to int16 after summing
+ * and that undithered stage sets the floor at every level. So the companion
+ * rounds and does not dither, which also removes an RNG from the encoder.
+ *
+ * THE DECODE GETS FASTER, not just smaller. A 16-bit stereo frame is 4
+ * bytes, and the group header is 8, so every frame starts 4-byte aligned:
+ * the whole stereo pair is ONE aligned word load. At 24 bits the 6-byte
+ * stride alternates alignment and each sample is a three-byte assemble with
+ * a sign-extend. Asserted in st_planar.h, where the decode lives.
+ */
+#define ST11_PCM_BIT_DEPTH        16u
+#define ST11_BYTES_PER_SAMPLE     (ST11_PCM_BIT_DEPTH / 8u) /* 2 */
+/* One frame carries all four stems, both channels: 4*2*2 = 16 bytes. */
 #define ST11_BYTES_PER_FRAME      (ST11_STEM_COUNT * ST11_CHANNELS_PER_STEM * ST11_BYTES_PER_SAMPLE)
-#define ST11_STEM_FRAME_BYTES     (ST11_CHANNELS_PER_STEM * ST11_BYTES_PER_SAMPLE) /* 6 */
+#define ST11_STEM_FRAME_BYTES     (ST11_CHANNELS_PER_STEM * ST11_BYTES_PER_SAMPLE) /* 4 */
 
 /* Stem order, fixed (docs/stem-tape-transfer-v1.1.md section 8, matching
  * this target's existing ST_STEM_VOCAL.. constants in st_storage_layout.h). */
@@ -68,10 +101,11 @@
 #define ST11_STEM_INSTRUMENT 3u
 
 /* ---- STSC sector layout [doc section 8, 12.3] ------------------------
- * ONE 32-byte header + 8160-byte LINEAR frame payload (340 frames * 24
- * bytes/frame), conventional per-frame ordering (stem-major, channel-major:
+ * ONE 32-byte header + 8160-byte LINEAR frame payload (v1.3: 510 frames * 16
+ * bytes/frame; v1.1/v1.2 was 340 * 24 -- the same 8160 either way),
+ * conventional per-frame ordering (stem-major, channel-major:
  * vocal L, vocal R, drums L, drums R, bass L, bass R, inst L, inst R), each
- * sample signed 24-bit little-endian. Deliberately NOT the timknapen wiki's
+ * sample signed little-endian at ST11_PCM_BIT_DEPTH. Deliberately NOT the timknapen wiki's
  * physical-sub-block/reordered-byte-interleave format st_sector_codec.c
  * implements for the classic looper's OWN native storage -- that format
  * governs a disjoint address range this migration never touches; this is
@@ -82,7 +116,7 @@
  * only once this replacement is fully wired, per the migration plan). */
 #define ST11_SECTOR_HEADER_BYTES  32u
 #define ST11_SECTOR_PAYLOAD_BYTES (ST11_SECTOR_BYTES - ST11_SECTOR_HEADER_BYTES) /* 8160 */
-#define ST11_FRAMES_PER_SECTOR    (ST11_SECTOR_PAYLOAD_BYTES / ST11_BYTES_PER_FRAME) /* 340 */
+#define ST11_FRAMES_PER_SECTOR    (ST11_SECTOR_PAYLOAD_BYTES / ST11_BYTES_PER_FRAME) /* 510 at 16-bit */
 
 #define ST11_SECTOR_MAGIC 0x53545343u /* 'STSC', little-endian on the wire */
 
@@ -101,13 +135,38 @@
 _Static_assert(ST11_SECTOR_HEADER_BYTES + ST11_FRAMES_PER_SECTOR * ST11_BYTES_PER_FRAME ==
 		       ST11_SECTOR_BYTES,
 	       "STSC sector geometry does not tile the sector exactly");
+/* ZERO PADDING AT BOTH WIDTHS, and that is what made the migration cheap
+ * rather than a rewrite: 32 + 340*24 == 32 + 510*16 == 8192. The container
+ * did not move; only how many frames fit inside it. The same holds for the
+ * 2048-byte planar group -- see st_planar.h. */
+_Static_assert(ST11_SECTOR_PAYLOAD_BYTES % ST11_BYTES_PER_FRAME == 0u,
+	       "frames must tile the sector payload with no remainder");
+/* The mixer reduces the stored domain to the 16-bit I2S output domain by
+ * shifting right (ST11_PCM_BIT_DEPTH - 16). At 16-bit that shift is zero and
+ * the samples are already at output scale; a depth BELOW 16 would make it
+ * negative, which is undefined, so it is refused here rather than in the
+ * 48 kHz loop. */
+_Static_assert(ST11_PCM_BIT_DEPTH >= 16u,
+	       "stored depth below 16 would make the mixer's output shift negative");
 #endif
 
 /* ---- versions and identity [doc 12.2] --------------------------------- */
 
 #define ST11_FIRMWARE_ID   0x53544657u /* 'STFW' */
 #define ST11_PROTOCOL_MAJOR 1u
-#define ST11_PROTOCOL_MINOR 1u
+/*
+ * 1 -> 3 WITH THE 16-BIT PAYLOAD. The companion reads this out of the STCP
+ * capability reply ('Q') before it uploads anything, so a companion that
+ * still encodes 24-bit sees the mismatch and refuses, rather than writing a
+ * song this firmware would decode as noise. That is the FIRST of the two
+ * fail-closed layers; the second is the per-group one in st_planar.h, which
+ * catches a song already on the card from before the migration.
+ *
+ * Skipping 2 is deliberate: v1.2 is the 24-bit song-planar format this
+ * replaces, and reusing its number for a different payload width is exactly
+ * the ambiguity these fields exist to prevent.
+ */
+#define ST11_PROTOCOL_MINOR 3u
 #define ST11_FORMAT_MAJOR   1u
 /*
  * THE STORAGE FORMAT VERSION, AND WHY IT IS OVERRIDABLE.

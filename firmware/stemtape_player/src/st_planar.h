@@ -44,12 +44,15 @@
  * ======================================================================
  * GEOMETRY PARITY WITH v1.1
  * ======================================================================
- * A group is 4 blocks: an 8-byte header plus 340 frames of 6 bytes.
- * 8 + 340*6 = 2048 exactly. Four groups at one group index carry the same 340
- * frames, so frames-per-group EQUALS v1.1's frames-per-sector and a song
- * occupies the same number of blocks. Every STIX geometry field carries over
- * untouched, and the static asserts in st_planar.c pin that rather than
- * trusting this comment.
+ * A group is 4 blocks: an 8-byte header plus the frames that fill the rest.
+ * At v1.3's 16-bit width that is 8 + 510*4 = 2048 exactly; at v1.2's 24-bit
+ * width it was 8 + 340*6 = 2048, also exactly. THE CONTAINER DID NOT MOVE --
+ * only how many frames fit inside it -- which is what made the width change a
+ * payload edit rather than a layout redesign. Four groups at one group index
+ * carry the same frames as one sector, so frames-per-group EQUALS
+ * frames-per-sector and a song occupies the same number of blocks. Every STIX
+ * geometry field carries over untouched, and the static asserts in
+ * st_planar.c pin that rather than trusting this comment.
  *
  * PURE: no I/O, no Zephyr, no allocation.
  */
@@ -61,14 +64,15 @@
 #include <stdint.h>
 
 #include "st_sector_v11.h"
+#include "st_latency.h"
 #include "st_v11_format.h"
 
 #define ST_PL_STEMS            ST11_STEM_COUNT              /* 4 */
 #define ST_PL_GROUP_BLOCKS     4u
 #define ST_PL_GROUP_BYTES      (ST_PL_GROUP_BLOCKS * ST11_PHYSICAL_BLOCK_BYTES) /* 2048 */
 #define ST_PL_HEADER_BYTES     8u
-#define ST_PL_FRAME_BYTES      ST11_STEM_FRAME_BYTES        /* 6: L+R, 24-bit */
-#define ST_PL_FRAMES_PER_GROUP ST11_FRAMES_PER_SECTOR       /* 340 -- v1.1 parity */
+#define ST_PL_FRAME_BYTES      ST11_STEM_FRAME_BYTES        /* 4: L+R, 16-bit */
+#define ST_PL_FRAMES_PER_GROUP ST11_FRAMES_PER_SECTOR       /* 510 -- sector parity */
 
 /* Blocks one group index costs across all four stems. Equals
  * ST11_BLOCKS_PER_SECTOR, which is what makes a v1.2 song exactly as long as
@@ -81,6 +85,29 @@
  * to check it against is a mis-address waiting to be played as audio. */
 #define ST_PL_MAGIC_0 0x50u   /* 'P' */
 #define ST_PL_MAGIC_1 0x4Cu   /* 'L' */
+
+/*
+ * THE PAYLOAD-WIDTH VERSION, IN THE FLAGS BYTE -- the second of the two
+ * fail-closed layers, and the one that matters most.
+ *
+ * The first layer is ST11_PROTOCOL_MINOR in the STCP capability reply, which
+ * stops a 24-bit companion uploading to a 16-bit device. It cannot help with
+ * a song ALREADY on the card from before the migration: those groups carry a
+ * correct 'PL' magic, a correct stem and a correct group index, so every
+ * check that existed before this would pass them, and the firmware would
+ * decode 24-bit bytes as 16-bit ones and play the result as audio. Loud
+ * noise, at full scale, into whatever the player has on their head.
+ *
+ * The flags byte was written as 0 and never read. It now carries the format
+ * version and st_pl_validate() checks it, so a v1.2 group fails validation on
+ * the very first group fetched -- the song refuses to play and the existing
+ * corrupt-group counter says so -- rather than being decoded as garbage.
+ *
+ * 0 is therefore reserved forever: it is what every pre-v1.3 group already
+ * has on the card, and it must keep meaning "not this format".
+ */
+#define ST_PL_FORMAT_V13   3u
+#define ST_PL_FORMAT_LEGACY 0u   /* v1.2 and earlier: written as 0, never checked */
 
 #define ST_PL_OFF_MAGIC_0    0u
 #define ST_PL_OFF_MAGIC_1    1u
@@ -214,10 +241,39 @@ void st_pl_decode_frame(const uint8_t *const groups[ST_PL_STEMS],
  * stem's caller moves to the array form and the other three can keep using
  * this.
  */
-/* The loads below are open-coded three bytes at a time; if the sample width
- * ever stops being 24-bit little-endian they must be rewritten, not adjusted. */
-_Static_assert(ST11_BYTES_PER_SAMPLE == 3u,
-		"st_pl_decode_stem_inline() open-codes 24-bit little-endian loads");
+/*
+ * THE DECODE IS ONE ALIGNED WORD LOAD, AND THAT IS A PROPERTY OF THE
+ * GEOMETRY RATHER THAN A LUCKY FACT ABOUT THIS FUNCTION.
+ *
+ * A v1.3 stereo frame is exactly 4 bytes and the group header is exactly 8,
+ * so frame k begins at 8 + 4k -- always 4-byte aligned. Both samples of the
+ * pair therefore arrive in a single 32-bit load, and sign extension is two
+ * register operations rather than a per-sample test.
+ *
+ * v1.2's 6-byte stride could never do this: 8 + 6k alternates between 2- and
+ * 4-byte alignment, and each 24-bit sample had to be assembled from three
+ * separate byte loads and sign-extended by hand -- roughly eighteen
+ * operations per stereo frame against three, four times over per output
+ * frame, 48,000 times a second, on the thread with the hard deadline.
+ *
+ * Both halves are asserted. If either the stride or the header alignment
+ * ever changes, this function must be REWRITTEN, not adjusted -- the same
+ * warning the 24-bit version carried, and the reason the change was caught
+ * loudly here rather than miscompiled silently when the width moved.
+ */
+_Static_assert(ST11_STEM_FRAME_BYTES == 4u,
+		"st_pl_decode_stem_inline() loads a stereo frame as one 32-bit word");
+_Static_assert(ST_PL_OFF_FRAMES % 4u == 0u,
+		"the group header must keep every frame 4-byte aligned");
+/* The single-word load reads L from the low half and R from the high half,
+ * which is only the stored order on a little-endian target. The 24-bit
+ * version assembled bytes by hand and so was endian-neutral; this one buys
+ * its speed by not being, so the assumption is stated rather than implied.
+ * Cortex-M4 is little-endian and so is every host this is tested on. */
+#if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__)
+_Static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__,
+		"st_pl_decode_stem_inline() reads L from the low half of the word");
+#endif
 
 /*
  * ONE STEM, ONE FRAME, INLINE -- the primitive both decode paths are built
@@ -239,19 +295,18 @@ static inline void st_pl_decode_stem_inline(const uint8_t *group,
 					     int32_t *out_l, int32_t *out_r)
 {
 	const uint32_t off = st_pl_frame_off(frame_in_group);
-	uint32_t l = (uint32_t)group[off + 0u] | ((uint32_t)group[off + 1u] << 8) |
-		     ((uint32_t)group[off + 2u] << 16);
-	uint32_t r = (uint32_t)group[off + 3u] | ((uint32_t)group[off + 4u] << 8) |
-		     ((uint32_t)group[off + 5u] << 16);
+	uint32_t w;
 
-	if (l & 0x800000u) {
-		l |= 0xFF000000u;
-	}
-	if (r & 0x800000u) {
-		r |= 0xFF000000u;
-	}
-	*out_l = (int32_t)l;
-	*out_r = (int32_t)r;
+	/* memcpy, not a cast through uint32_t*: `group` is a uint8_t* and the
+	 * cast would be a strict-aliasing violation and an alignment assumption
+	 * the compiler is entitled to act on. GCC lowers a 4-byte memcpy from a
+	 * known-aligned offset to a single LDR, so this is the fast form AND
+	 * the defined one -- there is no trade here. */
+	__builtin_memcpy(&w, group + off, sizeof(w));
+	/* Little-endian: low half is L, high half is R. The casts to int16_t
+	 * are what sign-extend, in one instruction each. */
+	*out_l = (int32_t)(int16_t)(uint16_t)(w & 0xFFFFu);
+	*out_r = (int32_t)(int16_t)(uint16_t)(w >> 16);
 }
 static inline void st_pl_decode_frame_shared(const uint8_t *const groups[ST_PL_STEMS],
 					      uint32_t frame_in_group,
@@ -313,7 +368,52 @@ static inline void st_pl_decode_frame_shared(const uint8_t *const groups[ST_PL_S
  * G is not free to differ from the mailbox's own depth -- the mailbox IS the
  * ring -- so it is taken from there rather than restated, and asserted below.
  */
-#define ST_PL_REFILL_GROUPS 2u
+/*
+ * R = 3 IN v1.3, AND IT IS A MEASUREMENT NOW RATHER THAN AN ESTIMATE.
+ *
+ * The read-cost model here is st_readcost.h's: us = F + P * blocks, where F
+ * is paid once per read whatever its size (CMD18 setup and its R1, CMD12 and
+ * its R1b busy wait) and P per 512-byte block. R is decided entirely by that
+ * ratio, and F had never been measured on this firmware -- one read size
+ * cannot separate two unknowns.
+ *
+ * The 'M' sweep measured it on hardware (1/2/4/8/16 blocks, 24 reps each):
+ *
+ *     us = 650 + 159.0 * blocks
+ *
+ * so HALF of a single-group read is fixed overhead, and batching pays. Two
+ * things fell out of the same capture and are worth recording here because
+ * both had confused this project for weeks:
+ *
+ *   - the start-bit hunt is 5.6 us PER BLOCK, linear, negligible. The old
+ *     1763 us figure that made per-stem planar look unaffordable was a
+ *     scheduling artefact and is gone.
+ *   - a read costs 1949 us here against 2781 us measured during live
+ *     playback, implying a 30% non-streamer share of wall time -- which is
+ *     the ~35% audio-thread CPU every budget in this project assumes. The
+ *     model checked out against hardware rather than against itself.
+ *
+ * WHY 3 AND NOT MORE. R must divide G (see below) so the candidates are
+ * 1, 2, 3 and 6. Worst-case total CPU for the finished milestone -- one
+ * reversed stem, maximum pitch-up, the dearest FX arm and a loop:
+ *
+ *     R=1  98.0%      R=2  88.3%      R=3  85.1%      R=6  81.8%
+ *
+ * R=6 leaves ZERO read-ahead and is not a candidate at any price. R=3 takes
+ * 3.2 points more headroom than R=2 and still holds 31.9 ms of runway
+ * against a 9.3 ms worst observed read -- 3.4x. R=2 remains the fallback if
+ * runway ever proves to matter more than this models it as.
+ *
+ * AND THE RUNWAY GOT LONGER, not shorter, despite R rising. A 16-bit group
+ * is 510 frames where a 24-bit group was 340, so G-R = 3 groups is 31.9 ms
+ * where the old G-R = 4 was 28.3 ms. The depth assertion in main.c is stated
+ * in milliseconds for exactly this reason: counting groups compared two
+ * different units before and after the migration.
+ */
+/* THE VALUE ITSELF lives in st_latency.h, because the ring size derives from
+ * it and ring sizing is that header's subject. Taken from there rather than
+ * restated, so the two can never disagree. */
+#define ST_PL_REFILL_GROUPS ST_LAT_REFILL_GROUPS
 
 /* How many groups tile one v1.1 sector's worth of bytes -- four, one per
  * stem. Used where something still needs 8192 contiguous bytes out of a

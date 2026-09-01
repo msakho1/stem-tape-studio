@@ -123,9 +123,42 @@ static void case_header_round_trip(void)
 			ck(st_pl_read_header(g, &h), "header parses");
 			ck(h.stem == s, "stem round-trips");
 			ck(h.group_index == idx[i], "group index round-trips");
-			ck(h.flags == 0u, "flags are zero");
+			ck(h.flags == ST_PL_FORMAT_V13,
+			   "flags carry the v1.3 payload-width version");
 			ck(st_pl_validate(g, s, idx[i]), "validates against itself");
 		}
+	}
+	/*
+	 * AND A LEGACY GROUP IS REFUSED. This is the failure the flags byte was
+	 * given a meaning for: a v1.2 group has the right magic, the right stem
+	 * and the right group index, so every check that existed before v1.3
+	 * passes it -- and the decoder would then read 24-bit bytes as 16-bit
+	 * ones and play the result at full scale into whatever the player has
+	 * on their head.
+	 *
+	 * Built by writing a well-formed v1.3 header and then stamping the flags
+	 * byte back to ST_PL_FORMAT_LEGACY, so the ONLY thing wrong with it is
+	 * the width. A test that also corrupted the magic would pass for the
+	 * wrong reason.
+	 */
+	{
+		uint8_t g[ST_PL_GROUP_BYTES];
+		st_pl_header_t h;
+
+		memset(g, 0xAB, sizeof(g));
+		st_pl_write_header(g, 2u, 77u);
+		ck(st_pl_validate(g, 2u, 77u), "the v1.3 group validates first");
+		g[ST_PL_OFF_FLAGS] = (uint8_t)ST_PL_FORMAT_LEGACY;
+		ck(!st_pl_read_header(g, &h),
+		   "a legacy group is refused at the header");
+		ck(!st_pl_validate(g, 2u, 77u),
+		   "and therefore by validate: a v1.2 song must never decode "
+		   "as v1.3 audio");
+		/* Everything else about it is RIGHT, which is the trap: put the
+		 * version back and the very same bytes pass. */
+		g[ST_PL_OFF_FLAGS] = (uint8_t)ST_PL_FORMAT_V13;
+		ck(st_pl_validate(g, 2u, 77u),
+		   "the width was the only thing wrong with it");
 	}
 }
 
@@ -438,8 +471,15 @@ static void case_conversion_refuses_a_malformed_sector(void)
 	 * until this case existed.
 	 */
 	{
-		const uint32_t bad[] = { ST11_FRAMES_PER_SECTOR + 1u, 400u,
-					  1000u, 0xFFFFFFFFu };
+		/* DERIVED, NOT SPELLED OUT. This list used to read
+		 * { 341, 400, 1000, ... } because a sector held 340 frames.
+		 * At v1.3's 510 the literal 400 became a LEGAL count and the
+		 * case started asserting that a valid sector is refused. Every
+		 * entry is now relative to the real capacity. */
+		const uint32_t bad[] = { ST11_FRAMES_PER_SECTOR + 1u,
+					  ST11_FRAMES_PER_SECTOR + 60u,
+					  ST11_FRAMES_PER_SECTOR * 2u,
+					  0xFFFFFFFFu };
 
 		for (size_t i = 0u; i < sizeof(bad) / sizeof(bad[0]); i++) {
 			sector[ST11_SECTOR_OFF_FRAME_COUNT + 0u] = (uint8_t)(bad[i] & 0xffu);

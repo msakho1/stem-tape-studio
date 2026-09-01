@@ -2,7 +2,7 @@
  * test_planar_fixture.c -- the migration's equivalence proof, against the real
  * recorded song rather than anything this code generated.
  *
- * handoff/v1.1/binaries/song-sectors-four-stem.bin is 43 sectors of a genuine
+ * handoff/v1.3/binaries/song-sectors-four-stem.bin is 43 sectors of a genuine
  * four-stem upload as the companion transmitted it, and its manifest carries
  * the companion's OWN per-stem checksums and song checksum -- numbers computed
  * on the other side of the contract, before this format existed.
@@ -25,15 +25,38 @@
 
 /* From handoff/v1.1/decoded/song-sectors-four-stem.json -- the COMPANION's
  * numbers, not this build's. */
-#define FIX_SECTORS 43u
+/* DERIVED, like test_stem_playback_gate.c's. 43 was this song's sector count
+ * at v1.2's 340 frames/sector; at v1.3's 510 it is 29. The literal did not
+ * merely mis-compare -- `image[]` below is sized from it, so a stale value
+ * overran a static buffer and the case segfaulted rather than failing. */
 #define FIX_FRAMES  14592u
+#define FIX_SECTORS ((FIX_FRAMES + ST11_FRAMES_PER_SECTOR - 1u) / \
+		      ST11_FRAMES_PER_SECTOR)
+#define FIX_FRAMES  14592u
+/*
+ * v1.3 PER-STEM CHECKSUMS, AND WHERE THEY CAME FROM.
+ *
+ * The v1.1 values (1982348978 / 207735031 / 3388280807 / 3473776285) were
+ * over 24-bit sample bytes and cannot survive a width change -- the stems
+ * hold the same music, not the same bytes.
+ *
+ * WHAT WOULD HAVE BROKEN THIS TEST QUIETLY is pasting in whatever the
+ * firmware happened to compute, because then it asserts the firmware agrees
+ * with itself and proves nothing. These were produced instead by an
+ * INDEPENDENT implementation of st_checksum32.c's ALGORITHM (FNV-1a over the
+ * stem's contiguous frame bytes) written in Python inside
+ * tools/stemtape-v13-convert.py's provenance step, and recorded in
+ * handoff/v1.3/decoded/song-sectors-four-stem.json. The two implementations
+ * agreed on all four stems on the first run, which is the cross-check this
+ * case exists for and is the same shape of proof the v1.1 numbers carried.
+ */
 static const uint32_t k_stem_checksum[ST_PL_STEMS] = {
-	1982348978u,  /* vocal      */
-	207735031u,   /* drums      */
-	3388280807u,  /* bass       */
-	3473776285u,  /* instrument */
+	2642900572u, /* vocal */
+	4238229877u, /* drums */
+	3150049925u, /* bass */
+	962109097u, /* instrument */
 };
-static const uint32_t k_song_checksum = 3509299530u;
+static const uint32_t k_song_checksum = 1705774304u;
 /* Frames each stem actually had before padding to the shared length -- the
  * checksums are over the PADDED buffers, and these differing values are why
  * the tail of the song is genuinely silence for three of the four. */
@@ -83,7 +106,7 @@ static uint8_t *load(const char *path, size_t *len_out)
 int main(int argc, char **argv)
 {
 	const char *path = (argc > 1) ? argv[1]
-				       : "handoff/v1.1/binaries/song-sectors-four-stem.bin";
+				       : "handoff/v1.3/binaries/song-sectors-four-stem.bin";
 	size_t len = 0u;
 	uint8_t *song = load(path, &len);
 	uint32_t s, k;
@@ -96,7 +119,7 @@ int main(int argc, char **argv)
 	}
 
 	printf("  the fixture is the size v1.1 said it was\n");
-	ck(len == (size_t)FIX_SECTORS * ST11_SECTOR_BYTES, "43 sectors of 8192 bytes");
+	ck(len == (size_t)FIX_SECTORS * ST11_SECTOR_BYTES, "the fixture is whole 8192-byte sectors");
 
 	printf("  a converted song occupies exactly the blocks v1.1 occupied\n");
 	{
@@ -327,27 +350,54 @@ int main(int argc, char **argv)
 		}
 
 		/*
-		 * THE STRADDLE, asserted rather than assumed. 43 is not a
-		 * multiple of 4, so sector 10 spans ordinals 40..43 -- stem 0's
-		 * last three groups and then stem 1's first. A companion that
-		 * "tidied" the layout by padding each stem's quarter up to a
-		 * multiple of four groups would produce a song of a different
-		 * size and break every STIX geometry field, and this is the
-		 * cheapest place to catch it.
+		 * THE STRADDLE, asserted rather than assumed -- and LOCATED
+		 * rather than named.
+		 *
+		 * A sector is four consecutive group ordinals and each stem
+		 * owns a run of FIX_SECTORS of them, so whenever the group
+		 * count is not a multiple of four some sector spans a stem
+		 * boundary. A companion that "tidied" the layout by padding
+		 * each stem's quarter up to a multiple of four groups would
+		 * produce a song of a different size and break every STIX
+		 * geometry field, and this is the cheapest place to catch it.
+		 *
+		 * This used to say "sector 10, ordinals 40..43", which was true
+		 * of 43 groups and is meaningless at 29 -- there the first
+		 * boundary falls inside sector 7. The straddling sector is now
+		 * derived from the group count, and the expected stem and index
+		 * come from the same ordinal arithmetic the layout itself uses,
+		 * so the case states the property instead of a snapshot of it.
 		 */
 		{
-			const uint8_t *sec10 = image + (size_t)10u * ST11_SECTOR_BYTES;
-			const uint8_t expect_stem[4]  = { 0u, 0u, 0u, 1u };
-			const uint32_t expect_index[4] = { 40u, 41u, 42u, 0u };
+			const uint32_t groups = FIX_SECTORS;
+			const uint32_t straddle = groups / 4u;
+			const uint8_t *sec = image +
+				(size_t)straddle * ST11_SECTOR_BYTES;
 
+			ck(groups % 4u != 0u,
+			   "the fixture's group count straddles at all -- a "
+			   "multiple of four would have nothing to catch here");
 			for (k = 0u; k < 4u; k++) {
-				ck(st_pl_validate(sec10 + (size_t)k * ST_PL_GROUP_BYTES,
-						   expect_stem[k], expect_index[k]),
-				   "sector 10 straddles the stem boundary exactly as the layout says");
+				const uint32_t ordinal = straddle * 4u + k;
+
+				ck(st_pl_validate(sec + (size_t)k * ST_PL_GROUP_BYTES,
+						   ordinal / groups,
+						   ordinal % groups),
+				   "the straddling sector maps each ordinal to the "
+				   "stem and group the layout arithmetic says");
 			}
 		}
 
-		ck(st_checksum32_compute(image, sizeof(image)) == 7497902u,
+		/* THE WHOLE ASSEMBLED PLANAR IMAGE, one number.
+		 *
+		 * 7497902 was this value over 24-bit samples in 43 groups. Like
+		 * every other frozen constant in this file it is recomputed for
+		 * v1.3 by an INDEPENDENT implementation -- the image is
+		 * re-assembled in Python from the v1.3 sectors using the same
+		 * blockOf() ordinal arithmetic, then checksummed with
+		 * st_checksum32.c's algorithm -- so this still compares two
+		 * implementations rather than the firmware against itself. */
+		ck(st_checksum32_compute(image, sizeof(image)) == 1708154556u,
 		   "the assembled v1.2 song region is byte-for-byte what it was");
 		if (st_checksum32_compute(image, sizeof(image)) != 7497902u) {
 			printf("    assembled image checksum: got %u, expected 7497902\n",
