@@ -779,9 +779,9 @@ function DevicePage() {
             <SupportButton />
           </div>
         </div>
-        <div className="flex flex-wrap items-center gap-x-8 gap-y-3 px-4 pb-5 pt-3 md:px-8">
-          <Link to="/" className="flex items-center gap-4">
-            <img src={stemTapeLogo.url} alt="Stem Tape logo" width={120} height={120} className="h-[120px] w-[120px] object-contain" />
+        <div className="flex flex-wrap items-center gap-x-8 gap-y-3 px-4 pb-3 pt-2 md:px-8 md:pb-5 md:pt-3">
+          <Link to="/" className="flex items-center gap-3 md:gap-4">
+            <img src={stemTapeLogo.url} alt="Stem Tape logo" width={120} height={120} className="h-16 w-16 object-contain md:h-[120px] md:w-[120px]" />
             <div>
               <h1 className="font-mono text-[28px] leading-none tracking-tight text-[var(--ink)]">
                 stem tape uploader
