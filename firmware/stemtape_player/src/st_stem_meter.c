@@ -20,11 +20,27 @@ void st_stem_meter_reset(st_stem_meter_t *m)
  * A step at or past the whole time constant is stated directly rather than
  * left to the arithmetic, because the proportional form would compute a >=100%
  * move and rely on a clamp.
+ *
+ * THE MINIMUM STEP IS ONE, and it is what makes a proportional decay actually
+ * terminate. span * dt / tc is integer division, so once the remaining span is
+ * smaller than tc/dt the step rounds to zero and the envelope STOPS -- at
+ * whatever value it happened to reach, forever. At a ~10 ms service rate and a
+ * 300 ms release that stall region is span < 30. In the 24-bit domain the noise
+ * floor was 2048, far above it, so the stall could only ever happen below the
+ * floor where the light is already dark and nothing could be seen. At v1.3's
+ * 16 bits the floor is 8 and the stall region straddles it: an envelope
+ * resting anywhere in 9..29 would never reach the floor, and the Track LED
+ * would sit faintly lit after the stem went silent and stay there.
+ *
+ * Stepping one instead of zero fixes it without touching the shape of the
+ * decay anywhere the proportional step is already >= 1 -- which is the whole
+ * visible range. The step is still capped at `span`, so it converges onto the
+ * target rather than crossing it.
  */
 static uint32_t glide(uint32_t env, uint32_t target, uint32_t dt_ms,
 		       uint32_t tc_ms)
 {
-	uint32_t span;
+	uint32_t span, step;
 
 	if (tc_ms == 0u || dt_ms >= tc_ms) {
 		return target;
@@ -32,12 +48,14 @@ static uint32_t glide(uint32_t env, uint32_t target, uint32_t dt_ms,
 	if (dt_ms == 0u) {
 		return env;
 	}
-	if (target >= env) {
-		span = target - env;
-		return env + (uint32_t)(((uint64_t)span * dt_ms) / tc_ms);
+
+	span = (target >= env) ? (target - env) : (env - target);
+	step = (uint32_t)(((uint64_t)span * dt_ms) / tc_ms);
+	if (step == 0u && span > 0u) {
+		step = 1u;
 	}
-	span = env - target;
-	return env - (uint32_t)(((uint64_t)span * dt_ms) / tc_ms);
+
+	return (target >= env) ? (env + step) : (env - step);
 }
 
 /*

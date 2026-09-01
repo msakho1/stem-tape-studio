@@ -157,9 +157,9 @@
 #define ST_RC_SWEEP_REPS 24u
 
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st53-VOLCAL"
+#define ST_BUILD_TAG "st54-VOLCAL"
 #else
-#define ST_BUILD_TAG "st53"
+#define ST_BUILD_TAG "st54"
 #endif
 #include "st_track_hold.h"
 
@@ -2032,7 +2032,11 @@ static atomic_t g_stem_reload_fail_count;  /* Slice C3: post-commit runtime relo
 static st_beat_timing_t g_stem_beat_timing;
 static atomic_t g_stem_song_frame_pub;
 /* BEAT PULSE: per-stem peak magnitude of the most recent audio block, in
- * the stored 24-bit domain. Written once per stem per block by the audio
+ * the STORED domain -- signed at ST11_PCM_BIT_DEPTH, so full scale is 32767
+ * at v1.3's 16 bits. st_stem_meter.h derives its own full scale, reference
+ * and noise floor from that same constant; the two must not drift, and
+ * tests/test_stem_meter.c has a case that decodes a real stored frame and
+ * asserts they have not. Written once per stem per block by the audio
  * thread (single producer), read by led_service() on the control thread
  * (single consumer). Purely observational -- nothing in the audio path
  * ever reads these back, so a torn or stale read could at worst make one
@@ -3232,8 +3236,8 @@ static void stem_audio_block(int16_t *s, int32_t m0, int32_t md, int32_t mv)
 		s_stem_jump_pend = 0u;
 	}
 	/* BEAT PULSE: largest absolute sample magnitude each stem produced in
-	 * THIS block, in the stored 24-bit domain. Block-local until the single
-	 * publication at the end. */
+	 * THIS block, in the stored domain (ST11_PCM_BIT_DEPTH bits signed).
+	 * Block-local until the single publication at the end. */
 	uint32_t stem_peak[ST11_STEM_COUNT] = { 0u, 0u, 0u, 0u };
 
 _Static_assert(NTRK == ST11_STEM_COUNT, "trk[]/stem lane count must match 1:1");
@@ -8712,8 +8716,8 @@ static void led_service(void)
 	 * publishing side in stem_audio_block() for why a peak HOLD rather
 	 * than the last block's value.
 	 *
-	 * The magnitude is the raw 24-bit stem, and it is already zero for a
-	 * stem the mixer silenced (stem_render_run() skips metering a stem
+	 * The magnitude is the raw stored-domain stem sample, and it is already
+	 * zero for a stem the mixer silenced (stem_render_run() skips metering a stem
 	 * whose prepared gain is zero), so a muted or solo-silenced stem
 	 * decays dark through the same envelope as one that simply stopped
 	 * playing. There is no separate rule for it and no state to keep in

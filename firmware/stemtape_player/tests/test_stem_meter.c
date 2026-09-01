@@ -14,6 +14,7 @@
 
 #include <stdio.h>
 
+#include "st_planar.h"
 #include "st_stem_meter.h"
 
 static int g_checks;
@@ -372,6 +373,140 @@ static void test_over_full_scale_clamps(void)
 	}
 }
 
+/*
+ * THE DOMAIN CHECK, and the reason it is in this file rather than in a planar
+ * test: every other case here is written against ST_STEM_METER_FULL_SCALE,
+ * ST_STEM_METER_REF and ST_STEM_METER_FLOOR, so it scales with whatever those
+ * constants happen to say. That is right for testing the CURVE and blind to
+ * the thing that actually broke -- the constants describing a different domain
+ * from the one the PRODUCER feeds them.
+ *
+ * stem_render_run() meters exactly what st_pl_decode_stem_inline() returned,
+ * so this decodes a real full-scale stored frame through that real function
+ * and asserts the magnitude lands on full scale here. If the stored width ever
+ * moves again and these constants do not, this is the case that says so.
+ */
+static void test_meter_domain_matches_the_decoder(void)
+{
+	uint8_t group[ST_PL_GROUP_BYTES] = { 0 };
+	int32_t l, r;
+
+	/*
+	 * Positive full scale for a STORED sample, written as bytes rather than
+	 * derived from any meter constant -- 0x7F in the most significant byte
+	 * and 0xFF below it, little-endian, which is 0x7FFF at v1.3's two bytes
+	 * per sample and 0x7FFFFF at v1.2's three. Building the pattern out of
+	 * ST_STEM_METER_FULL_SCALE would make the whole case circular: the
+	 * wrong constant would produce the bytes that decode back to itself.
+	 */
+	{
+		uint32_t i;
+		const uint32_t off = st_pl_frame_off(0u);
+
+		for (i = 0u; i < ST11_BYTES_PER_SAMPLE; i++) {
+			const uint8_t b = (i == ST11_BYTES_PER_SAMPLE - 1u) ?
+					  0x7Fu : 0xFFu;
+
+			group[off + i] = b;
+			group[off + ST11_BYTES_PER_SAMPLE + i] = b;
+		}
+	}
+
+	st_pl_decode_stem_inline(group, 0u, &l, &r);
+
+	CHECK(l == (int32_t)ST_STEM_METER_FULL_SCALE,
+	      "a full-scale stored sample decodes to %d, the meter's full scale",
+	      (int)ST_STEM_METER_FULL_SCALE);
+	CHECK(r == l, "both channels land in the same domain");
+
+	/* And the window the curve draws in has to be INSIDE that domain. The
+	 * v1.3 regression was exactly this: REF sat 256x above the largest
+	 * magnitude a stored sample could reach, so the body range was
+	 * unreachable and the row never rose above MIN_ON. */
+	CHECK(ST_STEM_METER_REF <= ST_STEM_METER_FULL_SCALE,
+	      "the body reference is reachable by a real sample");
+	CHECK(ST_STEM_METER_FLOOR > 0u &&
+	      ST_STEM_METER_FLOOR < ST_STEM_METER_REF,
+	      "the noise floor is above zero and below the reference");
+
+	/* The end-to-end consequence, stated as behaviour rather than as
+	 * arithmetic: sustained decoded full-scale material must light the LED
+	 * to at least the full BODY level.
+	 *
+	 * The body specifically, and settled -- not a single dt=0 update. A
+	 * lone peak with the body still at zero lights the row through the
+	 * ACCENT path, which is relative (fast far above body) and so fires at
+	 * any magnitude, in any domain. That is precisely the check that would
+	 * have passed straight through the v1.3 regression. Holding the peak
+	 * for a second of service passes puts body ON the peak and asks the
+	 * question that actually distinguishes the two domains: is a real
+	 * full-scale sample inside the body window at all?
+	 */
+	{
+		st_stem_meter_t m;
+		const uint32_t usable = ST_STEM_METER_MAX - ST_STEM_METER_MIN_ON;
+		const uint32_t body_range =
+			(usable * ST_STEM_METER_BODY_SHARE_Q8) / 256u;
+		int pass;
+
+		st_stem_meter_reset(&m);
+		/* 300 passes is 3 s at the real service rate, comfortably past
+		 * the 120 ms body attack settling exactly onto the peak. */
+		for (pass = 0; pass < 300; pass++) {
+			st_stem_meter_update(&m, (uint32_t)l, 10u);
+		}
+		CHECK(m.body == (uint32_t)l,
+		      "a held full-scale peak settles the body onto it");
+		CHECK(st_stem_meter_brightness(&m) >=
+		      (uint8_t)(ST_STEM_METER_MIN_ON + body_range),
+		      "and sustained full scale drives the LED to the full body level");
+	}
+}
+
+/*
+ * A PROPORTIONAL DECAY THAT STALLS ABOVE THE FLOOR NEVER GOES DARK.
+ *
+ * span * dt / tc is integer division, so a small remaining span rounds to a
+ * zero step. At 16 bits the floor is 8 and the stall region is span < 30, so
+ * this is reachable by real material -- the LED would rest faintly lit after
+ * the stem stopped. Drive an envelope from just inside that region and require
+ * that it actually reaches zero in bounded time.
+ */
+static void test_small_magnitudes_still_reach_the_floor(void)
+{
+	st_stem_meter_t m;
+	int pass;
+
+	st_stem_meter_reset(&m);
+	m.fast = ST_STEM_METER_FLOOR + 20u;
+	m.body = ST_STEM_METER_FLOOR + 20u;
+
+	CHECK(st_stem_meter_brightness(&m) > 0u,
+	      "an envelope just above the floor starts lit");
+
+	/* 10 ms a pass is the real LED service rate; 400 passes is 4 s, far
+	 * longer than the 300 ms release needs and still a bound. */
+	for (pass = 0; pass < 400; pass++) {
+		st_stem_meter_update(&m, 0u, 10u);
+		if (m.fast <= ST_STEM_METER_FLOOR && m.body <= ST_STEM_METER_FLOOR) {
+			break;
+		}
+	}
+
+	CHECK(pass < 400, "it reaches the floor rather than stalling above it");
+	CHECK(st_stem_meter_brightness(&m) == 0u, "and the LED is fully off");
+
+	/* The step never crosses the target: decaying toward a NON-zero level
+	 * must settle ON it, not undershoot and creep back. */
+	st_stem_meter_reset(&m);
+	m.fast = ST_STEM_METER_FLOOR + 20u;
+	for (pass = 0; pass < 400; pass++) {
+		st_stem_meter_update(&m, ST_STEM_METER_FLOOR + 5u, 10u);
+	}
+	CHECK(m.fast == ST_STEM_METER_FLOOR + 5u,
+	      "and a decay toward a held level settles exactly on it");
+}
+
 int main(void)
 {
 	RUN(test_reset_is_dark);
@@ -384,6 +519,8 @@ int main(void)
 	RUN(test_curve_spreads_real_material);
 	RUN(test_octaves_are_evenly_spaced);
 	RUN(test_over_full_scale_clamps);
+	RUN(test_meter_domain_matches_the_decoder);
+	RUN(test_small_magnitudes_still_reach_the_floor);
 
 	printf("\n%d distinct test cases, %d assertion checks\n", g_test_cases, g_checks);
 	if (g_failures) {

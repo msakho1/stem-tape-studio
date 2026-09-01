@@ -60,6 +60,7 @@
 #include "st_beat_phase.h"
 #include "st_led_mvp.h"
 #include "st_stem_meter.h"
+#include "st_v11_format.h"   /* ST11_PCM_BIT_DEPTH -- the material's domain */
 
 static int g_cases, g_checks, g_failures;
 
@@ -84,11 +85,19 @@ static int g_cases, g_checks, g_failures;
 
 /* ======================================================================
  * THE MATERIAL. Four generators, each a function of absolute song frame,
- * returning a 24-bit sample magnitude domain value. Deliberately written as
- * plain waveform maths rather than canned tables so the shapes are visible
- * and adjustable here.
+ * returning a magnitude in the STORED sample domain -- the same domain
+ * stem_render_run() meters and st_stem_meter.c is calibrated against.
+ * Deliberately written as plain waveform maths rather than canned tables so
+ * the shapes are visible and adjustable here.
+ *
+ * EVERY LEVEL BELOW IS A FRACTION OF FULL SCALE, NOT A MAGNITUDE. It used to
+ * be 24-bit magnitudes, and when the stored width moved to 16 bits the whole
+ * programme became 48 dB of material sitting under an 8-count noise floor.
+ * The fractions are stated against the 24-bit numbers they replace so the
+ * levels this gate asserts are unchanged in decibels at any width.
  * ====================================================================== */
-#define AMP 4000000.0             /* about -6 dBFS in the 24-bit domain */
+#define FS_MAG ((double)((1u << (ST11_PCM_BIT_DEPTH - 1u)) - 1u))
+#define AMP (FS_MAG * (4000000.0 / 8388608.0))   /* about -6 dBFS */
 
 /*
  * SILENCE, as it really arrives: the residual noise floor of a recorded and
@@ -102,16 +111,20 @@ static int g_cases, g_checks, g_failures;
  * permanently faintly-lit one. So the "silent" stem here sits just UNDER
  * ST_STEM_METER_FLOOR, which is the only material that tests the gate.
  */
-#define HISS_MAG 1024.0   /* a LITERAL, see below */
+#define HISS_MAG (FS_MAG * (1024.0 / 8388608.0))   /* -78 dBFS, see below */
 static double gen_silence(uint32_t f)
 {
 	/*
-	 * The magnitude is a literal and NOT derived from
+	 * The level is a fixed fraction of FULL SCALE and NOT derived from
 	 * ST_STEM_METER_FLOOR, which is the whole point. Writing it as
 	 * FLOOR/2 was the first attempt and it made the case worthless:
 	 * lowering the floor to zero to break the gate also lowered this
 	 * material to zero, so the test moved with the bug and passed. The
-	 * material has to be fixed while the constant varies. main() asserts
+	 * material has to be fixed while the constant varies -- and a fraction
+	 * of full scale still is: the floor can be moved anywhere without
+	 * moving this. What it is no longer fixed against is the STORED WIDTH,
+	 * because a hiss floor is a level in dBFS, not a count of LSBs, and
+	 * pinning it to 24-bit counts is what broke it at v1.3. main() asserts
 	 * the two are still in the right order.
 	 */
 	return HISS_MAG * sin(2.0 * M_PI * 3000.0 * f / SR);
