@@ -93,11 +93,8 @@ for (let s = 0; s < STEM_COUNT; s++) {
 }
 
 /* ---------- real upload against the mock, committed STIX record ---------- */
-const mock = new MockSp1({ bulk: true });
-const t = await attach(mock);
-await t.initialiseLibrary();
 const seqs: number[] = [];
-const m2 = new MockSp1({ bulk: true, onBulk: ({ seq }) => void seqs.push(seq) });
+const m2 = new MockSp1({ bulk: true, sectorsPerSong: 40, onBulk: ({ seq }) => void seqs.push(seq) });
 const t2 = await attach(m2);
 await t2.initialiseLibrary();
 const res = await t2.uploadSong({ song });
@@ -109,7 +106,7 @@ console.log("bulk seq first/last  ", seqs[0], seqs[seqs.length - 1]);
 
 const lib = await t2.readLibrary();
 const idxBlock = m2.block(
-  lib!.activeIndexSlot === 0 ? m2.caps.index[0].start : m2.caps.index[1].start,
+  lib!.activeIndexSlot === 0 ? m2.capabilities.index[0].start : m2.capabilities.index[1].start,
 );
 const record = idxBlock.subarray(0, 256);
 console.log("\n-- committed 256-byte STIX record (hex) --");
@@ -119,5 +116,3 @@ console.log("crc stored/computed  ", parsed.crc.toString(16), crc32(record, CRC_
 console.log("version/format/depth ", parsed.indexVersion, `${parsed.formatMajor}.${parsed.formatMinor}`, parsed.bitDepth);
 console.log("frames/sectors/blocks", parsed.frames, parsed.sectorCount, parsed.songBlockCount);
 console.log("padding beyond 256   ", idxBlock.subarray(256).every((b) => b === 0));
-void mock;
-void t;
