@@ -9,7 +9,7 @@
  */
 import { prepareCanonicalSong } from "../src/sp1/song";
 import { encodeSong } from "../src/sp1/sector";
-import { stemChecksums16, songChecksumFromStems } from "../src/sp1/song";
+import { stemChecksums16, songChecksumFromStems } from "../src/sp1/pcm16";
 import { STEM_ORDER } from "../src/sp1/prepare";
 import { decodeWavFixture, offlineStub } from "../src/sp1/__tests__/fixtureWav";
 import {
