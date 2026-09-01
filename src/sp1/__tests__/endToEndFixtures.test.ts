@@ -99,7 +99,7 @@ describe("four real WAV fixtures, end to end", () => {
     const expectedSectors = sectorsForFrames(song.frames);
     expect(sectors.length).toBe(expectedSectors);
     expect(expectedSectors).toBe(Math.ceil(14592 / FRAMES_PER_GROUP));
-    expect(expectedSectors).toBe(43);
+    expect(expectedSectors).toBe(29);
     for (const s of sectors) expect(s.length).toBe(SECTOR_BYTES);
 
     rec.op("--upload--");
@@ -107,12 +107,12 @@ describe("four real WAV fixtures, end to end", () => {
 
     expect(res.ok).toBe(true);
     expect(res.outcome).toBe("committed");
-    expect(res.sectorCount).toBe(43);
-    expect(res.totalBlocks).toBe(43 * BLOCKS_PER_SECTOR);
-    expect(res.totalBlocks).toBe(688);
-    expect(res.writtenBlocks).toBe(688);
-    expect(res.verifiedBlocks).toBe(688);
-    expect(res.bytesWritten).toBe(688 * PHYSICAL_BLOCK_BYTES);
+    expect(res.sectorCount).toBe(29);
+    expect(res.totalBlocks).toBe(29 * BLOCKS_PER_SECTOR);
+    expect(res.totalBlocks).toBe(464);
+    expect(res.writtenBlocks).toBe(464);
+    expect(res.verifiedBlocks).toBe(464);
+    expect(res.bytesWritten).toBe(464 * PHYSICAL_BLOCK_BYTES);
     expect(res.retries).toBe(0);
     // Mock run: simulated only. No readback/playback claim.
     expect(res.verification).toEqual({
@@ -130,9 +130,9 @@ describe("four real WAV fixtures, end to end", () => {
     // Device memory equals the encoded sectors, byte for byte.
     const caps = t.caps!;
     const base = caps.song[SLOT_A].start;
-    const deviceAudio = new Uint8Array(43 * SECTOR_BYTES);
-    for (let i = 0; i < 688; i++) deviceAudio.set(mock.block(base + i), i * PHYSICAL_BLOCK_BYTES);
-    const encoded = new Uint8Array(43 * SECTOR_BYTES);
+    const deviceAudio = new Uint8Array(29 * SECTOR_BYTES);
+    for (let i = 0; i < 464; i++) deviceAudio.set(mock.block(base + i), i * PHYSICAL_BLOCK_BYTES);
+    const encoded = new Uint8Array(29 * SECTOR_BYTES);
     sectors.forEach((s, i) => encoded.set(s, i * SECTOR_BYTES));
     const digest = (u: Uint8Array) => createHash("sha256").update(u).digest("hex");
     expect(digest(deviceAudio)).toBe(digest(encoded));
@@ -153,7 +153,7 @@ describe("four real WAV fixtures, end to end", () => {
     expect(entry.sampleRate).toBe(48000);
     expect(entry.channels).toBe(2);
     expect(entry.bitDepth).toBe(24);
-    expect(entry.sectorCount).toBe(43);
+    expect(entry.sectorCount).toBe(29);
     expect(entry.stemChecksums).toEqual(song.stems.map((s) => s.checksum));
     // The previous generation is untouched in the other index slot.
     const other = parseIndexRecord(mock.block(caps.index[SLOT_A].start));
@@ -174,8 +174,8 @@ describe("four real WAV fixtures, end to end", () => {
       .filter((e) => e.dir === "tx")
       .map((e) => e.hex!);
     const writes = uploadTx.filter((h) => h.startsWith("57"));
-    // 688 audio + 3 continuation index blocks + index block 0 (magic zeroed) + magic block 0
-    expect(writes.length).toBe(688 + idxBlocks + 1);
+    // 464 audio + 3 continuation index blocks + index block 0 (magic zeroed) + magic block 0
+    expect(writes.length).toBe(464 + idxBlocks + 1);
     const lastWrite = writes.at(-1)!;
     expect(lastWrite.slice(0, 10)).toBe("5701000000"); // index slot B = block 1
     expect(lastWrite.slice(10, 18)).toBe("58495453"); // 'STIX' LE
@@ -199,7 +199,7 @@ describe("four real WAV fixtures, end to end", () => {
       title: META.title,
       artist: META.artist,
       frames: 14592,
-      sectorCount: 43,
+      sectorCount: 29,
     });
     expect(songs[SLOT_A]!.durationSeconds).toBeCloseTo(0.304, 3);
     expect(songs.filter((s) => s.occupied)).toHaveLength(1);
