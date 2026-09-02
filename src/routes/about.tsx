@@ -63,9 +63,6 @@ function AboutPage() {
             <Link to="/" className="st-tab">
               instrument
             </Link>
-            <Link to="/shop" className="st-tab">
-              shop
-            </Link>
             <Link to="/device" className="st-tab">
               uploader
             </Link>
