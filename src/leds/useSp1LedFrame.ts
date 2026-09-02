@@ -17,6 +17,8 @@ import { useEffect, useRef, useState } from "react";
 import type { SurfaceState } from "@/machine/surface";
 import { trace } from "@/diagnostics/trace";
 import { ledTransport } from "@/diagnostics/ledTransport";
+import { getAudioEngine } from "@/audio/engine";
+import { StemActivityEnvelopes } from "./stemActivity";
 import {
   PHYSICAL_LED_MAP,
   formatSp1Frame,
@@ -26,6 +28,7 @@ import {
 } from "./sp1LedEngine";
 
 const nowMs = () => (typeof performance !== "undefined" ? performance.now() : Date.now());
+
 
 export function writeSp1LedDom(frame: ResolvedPhysicalLedFrame): void {
   if (typeof document === "undefined") return;
