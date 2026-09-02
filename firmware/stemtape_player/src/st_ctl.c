@@ -17,7 +17,164 @@ void st_ctl_reset(st_ctl_t *c)
 	/* -1, not 0: 0 is track 1, and memset would otherwise leave a phantom
 	 * first tap on it at cold boot. */
 	c->rev_tap_trk = -1;
+	st_ctl_scratch_end(c);
 	c->seeded      = true;
+}
+
+/*
+ * END THE SCRATCH GESTURE and forget every fader reference.
+ *
+ * The references MUST go. They are the position each fader was last seen at,
+ * and movement is the difference from that -- so a reference surviving into
+ * the next FUNCTION press would turn "wherever the player moved this fader
+ * while not scratching" into one enormous instantaneous movement the moment
+ * they grabbed it again. The first sample of a gesture establishes a fresh
+ * reference and deliberately produces no drive.
+ */
+void st_ctl_scratch_end(st_ctl_t *c)
+{
+	uint32_t k;
+
+	c->scr_target = ST_CTL_SCRATCH_NONE;
+	for (k = 0; k < ST_PL_STEMS; k++) {
+		c->scr_fader_prev[k] = ST_CTL_FADER_NONE;
+	}
+	c->scr_last_ms = 0u;
+}
+
+/*
+ * THE SCRATCH GESTURE. Called once per pass while a stem song is selected.
+ *
+ * It answers one question -- what is the hand asking of which head right now
+ * -- and it answers it the same way for both controls, because below
+ * st_scratch_drive_from_*() the transport cannot tell them apart. That is the
+ * "same underlying signed-head transport" the spec requires, obtained by the
+ * two controls meeting HERE rather than by two engines agreeing later.
+ */
+static void scratch_service(st_ctl_t *c, const st_ctl_in_t *in, st_ctl_out_t *out)
+{
+	uint32_t dt_us;
+	uint32_t k;
+	int32_t  drive = 0;
+
+	/* FUNCTION UP ENDS IT, and ends it completely. The hand comes off the
+	 * record; main.c hands the signed rate to st_scrub's release ramp and
+	 * the head stays exactly where the gesture left it. */
+	if (!in->function_down) {
+		if (c->scr_target != ST_CTL_SCRATCH_NONE) {
+			st_ctl_scratch_end(c);
+		}
+		return;
+	}
+
+	/* The first pass of a press has no elapsed time to divide by, and no
+	 * fader reference to subtract. Establish both and ask for nothing. */
+	if (c->scr_last_ms == 0u) {
+		c->scr_last_ms = in->now_ms ? in->now_ms : 1u;
+		for (k = 0; k < ST_PL_STEMS; k++) {
+			/*
+			 * ONLY FADERS THAT ACTUALLY REPORTED. Copying the raw
+			 * value unconditionally records -1 -- "not sampled" --
+			 * as though it were a position, and the next real
+			 * reading then differs from it by the whole ADC range.
+			 * A fader nobody touched would lurch the head at full
+			 * drive the moment main.c got round to polling it.
+			 *
+			 * An unsampled channel keeps ST_CTL_FADER_NONE and is
+			 * skipped until it reports, which is what that value is
+			 * for. Only the round-robin makes this reachable: during
+			 * a gesture main.c reads one fader per pass, so three of
+			 * the four are -1 on any given pass INCLUDING the first.
+			 */
+			if (in->fader_raw[k] >= 0) {
+				c->scr_fader_prev[k] = in->fader_raw[k];
+			}
+		}
+		return;
+	}
+
+	dt_us = (in->now_ms - c->scr_last_ms) * 1000u;
+	c->scr_last_ms = in->now_ms ? in->now_ms : 1u;
+	if (dt_us == 0u) {
+		return;    /* two passes inside one millisecond: no news */
+	}
+
+	/*
+	 * DELTAS FIRST, REFERENCES AFTER. Movement is the difference from the
+	 * last reading, so the reference must not be advanced until every
+	 * consumer of the difference has had it -- updating first makes every
+	 * delta identically zero, which is a bug that looks exactly like a dead
+	 * control.
+	 */
+	int32_t fdrive[ST_PL_STEMS];
+
+	for (k = 0; k < ST_PL_STEMS; k++) {
+		const int32_t prev = c->scr_fader_prev[k];
+
+		fdrive[k] = 0;
+		if (in->fader_raw[k] >= 0 && prev != ST_CTL_FADER_NONE) {
+			fdrive[k] = st_scratch_drive_from_fader(in->fader_raw[k] - prev,
+								 dt_us);
+		}
+	}
+
+	/* Every fader that reported a value updates its reference, owner or
+	 * not: a fader moved during someone else's gesture must not bank that
+	 * movement and deliver it later. */
+	for (k = 0; k < ST_PL_STEMS; k++) {
+		if (in->fader_raw[k] >= 0) {
+			c->scr_fader_prev[k] = in->fader_raw[k];
+		}
+	}
+
+	/*
+	 * WHO OWNS THE GESTURE. First mover wins, and keeps it until FUNCTION
+	 * is released -- see st_ctl_t's own note on why a brushed fader must
+	 * not steal a master shuttle mid-movement.
+	 */
+	if (c->scr_target == ST_CTL_SCRATCH_NONE) {
+		if (in->rocker_dir != 0) {
+			c->scr_target = ST_CTL_SCRATCH_MASTER;
+		} else {
+			for (k = 0; k < ST_PL_STEMS; k++) {
+				if (fdrive[k] != 0) {
+					c->scr_target = (uint8_t)k;
+					break;
+				}
+			}
+		}
+	}
+
+	if (c->scr_target == ST_CTL_SCRATCH_NONE) {
+		/*
+		 * FUNCTION IS HELD BUT NOTHING HAS MOVED YET. Not a gesture, so
+		 * nothing is published and nothing is consumed -- FUNCTION is
+		 * still free to mean whatever else it means, which is what keeps
+		 * merely holding it from suppressing the other FUNCTION chords.
+		 */
+		return;
+	}
+
+	if (c->scr_target == ST_CTL_SCRATCH_MASTER) {
+		drive = st_scratch_drive_from_rocker(in->rocker_dir);
+		out->rocker_consumed = true;
+	} else {
+		drive = fdrive[c->scr_target];
+		out->fader_consumed_mask = (uint8_t)(1u << c->scr_target);
+	}
+
+	out->scratch_active     = true;
+	out->scratch_target     = c->scr_target;
+	out->scratch_drive_q16  = drive;
+
+	/*
+	 * THE FUNCTION PRESS IS SPENT. Nothing else may read it as its own
+	 * modifier for the rest of this press -- the reverse double-tap least
+	 * of all, since a hand shuttling the song should not also be able to
+	 * flip a track into reverse by brushing it.
+	 */
+	out->function_consumed = true;
+	c->fn_consumed         = true;
 }
 
 /* VOLUME debounce -> a single press EDGE. main.c's rocker is on its own
@@ -102,11 +259,25 @@ void st_ctl_service(st_ctl_t *c, const st_ctl_in_t *in, st_ctl_out_t *out)
 		c->trk_prev       = 0u;
 		c->rev_tap_trk    = -1;
 		c->rev_fn_held    = false;
+		/* A song going away mid-gesture must not leave a fader reference
+		 * behind for the next song to scratch by. */
+		st_ctl_scratch_end(c);
 		st_loop_reset_gesture_edges(&c->loop);
 		publish_levels(c, out);
 		out->track_mask = 0u;
 		return;
 	}
+
+	/*
+	 * THE SCRATCH GESTURE RUNS FIRST, and that ordering is the arbitration.
+	 *
+	 * It is the only handler that can claim the rocker or a fader, and it
+	 * marks the FUNCTION press spent when it does. Everything below then
+	 * sees a consumed press and declines to reinterpret it -- so one
+	 * physical movement does exactly one thing, which is the rule the spec
+	 * states and the one this file was written to enforce for PLAY.
+	 */
+	scratch_service(c, in, out);
 
 	/* ---- ONE classification, TWO consumers, no second interpretation --
 	 * The mask published here is the same object the mixer solos with and
@@ -142,8 +313,13 @@ void st_ctl_service(st_ctl_t *c, const st_ctl_in_t *in, st_ctl_out_t *out)
 		 * is still down -- see st_ctl_t's own note on why neither edge
 		 * alone is enough. */
 		if (down_edges != 0u) {
-			c->rev_fn_held = in->function_down;
-		} else if (trk != 0u && !in->function_down) {
+			/* NOT DURING A SCRATCH. A hand shuttling the whole song
+			 * with FUNCTION held will brush Track buttons; without
+			 * this, the brush arms a reverse double-tap and the
+			 * player finds a stem playing backwards afterwards with
+			 * no idea why. The scratch owns this FUNCTION press. */
+			c->rev_fn_held = in->function_down && !out->scratch_active;
+		} else if (trk != 0u && (!in->function_down || out->scratch_active)) {
 			c->rev_fn_held = false;
 		}
 

@@ -928,6 +928,247 @@ static void case_reverse_gesture(void)
 	(void)rev_count;
 }
 
+
+/* ======================================================================
+ * THE SCRATCH GESTURE
+ * ======================================================================
+ * A separate pass helper because these cases drive controls the loop/reverse
+ * cases have no opinion about: the rocker's direction and the four faders'
+ * raw positions. `fader` is a per-stem array; -1 means "not sampled on this
+ * pass", which is what main.c reports for the three faders it is not reading
+ * while one is being scratched.
+ */
+static void pass_scr(rig_t *r, bool fn, int8_t rocker, const int32_t fader[4])
+{
+	st_ctl_in_t in;
+	uint32_t k;
+
+	memset(&in, 0, sizeof(in));
+	in.ladder_raw      = RAW_IDLE;
+	in.function_down   = fn;
+	in.stem_song       = true;
+	in.playing         = r->playing;
+	in.song_frame      = r->song_frame;
+	in.song_frames     = SONG_LEN;
+	in.frames_per_beat = FPB;
+	in.now_ms          = r->now_ms;
+	in.rocker_dir      = rocker;
+	for (k = 0; k < 4u; k++) {
+		in.fader_raw[k] = fader ? fader[k] : -1;
+	}
+
+	st_ctl_service(&r->ctl, &in, &r->out);
+	r->now_ms += PASS_MS;
+}
+
+static const int32_t FADERS_STILL[4] = { 1000, 1000, 1000, 1000 };
+
+static void test_scratch_rocker_is_master(void)
+{
+	rig_t r;
+
+	rig_init(&r, 0);
+	pass_scr(&r, true, 0, FADERS_STILL);          /* FUNCTION down, nothing moved */
+	CHECK(!r.out.scratch_active,
+	      "S1. FUNCTION held with nothing moving is not yet a scratch");
+	CHECK(!r.out.function_consumed,
+	      "S1. and merely holding FUNCTION does not consume it -- the other "
+	      "FUNCTION chords still work until something actually moves");
+
+	pass_scr(&r, true, 1, FADERS_STILL);          /* rocker forward */
+	CHECK(r.out.scratch_active, "S1. the rocker moving starts the gesture");
+	CHECK(r.out.scratch_target == ST_CTL_SCRATCH_MASTER,
+	      "S1. and its target is MASTER -- all four heads, locked");
+	CHECK(r.out.scratch_drive_q16 == ST_SCRATCH_DRIVE_FULL,
+	      "S1. held forward, it drives at full deflection (%d)",
+	      r.out.scratch_drive_q16);
+	CHECK(r.out.rocker_consumed,
+	      "S1. and the rocker edge is CONSUMED, so st_pitch_click() must not "
+	      "also transpose the song by a half semitone");
+	CHECK(r.out.function_consumed, "S1. the FUNCTION press is spent");
+	CHECK(r.out.fader_consumed_mask == 0u, "S1. no fader is claimed");
+
+	pass_scr(&r, true, -1, FADERS_STILL);
+	CHECK(r.out.scratch_drive_q16 == -ST_SCRATCH_DRIVE_FULL,
+	      "S1. held backward, full deflection the other way (%d)",
+	      r.out.scratch_drive_q16);
+
+	pass_scr(&r, true, 0, FADERS_STILL);
+	CHECK(r.out.scratch_active && r.out.scratch_drive_q16 == 0,
+	      "S1. released mid-gesture, the gesture is STILL live and asks for "
+	      "zero -- the hand resting on the record, which is what slows the head");
+}
+
+static void test_scratch_fader_is_one_stem(void)
+{
+	rig_t r;
+	int32_t f[4] = { 1000, 1000, 1000, 1000 };
+
+	rig_init(&r, 0);
+	pass_scr(&r, true, 0, f);      /* reference pass */
+
+	f[2] += 200;                   /* stem 2's fader sweeps */
+	pass_scr(&r, true, 0, f);
+
+	CHECK(r.out.scratch_active, "S2. moving one fader starts a gesture");
+	CHECK(r.out.scratch_target == 2u,
+	      "S2. and its target is THAT stem (%u), not the master",
+	      r.out.scratch_target);
+	CHECK(r.out.scratch_drive_q16 > 0,
+	      "S2. moving it upward pushes the tape forward (%d)",
+	      r.out.scratch_drive_q16);
+	CHECK(r.out.fader_consumed_mask == (1u << 2),
+	      "S2. stem 2's fader is claimed, so main.c must not also write its "
+	      "volume -- scratching a stem must not fade it out");
+	CHECK(!r.out.rocker_consumed, "S2. and the rocker is left alone");
+
+	f[2] -= 200;
+	pass_scr(&r, true, 0, f);
+	CHECK(r.out.scratch_drive_q16 < 0,
+	      "S2. moving it back down pulls the tape backward (%d)",
+	      r.out.scratch_drive_q16);
+}
+
+static void test_scratch_first_mover_owns_the_gesture(void)
+{
+	rig_t r;
+	int32_t f[4] = { 1000, 1000, 1000, 1000 };
+
+	/* Rocker first, then a fader is brushed. */
+	rig_init(&r, 0);
+	pass_scr(&r, true, 0, f);
+	pass_scr(&r, true, 1, f);
+	CHECK(r.out.scratch_target == ST_CTL_SCRATCH_MASTER, "S3. the rocker took it");
+
+	f[0] += 300;
+	pass_scr(&r, true, 1, f);
+	CHECK(r.out.scratch_target == ST_CTL_SCRATCH_MASTER,
+	      "S3. and a fader brushed mid-shuttle does NOT steal it -- abandoning "
+	      "the master head halfway through a movement is not what the hand asked");
+	CHECK(r.out.fader_consumed_mask == 0u,
+	      "S3. nor is that fader claimed, so it keeps its ordinary volume job");
+
+	/* And the other way round. */
+	rig_init(&r, 0);
+	f[0] = f[1] = f[2] = f[3] = 1000;
+	pass_scr(&r, true, 0, f);
+	f[1] += 300;
+	pass_scr(&r, true, 0, f);
+	CHECK(r.out.scratch_target == 1u, "S3. the fader took it");
+	pass_scr(&r, true, 1, f);
+	CHECK(r.out.scratch_target == 1u,
+	      "S3. and the rocker pressed mid-stem-scratch does not steal it either");
+}
+
+static void test_scratch_ends_with_function(void)
+{
+	rig_t r;
+	int32_t f[4] = { 1000, 1000, 1000, 1000 };
+
+	rig_init(&r, 0);
+	pass_scr(&r, true, 0, f);
+	pass_scr(&r, true, 1, f);
+	CHECK(r.out.scratch_active, "S4. gesture live");
+
+	pass_scr(&r, false, 1, f);
+	CHECK(!r.out.scratch_active,
+	      "S4. FUNCTION up ends it, even with the rocker still held");
+	CHECK(!r.out.rocker_consumed,
+	      "S4. and the rocker is released back to the pitch handler at once");
+
+	/*
+	 * THE FADER REFERENCE MUST NOT SURVIVE. Between gestures the player may
+	 * move a fader anywhere as a volume control. If the reference persisted,
+	 * the next FUNCTION press would read that whole journey as one enormous
+	 * instantaneous movement and fling the head across the song.
+	 */
+	f[3] = 3500;                   /* volume moved right across, FUNCTION up */
+	pass_scr(&r, false, 0, f);
+	pass_scr(&r, true, 0, f);      /* grab again: this pass is the reference */
+	CHECK(!r.out.scratch_active,
+	      "S4. re-grabbing after a big fader move produces NO drive -- the "
+	      "first sample of a gesture is a reference, not a movement");
+}
+
+/*
+ * A FADER THAT WAS NOT SAMPLED HAS NOT MOVED, and the two must never be
+ * confused. During a gesture main.c reads ONE fader per pass at the full
+ * control cadence, so three of the four report -1 on any given pass --
+ * including the first one, which is where the reference is taken.
+ *
+ * Recording -1 as though it were a position makes the next real reading differ
+ * from it by the whole ADC range, and the head lurches at full drive on a
+ * fader nobody touched. This is the case that catches it, and it is the reason
+ * st_ctl_scratch_end() clearing the references is load-bearing rather than
+ * tidy: without both halves, a stale reference or a phantom one produces the
+ * same lurch.
+ */
+static void test_an_unsampled_fader_is_not_a_movement(void)
+{
+	rig_t r;
+	int32_t f[4] = { -1, -1, -1, -1 };
+	int i;
+
+	rig_init(&r, 0);
+
+	/* FUNCTION down; only stem 0 is being polled, the rest report -1. */
+	f[0] = 1000;
+	pass_scr(&r, true, 0, f);          /* reference pass */
+	for (i = 0; i < 3; i++) {
+		pass_scr(&r, true, 0, f);
+	}
+	CHECK(!r.out.scratch_active,
+	      "S7. three passes with only stem 0 polled and still is not a gesture");
+
+	/* NOW stem 3 gets its first ever reading, sitting wherever it sits. */
+	f[3] = 1800;
+	pass_scr(&r, true, 0, f);
+	CHECK(!r.out.scratch_active,
+	      "S7. a fader's FIRST reading is a reference, not a 1800-count movement");
+	CHECK(r.out.scratch_drive_q16 == 0,
+	      "S7. and it asks for no drive (%d)", r.out.scratch_drive_q16);
+
+	/* And only a real movement after that drives. */
+	f[3] = 1900;
+	pass_scr(&r, true, 0, f);
+	CHECK(r.out.scratch_active && r.out.scratch_target == 3u,
+	      "S7. the NEXT reading is a movement and starts the gesture on stem 3");
+}
+
+static void test_scratch_suppresses_the_reverse_double_tap(void)
+{
+	rig_t r;
+	int32_t f[4] = { 1000, 1000, 1000, 1000 };
+
+	rig_init(&r, 0);
+	pass_scr(&r, true, 0, f);
+	pass_scr(&r, true, 1, f);
+	CHECK(r.out.scratch_active, "S5. shuttling the song with FUNCTION held");
+
+	/* Now brush Track 1 twice, which outside a scratch is the reverse
+	 * gesture. It must do nothing: a hand on the rocker will touch buttons,
+	 * and finding a stem silently reversed afterwards is not acceptable. */
+	g_rev_seen = 0;
+	trk_press(&r, 0, true, 4, 4);
+	trk_press(&r, 0, true, 4, 4);
+	CHECK(g_rev_seen == 0,
+	      "S5. a Track double-tap during a live scratch does NOT toggle reverse "
+	      "(%d fired) -- the scratch owns this FUNCTION press", g_rev_seen);
+}
+
+static void test_rocker_without_function_is_not_a_scratch(void)
+{
+	rig_t r;
+
+	rig_init(&r, 0);
+	pass_scr(&r, false, 1, FADERS_STILL);
+	pass_scr(&r, false, 1, FADERS_STILL);
+	CHECK(!r.out.scratch_active,
+	      "S6. the rocker alone is not a scratch -- it is still the pitch control");
+	CHECK(!r.out.rocker_consumed,
+	      "S6. and it is not consumed, so st_pitch_click() still sees it");
+}
+
 int main(void)
 {
 	printf("== st_ctl: the assembled Stem Tape control path ==\n");
@@ -947,6 +1188,14 @@ int main(void)
 	case_loop_works_while_fx_holds_a_track();
 	case_no_tempo_is_reported();
 	case_reverse_gesture();
+
+	test_scratch_rocker_is_master();
+	test_scratch_fader_is_one_stem();
+	test_scratch_first_mover_owns_the_gesture();
+	test_scratch_ends_with_function();
+	test_an_unsampled_fader_is_not_a_movement();
+	test_scratch_suppresses_the_reverse_double_tap();
+	test_rocker_without_function_is_not_a_scratch();
 
 	printf("\n");
 	if (g_failures) {

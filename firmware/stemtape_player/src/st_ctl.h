@@ -57,10 +57,19 @@
 
 #include "st_ladder.h"
 #include "st_loop.h"
+#include "st_scratch.h"
 
 /* How many consecutive agreeing reads commit a VOLUME button. The same
  * discipline the ladder uses, for the same reason. */
 #define ST_CTL_VOL_SETTLE 3u
+
+/*
+ * THE SCRATCH TARGET. 0..3 are the stems; this is what "all four, locked"
+ * is called. Deliberately outside the stem range rather than a separate
+ * boolean, so a caller cannot hold "master" and "stem 2" at the same time --
+ * the two are one field because they are one choice.
+ */
+#define ST_CTL_SCRATCH_MASTER 0xFFu
 
 /*
  * THE REVERSE GESTURE: FUNCTION + double-tap a TRACK button, and the SAME
@@ -124,6 +133,30 @@ typedef struct {
 	uint32_t song_frames;
 	uint32_t frames_per_beat;
 
+	/*
+	 * ---- THE SCRATCH CONTROLS ----------------------------------------
+	 *
+	 * THE ROCKER, as a direction and nothing else: -1 = RWD held, 0 = free,
+	 * +1 = FWD held. It is a momentary two-way switch on the AIN1 ladder
+	 * (VOL_TEMPO_DOWN / VOL_TEMPO_UP), so it reports which way and never how
+	 * far -- which is exactly why press DURATION is what spans scratching
+	 * and shuttling, and why nothing here needs to time it.
+	 */
+	int8_t   rocker_dir;
+
+	/*
+	 * THE FOUR FADERS, raw ADC counts, index == stem. -1 for a channel not
+	 * sampled on this pass.
+	 *
+	 * main.c samples these round-robin at ~32 ms each during ordinary play,
+	 * which is right for a volume slider and far too coarse for a hand on a
+	 * record. While FUNCTION is held it samples the ACTIVE one every pass
+	 * instead, so the moving fader is read at the full control cadence and
+	 * the others simply report -1. Passing -1 rather than a stale value is
+	 * what keeps this module from computing a movement that did not happen.
+	 */
+	int32_t  fader_raw[ST_PL_STEMS];
+
 	uint32_t now_ms;
 } st_ctl_in_t;
 
@@ -163,9 +196,42 @@ typedef struct {
 	bool     reverse_toggle;
 	uint8_t  reverse_track;    /* 0..3, meaningful only when reverse_toggle */
 
+	/*
+	 * ---- the scratch gesture, as a LIVE LEVEL --------------------------
+	 *
+	 * Not a one-shot like reverse_toggle: a scratch is a continuous
+	 * manipulation, so this is what the hand is asking for RIGHT NOW and it
+	 * is republished every pass for as long as FUNCTION is held.
+	 *
+	 * `scratch_drive_q16` is signed and already scaled by st_scratch.h's
+	 * mapping, so main.c hands it straight to st_scratch_set_drive() without
+	 * interpreting it. Zero is a real value -- the hand resting on the
+	 * record without pushing -- and is published every pass the controls are
+	 * still while the gesture is live, which is what makes the head slow.
+	 */
+	bool     scratch_active;
+	uint8_t  scratch_target;   /* ST_CTL_SCRATCH_MASTER, or a stem 0..3 */
+	int32_t  scratch_drive_q16;
+
 	/* ---- what main.c must NOT also act on ----------------------------- */
 	bool     function_consumed;/* this FUNCTION press belongs to the loop */
 	bool     vol_consumed;     /* this VOLUME press belongs to the loop   */
+
+	/*
+	 * THE ROCKER EDGE BELONGS TO THE SCRATCH, so st_pitch_click() must not
+	 * also see it. One physical movement does one thing: without this the
+	 * same press would scratch the song AND transpose it a half semitone,
+	 * and the transposition would still be there after the hand came off.
+	 */
+	bool     rocker_consumed;
+
+	/*
+	 * AND THE FADER'S MOVEMENT IS NOT A VOLUME CHANGE. Bit per stem. While
+	 * a fader is scratching, main.c must not also write trk[].vol_q8 from
+	 * it -- otherwise scratching a stem would fade it out as a side effect,
+	 * which is the same class of bug as the rocker one above.
+	 */
+	uint8_t  fader_consumed_mask;
 
 	/* ---- diagnosis, never a silent no-op ------------------------------ */
 	st_ctl_refuse_t refused;   /* set once, on the pass the hold expired */
@@ -226,8 +292,52 @@ typedef struct {
 	uint32_t rev_tap_ms;
 	bool     rev_fn_held;
 
+	/*
+	 * ---- the scratch gesture's own state -------------------------------
+	 *
+	 * `scr_target` is FIRST-MOVER-WINS for the duration of a FUNCTION press,
+	 * and that is a real decision rather than an implementation detail. Both
+	 * controls are live while FUNCTION is held, so a player already
+	 * shuttling the whole song with the rocker may brush a fader; without a
+	 * lock that brush would silently transfer the gesture to one stem and
+	 * abandon the master head mid-movement. The first control to actually
+	 * MOVE owns the gesture until FUNCTION is released.
+	 *
+	 * `scr_fader_prev` is the previous raw reading per stem, so movement is
+	 * a delta. ST_CTL_FADER_NONE means "no reading yet this gesture" -- the
+	 * first sample of a press establishes a reference and produces no
+	 * movement, or grabbing a fader would scratch by the distance between
+	 * wherever it sits and wherever it sat last time it was polled.
+	 */
+	uint8_t  scr_target;       /* ST_CTL_SCRATCH_MASTER, a stem, or ST_CTL_SCRATCH_NONE */
+	int32_t  scr_fader_prev[ST_PL_STEMS];
+	uint32_t scr_last_ms;
+
 	bool     seeded;
 } st_ctl_t;
+
+/* No gesture is live. Distinct from MASTER, which is a live gesture. */
+#define ST_CTL_SCRATCH_NONE 0xFEu
+/*
+ * No fader reading has been taken yet in this gesture.
+ *
+ * DELIBERATELY THE SAME VALUE main.c passes in fader_raw[] for a channel it
+ * did not sample this pass, so "never read" and "not read now" are one state
+ * and cannot be told apart -- which is right, because neither is a movement.
+ * The asserts below pin that coincidence: it is load-bearing, and two
+ * constants that merely happen to agree are exactly what drifts.
+ */
+#define ST_CTL_FADER_NONE   (-1)
+
+#if !defined(__cplusplus)
+_Static_assert(ST_CTL_FADER_NONE < 0,
+	       "the not-sampled sentinel must be outside the ADC's range");
+_Static_assert(ST_CTL_SCRATCH_NONE != ST_CTL_SCRATCH_MASTER,
+	       "'no gesture' and 'the master gesture' must be distinguishable");
+_Static_assert(ST_CTL_SCRATCH_MASTER >= ST_PL_STEMS &&
+	       ST_CTL_SCRATCH_NONE >= ST_PL_STEMS,
+	       "neither sentinel may collide with a real stem index");
+#endif
 
 /*
  * Cold boot. Resets the ladder, the loop (which is where the one-bar default
@@ -235,6 +345,13 @@ typedef struct {
  * mid-session reset would silently discard the player's chosen division.
  */
 void st_ctl_reset(st_ctl_t *c);
+
+/*
+ * Abandon any live scratch gesture and forget every fader reference. Called
+ * by st_ctl_reset(), on FUNCTION release, and whenever the stem song goes
+ * away -- see the definition for why the references specifically must go.
+ */
+void st_ctl_scratch_end(st_ctl_t *c);
 
 /*
  * ONE control pass. Total and deterministic: same state plus same inputs
