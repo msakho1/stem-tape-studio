@@ -157,9 +157,9 @@
 #define ST_RC_SWEEP_REPS 24u
 
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st55-VOLCAL"
+#define ST_BUILD_TAG "st53-VOLCAL"
 #else
-#define ST_BUILD_TAG "st55"
+#define ST_BUILD_TAG "st53"
 #endif
 #include "st_track_hold.h"
 
@@ -1737,43 +1737,6 @@ static atomic_t g_stem_loop_enter_req = ATOMIC_INIT(0);
  * exchange doing what its atomic_cas does.
  */
 static atomic_t g_stem_reverse_req = ATOMIC_INIT(0);
-
-/*
- * THE SCRATCH GESTURE, CONTROL THREAD -> AUDIO THREAD, IN ONE WORD.
- *
- * The control thread publishes what the hand is asking -- a target and a
- * signed drive -- and the audio thread owns the integrator that turns it into
- * a rate. That split is deliberate on both sides.
- *
- * WHY THE AUDIO THREAD INTEGRATES. The rate has to change on block boundaries,
- * because that is where the render reads it; integrating on the control thread
- * would let it move mid-block and make the two disagree about what a block was
- * rendered at. The audio thread also has the only exact clock -- one block is
- * BLK_FRAMES/48000, a constant -- while the control loop's ~8 ms is nominal.
- *
- * WHY ONE WORD AND NOT TWO ATOMICS. Target and drive must be read as a pair. A
- * torn read that took a new target with the old drive would push the wrong
- * head for one block, which at 2x is about 11 ms of the wrong stem moving --
- * audible, and exactly the kind of fault that is impossible to reproduce on
- * demand. Packing removes the question rather than reasoning about how narrow
- * the window is.
- *
- * Drive is +/-65536 and fits in 20 signed bits with room to spare; the target
- * is 0..5. Bits 0..19 drive, 20..23 target.
- */
-#define ST_SCR_T_MASTER 4u
-#define ST_SCR_T_NONE   5u
-#define ST_SCR_PACK(tgt, drive) \
-	((atomic_val_t)(((uint32_t)(tgt) << 20) | ((uint32_t)(drive) & 0xFFFFFu)))
-#define ST_SCR_TGT(v)   ((uint8_t)(((uint32_t)(v) >> 20) & 0xFu))
-/* Sign-extend the low 20 bits. */
-#define ST_SCR_DRIVE(v) ((int32_t)((uint32_t)(v) << 12) >> 12)
-
-static atomic_t g_stem_scratch_req =
-	ATOMIC_INIT((atomic_val_t)(((uint32_t)ST_SCR_T_NONE << 20)));
-
-/* One audio block, in microseconds -- the integrator's tick. */
-#define ST_SCR_BLOCK_US ((BLK_FRAMES * 1000000u) / ST11_SAMPLE_RATE_HZ)
 /* THE exit target: loop_end, the first frame after the looped section. */
 static atomic_t g_stem_loop_exit_req  = ATOMIC_INIT(0);
 /* Latched vs momentary, for the LED marker only -- never a decision input. */
@@ -2069,11 +2032,7 @@ static atomic_t g_stem_reload_fail_count;  /* Slice C3: post-commit runtime relo
 static st_beat_timing_t g_stem_beat_timing;
 static atomic_t g_stem_song_frame_pub;
 /* BEAT PULSE: per-stem peak magnitude of the most recent audio block, in
- * the STORED domain -- signed at ST11_PCM_BIT_DEPTH, so full scale is 32767
- * at v1.3's 16 bits. st_stem_meter.h derives its own full scale, reference
- * and noise floor from that same constant; the two must not drift, and
- * tests/test_stem_meter.c has a case that decodes a real stored frame and
- * asserts they have not. Written once per stem per block by the audio
+ * the stored 24-bit domain. Written once per stem per block by the audio
  * thread (single producer), read by led_service() on the control thread
  * (single consumer). Purely observational -- nothing in the audio path
  * ever reads these back, so a torn or stale read could at worst make one
@@ -2646,8 +2605,7 @@ static void stem_render_run(const uint8_t *const grp[ST_PL_STEMS],
 			     uint32_t f0, uint32_t n, int16_t *s,
 			     uint32_t peak[ST11_STEM_COUNT],
 			     st_seam_t *seam, uint32_t transport,
-			     const uint32_t rate_q16[ST_PL_STEMS],
-			     uint32_t frac_io[ST_PL_STEMS],
+			     uint32_t rate_q16, uint32_t frac_io[ST_PL_STEMS],
 			     const uint32_t src_avail[ST_PL_STEMS],
 			     uint32_t used_out[ST_PL_STEMS],
 			     const st_stream_t heads[ST_PL_STEMS],
@@ -2710,30 +2668,17 @@ static void stem_render_run(const uint8_t *const grp[ST_PL_STEMS],
 	 * four-forward playback is bit-identical to a build without any of
 	 * this: the full-playback gate's output hash is the proof.
 	 */
-	/*
-	 * `together` now also asks whether the heads share a SPEED, because the
-	 * rate is no longer one number for the whole block. The shared decode
-	 * walks ONE cursor for all four stems, so it is correct only when they
-	 * agree on direction, position AND rate -- one stem scratching drops
-	 * the whole block onto the variable-rate path, which is right, and is
-	 * why an isolated scratch costs CPU on the other three as well as on
-	 * itself.
-	 *
-	 * Folded into the loop that already walks the stems rather than added
-	 * as a second pass: this runs once per run, on the deadline thread.
-	 */
 	bool together = true;
 
 	for (sp = 0; sp < ST_PL_STEMS; sp++) {
 		frac[sp] = frac_io[sp];
 		cur[sp]  = 0u;
-		if (dirs[sp] < 0 || frame_in_group[sp] != frame_in_group[0] ||
-		    rate_q16[sp] != rate_q16[0]) {
+		if (dirs[sp] < 0 || frame_in_group[sp] != frame_in_group[0]) {
 			together = false;
 		}
 	}
 
-	const bool unity = (rate_q16[0] == ST_RS_ONE) && stem_rs_all_aligned() && together;
+	const bool unity = (rate_q16 == ST_RS_ONE) && stem_rs_all_aligned() && together;
 
 	for (uint32_t k = 0; k < n; k++) {
 		const uint32_t f = f0 + k;
@@ -2833,7 +2778,7 @@ static void stem_render_run(const uint8_t *const grp[ST_PL_STEMS],
 			 * most once and this is what it always was.
 			 */
 			for (sp = 0; sp < ST_PL_STEMS; sp++) {
-				frac[sp] += rate_q16[sp];
+				frac[sp] += rate_q16;
 				while (frac[sp] >= ST_RS_ONE) {
 					frac[sp] -= ST_RS_ONE;
 					cur[sp]++;
@@ -3287,8 +3232,8 @@ static void stem_audio_block(int16_t *s, int32_t m0, int32_t md, int32_t mv)
 		s_stem_jump_pend = 0u;
 	}
 	/* BEAT PULSE: largest absolute sample magnitude each stem produced in
-	 * THIS block, in the stored domain (ST11_PCM_BIT_DEPTH bits signed).
-	 * Block-local until the single publication at the end. */
+	 * THIS block, in the stored 24-bit domain. Block-local until the single
+	 * publication at the end. */
 	uint32_t stem_peak[ST11_STEM_COUNT] = { 0u, 0u, 0u, 0u };
 
 _Static_assert(NTRK == ST11_STEM_COUNT, "trk[]/stem lane count must match 1:1");
@@ -3381,151 +3326,6 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 	const uint32_t rate_q16 = st_rs_rate_clamp(
 		(uint32_t)(((uint64_t)pitch_q16 *
 			     st_inertia_env_q16(&s_stem_inertia)) >> 16));
-	/*
-	 * ---- ONE RATE PER HEAD -------------------------------------------
-	 *
-	 * The render loop used to take a single rate for the whole block. It
-	 * cannot any more: an isolated stem scratch moves ONE head while the
-	 * other three keep running forward at the transport's rate, and that
-	 * is not expressible as one number.
-	 *
-	 * Every entry is the transport rate here. Nothing yet writes a
-	 * different one -- the gesture that will is step 3 -- so this commit
-	 * changes the SHAPE of the quantity and not its value, and ordinary
-	 * playback stays bit-identical (the full-playback gate's 0x2a737e00
-	 * hash is the proof, not the intent).
-	 *
-	 * `rate_q16` itself stays, because the things that are genuinely
-	 * song-level -- the seam's duck length, the loop's arming arithmetic --
-	 * belong to the transport and not to any one head.
-	 */
-	uint32_t stem_rate_q16[ST_PL_STEMS];
-
-	for (uint32_t rk = 0; rk < ST_PL_STEMS; rk++) {
-		stem_rate_q16[rk] = rate_q16;
-	}
-
-	/*
-	 * ---- THE SCRATCH, APPLIED --------------------------------------
-	 *
-	 * ONCE PER BLOCK, for the same reason the reverse request is consumed
-	 * once per block: a head must not change speed or direction part-way
-	 * through a block it is already being rendered for.
-	 *
-	 * The integrator lives here rather than on the control thread because
-	 * the rate has to move on block boundaries -- that is where the render
-	 * reads it -- and because this thread has the only exact clock.
-	 */
-	{
-		static st_scratch_t s_scr;
-		/*
-		 * WHICH HEAD THE GESTURE OWNS, remembered across the coast:
-		 * by the time the hand is off, the published target is already
-		 * NONE, and the coast still has to be applied to the head that
-		 * was being moved rather than to all of them.
-		 */
-		static uint8_t s_scr_owner = ST_SCR_T_NONE;
-		/*
-		 * THE DIRECTION THE HEAD WAS IN WHEN THE HAND ARRIVED.
-		 *
-		 * A stem may have been reverse-toggled before the gesture. The
-		 * coast has to return it to THAT, not to forward: coasting to a
-		 * positive rate would silently cancel the latch -- the player
-		 * reversed a stem, scratched it, let go, and found it playing
-		 * forward with nothing to explain it. Position is left where the
-		 * scratch put it; direction goes back to the mode the player
-		 * chose.
-		 */
-		static bool s_scr_was_rev;
-		const atomic_val_t sv = atomic_get(&g_stem_scratch_req);
-		const uint8_t tgt = ST_SCR_TGT(sv);
-		const bool live = (tgt != ST_SCR_T_NONE);
-
-		if (live && !s_scr.engaged) {
-			/*
-			 * THE GRAB. Start from the transport's CURRENT rate,
-			 * not from a standstill -- a hand landing on a spinning
-			 * record does not stop it dead, and starting at zero
-			 * would be a click on every FUNCTION press.
-			 *
-			 * Direction is folded in here: a head already running
-			 * backwards is grabbed at a NEGATIVE rate, so reversing
-			 * a reversed stem starts from where it actually is
-			 * rather than from its mirror image.
-			 */
-			const uint32_t k = (tgt == ST_SCR_T_MASTER) ? s_stem_transport : tgt;
-			const int32_t signed_now =
-				g_stem_stream[k].reverse ? -(int32_t)rate_q16
-							  : (int32_t)rate_q16;
-
-			s_scr_was_rev = g_stem_stream[k].reverse;
-			st_scratch_begin(&s_scr, signed_now,
-					  (tgt == ST_SCR_T_MASTER)
-					   ? ST_SCRATCH_MAX_RATE_MASTER_Q16
-					   : ST_SCRATCH_MAX_RATE_STEM_Q16);
-		} else if (!live && s_scr.engaged) {
-			(void)st_scratch_release(&s_scr);   /* begins the coast */
-		}
-
-		if (live) {
-			st_scratch_set_drive(&s_scr, ST_SCR_DRIVE(sv));
-			st_scratch_tick(&s_scr, ST_SCR_BLOCK_US);
-		} else {
-			/*
-			 * COAST TO WHAT THE TRANSPORT WILL ACTUALLY RESUME AT,
-			 * not to a hard-coded 1.0x. With the pitch rocker set
-			 * the transport runs up to 1.19x, and a coast that
-			 * finished at unity would drop the override and step
-			 * the rate 0.19x in one block -- a 19% speed jump,
-			 * audible as a pitch glitch, on every release while
-			 * pitched. Signed, so a latched reverse survives.
-			 */
-			(void)st_scratch_coast(&s_scr, ST_SCR_BLOCK_US,
-						s_scr_was_rev ? -(int32_t)rate_q16
-							       : (int32_t)rate_q16);
-		}
-
-		if (live) {
-			s_scr_owner = tgt;
-		}
-
-		if (s_scr.engaged || s_scr.coasting) {
-			const int32_t sr = st_scratch_rate_q16(&s_scr);
-			const bool want_rev = (sr < 0);
-			const uint32_t mag = st_rs_rate_clamp(
-				(uint32_t)(want_rev ? -sr : sr));
-			uint32_t sk;
-
-			/*
-			 * SPLIT THE SIGNED RATE. The transport carries speed
-			 * and direction separately -- magnitude in the rate
-			 * array, sign in each head's own `reverse` -- so this
-			 * is where one signed number becomes the two the engine
-			 * already understands. Nothing downstream learns a new
-			 * concept.
-			 *
-			 * st_stream_set_reverse() is the only way the sign is
-			 * allowed to change: it moves no head and lifts only
-			 * the terminal state the new direction frees, which is
-			 * what keeps a direction change from being a seek.
-			 */
-			for (sk = 0; sk < ST_PL_STEMS; sk++) {
-				/* MASTER moves all four; a stem gesture moves
-				 * exactly its own and the other three carry on
-				 * untouched, which is the whole point of it. */
-				if (s_scr_owner != ST_SCR_T_MASTER && sk != s_scr_owner) {
-					continue;
-				}
-				if (g_stem_stream[sk].reverse != want_rev) {
-					st_stream_set_reverse(&g_stem_stream[sk], want_rev);
-				}
-				stem_rate_q16[sk] = mag;
-			}
-		} else {
-			s_scr_owner = ST_SCR_T_NONE;
-		}
-	}
-
 	/* The seam's duck length converted from output frames into the tape
 	 * the playhead covers while it runs. See the arm clamp below. */
 	const uint32_t seam_src = st_rs_src_for_out(ST_SEAM_FRAMES, rate_q16);
@@ -4250,43 +4050,23 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 		 * same number and everything below reduces to what shipped;
 		 * during a ramp it is more, because the tape is passing more
 		 * slowly than the output is being produced. */
-		/* SIZED BY THE HEAD THAT RUNS OUT OF SOURCE FIRST.
-		 *
-		 * That used to be found by pairing `run` with the largest
-		 * carried fraction, since a bigger fraction crosses a source
-		 * frame sooner. With one rate for the whole block that was
-		 * exactly right. It is not any more: rate now dominates the
-		 * fraction, so a head at 4x exhausts the run in a quarter of
-		 * the output frames a head at 1x does, whatever fraction each
-		 * is carrying. Asking with the worst fraction and one rate
-		 * would over-produce for the fastest head and read past the
-		 * source it actually has. */
+		/* SIZED BY THE HEAD THAT WILL CONSUME THE MOST SOURCE, which
+		 * is the one whose cursor fraction is largest: a bigger carried
+		 * fraction crosses a source frame sooner, so it runs out of
+		 * `run` first. `run` is already the minimum across heads, so
+		 * pairing it with the maximum fraction is the conservative
+		 * corner and no head can be asked for a frame the run does not
+		 * contain. All four fractions are equal until a head diverges,
+		 * and then this is exactly stem 0's value again. */
 		{
-			/*
-			 * THE OUTPUT COUNT IS THE MINIMUM OVER THE HEADS, and
-			 * with per-stem rates that is no longer the same as
-			 * asking once with the worst fraction.
-			 *
-			 * `run` source frames buy a different number of output
-			 * frames at each head's own rate: a stem at 4x exhausts
-			 * the run in a quarter of the frames a stem at 1x does.
-			 * Producing more than the slowest-supplied head can
-			 * cover would read past the source it actually has --
-			 * so every head is asked, and the smallest answer wins.
-			 *
-			 * At a shared rate every term is identical and this is
-			 * exactly the single call it replaces, which is what
-			 * keeps ordinary playback bit-identical.
-			 */
-			out_n = st_rs_out_frames(run, s_stem_rate_frac[0], stem_rate_q16[0]);
-			for (sk = 1; sk < ST_PL_STEMS; sk++) {
-				const uint32_t n_k = st_rs_out_frames(run, s_stem_rate_frac[sk],
-								       stem_rate_q16[sk]);
+			uint32_t frac_max = s_stem_rate_frac[0];
 
-				if (n_k < out_n) {
-					out_n = n_k;
+			for (sk = 1; sk < ST_PL_STEMS; sk++) {
+				if (s_stem_rate_frac[sk] > frac_max) {
+					frac_max = s_stem_rate_frac[sk];
 				}
 			}
+			out_n = st_rs_out_frames(run, frac_max, rate_q16);
 		}
 
 		/* ---- A FIFTH BOUND, IN THE OUTPUT DOMAIN: this block ----- */
@@ -4349,7 +4129,7 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 		stem_render_run(grp, fis, &stem_prepared, m0, md, mv,
 				 f, out_n, s, stem_peak, &s_stem_seam,
 				 s_stem_transport,
-				 stem_rate_q16, s_stem_rate_frac, run_k,
+				 rate_q16, s_stem_rate_frac, run_k,
 				 stem_used, g_stem_stream, dirs);
 		f += out_n;
 		/* THE PLAYHEAD ADVANCES BY WHAT WAS ACTUALLY READ, which is
@@ -8932,8 +8712,8 @@ static void led_service(void)
 	 * publishing side in stem_audio_block() for why a peak HOLD rather
 	 * than the last block's value.
 	 *
-	 * The magnitude is the raw stored-domain stem sample, and it is already
-	 * zero for a stem the mixer silenced (stem_render_run() skips metering a stem
+	 * The magnitude is the raw 24-bit stem, and it is already zero for a
+	 * stem the mixer silenced (stem_render_run() skips metering a stem
 	 * whose prepared gain is zero), so a muted or solo-silenced stem
 	 * decays dark through the same envelope as one that simply stopped
 	 * playing. There is no separate rule for it and no state to keep in
@@ -9026,28 +8806,6 @@ static void stem_ctl_apply(void)
 		 * here is exactly how a surface and an engine come to
 		 * disagree. */
 		atomic_set(&g_stem_reverse_req, (atomic_val_t)(o->reverse_track + 1u));
-	}
-
-	/*
-	 * THE SCRATCH, published as a LEVEL every pass -- not an edge.
-	 *
-	 * A scratch is a continuous manipulation, so the audio thread needs to
-	 * know what the hand is asking RIGHT NOW, including "nothing", which is
-	 * a real answer meaning the hand is resting and the head should slow.
-	 * Republishing every pass also means a missed pass costs one stale
-	 * block rather than a stuck gesture.
-	 *
-	 * Same division of labour as reverse above: this says what the player
-	 * did, never what any head is doing. The audio thread owns the heads.
-	 */
-	{
-		const uint8_t tgt = !o->scratch_active ? ST_SCR_T_NONE
-				     : (o->scratch_target == ST_CTL_SCRATCH_MASTER)
-					? ST_SCR_T_MASTER
-					: (uint8_t)o->scratch_target;
-
-		atomic_set(&g_stem_scratch_req,
-			    ST_SCR_PACK(tgt, o->scratch_drive_q16));
 	}
 	if (o->loop_latch) {
 		atomic_set(&g_stem_loop_latched, 1);
@@ -10016,61 +9774,6 @@ int main(void)
 			st_ctl_in_t ci;
 
 			memset(&ci, 0, sizeof(ci));
-
-			/*
-			 * ---- THE SCRATCH CONTROLS -------------------------
-			 *
-			 * THE ROCKER, as a direction. Raw: st_ctl settles it
-			 * itself over two agreeing passes, which is shorter
-			 * than the volume path's three because a scratch feels
-			 * the latency in the hand -- see st_ctl_t's own note.
-			 */
-			ci.rocker_dir = (st_vraw == VOL_TEMPO_UP)   ?  1 :
-					 (st_vraw == VOL_TEMPO_DOWN) ? -1 : 0;
-
-			/*
-			 * THE FADERS, and this is where the ~32 ms round-robin
-			 * is not good enough.
-			 *
-			 * A volume slider updating every 32 ms is imperceptible.
-			 * A hand on a record sampled at 31 Hz is not: the
-			 * movement between samples is the whole signal, and at
-			 * that rate most of a scratch falls between two reads.
-			 *
-			 * So while FUNCTION is held the cadence changes. Before
-			 * a gesture has an owner, ALL FOUR are read every pass,
-			 * because which fader the hand will move is exactly
-			 * what is not yet known. Once one is chosen, only that
-			 * one is read -- the other three go back to -1, "not
-			 * sampled", and st_ctl correctly treats them as not
-			 * moved rather than as sitting at zero.
-			 *
-			 * The cost is bounded and brief: four blocking ADC
-			 * reads instead of one, only while FUNCTION is down and
-			 * only until the hand commits. Ordinary playback never
-			 * takes this path, and its round-robin below is
-			 * untouched.
-			 */
-			for (uint32_t fk = 0; fk < ST_PL_STEMS; fk++) {
-				ci.fader_raw[fk] = -1;
-			}
-			if (pwr_pressed() && stem_ctl) {
-				const uint8_t tgt = g_stem_ctl_out.scratch_active
-						     ? g_stem_ctl_out.scratch_target
-						     : ST_CTL_SCRATCH_NONE;
-
-				if (tgt < ST_PL_STEMS) {
-					ci.fader_raw[tgt] =
-						ladder_read(&adc_ladder[LAD_FADER0 + tgt]);
-				} else if (tgt == ST_CTL_SCRATCH_NONE) {
-					for (uint32_t fk = 0; fk < ST_PL_STEMS; fk++) {
-						ci.fader_raw[fk] = ladder_read(
-							&adc_ladder[LAD_FADER0 + fk]);
-					}
-				}
-				/* tgt == MASTER: the rocker owns the gesture and
-				 * no fader is read at all. */
-			}
 			ci.ladder_raw     = st_trk_raw;
 			ci.track_consumed_mask = s_fx_track_claim;
 			/* Only the master-volume pair maps to a loop division. The
@@ -10280,27 +9983,7 @@ int main(void)
 					k_msleep(25);
 					continue;
 				}
-				/*
-				 * THE SCRATCH OWNS FUNCTION + ROCKER WHENEVER A
-				 * STEM SONG IS SELECTED.
-				 *
-				 * This branch is the inherited Tape Looper's
-				 * CHOP divider, and it is classic-only: the stem
-				 * path clears g_chop_req every block, and with no
-				 * classic content (the source-absence gate proves
-				 * that fail-closed) it is already a no-op here.
-				 * So nothing audible is lost -- but leaving it
-				 * running would still let a shuttle rewrite
-				 * g_chop_div and persist it to g_meta, which is
-				 * state churn on a gesture that means something
-				 * else entirely.
-				 *
-				 * Same ownership rule st_ctl.h states for the
-				 * Track buttons and PLAY: with a stem song, the
-				 * stem instrument owns the surface; without one,
-				 * the Looper is untouched.
-				 */
-				if (vb != VOL_NONE && !g_stem_ctl_out.rocker_consumed) {
+				if (vb != VOL_NONE) {
 					if (vb == cp_cand) { if (cp_cnt < 1000) cp_cnt++; }
 					else { cp_cand = vb; cp_cnt = 1; }
 					if (cp_cnt == 3) {          /* committed press edge */
@@ -10973,20 +10656,7 @@ int main(void)
 			 * ADC time low; see the ladder_read comment for why that matters. */
 			{
 				static int fi;
-				/*
-				 * A FADER BEING SCRATCHED IS NOT A VOLUME
-				 * CONTROL. Without this, moving a stem's fader
-				 * under FUNCTION would scratch it AND fade it
-				 * out at the same time -- one physical movement
-				 * doing two things, which is the bug st_ctl's
-				 * whole arbitration exists to prevent. The mask
-				 * says which fader the gesture has claimed.
-				 */
-				const bool claimed =
-					(g_stem_ctl_out.fader_consumed_mask &
-					 (uint8_t)(1u << fi)) != 0u;
-				int fv = claimed ? -1
-						  : ladder_read(&adc_ladder[LAD_FADER0 + fi]);
+				int fv = ladder_read(&adc_ladder[LAD_FADER0 + fi]);
 				if (fv >= 0) {        /* ADC error -> hold the last volume */
 					uint32_t q = (uint32_t)fv * 256u / 3700u;
 					trk[fi].vol_q8 = (uint16_t)(q > 256u ? 256u : q);
@@ -11123,18 +10793,7 @@ int main(void)
 				static uint32_t dclick_base;    /* the speed BEFORE that click */
 				/* tempo LOCKED while a take is in flight: a mid-take speed
 				 * glide records the warp into the loop (tape-bend artifact) */
-				/*
-				 * A ROCKER THE SCRATCH HAS CLAIMED IS NOT A
-				 * PITCH CONTROL. Without this, a master shuttle
-				 * would also transpose the song a half semitone
-				 * per press -- and the transposition would still
-				 * be there after the hand came off the record,
-				 * which is the worst kind of side effect: silent
-				 * at the time, audible afterwards, and with no
-				 * gesture to undo it.
-				 */
 				int dir = (g_rec_track >= 0) ? 0 :
-					  g_stem_ctl_out.rocker_consumed ? 0 :
 					  (vcommit == VOL_TEMPO_UP) ? 1 :
 					  (vcommit == VOL_TEMPO_DOWN) ? -1 : 0;
 				int step = 0;

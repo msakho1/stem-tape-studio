@@ -24,11 +24,10 @@
  * ======================================================================
  * SAMPLE DOMAIN
  * ======================================================================
- * Everything here is Q23: sign-extended 24-bit, |x| <= 8388607. That is the
- * RACK's own domain and it does not move with the stored width -- a stem
- * sample is lifted into it by ST_FX_STEM_SHIFT (see below) and the mixed
- * int16 of GLOBAL scope by 8, and both saturate back down on the way out, so
- * there is ONE processing path rather than one per storage width.
+ * Everything here is Q23: sign-extended 24-bit, |x| <= 8388607, which is
+ * precisely what st11_sector_decode_frame() produces. GLOBAL scope shifts the
+ * mixed int16 up by 8 on the way in and saturates back down on the way out, so
+ * there is ONE processing path rather than a 16-bit and a 24-bit variant.
  *
  * The echo's delay line is the single exception: it stores Q15 int16 (the
  * sample >> 8). That halves the only large allocation in the whole feature and

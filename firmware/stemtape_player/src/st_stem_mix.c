@@ -94,22 +94,19 @@ bool st_stem_mix_channel_audible(const st_stem_mix_channel_t channels[ST11_STEM_
  * close.
  *
  * NO OVERFLOW, at the bias or at the multiply. gain_q8 is clamped to
- * ST_STEM_MIX_GAIN_MAX_Q8 (256) and a stem sample is sign-extended at
- * ST11_PCM_BIT_DEPTH, so at the widest width this ever ran (24 bits) the
- * product was bounded by [-2^23 * 256, (2^23 - 1) * 256] = [INT32_MIN,
- * INT32_MAX-255]. The largest positive product plus the 255 bias is exactly
- * INT32_MAX; the bias is only ever added to negative values anyway, and the
- * most negative product plus 255 is well inside range. v1.3's 16 bits sit
- * 8 bits inside that, so the bound holds with room to spare.
+ * ST_STEM_MIX_GAIN_MAX_Q8 (256) and a stem sample is a sign-extended 24-bit
+ * value, so the product is bounded by [-2^23 * 256, (2^23 - 1) * 256] =
+ * [INT32_MIN, INT32_MAX-255]. The largest positive product plus the 255 bias
+ * is exactly INT32_MAX; the bias is only ever added to negative values anyway,
+ * and the most negative product plus 255 is well inside range.
  *
- * THE FINAL REDUCTION happens BEFORE the clamp: the stem-storage domain comes
- * down to the 16-bit I2S output domain audio_thread() consumes -- a shift of
- * ST11_PCM_BIT_DEPTH - 16, which was 8 at v1.2's 24 bits and is ZERO at
- * v1.3's 16 -- and only then saturates. ST11_STEM_COUNT stems summed near
- * full-scale can legitimately push past the stored domain; that is the one
- * place clamped rather than silently wrapped, and the comparison is taken on
- * the FULL-WIDTH value so the narrowing cast can never hit
- * implementation-defined overflow first.
+ * THE FINAL REDUCTION happens BEFORE the clamp: the 24-bit stem-storage domain
+ * comes down to the 16-bit I2S output domain audio_thread() consumes (an
+ * 8-bit shift == ST11_PCM_BIT_DEPTH - 16), and only then saturates.
+ * ST11_STEM_COUNT stems summed near full-scale can legitimately push past the
+ * original 24-bit domain; that is the one place clamped rather than silently
+ * wrapped, and the comparison is taken on the FULL-WIDTH value so the
+ * narrowing cast can never hit implementation-defined overflow first.
  */
 void st_stem_mix_frame_prepared(const st11_audio_frame_t *frame,
 				 const st_stem_mix_prepared_t *prepared,

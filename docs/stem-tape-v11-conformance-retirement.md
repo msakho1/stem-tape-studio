@@ -130,39 +130,6 @@ record may choose, and a record disagreeing with its own version is malformed.
    implementation that closes this, and re-establishing a byte-exact
    companion-derived v1.3 fixture is the cheapest way to buy the lost strength
    back — worth doing when the companion ships its v1.3 encoder.
-
-   **Partly retired.** The companion has shipped its v1.3 encoder, and two
-   things came back from it.
-
-   - **The index record is now cross-party.**
-     `handoff/v1.3/binaries/index-companion-committed.bin` is 512 bytes read
-     back out of the companion's stored index after a real upload through its
-     own `StemTapeTransport.uploadSong()` — an independent implementation, in
-     another language, that has never seen `st_stix.c`.
-     `test_stix_companion_produced_record` validates it with the production
-     parser, CRC and validator. Field offsets, endianness, the CRC polynomial
-     and its `[0,4)`-zeroed span, the `songChecksum` derivation from the four
-     stem digests, and the `[256,512)` zero-tail rule are all now agreed by a
-     party that could have got any of them wrong independently. A CI grep
-     requires the case to appear in the tee'd output, so it cannot be dropped
-     silently. The one rule it cannot cross-check is **bounds**, which is
-     validated against the *device's* capability-reported geometry and so
-     depends on the companion's mock rather than on the contract.
-
-   - **The planar audio layout is cross-party at the head of each stem.** The
-     companion reproduced the first 32 bytes of all four stems' first groups
-     byte-for-byte against the values `st_pl_from_v11_sector()` produces,
-     together with the five checksums and the 29 / 464 / 312+198 geometry
-     (see `docs/stem-tape-v1.3-companion-verification.md`). That is agreement
-     on the group header, the stem ordering, the frame stride, endianness and
-     the padding rule.
-
-   **What is still open.** Those 32-byte runs are the *head* of each stem, and
-   the checksums are layout-independent by construction, so the interior of the
-   region — every group after the first — is still attested by one party only.
-   Closing it fully needs a companion-produced planar **region** to compare
-   against, not a record and four openings. That is the remaining piece of this
-   risk, and it is now the only one.
 2. **Single-sample corruption in an interrupted upload** is no longer caught by
    the transcript replay's post-hoc check. Region-level damage still is.
 3. **The transcripts can never be re-recorded at v1.3** without a v1.3

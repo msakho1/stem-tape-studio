@@ -583,35 +583,6 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Link closure (a call whose .c file is not in the build)
-        # THE SECOND ARM-ONLY FAILURE CLASS THIS JOB NOW CATCHES WITHOUT ARM,
-        # and the nastier of the two to diagnose. A call to a function nobody
-        # compiles does NOT fail like a missing function usually does: the
-        # compile succeeds (the prototype is in a header), the first link pass
-        # runs, and the build dies with no zephyr.elf. The surviving log tail
-        # says only "bin=NOT-PRODUCED (the build did not reach a final link)",
-        # which describes the symptom and names nothing.
-        #
-        # It has now happened TWICE: main.c's v1.2 read path called
-        # st_pl_group_block(), st_pl_validate() and st_pl_decode_frame() with
-        # src/st_planar.c never added to CMakeLists.txt; and st_ctl.c's scratch
-        # gesture called st_scratch_drive_from_fader() with src/st_scratch.c
-        # left out on the theory that "nothing calls it yet" -- which had
-        # stopped being true in the very commit that said it.
-        #
-        # AND THIS STEP RAN AFTER THE BUILD BOTH TIMES, which is why it caught
-        # neither. It is pure source analysis: no toolchain, no ELF, no
-        # artefacts, about a second to run. Downstream of the compile it could
-        # only ever confirm a diagnosis already paid for with a failed build.
-        # It now runs BEFORE the SDK is set up, where it turns a wasted compile
-        # into an error naming the file, the line, the function and the fix.
-        working-directory: ${{ github.workspace }}/project
-        run: |
-          set -euo pipefail
-          python3 .github/scripts/stemtape_player_link_closure.py \
-            firmware/stemtape_player/CMakeLists.txt \
-            firmware/stemtape_player/src
-
       - name: Start CI heartbeat (Set up Zephyr)
         # See the `build` job's identical step for why: this composite
         # action prints nothing while it downloads/unpacks the SDK, so a
@@ -1001,17 +972,6 @@ jobs:
             firmware/stemtape_player/tests/test_stem_v11.c \
             -o audit/test_stem_v11
           ./audit/test_stem_v11 | tee audit/stem-v11-fixture-selftest.txt
-
-          # THE CROSS-PARTY CASE MUST HAVE RUN. Every other v1.3 fixture in
-          # this repository was produced by this side of the contract; this
-          # one is 512 bytes read back out of the COMPANION's own stored
-          # index after a real upload. It is the only thing standing between
-          # "two implementations agree" and "two parties agree" (see
-          # docs/stem-tape-v11-conformance-retirement.md, residual risk 1),
-          # and a silently-dropped case would take that back without a
-          # failing test anywhere.
-          grep -q 'a record this side never wrote' audit/stem-v11-fixture-selftest.txt \
-            || { echo "the companion-produced index record case did not run"; exit 1; }
           {
             echo '### Stem Tape storage-contract conformance'
             echo '```text'
@@ -1304,32 +1264,14 @@ jobs:
         # forever without a floor, and a linear curve rendering all real
         # programme material near-full -- which is what made the previous
         # tempo-boolean display look uniform.
-        #
-        # AND the v1.3 one: this module's full scale, reference and noise
-        # floor were 24-bit literals, so when the stored width moved to 16
-        # bits every peak arrived 256x below the window they describe and
-        # the Track row could never rise above MIN_ON. Nothing failed,
-        # because every other case here is written against those same
-        # constants and so scales with whatever they say. The two greps
-        # below are what stop it coming back: the constants must be
-        # DERIVED from ST11_PCM_BIT_DEPTH, and the case that decodes a real
-        # stored frame through st_pl_decode_stem_inline() and lands it on
-        # this module's full scale must actually have run.
         working-directory: ${{ github.workspace }}/project
         run: |
           set -euo pipefail
-          grep -q 'ST_STEM_METER_FULL_SCALE ((1u << (ST11_PCM_BIT_DEPTH - 1u)) - 1u)' \
-            firmware/stemtape_player/src/st_stem_meter.h \
-            || { echo "meter full scale must be DERIVED from the stored width, not a literal"; exit 1; }
           cc -std=c11 -Wall -Wextra -Ifirmware/stemtape_player/src \
             firmware/stemtape_player/src/st_stem_meter.c \
             firmware/stemtape_player/tests/test_stem_meter.c \
             -o audit/test_stem_meter
           ./audit/test_stem_meter | tee audit/stem-meter-selftest.txt
-          grep -q 'the meter.s full scale' audit/stem-meter-selftest.txt \
-            || { echo "the meter/decoder domain-agreement case did not run"; exit 1; }
-          grep -q 'reaches the floor rather than stalling above it' audit/stem-meter-selftest.txt \
-            || { echo "the small-magnitude decay case did not run"; exit 1; }
           {
             echo '### st_stem_meter host tests (per-stem envelope + brightness curve)'
             echo '```text'
@@ -2323,196 +2265,6 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Stem Tape SIGNED-HEAD VELOCITY CLAMP -- how fast a scratch may go
-        # Playback rate IS a data rate. At |r| the transport consumes stored
-        # audio |r| times faster and the eMMC must supply it |r| times faster,
-        # so past some |r| it simply cannot -- starvation by arithmetic, which
-        # no amount of buffering fixes. st_scratch.h therefore DERIVES the
-        # maximum signed velocity from the measured read-cost fit, the refill
-        # batch size and how many heads are moving, rather than picking a
-        # number that felt safe.
-        #
-        # Two kinds of case here, and the difference is the point. The first
-        # re-derives the clamp in floating point from first principles and
-        # requires it to agree with the header's integer form, so a
-        # hand-edited constant cannot drift from the measurement -- the same
-        # discipline test_ladder.c applies to the ladder bands. The second
-        # models nothing at all: it drives a synthetic oscillating gesture
-        # through the REAL st_stem_stream state machine and COUNTS the sectors
-        # demanded, so the claim that scratching inside the resident ring is
-        # free is measured against the production ring. A model that says
-        # scratching is affordable and a simulation that says it is not is
-        # exactly the disagreement worth finding before the audio thread ever
-        # sees a signed rate.
-        working-directory: ${{ github.workspace }}/project
-        run: |
-          set -euo pipefail
-          cc -std=c11 -Wall -Wextra -Werror -Ifirmware/stemtape_player/src \
-            firmware/stemtape_player/src/st_stem_stream.c \
-            firmware/stemtape_player/src/st_scratch.c \
-            firmware/stemtape_player/tests/test_scratch.c \
-            -lm -o audit/test_scratch
-          ./audit/test_scratch | tee audit/scratch-clamp-selftest.txt
-
-          # BOTH HALVES MUST KEEP RUNNING. The re-derivation alone would let a
-          # wrong-but-self-consistent model pass; the simulation alone would
-          # let a drifted constant pass. Neither is sufficient on its own, so
-          # neither may quietly disappear.
-          grep -q 'the measured fit says' audit/scratch-clamp-selftest.txt \
-            || { echo "the clamp is no longer checked against the measured fit"; exit 1; }
-          grep -q 'demanded 0 reads' audit/scratch-clamp-selftest.txt \
-            || { echo "the free-window simulation did not run, or is no longer free"; exit 1; }
-          grep -q 'so the free-window case above is measuring something real' \
-            audit/scratch-clamp-selftest.txt \
-            || { echo "the complementary travelling case is gone -- the free-window case may be vacuous"; exit 1; }
-
-          # THE CLAMP MUST BE DERIVED, NOT WRITTEN DOWN. A literal max rate in
-          # the header is the failure this whole step exists to prevent.
-          grep -q 'ST_SCRATCH_MAX_RATE_Q16(moving)' \
-            firmware/stemtape_player/src/st_scratch.h \
-            || { echo "the velocity clamp must be derived from the read-cost model"; exit 1; }
-
-          # AND IT MUST BE THE MINIMUM OF BOTH CEILINGS. The read-cost model
-          # answers "what can the storage feed"; st_resample.h's ST_RS_RATE_MAX
-          # answers "what can the reader span", and on an isolated stem the
-          # SECOND one binds -- the eMMC allows 7.62x where the interpolator
-          # allows 2x. Shipping the storage figure alone would drive the
-          # renderer four times past its stated span.
-          grep -q 'the effective clamp is the MINIMUM of the two ceilings' \
-            audit/scratch-clamp-selftest.txt \
-            || { echo "the renderer ceiling is no longer applied to the clamp"; exit 1; }
-          grep -q 'ST_SCRATCH_EFFECTIVE_MAX_Q16(moving)' \
-            firmware/stemtape_player/src/st_scratch.h \
-            || { echo "the effective clamp must take both ceilings, not just storage"; exit 1; }
-
-          # THE TRANSPORT'S TWO LOAD-BEARING PROPERTIES.
-          #
-          # One integrator spanning both gestures is the whole design, so the
-          # case proving that short alternating presses actually REVERSE the
-          # head must keep running. It caught a real bug the first time it ran:
-          # selecting the ramp by magnitude alone read a full-reverse target as
-          # an acceleration, so two equal presses exactly undid each other and
-          # the head sawtoothed 0 -> +2.1 -> 0 without ever crossing zero --
-          # forward-only pumping that would have felt like a broken control.
-          grep -q 'that is scratching, produced by nothing but press timing' \
-            audit/scratch-clamp-selftest.txt \
-            || { echo "the no-mode scratching case did not run"; exit 1; }
-          grep -q 'a reversal is a walk and can never be a sign flip' \
-            audit/scratch-clamp-selftest.txt \
-            || { echo "the zero-crossing continuity case did not run"; exit 1; }
-
-          # THE HAND COMING OFF THE RECORD is the last place a sign flip could
-          # hide: at release the head may be at -2.6x while ordinary playback
-          # is +1.0, and handing the transport straight back its own rate would
-          # step 3.6x between one block and the next -- worst exactly where a
-          # player uses it most, coming out of a reverse scratch.
-          grep -q 'the override can be dropped with no step at the handover' \
-            audit/scratch-clamp-selftest.txt \
-            || { echo "the release coast is gone -- letting go would be a hard sign flip"; exit 1; }
-
-          # AND NO TIMEOUT MAY APPEAR. The moment something in here measures
-          # how long a press lasted in order to pick a behaviour, scratch and
-          # scrub have become two systems with a seam between them, which is
-          # exactly what this design forbids.
-          if grep -qE '(SCRATCH|SCRUB)_(MODE|TIMEOUT|THRESHOLD)_MS' \
-               firmware/stemtape_player/src/st_scratch.h \
-               firmware/stemtape_player/src/st_scratch.c; then
-            echo "a scratch/scrub mode threshold appeared -- they are one state machine"
-            exit 1
-          fi
-          {
-            echo '### Stem Tape signed-head velocity clamp'
-            echo '```text'
-            cat audit/scratch-clamp-selftest.txt
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Stem Tape SCRATCH APPLIED -- main.c's own block, compiled on stubs
-        # THE ONE PIECE OF THE SCRATCH THAT LIVES ONLY IN main.c, and the piece
-        # that decides which heads move, in which direction, at what speed. A
-        # hand-written copy of it in a test would be a second implementation
-        # that goes stale silently the first time the real one changes -- so
-        # the harness EXTRACTS those exact lines at build time and compiles
-        # them against stubs for the two things a host cannot have: the atomics
-        # and the four playheads.
-        #
-        # The extractor fails loudly if the markers are gone, if the block is
-        # implausibly small, or if it no longer contains the calls that make it
-        # the real thing. An empty extract would let the test pass by testing
-        # nothing, which is the failure mode worth engineering against.
-        #
-        # WHAT THIS CANNOT PROVE: that the block sits in the right place in
-        # stem_audio_block(), or that it runs once per block. Those belong to
-        # the Zephyr build and the wiring gate. It proves the arithmetic --
-        # grab, drive, direction split, ownership, coast, handover -- which is
-        # where the mistakes are.
-        working-directory: ${{ github.workspace }}/project
-        run: |
-          set -euo pipefail
-          python3 .github/scripts/stemtape_player_extract_scratch_apply.py \
-            firmware/stemtape_player/src/main.c \
-            firmware/stemtape_player/tests/scratch_apply_block.inc apply
-          python3 .github/scripts/stemtape_player_extract_scratch_apply.py \
-            firmware/stemtape_player/src/main.c \
-            firmware/stemtape_player/tests/loop_wrap_block.inc loopwrap
-          cc -std=c11 -Wall -Wextra -Werror \
-            -Ifirmware/stemtape_player/src -Ifirmware/stemtape_player/tests \
-            firmware/stemtape_player/src/st_stem_stream.c \
-            firmware/stemtape_player/src/st_scratch.c \
-            firmware/stemtape_player/tests/test_scratch_apply.c \
-            -o audit/test_scratch_apply
-          ./audit/test_scratch_apply | tee audit/scratch-apply-selftest.txt
-
-          # THE FOUR CLAIMS THE SPEC MAKES ABOUT WHAT SCRATCHING DOES.
-          grep -q 'locked' audit/scratch-apply-selftest.txt \
-            || { echo "master no longer moves all four heads together"; exit 1; }
-          grep -q 'the sign went to the head, not to the rate' audit/scratch-apply-selftest.txt \
-            || { echo "the signed rate is no longer split into magnitude + direction"; exit 1; }
-          grep -q 'is untouched -- still forward' audit/scratch-apply-selftest.txt \
-            || { echo "an isolated stem scratch is disturbing the other three"; exit 1; }
-          grep -q 'not from where it started and not resynced' audit/scratch-apply-selftest.txt \
-            || { echo "releasing a gesture is moving the head -- it must resume where it was left"; exit 1; }
-
-          # THE TWO HANDOVER RULES, both of which were wrong first.
-          #
-          # The coast walked to a hard-coded 1.0x, so with the pitch rocker set
-          # (the transport runs to 1.19x) it finished at unity, dropped the
-          # override, and stepped the rate 0.19x in a single block -- a 19%
-          # speed jump on every release while pitched. And coasting to a
-          # POSITIVE rate cancelled a reverse the player had latched, leaving a
-          # stem playing forward with nothing to explain it.
-          grep -q "EXACTLY the transport's pitched rate" audit/scratch-apply-selftest.txt \
-            || { echo "the coast no longer ends on the rate the transport resumes at"; exit 1; }
-          grep -q 'it does not cancel a mode' audit/scratch-apply-selftest.txt \
-            || { echo "a scratch is silently cancelling a latched reverse"; exit 1; }
-          # And every stem, not just whichever one happened to get tested.
-          for st in vocal drums bass instrument; do
-            grep -q "A10. $st" audit/scratch-apply-selftest.txt \
-              || { echo "stem '$st' is no longer covered by the isolated-scratch case"; exit 1; }
-          done
-
-          # SCRATCHING INSIDE A LOOP adds no loop code: the scratch's only
-          # effect on direction is hd->reverse, and main.c's per-head wrap is
-          # keyed on that same flag, so a scratched head crossing loop_start
-          # wraps to loop_end by machinery the reverse feature already built.
-          # These drive BOTH real blocks together to check that inheritance
-          # actually holds -- and report the seek rate a boundary-crossing
-          # gesture produces, since every wrap invalidates residency and the
-          # eMMC clamp was derived for travel rather than for repeated seeks.
-          grep -q 'wrapped it to loop_end rather than escaping' audit/scratch-apply-selftest.txt \
-            || { echo "a backward scratch can escape the loop window"; exit 1; }
-          grep -q 'the case is not passing because nothing reached the boundary' \
-            audit/scratch-apply-selftest.txt \
-            || { echo "the loop case no longer proves it reached the boundary"; exit 1; }
-          grep -q 'of blocks caused a seek' audit/scratch-apply-selftest.txt \
-            || { echo "the boundary-oscillation seek rate is no longer measured"; exit 1; }
-          {
-            echo '### Stem Tape scratch, applied'
-            echo '```text'
-            cat audit/scratch-apply-selftest.txt
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
       - name: Stem Tape v1.2 SONG-PLANAR addressing -- pure module AND the wired read path
         # THE FORMAT'S WHOLE JUSTIFICATION, as an executable claim. v1.1 weaves
         # all four stems into every frame, so a stem playing from a different
@@ -2712,34 +2464,21 @@ jobs:
           # AND THE RATE MUST REACH THE READ. An envelope that never becomes
           # a read position is a fade waiting to happen.
           # The cursor fraction became PER STEM when the resampler's carried
-          # state did, the RUN became per stem when the playheads did, and the
-          # RATE became per stem when an isolated stem scratch had to move one
-          # head while the others kept running. All three now match arrays
-          # rather than scalars. The question is unchanged: the rate must reach
-          # the read, and the source/output domain conversion must be applied.
-          grep -q 'stem_rate_q16, s_stem_rate_frac, run_k' "$M" || {
-            echo "  the renderer is not given the per-stem rates"; fail=1; }
-          grep -q 'out_n = st_rs_out_frames(run, s_stem_rate_frac\[0\], stem_rate_q16\[0\])' "$M" || {
+          # state did, and the RUN became per stem when the playheads did, so
+          # these two match the arrays rather than the scalars. The question
+          # they ask is unchanged: the rate must reach the read, and the
+          # source/output domain conversion must be applied.
+          grep -q 'rate_q16, s_stem_rate_frac, run_k' "$M" || {
+            echo "  the renderer is not given the transport rate"; fail=1; }
+          grep -q 'out_n = st_rs_out_frames(run, frac_max, rate_q16)' "$M" || {
             echo "  the source/output domain conversion is not applied"; fail=1; }
-          # AND THE CONVERSION MUST USE THE WORST-CASE HEAD -- but which head
-          # that IS changed with the rate.
-          #
-          # It used to be the one carrying the largest cursor fraction, since a
-          # bigger fraction crosses a source frame sooner, and with one rate for
-          # the whole block that was exactly right. Rate now dominates: a head
-          # at 4x exhausts `run` in a quarter of the output frames a head at 1x
-          # does, whatever fraction either carries. So the gate no longer looks
-          # for a max-fraction scan -- it requires the MINIMUM over the heads,
-          # each asked at its own rate. Anything less would let a fast head be
-          # asked for a source frame its own run does not contain, which is
-          # reading the next group's bytes as if they were this one's.
-          grep -q 'if (n_k < out_n)' "$M" || {
-            echo "  out_n is not the minimum over the heads at their own rates"; fail=1; }
-          # And the OLD rule must be gone, not merely unused: a surviving
-          # max-fraction scan would mean two sizing rules in one function.
-          if grep -q 'frac_max' "$M"; then
-            echo "  the retired max-fraction sizing is still present"; fail=1
-          fi
+          # AND THE CONVERSION MUST USE THE WORST-CASE HEAD. `run` is the
+          # minimum across the four playheads; pairing it with anything but
+          # the LARGEST carried fraction would let some head be asked for a
+          # source frame its own run does not contain, which is reading the
+          # next group's bytes as if they were this one's.
+          grep -q 'if (s_stem_rate_frac\[sk\] > frac_max)' "$M" || {
+            echo "  out_n is not sized by the worst-supplied head"; fail=1; }
           [ "$fail" = 0 ] || exit 1
           echo "inertia wiring: PLAY/STOP move the reel, and the reel moves the tape"
           {
@@ -2910,43 +2649,9 @@ jobs:
             firmware/stemtape_player/src/st_ctl.c \
             firmware/stemtape_player/src/st_ladder.c \
             firmware/stemtape_player/src/st_loop.c \
-            firmware/stemtape_player/src/st_scratch.c \
             firmware/stemtape_player/tests/test_ctl.c \
             -o audit/test_ctl
           ./audit/test_ctl | tee audit/ctl-selftest.txt
-
-          # THE SCRATCH ARBITRATION, which is the whole reason this gesture
-          # lives in st_ctl.c rather than in main.c: one physical movement
-          # must do exactly one thing. Each of these is a bug that would only
-          # ever show up on hardware, as a control that quietly does something
-          # extra.
-          grep -q 'the rocker edge is CONSUMED' audit/ctl-selftest.txt \
-            || { echo "the rocker is no longer claimed -- a scratch would also transpose"; exit 1; }
-          grep -q "stem 2's fader is claimed" audit/ctl-selftest.txt \
-            || { echo "the fader is no longer claimed -- a scratch would also fade the stem"; exit 1; }
-          grep -q 'does NOT toggle reverse' audit/ctl-selftest.txt \
-            || { echo "a Track brush during a scratch can flip a stem into reverse"; exit 1; }
-          grep -q 'does NOT steal it' audit/ctl-selftest.txt \
-            || { echo "first-mover-wins is gone -- a brushed fader can abandon a master shuttle"; exit 1; }
-          grep -q 'is a reference, not a 1800-count movement' audit/ctl-selftest.txt \
-            || { echo "an unsampled fader can be read as a full-range movement"; exit 1; }
-          grep -q 'does NOT drop the drive mid-shuttle' audit/ctl-selftest.txt \
-            || { echo "the rocker debounce is gone -- rail noise would stutter a shuttle"; exit 1; }
-
-          # AND THE SUPPRESSIONS MUST REACH main.c. st_ctl publishing a claim
-          # nobody honours is the same bug as not claiming at all: the gesture
-          # would scratch AND transpose, or scratch AND fade the stem out.
-          M=firmware/stemtape_player/src/main.c
-          grep -q 'g_stem_ctl_out.rocker_consumed ? 0 :' "$M" \
-            || { echo "the pitch handler still sees a rocker the scratch claimed"; exit 1; }
-          grep -q 'g_stem_ctl_out.fader_consumed_mask &' "$M" \
-            || { echo "the volume round-robin still writes a fader being scratched"; exit 1; }
-          grep -q 'vb != VOL_NONE && !g_stem_ctl_out.rocker_consumed' "$M" \
-            || { echo "the classic chop path still reinterprets a scratch shuttle"; exit 1; }
-          grep -q 'ci.rocker_dir = (st_vraw == VOL_TEMPO_UP)' "$M" \
-            || { echo "the rocker is not fed to the gesture at all"; exit 1; }
-          grep -q 'ladder_read(&adc_ladder\[LAD_FADER0 + tgt\])' "$M" \
-            || { echo "the active fader is not sampled at the scratch cadence"; exit 1; }
 
           # THE CHORD MUST NOT PAUSE THE SONG. Reported from hardware:
           # FUNCTION + PLAY toggled slow playback AND paused, because
@@ -3033,6 +2738,26 @@ jobs:
             cat audit/led-acceptance-matrix.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Link closure (a call whose .c file is not in the build)
+        # THE SECOND ARM-ONLY FAILURE CLASS THIS JOB NOW CATCHES WITHOUT ARM,
+        # and the nastier of the two to diagnose. A call to a function nobody
+        # compiles does NOT fail like a missing function usually does: the
+        # compile succeeds (the prototype is in a header), the first link pass
+        # runs, and the build dies with no zephyr.elf. The surviving log tail
+        # says only "bin=NOT-PRODUCED (the build did not reach a final link)",
+        # which describes the symptom and names nothing.
+        #
+        # It has already happened once: main.c's v1.2 read path called
+        # st_pl_group_block(), st_pl_validate() and st_pl_decode_frame() on
+        # every fetch and every frame, and src/st_planar.c was never added to
+        # CMakeLists.txt.
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/stemtape_player_link_closure.py \
+            firmware/stemtape_player/CMakeLists.txt \
+            firmware/stemtape_player/src
 
       - name: RAM ownership map has not gone stale (a renamed symbol reclassifies silently)
         # THE THIRD FAILURE CLASS THIS JOB CATCHES WITHOUT THE TOOLCHAIN, and

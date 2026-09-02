@@ -185,7 +185,6 @@ target_sources(app PRIVATE
 	src/st_track_hold.c
 	src/st_ladder.c
 	src/st_ctl.c
-	src/st_scratch.c
 	src/st_loop.c
 	src/st_fx.c
 	src/st_fx_ctl.c

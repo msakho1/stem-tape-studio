@@ -39,5 +39,3 @@ __pycache__/
 # its ThreadSanitizer build, the ring-depth sweep) drops the same binaries
 # here. None of it is source and none of it belongs in the repository.
 audit/
-firmware/stemtape_player/tests/scratch_apply_block.inc
-firmware/stemtape_player/tests/loop_wrap_block.inc
