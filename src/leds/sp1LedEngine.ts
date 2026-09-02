@@ -174,9 +174,9 @@ export interface AuthoritativeSp1LedState {
    * the audio engine's own position. `null` when the engine has no loop phase
    * to offer — the accent then falls back to the app clock.
    */
-  loopPhase: number | null;
+  loopPhase?: number | null;
   /** Persistent slowed-tape state (musical rate below unity). */
-  slow: boolean;
+  slow?: boolean;
   /** Scratch readiness — master (all-stem) scratch, fed by the scratch engine. */
   scratch?: { master: boolean };
   scrub: { direction: 0 | 1 | -1; speedIndex: ScrubSpeedIndex; latched: boolean; inertia: boolean };
