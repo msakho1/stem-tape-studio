@@ -1143,6 +1143,24 @@ export class AudioEngine {
     return p != null && p.target === live;
   }
 
+  /**
+   * The SONG position a lane's newest voice is reading RIGHT NOW, derived from
+   * the shared integrated-rate timeline (never from a JS timer). Null when the
+   * lane has no live voice.
+   */
+  private laneAudiblePosition(t: TrackRuntime, now: number): number | null {
+    // The AUDIBLE voice is the newest one that has already started; a voice
+    // scheduled ahead of `now` (a committed wrap) is not being heard yet.
+    let live: LiveSource | undefined;
+    for (const s of t.sources) if (s.startAt <= now && (!live || s.startAt >= live.startAt)) live = s;
+    if (!live) live = t.sources[t.sources.length - 1];
+    if (!live) return null;
+    return live.startPos + (this.timeline.positionAt(now) - this.timeline.positionAt(live.startAt));
+  }
+
+
+
+
   private pendingRelease: ({
     at: number;
     pos: number;
@@ -1194,11 +1212,12 @@ export class AudioEngine {
     for (let i = 0; i < this.tracks.length; i++) {
       const t = this.tracks[i]!;
       if (!t.loop.enabled) continue;
-      const live = t.sources[t.sources.length - 1];
-      if (!live) continue;
-      audible = live.startPos + (this.timeline.positionAt(now) - this.timeline.positionAt(live.startAt));
+      const p = this.laneAudiblePosition(t, now);
+      if (p == null) continue;
+      audible = p;
       break;
     }
+
     if (audible == null) {
       for (const t of this.tracks) t.loop = { ...t.loop, enabled: false };
       this.invalidateSeams();
@@ -1206,7 +1225,49 @@ export class AudioEngine {
     }
     const landing = Math.max(0, dur ? Math.min(dur - 1e-3, audible + advance) : audible + advance);
 
+    // Release must not seek. When no wrap has been COMMITTED into the audio
+    // graph yet (no lane has a scheduled seam ahead of us), the currently
+    // audible voices are simply allowed to keep running: the window is closed,
+    // the shared clock is re-anchored onto the audible frame and nothing is
+    // respawned or crossfaded at all. Only when a wrap is already scheduled —
+    // its fade-out and replacement are in the graph and cannot be un-scheduled
+    // sample-accurately — does the release fall back to the audible-frame
+    // crossfade below.
+    const wrapCommitted = this.tracks.some((t) => t.loop.enabled && t.committedSeamAt != null && t.committedSeamAt > now);
+
     let lanes = 0;
+    if (!wrapCommitted) {
+      for (let i = 0 as TrackId; i < 4; i = (i + 1) as TrackId) {
+        const t = this.tracks[i];
+        if (!t) continue;
+        const wasLooping = t.loop.enabled;
+        t.loop = { ...t.loop, enabled: false };
+        this.pendingRelease[i] = null;
+        t.committedSeamAt = null;
+        if (!wasLooping) continue;
+        lanes++;
+        if (t.engineMode === "worklet" && t.worklet) {
+          // Worklet parity: drop the window WITHOUT moving the read pointer.
+          const frames = Math.round(t.sourceDurationS * ctx.sampleRate);
+          void t.worklet.post({
+            type: "setWindow",
+            start: 0,
+            end: frames,
+            enabled: false,
+            applyAtContextFrame: sharedApplyFrame(ctx),
+          });
+        }
+      }
+      // The audible frame IS the song position from here on.
+      this.timeline.anchor(now, audible);
+      this.invalidateSeams();
+      this.lastGlobalRelease = { at: now, position: audible, lanes };
+      return {
+        ok: true,
+        detail: `global loop released with no seek — ${lanes} lanes continue forward from the audible frame ${audible.toFixed(3)}s`,
+      };
+    }
+
     for (let i = 0 as TrackId; i < 4; i = (i + 1) as TrackId) {
       const t = this.tracks[i];
       if (!t) continue;
@@ -1233,6 +1294,7 @@ export class AudioEngine {
     }
     // The SONG itself was looping: the shared clock follows the audible frame.
     this.timeline.anchor(at, landing);
+
     this.invalidateSeams();
     this.lastGlobalRelease = { at, position: landing, lanes };
     return {
@@ -4545,9 +4607,20 @@ export class AudioEngine {
             });
           }
           const bounds = this.loopBounds(t);
-          // Loop-mode transitions are NOT click-free by themselves: entering or
-          // leaving the window relocates the read pointer.
-          const relocated = bounds && enabled ? this.relocateLane(t, bounds.start) : false;
+          // Loop ENTRY must never seek. If the lane's audible read pointer is
+          // already inside the new window, the voice is left strictly alone:
+          // playback keeps moving forward and the shared seam scheduler wraps
+          // it for the first time only when it naturally reaches loopEnd.
+          // A relocation happens ONLY when the pointer is outside the window
+          // (a chop jump or a window moved elsewhere), which genuinely has to
+          // move the read head.
+          let relocated = false;
+          if (bounds && enabled && this.ctx && this.requestedPlaying) {
+            const here = this.laneAudiblePosition(t, this.ctx.currentTime);
+            const inside = here != null && here >= bounds.start && here < bounds.end;
+            if (!inside) relocated = this.relocateLane(t, bounds.start);
+          }
+
           return this.ack(
             cmd,
             "completed",
