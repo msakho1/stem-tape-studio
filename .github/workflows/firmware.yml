@@ -2320,6 +2320,7 @@ jobs:
           set -euo pipefail
           cc -std=c11 -Wall -Wextra -Werror -Ifirmware/stemtape_player/src \
             firmware/stemtape_player/src/st_stem_stream.c \
+            firmware/stemtape_player/src/st_scratch.c \
             firmware/stemtape_player/tests/test_scratch.c \
             -lm -o audit/test_scratch
           ./audit/test_scratch | tee audit/scratch-clamp-selftest.txt
@@ -2341,6 +2342,32 @@ jobs:
           grep -q 'ST_SCRATCH_MAX_RATE_Q16(moving)' \
             firmware/stemtape_player/src/st_scratch.h \
             || { echo "the velocity clamp must be derived from the read-cost model"; exit 1; }
+
+          # THE TRANSPORT'S TWO LOAD-BEARING PROPERTIES.
+          #
+          # One integrator spanning both gestures is the whole design, so the
+          # case proving that short alternating presses actually REVERSE the
+          # head must keep running. It caught a real bug the first time it ran:
+          # selecting the ramp by magnitude alone read a full-reverse target as
+          # an acceleration, so two equal presses exactly undid each other and
+          # the head sawtoothed 0 -> +2.1 -> 0 without ever crossing zero --
+          # forward-only pumping that would have felt like a broken control.
+          grep -q 'that is scratching, produced by nothing but press timing' \
+            audit/scratch-clamp-selftest.txt \
+            || { echo "the no-mode scratching case did not run"; exit 1; }
+          grep -q 'a reversal is a walk and can never be a sign flip' \
+            audit/scratch-clamp-selftest.txt \
+            || { echo "the zero-crossing continuity case did not run"; exit 1; }
+
+          # AND NO TIMEOUT MAY APPEAR. The moment something in here measures
+          # how long a press lasted in order to pick a behaviour, scratch and
+          # scrub have become two systems with a seam between them, which is
+          # exactly what this design forbids.
+          grep -qE '(SCRATCH|SCRUB)_(MODE|TIMEOUT|THRESHOLD)_MS' \
+            firmware/stemtape_player/src/st_scratch.h \
+            firmware/stemtape_player/src/st_scratch.c \
+            && { echo "a scratch/scrub mode threshold appeared -- they are one state machine"; exit 1; }
+          true
           {
             echo '### Stem Tape signed-head velocity clamp'
             echo '```text'

@@ -276,9 +276,364 @@ static void test_the_free_window_is_stated_honestly(void)
 	      "and it is at least 40 ms, or a hand movement would leave it instantly");
 }
 
+
+/* ======================================================================
+ * PART THREE -- the transport primitive
+ * ====================================================================== */
+
+/* One control pass at the real ~8 ms cadence. */
+#define PASS_US 8000u
+
+static double rate_of(const st_scratch_t *s) { return st_scratch_rate_q16(s) / 65536.0; }
+
+/* Hold a drive for `ms` and return the rate reached. */
+static double hold(st_scratch_t *s, int32_t drive, uint32_t ms)
+{
+	uint32_t t;
+
+	for (t = 0; t < ms * 1000u; t += PASS_US) {
+		st_scratch_set_drive(s, drive);
+		st_scratch_tick(s, PASS_US);
+	}
+	return rate_of(s);
+}
+
+static void test_a_sustained_hold_shuttles_to_the_clamp(void)
+{
+	st_scratch_t s;
+	double r;
+
+	st_scratch_begin(&s, 0, ST_SCRATCH_MAX_RATE_MASTER_Q16);
+	r = hold(&s, ST_SCRATCH_DRIVE_FULL, 400u);
+
+	CHECK(fabs(r - ST_SCRATCH_MAX_RATE_MASTER_Q16 / 65536.0) < 0.01,
+	      "holding forward reaches the clamp and stays there: %.3fx", r);
+
+	/* And it STAYS. A shuttle that crept past its clamp, or drifted back
+	 * off it, would be the transport arguing with the player. */
+	r = hold(&s, ST_SCRATCH_DRIVE_FULL, 400u);
+	CHECK(fabs(r - ST_SCRATCH_MAX_RATE_MASTER_Q16 / 65536.0) < 0.01,
+	      "and another 400 ms of hold does not push past it: %.3fx", r);
+
+	r = hold(&s, -ST_SCRATCH_DRIVE_FULL, 400u);
+	CHECK(fabs(r + ST_SCRATCH_MAX_RATE_MASTER_Q16 / 65536.0) < 0.01,
+	      "holding backward shuttles in reverse at the clamp: %.3fx", r);
+}
+
+static void test_short_presses_scratch_without_a_mode(void)
+{
+	/*
+	 * THE CENTRAL CLAIM. Nothing in st_scratch.c measures press duration or
+	 * names a mode, so short alternating presses must produce oscillation
+	 * and a long press must produce travel -- purely as a consequence of the
+	 * same integrator. If a seam ever appears between the two, it will show
+	 * up here as one of these two cases failing while the other passes.
+	 */
+	st_scratch_t s;
+	double peak_fwd = 0.0, peak_rev = 0.0;
+	int crossings = 0;
+	int prev_sign = 0;
+	int cycle;
+
+	st_scratch_begin(&s, 0, ST_SCRATCH_MAX_RATE_MASTER_Q16);
+
+	/* 8 alternating 60 ms presses -- a scratch rhythm, roughly 8 Hz. */
+	for (cycle = 0; cycle < 8; cycle++) {
+		const int32_t d = (cycle & 1) ? -ST_SCRATCH_DRIVE_FULL : ST_SCRATCH_DRIVE_FULL;
+		uint32_t t;
+
+		for (t = 0; t < 60u * 1000u; t += PASS_US) {
+			int sign;
+
+			st_scratch_set_drive(&s, d);
+			st_scratch_tick(&s, PASS_US);
+
+			if (rate_of(&s) > peak_fwd) { peak_fwd = rate_of(&s); }
+			if (rate_of(&s) < peak_rev) { peak_rev = rate_of(&s); }
+
+			sign = (st_scratch_rate_q16(&s) > 0) ? 1 :
+			       (st_scratch_rate_q16(&s) < 0) ? -1 : 0;
+			if (sign != 0 && prev_sign != 0 && sign != prev_sign) {
+				crossings++;
+			}
+			if (sign != 0) { prev_sign = sign; }
+		}
+	}
+
+	printf("       8 presses of 60 ms: peak +%.2fx / %.2fx, %d zero crossings\n",
+	       peak_fwd, peak_rev, crossings);
+
+	CHECK(peak_fwd > 0.5, "short presses reach a real forward velocity (%.2fx), not a wobble",
+	      peak_fwd);
+	CHECK(peak_rev < -0.5, "and a real reverse one (%.2fx)", peak_rev);
+	CHECK(crossings >= 6,
+	      "and the head genuinely reverses direction on each press (%d crossings) -- "
+	      "that is scratching, produced by nothing but press timing", crossings);
+}
+
+static void test_the_zero_crossing_is_continuous(void)
+{
+	/*
+	 * Forward -> slow -> zero -> reverse must be a walk, not a jump. The
+	 * largest single-tick change anywhere across a full reversal bounds how
+	 * big a discontinuity the resampler can ever be handed.
+	 */
+	st_scratch_t s;
+	double max_step = 0.0;
+	double closest_to_zero = 1e9;
+	double prev;
+	uint32_t t;
+	uint32_t ticks_to_cross = 0u;
+	bool crossed = false;
+
+	st_scratch_begin(&s, 0, ST_SCRATCH_MAX_RATE_MASTER_Q16);
+	(void)hold(&s, ST_SCRATCH_DRIVE_FULL, 400u);   /* settled forward */
+
+	prev = rate_of(&s);
+	for (t = 0; t < 400u * 1000u; t += PASS_US) {
+		double now;
+
+		st_scratch_set_drive(&s, -ST_SCRATCH_DRIVE_FULL);
+		st_scratch_tick(&s, PASS_US);
+		now = rate_of(&s);
+		if (fabs(now - prev) > max_step) { max_step = fabs(now - prev); }
+		if (fabs(now) < closest_to_zero) { closest_to_zero = fabs(now); }
+		if (!crossed) {
+			ticks_to_cross++;
+			if (now < 0.0) { crossed = true; }
+		}
+		prev = now;
+	}
+
+	/*
+	 * "PASSES THROUGH ZERO" MEANS BOUNDED, NOT PAUSED.
+	 *
+	 * The first version of this case asked the rate to land within +/-0.05 of
+	 * zero at some tick. It does not, and should not have been expected to:
+	 * one legal decel step is 0.425, so the crossing tick steps +0.106 ->
+	 * -0.319 and simply passes over that band. Asking for a dwell at zero is
+	 * asking for a granularity the ramp does not have and the audio does not
+	 * need -- what the resampler is handed is a rate CHANGE, not a sample
+	 * discontinuity.
+	 *
+	 * The real property is that the sign change costs one bounded step and
+	 * that getting there took many ticks, so a reversal can never be a flip.
+	 */
+	CHECK(closest_to_zero <=
+	      (ST_SCRATCH_MAX_RATE_MASTER_Q16 / 65536.0) *
+	      ((double)PASS_US / 1000.0) / (double)ST_SCRATCH_DECEL_MS,
+	      "the rate comes within one ramp step of zero (%.4fx) before changing sign -- "
+	      "it passes through rather than over", closest_to_zero);
+	CHECK(ticks_to_cross >= 6u,
+	      "and reaching the far side took %u ticks, so a reversal is a walk and can "
+	      "never be a sign flip", ticks_to_cross);
+	/*
+	 * BOUND IT BY THE RAMP, not by a number that looked small. One tick may
+	 * legally move the rate by (clamp * dt / ramp_ms); anything larger would
+	 * mean the walk jumped. Asserting the real bound is what makes this case
+	 * survive a change to either constant.
+	 */
+	{
+		const double legal =
+			(ST_SCRATCH_MAX_RATE_MASTER_Q16 / 65536.0) *
+			((double)PASS_US / 1000.0) / (double)ST_SCRATCH_DECEL_MS;
+
+		CHECK(max_step <= legal + 1e-6,
+		      "and the largest single-tick change across the crossing is %.4fx, within "
+		      "the %.4fx one ramp step allows -- a walk, not a sign flip",
+		      max_step, legal);
+	}
+	CHECK(rate_of(&s) < -1.0, "and it ends up genuinely reversed (%.2fx)", rate_of(&s));
+}
+
+static void test_releasing_the_push_stops_the_tape(void)
+{
+	st_scratch_t s;
+	double r;
+
+	st_scratch_begin(&s, 0, ST_SCRATCH_MAX_RATE_MASTER_Q16);
+	(void)hold(&s, ST_SCRATCH_DRIVE_FULL, 400u);
+
+	r = hold(&s, 0, 200u);
+	CHECK(fabs(r) < 0.001,
+	      "drive back to zero brings the head to a genuine standstill (%.4fx) -- "
+	      "the hand resting on the record, which is a thing a player asks for", r);
+
+	/* And the decel is FASTER than the accel, which is what makes it feel
+	 * like a hand rather than a motor. */
+	{
+		st_scratch_t a, b;
+		uint32_t t, accel_us = 0, decel_us = 0;
+
+		st_scratch_begin(&a, 0, ST_SCRATCH_MAX_RATE_MASTER_Q16);
+		for (t = 0; t < 1000u * 1000u; t += PASS_US) {
+			st_scratch_set_drive(&a, ST_SCRATCH_DRIVE_FULL);
+			st_scratch_tick(&a, PASS_US);
+			accel_us += PASS_US;
+			if (st_scratch_rate_q16(&a) >= a.max_rate_q16) { break; }
+		}
+		b = a;
+		for (t = 0; t < 1000u * 1000u; t += PASS_US) {
+			st_scratch_set_drive(&b, 0);
+			st_scratch_tick(&b, PASS_US);
+			decel_us += PASS_US;
+			if (st_scratch_rate_q16(&b) == 0) { break; }
+		}
+		printf("       accel %u us, decel %u us\n", accel_us, decel_us);
+		CHECK(decel_us < accel_us,
+		      "stopping (%u us) is quicker than starting (%u us)", decel_us, accel_us);
+	}
+}
+
+static void test_grabbing_a_moving_tape_starts_from_its_motion(void)
+{
+	st_scratch_t s;
+
+	/* Unity playback, then FUNCTION goes down. */
+	st_scratch_begin(&s, 65536, ST_SCRATCH_MAX_RATE_MASTER_Q16);
+	CHECK(st_scratch_rate_q16(&s) == 65536,
+	      "grabbing a tape running at 1x starts the gesture AT 1x, not at a standstill -- "
+	      "a hand landing on a spinning record does not stop it dead");
+
+	/* A rate the new target cannot afford is clamped on entry rather than
+	 * refused, so the grab always succeeds and the bound still holds. */
+	st_scratch_begin(&s, 8 * 65536, ST_SCRATCH_MAX_RATE_MASTER_Q16);
+	CHECK(st_scratch_rate_q16(&s) == (int32_t)ST_SCRATCH_MAX_RATE_MASTER_Q16,
+	      "and grabbing one running faster than this target may go clamps on entry (%.2fx)",
+	      rate_of(&s));
+
+	/* Release hands the rate back and moves nothing. */
+	{
+		int32_t r = st_scratch_release(&s);
+
+		CHECK(r == (int32_t)ST_SCRATCH_MAX_RATE_MASTER_Q16,
+		      "release hands the signed rate back for st_scrub's ramp to take over");
+		CHECK(!s.engaged, "and the gesture is no longer live");
+	}
+}
+
+static void test_the_clamp_is_never_exceeded(void)
+{
+	/*
+	 * The whole starvation argument rests on this. Drive is saturated, so no
+	 * caller can ask for more than full deflection -- and even a caller that
+	 * tries must not get it.
+	 */
+	st_scratch_t s;
+	uint32_t t;
+	int32_t worst = 0;
+
+	st_scratch_begin(&s, 0, ST_SCRATCH_MAX_RATE_STEM_Q16);
+	for (t = 0; t < 2000u * 1000u; t += PASS_US) {
+		st_scratch_set_drive(&s, 100 * ST_SCRATCH_DRIVE_FULL);  /* absurd */
+		st_scratch_tick(&s, PASS_US);
+		if (st_scratch_rate_q16(&s) > worst) { worst = st_scratch_rate_q16(&s); }
+	}
+	CHECK(worst == (int32_t)ST_SCRATCH_MAX_RATE_STEM_Q16,
+	      "a drive 100x past full deflection still tops out exactly at the clamp (%.3fx)",
+	      worst / 65536.0);
+
+	st_scratch_begin(&s, 0, ST_SCRATCH_MAX_RATE_STEM_Q16);
+	worst = 0;
+	for (t = 0; t < 2000u * 1000u; t += PASS_US) {
+		st_scratch_set_drive(&s, -100 * ST_SCRATCH_DRIVE_FULL);
+		st_scratch_tick(&s, PASS_US);
+		if (st_scratch_rate_q16(&s) < worst) { worst = st_scratch_rate_q16(&s); }
+	}
+	CHECK(worst == -(int32_t)ST_SCRATCH_MAX_RATE_STEM_Q16,
+	      "and symmetrically in reverse (%.3fx)", worst / 65536.0);
+}
+
+static void test_master_heads_cannot_drift(void)
+{
+	/*
+	 * Master scratch must keep the four stems sample-locked. They are locked
+	 * because they are driven by ONE rate, so the property to prove is that
+	 * the same gesture through independent instances yields bit-identical
+	 * rates -- if it did not, sharing one instance would be hiding a
+	 * divergence rather than preventing one.
+	 */
+	st_scratch_t a, b;
+	uint32_t t;
+	int diverged = 0;
+
+	st_scratch_begin(&a, 0, ST_SCRATCH_MAX_RATE_MASTER_Q16);
+	st_scratch_begin(&b, 0, ST_SCRATCH_MAX_RATE_MASTER_Q16);
+
+	for (t = 0; t < 3000u * 1000u; t += PASS_US) {
+		const int32_t d = ((t / 47000u) & 1u) ? -ST_SCRATCH_DRIVE_FULL
+						       : ST_SCRATCH_DRIVE_FULL;
+
+		st_scratch_set_drive(&a, d);
+		st_scratch_tick(&a, PASS_US);
+		st_scratch_set_drive(&b, d);
+		st_scratch_tick(&b, PASS_US);
+		if (st_scratch_rate_q16(&a) != st_scratch_rate_q16(&b)) { diverged++; }
+	}
+	CHECK(diverged == 0,
+	      "3 s of irregular scratching leaves two independently-ticked heads "
+	      "bit-identical -- the integrator is deterministic, so locked heads stay locked");
+}
+
+static void test_the_fader_maps_movement_not_position(void)
+{
+	/* Standing still asks for nothing, wherever the fader physically is. */
+	CHECK(st_scratch_drive_from_fader(0, PASS_US) == 0,
+	      "a stationary fader asks for zero drive, at any position");
+
+	/* Noise-sized movement is rejected. A few counts at 125 Hz is a few
+	 * hundred counts per second, which is a resting finger, not a hand. */
+	CHECK(st_scratch_drive_from_fader(1, PASS_US) == 0,
+	      "one count per pass (125 counts/s) is ADC noise and produces no drive");
+
+	/* A brisk sweep saturates; a slow one does not. */
+	{
+		const int32_t fast = st_scratch_drive_from_fader(200, PASS_US);
+		const int32_t slow = st_scratch_drive_from_fader(6, PASS_US);
+
+		printf("       fast sweep -> %d, slow -> %d (full is %d)\n",
+		       fast, slow, ST_SCRATCH_DRIVE_FULL);
+		CHECK(fast == ST_SCRATCH_DRIVE_FULL, "a fast sweep saturates the drive");
+		CHECK(slow > 0 && slow < ST_SCRATCH_DRIVE_FULL / 4,
+		      "and a slow movement asks for a correspondingly small one (%d)", slow);
+	}
+
+	/* Direction follows the movement's sign, and the map is symmetric. */
+	CHECK(st_scratch_drive_from_fader(-200, PASS_US) == -ST_SCRATCH_DRIVE_FULL,
+	      "moving the other way drives the other way, by the same amount");
+
+	/* The deadband is SUBTRACTED, not stepped over: drive must rise from
+	 * zero continuously as movement crosses the threshold, or every slow
+	 * scratch would begin with a lurch. */
+	{
+		int32_t at_edge = 0;
+		int32_t d;
+
+		for (d = 1; d < 40; d++) {
+			int32_t v = st_scratch_drive_from_fader(d, PASS_US);
+
+			if (v > 0) { at_edge = v; break; }
+		}
+		CHECK(at_edge > 0 && at_edge < ST_SCRATCH_DRIVE_FULL / 20,
+		      "the first movement past the deadband asks for a TINY drive (%d), "
+		      "not a step up to the deadband's worth", at_edge);
+	}
+}
+
+static void test_the_rocker_reports_direction_only(void)
+{
+	CHECK(st_scratch_drive_from_rocker(1) == ST_SCRATCH_DRIVE_FULL,
+	      "the rocker held forward drives at full deflection");
+	CHECK(st_scratch_drive_from_rocker(-1) == -ST_SCRATCH_DRIVE_FULL,
+	      "held backward, full deflection the other way");
+	CHECK(st_scratch_drive_from_rocker(0) == 0,
+	      "released, nothing -- it is a switch and reports which way, never how far, "
+	      "which is why press DURATION is what spans scratching and shuttling");
+}
+
 int main(void)
 {
-	printf("== Stem Tape SIGNED-HEAD VELOCITY CLAMP ==\n");
+	printf("== Stem Tape SIGNED-HEAD TRANSPORT + VELOCITY CLAMP ==\n");
 	printf("read cost: %u us + %.1f us/block   batch %u blocks = %u us\n",
 	       ST_SCRATCH_RC_FIXED_US, ST_SCRATCH_RC_PER_BLOCK_Q8 / 256.0,
 	       ST_SCRATCH_BATCH_BLOCKS, ST_SCRATCH_BATCH_US);
@@ -295,6 +650,16 @@ int main(void)
 	RUN(test_the_free_window_is_stated_honestly);
 	RUN(test_oscillating_inside_the_ring_costs_nothing);
 	RUN(test_travelling_beyond_the_ring_costs_reads);
+
+	RUN(test_a_sustained_hold_shuttles_to_the_clamp);
+	RUN(test_short_presses_scratch_without_a_mode);
+	RUN(test_the_zero_crossing_is_continuous);
+	RUN(test_releasing_the_push_stops_the_tape);
+	RUN(test_grabbing_a_moving_tape_starts_from_its_motion);
+	RUN(test_the_clamp_is_never_exceeded);
+	RUN(test_master_heads_cannot_drift);
+	RUN(test_the_fader_maps_movement_not_position);
+	RUN(test_the_rocker_reports_direction_only);
 
 	printf("\n%d distinct test cases, %d assertion checks\n", g_cases, g_checks);
 	if (g_failures) {

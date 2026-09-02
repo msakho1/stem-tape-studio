@@ -162,4 +162,159 @@ _Static_assert(ST_SCRATCH_MAX_RATE_STEM_Q16 > ST_SCRATCH_MAX_RATE_MASTER_Q16,
 	       "moving one head must be cheaper than moving four");
 #endif
 
+/* ======================================================================
+ * THE TRANSPORT PRIMITIVE
+ * ======================================================================
+ *
+ * ONE INTEGRATOR. The control hands in a signed DRIVE -- "how hard is the hand
+ * pushing, and which way" -- and this walks the head's signed RATE toward it.
+ * That single fact is what makes scratch and scrub the same state machine:
+ *
+ *   a short press      drive goes +1 then 0; the rate rises, then falls back
+ *                      through zero as the next press pushes the other way.
+ *                      Alternate rapidly and the head oscillates -- scratching.
+ *   a sustained hold   drive stays +1; the rate rises to the clamp and stays
+ *                      there. The tape keeps travelling -- shuttling.
+ *
+ * Nothing in here measures how long a press lasted, and nothing decides which
+ * of the two is happening. There is no timeout, no mode flag and no threshold,
+ * because any of those would be a seam the hand can feel at the moment it is
+ * crossed. The duration of the input produces the musical result by itself.
+ *
+ * THE ZERO CROSSING IS NOT A CASE either. Drive flipping from + to - walks the
+ * rate down through zero and up the other side by the same arithmetic that
+ * moves it anywhere else. Forward -> slow -> stopped -> reverse is continuous
+ * because it is one number changing sign, not two code paths meeting.
+ *
+ * ASYMMETRIC BY DESIGN. Pushing accelerates over ST_SCRATCH_ACCEL_MS; letting
+ * go decelerates over ST_SCRATCH_DECEL_MS, which is shorter. That is the hand
+ * on the record: a push takes effort and builds, but the moment the hand stops
+ * pushing while still resting on the platter, the tape stops quickly. Both are
+ * far shorter than the tape-inertia ramp st_scrub.h uses for PLAY/STOP, which
+ * is a motor spinning up and is deliberately slow. Scratching needs the hand,
+ * not the motor.
+ *
+ * RELEASING THE GESTURE IS THE THIRD THING, and it is the one case that hands
+ * back to st_scrub: FUNCTION up means the hand comes OFF the record, so the
+ * rate returns to +1.0 along the existing tape-inertia release ramp from
+ * whatever signed rate it had. Where the head ended up is where playback
+ * resumes -- there is no hidden forward transport running underneath and
+ * nothing snaps back.
+ */
+
+/* Milliseconds from a standing start to the clamp under sustained full drive.
+ * Short enough that a ~100 ms press produces a real excursion rather than a
+ * wobble -- which is the whole difference between scratching and nudging --
+ * and long enough that a press is a push rather than a step discontinuity. */
+#define ST_SCRATCH_ACCEL_MS 80u
+
+/* And from the clamp back to a standstill once the hand stops pushing. Shorter
+ * than the accel: the tape under a resting hand stops sooner than it starts. */
+#define ST_SCRATCH_DECEL_MS 50u
+
+/* Drive is signed Q16: +65536 is "pushing forward as hard as the control can
+ * ask", -65536 the same backwards, 0 the hand resting without pushing. */
+#define ST_SCRATCH_DRIVE_FULL 65536
+
+typedef struct {
+	int32_t  rate_q16;     /* signed; the head's velocity right now */
+	int32_t  drive_q16;    /* signed; what the control is currently asking for */
+	int32_t  max_rate_q16; /* the eMMC clamp for this target -- never exceeded */
+	bool     engaged;      /* the gesture is live (FUNCTION held) */
+} st_scratch_t;
+
+/*
+ * Begin a gesture. `from_rate_q16` is the signed rate the transport already
+ * had, so grabbing a moving tape starts from its motion rather than from a
+ * standstill -- taking hold of a spinning record does not stop it dead.
+ * `max_rate_q16` is the clamp for the target being grabbed:
+ * ST_SCRATCH_MAX_RATE_MASTER_Q16 or ST_SCRATCH_MAX_RATE_STEM_Q16.
+ */
+void st_scratch_begin(st_scratch_t *s, int32_t from_rate_q16, uint32_t max_rate_q16);
+
+/*
+ * What the hand is asking for, signed and clamped to +/-ST_SCRATCH_DRIVE_FULL.
+ * Called every control pass while the gesture is live -- including with 0,
+ * which is not "no news" but a positive statement that the hand has stopped
+ * pushing and the head should slow.
+ */
+void st_scratch_set_drive(st_scratch_t *s, int32_t drive_q16);
+
+/*
+ * Advance the integrator by `dt_us`. Pure: no clock of its own, so the audio
+ * thread and a host test drive it identically.
+ */
+void st_scratch_tick(st_scratch_t *s, uint32_t dt_us);
+
+/* The head's signed rate. Zero is a real, reachable value: the tape stopped
+ * under the hand, which is a thing a player asks for and must be able to get. */
+static inline int32_t st_scratch_rate_q16(const st_scratch_t *s)
+{
+	return s->rate_q16;
+}
+
+/*
+ * End the gesture -- the hand leaves the record. The rate is handed back to
+ * the caller so it can be fed to st_scrub's release ramp; this module stops
+ * having an opinion at that point, and deliberately does NOT move the head.
+ */
+int32_t st_scratch_release(st_scratch_t *s);
+
+/*
+ * ---- the two controls, mapped to drive ------------------------------------
+ *
+ * Both produce the SAME quantity, which is the point: below this line the
+ * transport cannot tell a rocker from a fader.
+ */
+
+/*
+ * THE ROCKER. A momentary two-way switch: it reports which way, never how far.
+ * So it drives at full deflection while held and not at all when released, and
+ * the integrator's accel/decel is what turns press DURATION into velocity.
+ * That is why press timing alone spans scratching and shuttling.
+ */
+static inline int32_t st_scratch_drive_from_rocker(int dir)
+{
+	return (dir > 0) ? ST_SCRATCH_DRIVE_FULL :
+	       (dir < 0) ? -ST_SCRATCH_DRIVE_FULL : 0;
+}
+
+/*
+ * THE FADER. A continuous position, but position is NOT what it means here.
+ * Mapping travel to song position (bottom = start, top = end) would make fine
+ * scratching impossible: the whole song across 3700 counts is about 1.4 ms of
+ * audio per count, so a single count of ADC jitter would jump the head further
+ * than a deliberate small movement.
+ *
+ * So MOVEMENT is the push, exactly like a hand on a platter: the delta since
+ * the last sample, per unit time, is the drive. Stop moving and the drive is
+ * zero and the head slows -- which is also what a resting hand does.
+ *
+ * ST_SCRATCH_FADER_FULL_CPS is the movement speed, in ADC counts per second,
+ * that asks for full drive: a brisk sweep of roughly a third of the fader's
+ * travel in a third of a second. Faster than that simply saturates, the way a
+ * hand can only push a record so hard before it is already at full speed.
+ */
+#define ST_SCRATCH_FADER_TRAVEL_COUNTS 3700
+#define ST_SCRATCH_FADER_FULL_CPS      3700
+
+/*
+ * Movement slower than this is ADC noise, not a hand.
+ *
+ * SET AGAINST THE CONTROL CADENCE, not guessed. At the ~125 Hz rate the active
+ * fader is sampled during a gesture, ONE count of jitter per pass is 125
+ * counts per second. 200 rejects that with margin and still admits two counts
+ * per pass (250 cps), which is a real if very slow movement. Without a gate at
+ * all, a resting finger would scratch by itself.
+ *
+ * UNMEASURED, and the one number in this header that is. The ladder bands have
+ * docs/ladder-measured.json behind them; the fader channels have no equivalent
+ * capture yet, so this is derived from the cadence rather than from observed
+ * jitter. If a resting hand drifts on hardware, this is the constant to raise,
+ * and the honest fix is to measure the fader rails the way AIN0 was measured.
+ */
+#define ST_SCRATCH_FADER_DEADBAND_CPS 200
+
+int32_t st_scratch_drive_from_fader(int32_t delta_counts, uint32_t dt_us);
+
 #endif /* STEMTAPE_PLAYER_SCRATCH_H_ */
