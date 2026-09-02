@@ -1502,6 +1502,24 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Stem Tape POWER LIVENESS -- no unbounded blocking above the escape hatch
+        # E-8 proves nothing SKIPS the power service. This proves nothing
+        # BLOCKS above it -- a k_sem_take(K_FOREVER) added there would leave
+        # E-8 green and strand the device just as completely.
+        #
+        # The gate states its own limits in its report and they are narrow: it
+        # is syntactic, it does not analyse called drivers, and L-2 proves the
+        # audio loop's first statement is a blocking allocation rather than
+        # proving the audio thread makes progress. Read the "What this gate
+        # does not prove" section rather than the headline.
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/stemtape_player_power_liveness_gate.py \
+            firmware/stemtape_player/src/main.c audit/power-liveness.md
+          { echo '### Power liveness (L-1 / L-2)'; cat audit/power-liveness.md; } \
+            >> "$GITHUB_STEP_SUMMARY"
+
       - name: Stem Tape IDLE AUTO-SHUTDOWN -- 5 minutes of true inactivity, and playback is not idle
         # THE FAILURE THIS STEP EXISTS TO PREVENT: a seven-minute song, playing
         # normally, switched off at 5:00 because nobody had touched a button.
