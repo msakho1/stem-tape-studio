@@ -478,7 +478,7 @@ function trackCandidates(s: AuthoritativeSp1LedState, i: number): Candidate[] {
               provenance: "stem-tape-override",
               periodMs: null,
               phaseAnchor: "stem-audio",
-              level: s.levels[i] ?? 0,
+              level: s.levels?.[i] ?? 0,
               floor: 6,
             }
           : {

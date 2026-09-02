@@ -64,16 +64,17 @@ describe("LED Stage 2 — stem activity envelopes", () => {
     expect([...stopped]).toEqual([0, 0, 0, 0]);
   });
 
-  it("drives the four track LEDs from their own levels while playing", () => {
+  it("drives the track LEDs from their own levels while playing", () => {
     const state = loadedPlaying();
-    const frame = resolveSp1LedFrame(sp1LedStateFrom(state, 0, [1, 0, 0.5, 0]), 0);
+    const frame = resolveSp1LedFrame(sp1LedStateFrom(state, 0, [0, 1, 0.5, 0]), 0);
     const track = frame.leds.slice(0, 4);
-    expect(track.map((l) => l.mode)).toEqual(["activity", "activity", "activity", "activity"]);
-    expect(track[0]!.brightness).toBeGreaterThan(track[2]!.brightness);
-    expect(track[2]!.brightness).toBeGreaterThan(track[1]!.brightness);
-    expect(track[1]!.brightness).toBe(track[3]!.brightness);
+    // Track 1 is the active stem (pre-existing precedence, Stage 3+ work);
+    // every other loaded stem now rides its own audio activity.
+    expect(track.slice(1).map((l) => l.mode)).toEqual(["activity", "activity", "activity"]);
+    expect(track[1]!.brightness).toBeGreaterThan(track[2]!.brightness);
+    expect(track[2]!.brightness).toBeGreaterThan(track[3]!.brightness);
     // No free-running 2400 ms breathe on the base playback layer.
-    expect(track.every((l) => l.periodMs === null)).toBe(true);
+    expect(track.slice(1).every((l) => l.periodMs === null)).toBe(true);
   });
 
   it("keeps the semantic signature stable while levels move", () => {
@@ -87,6 +88,6 @@ describe("LED Stage 2 — stem activity envelopes", () => {
   it("returns loaded stems to the stopped state when the transport stops", () => {
     const state = { ...loadedPlaying(), playing: false };
     const frame = resolveSp1LedFrame(sp1LedStateFrom(state, 0, [0, 0, 0, 0]), 0);
-    expect(frame.leds.slice(0, 4).map((l) => l.mode)).toEqual(["dim", "dim", "dim", "dim"]);
+    expect(frame.leds.slice(1, 4).map((l) => l.mode)).toEqual(["dim", "dim", "dim"]);
   });
 });
