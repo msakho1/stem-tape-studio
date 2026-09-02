@@ -58,15 +58,31 @@ export function useSp1LedFrame(state: SurfaceState): Sp1LedFrameHandle {
   const latest = useRef(semantic);
   const rafRef = useRef(0);
   const originRef = useRef(nowMs());
+  /** LED Stage 2 — four independent envelopes + one reused RMS scratch array. */
+  const envelopes = useRef(new StemActivityEnvelopes());
+  const rmsRef = useRef<number[]>([0, 0, 0, 0]);
 
   useEffect(() => {
     let stopped = false;
 
     const step = () => {
       const t = nowMs();
-      const frame = resolveSp1LedFrame(sp1LedStateFrom(stateRef.current, t), t - originRef.current);
+      const surface = stateRef.current;
+      // Metering is visual only: it reads the existing per-stem analyser taps
+      // and never touches the audio graph. No allocation per sample.
+      const playing = surface.playing && surface.power !== "off";
+      if (playing) {
+        try {
+          getAudioEngine().trackRmsInto(rmsRef.current);
+        } catch {
+          rmsRef.current[0] = rmsRef.current[1] = rmsRef.current[2] = rmsRef.current[3] = 0;
+        }
+      }
+      const levels = envelopes.current.sample(rmsRef.current, t, playing);
+      const frame = resolveSp1LedFrame(sp1LedStateFrom(surface, t, levels), t - originRef.current);
       latest.current = frame;
       writeSp1LedDom(frame);
+
 
       if (frame.signature !== sigRef.current) {
         sigRef.current = frame.signature;
