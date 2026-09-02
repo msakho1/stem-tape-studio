@@ -809,6 +809,58 @@ def main() -> int:
     else:
         report.append("- present: power_hold_service() reads no dispatcher state -- "
                        "only pwr_pressed(), a debounced ladder fact and the clock")
+    # E-4. RELEASE-TO-REARM IS UNFAKEABLE, asserted in the module's own source.
+    #
+    #      The rule is that ONE uninterrupted FUNCTION press causes at most one
+    #      power transition, and the way that is enforced is that shutdown is
+    #      armed by exactly one thing: st_pwr_service() observing FUNCTION
+    #      physically up. If a second `off_armed = true` ever appears -- in an
+    #      initialiser, a helper, a recovery path -- the guard becomes
+    #      grantable by software and the press that woke the device could
+    #      switch it off again. So the count is pinned at one, and its
+    #      position is pinned inside the `!in->fn_down` branch.
+    mod_path = str(Path(main_c_path).with_name("st_pwr_hold.c"))
+    try:
+        with open(mod_path, "r", encoding="utf-8") as fh:
+            mod_src = fh.read()
+    except OSError:
+        report.append("- **MISSING**: st_pwr_hold.c not readable beside main.c")
+        mod_src = ""
+        fail = True
+    if mod_src:
+        # Comments must not satisfy or break these checks -- the scratch
+        # series shipped an extractor that matched its own explanation.
+        mod_code = re.sub(r"/\*.*?\*/", "", mod_src, flags=re.S)
+        mod_code = re.sub(r"//[^\n]*", "", mod_code)
+        arms = [m.start() for m in re.finditer(r"off_armed\s*=\s*true", mod_code)]
+        guard = mod_code.find("if (!in->fn_down) {")
+        if len(arms) != 1:
+            report.append("- **MISSING/BAD**: st_pwr_hold.c assigns `off_armed = true` "
+                           + str(len(arms)) + " times. Exactly one is allowed: a "
+                           "physical FUNCTION release. Any other grant lets software "
+                           "fake the release and hand one press two power transitions")
+            fail = True
+        elif guard < 0 or not (guard < arms[0] < guard + 120):
+            report.append("- **MISSING/BAD**: the single `off_armed = true` is not "
+                           "inside the `if (!in->fn_down)` branch -- shutdown would be "
+                           "armed by something other than a physical release")
+            fail = True
+        else:
+            report.append("- present: shutdown is armed in exactly ONE place, inside "
+                           "`if (!in->fn_down)` -- no initialiser, reset, feature flag "
+                           "or dispatcher state can fake a FUNCTION release")
+
+        # And the transition must disarm. Without this a tap before the wake
+        # leaves an arm standing and the waking press can power off (A11).
+        if "p->off_armed = false;" not in mod_code.split("out->on_due  = true;")[0][-200:]:
+            report.append("- **MISSING/BAD**: the OFF->ON transition does not disarm "
+                           "shutdown -- an earlier tap's arm would survive into the "
+                           "press that woke the device")
+            fail = True
+        else:
+            report.append("- present: the OFF->ON transition disarms shutdown, so the "
+                           "waking press owes its own release regardless of what "
+                           "preceded it")
     report.append("")
 
     # ---- STEM TAPE TRACK-BUTTON PROOF ----

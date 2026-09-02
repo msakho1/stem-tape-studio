@@ -686,15 +686,41 @@ typedef struct {
 	int32_t  fader_pos[ST_PWR_FADERS];
 } svc_t;
 
+static int64_t svc_run(svc_t *s, bool fn, bool ain0, bool ain1, int64_t ms);
+
+/*
+ * A RUNNING INSTRUMENT: powered ON, and shutdown ARMED.
+ *
+ * The arm is not handed over -- st_pwr_init_on() starts DISARMED like every
+ * entry point, and the only thing that can grant it is st_pwr_service()
+ * observing FUNCTION physically up. So this runs a few real passes with the
+ * button up, exactly as a booted device does before anyone touches it. If the
+ * release-to-rearm guard were ever broken open, these tests would still be
+ * arming through the real mechanism rather than around it.
+ */
 static void svc_init(svc_t *s)
 {
 	uint32_t k;
 
 	memset(s, 0, sizeof(*s));
-	st_pwr_reset(&s->p);
+	st_pwr_init_on(&s->p);
 	s->now = 100000;
 	for (k = 0; k < ST_PWR_FADERS; k++) {
 		s->fader_pos[k] = 2000;   /* mid-travel, resting */
+	}
+	(void)svc_run(s, false, false, false, 40);
+}
+
+/* A DEVICE THAT IS OFF, with the wake gate running: standby, or battery wake. */
+static void svc_init_off(svc_t *s)
+{
+	uint32_t k;
+
+	memset(s, 0, sizeof(*s));
+	st_pwr_init_off(&s->p);
+	s->now = 100000;
+	for (k = 0; k < ST_PWR_FADERS; k++) {
+		s->fader_pos[k] = 2000;
 	}
 }
 
@@ -986,7 +1012,10 @@ static void test_F10_the_on_threshold_through_the_service(void)
 	st_pwr_out_t out;
 	int64_t start, on_at = -1;
 
-	svc_init(&s);
+	/* THE ON THRESHOLD BELONGS TO THE OFF STATE. A running instrument never
+	 * reports on_due -- that is the state machine, not a quirk of this
+	 * test -- so this one starts from the wake entry. */
+	svc_init_off(&s);
 	start = s.now;
 	while (s.now < start + ST_PWR_ON_MS + 100 && on_at < 0) {
 		memset(&in, 0, sizeof(in));
@@ -1182,6 +1211,286 @@ static void test_F14_the_settle_depth_is_exactly_two_passes(void)
 	      "F14. 200 alternating samples never commit a verdict");
 }
 
+/* ======================================================================
+ * A1..A10 -- RELEASE-TO-REARM
+ * ======================================================================
+ *
+ *   A SINGLE UNINTERRUPTED FUNCTION PRESS CANNOT BOTH POWER THE DEVICE ON
+ *   AND LATER POWER IT OFF.
+ *
+ * Before this existed the two thresholds sat on one clock with no state
+ * between them: hold from OFF, the device turns on at 2.000 s, the same finger
+ * keeps counting, and at 5.000 s it switches off again. Seven seconds, one
+ * press, two transitions.
+ *
+ * These ten cases are the contract as written, in order.
+ */
+
+/* Drive the real service until `ms` have passed, reporting the transitions. */
+typedef struct { int64_t on_at; int64_t off_at; int n_on; int n_off; } trans_t;
+
+static void svc_watch(svc_t *s, bool fn, int64_t ms, trans_t *tr)
+{
+	const int64_t end = s->now + ms;
+	int pass = 0;
+
+	while (s->now < end) {
+		st_pwr_in_t in;
+		st_pwr_out_t out;
+
+		memset(&in, 0, sizeof(in));
+		in.fn_down   = fn;
+		in.now_ms    = s->now;
+		in.fader_raw = -1;
+		if (fn && (pass % 4) == 0) {
+			in.fader_idx = s->rr;
+			in.fader_raw = s->fader_pos[s->rr];
+			s->rr = (uint8_t)((s->rr + 1u) & (ST_PWR_FADERS - 1u));
+		}
+		st_pwr_service(&s->p, &in, &out);
+		if (out.on_due) {
+			if (tr->n_on == 0) { tr->on_at = s->now; }
+			tr->n_on++;
+		}
+		if (out.off_due) {
+			if (tr->n_off == 0) { tr->off_at = s->now; }
+			tr->n_off++;
+		}
+		s->now += 8;
+		pass++;
+	}
+}
+
+static void trans_clear(trans_t *tr) { memset(tr, 0, sizeof(*tr)); tr->on_at = -1; tr->off_at = -1; }
+
+/* ---- A1 / A2: the wake threshold is still exact ----------------------- */
+static void test_A1_A2_the_wake_threshold(void)
+{
+	svc_t s; trans_t tr; int64_t start;
+
+	svc_init_off(&s); trans_clear(&tr);
+	start = s.now;
+	svc_watch(&s, true, ST_PWR_ON_MS - 1, &tr);
+	CHECK(tr.n_on == 0, "A1. FUNCTION held %d ms from OFF stays off",
+	      ST_PWR_ON_MS - 1);
+
+	svc_watch(&s, true, 200, &tr);
+	CHECK(tr.n_on == 1 && tr.on_at - start >= ST_PWR_ON_MS,
+	      "A2. ...and turns on at %d ms (measured %lld)", ST_PWR_ON_MS,
+	      (long long)(tr.on_at - start));
+}
+
+/* ---- A3: the SAME press, held on and on, must not power off ----------- */
+static void test_A3_the_same_press_held_5_10_30_seconds(void)
+{
+	const int64_t probes[] = { 5000, 10000, 30000 };
+	size_t i;
+
+	for (i = 0; i < sizeof(probes) / sizeof(probes[0]); i++) {
+		svc_t s; trans_t tr;
+
+		svc_init_off(&s); trans_clear(&tr);
+		/* ONE press. Never released. */
+		svc_watch(&s, true, probes[i], &tr);
+
+		CHECK(tr.n_on == 1 && tr.n_off == 0,
+		      "A3. one unbroken press of %lld ms: ON once, OFF never "
+		      "(on=%d off=%d)", (long long)probes[i], tr.n_on, tr.n_off);
+		CHECK(st_pwr_device_on(&s.p) && !st_pwr_off_armed(&s.p),
+		      "A3. ...device ON, shutdown still DISARMED after %lld ms",
+		      (long long)probes[i]);
+	}
+}
+
+/* ---- A4: the release, and only the release, arms shutdown ------------- */
+static void test_A4_release_after_wake_arms_shutdown(void)
+{
+	svc_t s; trans_t tr;
+
+	svc_init_off(&s); trans_clear(&tr);
+	svc_watch(&s, true, 6000, &tr);
+	CHECK(!st_pwr_off_armed(&s.p), "A4. disarmed while the press is held");
+
+	svc_watch(&s, false, 16, &tr);          /* the finger lifts */
+	CHECK(st_pwr_off_armed(&s.p),
+	      "A4. releasing FUNCTION after the wake ARMS shutdown");
+	CHECK(st_pwr_device_on(&s.p), "A4. ...and the device is still on");
+}
+
+/* ---- A5 / A6: the second press is an ordinary 5.000 s transaction ----- */
+static void test_A5_A6_the_second_press_powers_off(void)
+{
+	svc_t s; trans_t tr; int64_t start;
+
+	svc_init_off(&s); trans_clear(&tr);
+	svc_watch(&s, true, 6000, &tr);         /* wake, keep holding */
+	svc_watch(&s, false, 100, &tr);         /* release -> armed */
+
+	start = s.now;
+	svc_watch(&s, true, ST_PWR_OFF_MS - 1, &tr);
+	CHECK(tr.n_off == 0, "A5. the second press at %d ms remains on",
+	      ST_PWR_OFF_MS - 1);
+
+	svc_watch(&s, true, 200, &tr);
+	CHECK(tr.n_off > 0 && tr.off_at - start >= ST_PWR_OFF_MS &&
+	      tr.off_at - start < ST_PWR_OFF_MS + 16,
+	      "A6. ...and powers off at %d ms (measured %lld)", ST_PWR_OFF_MS,
+	      (long long)(tr.off_at - start));
+	CHECK(tr.n_on == 1, "A6. still exactly ONE on-transition in the whole run");
+}
+
+/* ---- A7: thirty seconds, one press, exactly one transition ------------ */
+static void test_A7_thirty_seconds_one_transition(void)
+{
+	svc_t s; trans_t tr;
+
+	svc_init_off(&s); trans_clear(&tr);
+	svc_watch(&s, true, 30000, &tr);
+
+	CHECK(tr.n_on + tr.n_off == 1 && tr.n_on == 1,
+	      "A7. a single uninterrupted 30 s hold from OFF produces EXACTLY "
+	      "one transition, OFF -> ON (on=%d off=%d)", tr.n_on, tr.n_off);
+}
+
+/* ---- A8: a second transition is impossible without a physical release -- */
+static void test_A8_no_second_transition_without_a_release(void)
+{
+	svc_t s; trans_t tr;
+	int64_t k;
+
+	svc_init_off(&s); trans_clear(&tr);
+	svc_watch(&s, true, 3000, &tr);         /* on, disarmed */
+
+	/* Five minutes of continuous hold, sampled the whole way. Any single
+	 * pass reporting off_due would fail this. */
+	for (k = 0; k < 60; k++) {
+		svc_watch(&s, true, 5000, &tr);
+		if (tr.n_off) { break; }
+	}
+	CHECK(tr.n_off == 0,
+	      "A8. five minutes of unbroken hold: no second transition is "
+	      "reachable without a physical release");
+
+	/* And the instant the finger lifts, it becomes reachable again. */
+	svc_watch(&s, false, 16, &tr);
+	svc_watch(&s, true, ST_PWR_OFF_MS + 100, &tr);
+	CHECK(tr.n_off > 0, "A8. ...and after the release it is reachable");
+}
+
+/* ---- A9: nothing but the release can grant the arm -------------------- */
+static void test_A9_nothing_can_fake_the_release(void)
+{
+	svc_t s; trans_t tr;
+
+	/* (a) NEITHER INITIALISER GRANTS IT. This is the whole reason both
+	 *     start disarmed: if a re-init could arm shutdown, then any code
+	 *     that re-initialised the module -- a feature, a mode change, a
+	 *     recovery path -- would be able to hand a held press the second
+	 *     transition the contract forbids. */
+	svc_init_off(&s);
+	CHECK(!st_pwr_off_armed(&s.p), "A9. st_pwr_init_off() does not arm");
+	st_pwr_init_on(&s.p);
+	CHECK(!st_pwr_off_armed(&s.p), "A9. st_pwr_init_on() does not arm");
+
+	/* (b) RE-INITIALISING MID-PRESS DOES NOT ARM IT EITHER. This is the
+	 *     literal "software state reset cannot fake a release" case. */
+	svc_init_off(&s); trans_clear(&tr);
+	svc_watch(&s, true, 3000, &tr);          /* on, disarmed, finger down */
+	st_pwr_init_on(&s.p);                    /* the most aggressive reset
+						  * available to any caller */
+	svc_watch(&s, true, ST_PWR_OFF_MS + 500, &tr);
+	CHECK(tr.n_off == 0,
+	      "A9. a full re-init mid-press does NOT arm shutdown -- the held "
+	      "finger still owes a release");
+
+	/* (c) AND OTHER PHYSICAL ACTIVITY IS NOT A RELEASE. Pressing PLAY, the
+	 *     rocker or a fader resets the TRANSACTION; it does not lift the
+	 *     finger off FUNCTION, so it cannot arm shutdown. */
+	svc_init_off(&s); trans_clear(&tr);
+	svc_watch(&s, true, 3000, &tr);
+	(void)svc_run(&s, true, true, false, 500);    /* PLAY, FUNCTION still down */
+	(void)svc_run(&s, true, false, true, 500);    /* rocker, ditto */
+	CHECK(!st_pwr_off_armed(&s.p),
+	      "A9. AIN0 and AIN1 activity during the press do not arm shutdown");
+	(void)svc_run(&s, true, false, false, ST_PWR_OFF_MS + 500);
+	CHECK(!st_pwr_off_armed(&s.p),
+	      "A9. ...and a further full 5 s of clean hold still does not");
+}
+
+/* ---- A11: A TAP BEFORE THE WAKE MUST NOT PRE-ARM THE WAKE PRESS -------
+ *
+ * ADDED BECAUSE A MUTANT SURVIVED. Deleting the explicit disarm at the ON
+ * transition broke nothing, because every A-case above began from a fresh
+ * st_pwr_init_off() and never released FUNCTION before the successful hold --
+ * so off_armed was still false from initialisation and the missing line could
+ * not be observed.
+ *
+ * It is observable, and by the most ordinary gesture there is. Someone taps
+ * FUNCTION (nothing happens -- ON-9), and that release ARMS shutdown. Then
+ * they hold properly and the device wakes at 2.000 s. Without the disarm the
+ * arm from that earlier tap is still standing, and the very press that woke
+ * the instrument switches it off again three seconds later.
+ *
+ * The disarm at the transition is what makes the rule about THE PRESS rather
+ * than about whatever happened to precede it.
+ */
+static void test_A11_a_tap_before_the_wake_does_not_pre_arm(void)
+{
+	svc_t s; trans_t tr;
+	int n;
+
+	svc_init_off(&s); trans_clear(&tr);
+
+	/* Twenty short taps: none wakes it, and each release arms shutdown. */
+	for (n = 0; n < 20; n++) {
+		svc_watch(&s, true, 300, &tr);
+		svc_watch(&s, false, 200, &tr);
+	}
+	CHECK(tr.n_on == 0 && tr.n_off == 0,
+	      "A11. twenty short taps produce no transition at all");
+	CHECK(st_pwr_off_armed(&s.p),
+	      "A11. ...and the last release did leave the arm standing");
+
+	/* Now the real hold, and then keep holding well past 5 s. */
+	svc_watch(&s, true, 12000, &tr);
+	CHECK(tr.n_on == 1,
+	      "A11. the hold after the taps wakes the device exactly once");
+	CHECK(tr.n_off == 0,
+	      "A11. ...and the SAME press does not then switch it off -- the "
+	      "transition disarmed the arm the taps had left standing");
+	CHECK(!st_pwr_off_armed(&s.p),
+	      "A11. ...leaving the wake press owing its own release");
+
+	/* And the release still works normally afterwards. */
+	svc_watch(&s, false, 16, &tr);
+	svc_watch(&s, true, ST_PWR_OFF_MS + 100, &tr);
+	CHECK(tr.n_off > 0, "A11. after that release, 5.000 s powers off");
+}
+
+/* ---- A10: standby and battery wake are the same object, the same rule -- */
+static void test_A10_standby_and_battery_wake_are_identical(void)
+{
+	svc_t a, b; trans_t ta, tb;
+
+	/* There is only one wake path in the module -- st_pwr_init_off()
+	 * followed by st_pwr_service() -- and main.c reaches it from both the
+	 * charge-standby loop and a battery/SYSTEM_OFF wake. Driving it twice
+	 * proves the rule is a property of the module rather than of either
+	 * caller: same thresholds, same disarm, same debt. */
+	svc_init_off(&a); trans_clear(&ta);
+	svc_init_off(&b); trans_clear(&tb);
+
+	svc_watch(&a, true, 12000, &ta);
+	svc_watch(&b, true, 12000, &tb);
+
+	CHECK(ta.n_on == tb.n_on && ta.n_off == tb.n_off &&
+	      ta.n_on == 1 && ta.n_off == 0,
+	      "A10. both wake entries: one ON, no OFF, from a 12 s held press");
+	CHECK(st_pwr_off_armed(&a.p) == st_pwr_off_armed(&b.p) &&
+	      !st_pwr_off_armed(&a.p),
+	      "A10. ...and both are left DISARMED, owing the same release");
+}
+
 int main(void)
 {
 	printf("power contract -- ON %d ms, OFF %d ms, settle %u passes, "
@@ -1224,6 +1533,15 @@ int main(void)
 	RUN(test_F12_ain1_resets_the_transaction_through_the_service);
 	RUN(test_F13_fader_readings_outside_a_transaction_are_ignored);
 	RUN(test_F14_the_settle_depth_is_exactly_two_passes);
+	RUN(test_A1_A2_the_wake_threshold);
+	RUN(test_A3_the_same_press_held_5_10_30_seconds);
+	RUN(test_A4_release_after_wake_arms_shutdown);
+	RUN(test_A5_A6_the_second_press_powers_off);
+	RUN(test_A7_thirty_seconds_one_transition);
+	RUN(test_A8_no_second_transition_without_a_release);
+	RUN(test_A9_nothing_can_fake_the_release);
+	RUN(test_A11_a_tap_before_the_wake_does_not_pre_arm);
+	RUN(test_A10_standby_and_battery_wake_are_identical);
 
 	printf("\n%d cases, %d checks, %d failures\n", g_cases, g_checks, g_failures);
 	return g_failures ? 1 : 0;

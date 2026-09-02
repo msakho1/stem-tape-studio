@@ -156,23 +156,33 @@
  * session's patience. */
 #define ST_RC_SWEEP_REPS 24u
 
-/* st58: STAGE 0 -- the power contract as a TRANSACTION, and nothing else.
+/* st59: STAGE 0 -- the power contract as a TRANSACTION, with release-to-rearm.
  *
  * st55 (the scratch series) is burned and its tag is not reused; st56 named a
  * build whose power BEHAVIOUR was wrong (2.5 s, and a control map that omitted
- * AIN1), so it is not reused either. st57's binaries went out with a published
- * hash and then a real defect was found in them -- a fader baseline that
- * survived across holds turned the 5.000 s guarantee into 24.7 s -- so that tag
- * is retired rather than re-cut.
+ * AIN1); st57's binaries went out with a published hash before a real defect
+ * was found in them (a fader baseline surviving across holds turned the
+ * 5.000 s guarantee into 24.7 s); st58 was correct as far as it went but let a
+ * single uninterrupted press cause TWO power transitions -- on at 2.000 s, off
+ * again at 5.000 s, seven seconds under one finger. None of those tags is
+ * re-cut.
  *
- * This build is st54 plus one safety change: the power transitions moved out of
- * feature-gated code into one authoritative timer -- FUNCTION-only for 2.000 s
- * ON, 5.000 s OFF, zeroed the instant any other physical control is active --
- * and the whole decision moved into st_pwr_service(), which is pure and
- * host-tested. A power hold is a self-contained physical transaction: the
- * FUNCTION rising edge drops every piece of prior state, and the battery-wake
- * path now goes through the same 2.000 s gate as charge-standby instead of
- * booting on any press.
+ * THIS BUILD IS st54 PLUS ONE SAFETY CHANGE, and the change is now complete:
+ *
+ *   OFF --FUNCTION only 2.000 s--> ON, shutdown DISARMED
+ *   ON, DISARMED --still held--> stays ON, indefinitely
+ *   ON, DISARMED --FUNCTION RELEASED--> ON, shutdown ARMED
+ *   ON, ARMED --FUNCTION only 5.000 s--> OFF
+ *
+ * A single uninterrupted FUNCTION press cannot both power the device on and
+ * later power it off. The whole decision -- both thresholds, the control map,
+ * the transaction rule and the arming guard -- lives in st_pwr_service(),
+ * which is pure and host-tested end to end; main.c contributes four reads and
+ * one call. Shutdown is armed in exactly one place in the codebase, by
+ * observing FUNCTION physically up, and CI asserts that count.
+ *
+ * The battery-wake path goes through the same 2.000 s gate as charge-standby
+ * instead of booting on any press.
  *
  * No head, no residency, no scratch work is in it -- those are Stage 2 and
  * later, and are deliberately NOT mixed into a build whose job is to prove the
@@ -182,9 +192,9 @@
  * docs/stem-tape-power-contract.md for the control map, the proof matrix and
  * the hardware acceptance list this build has NOT yet been run against. */
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st58-VOLCAL"
+#define ST_BUILD_TAG "st59-VOLCAL"
 #else
-#define ST_BUILD_TAG "st58"
+#define ST_BUILD_TAG "st59"
 #endif
 #include "st_track_hold.h"
 
@@ -9486,6 +9496,13 @@ int main(void)
 	 * the bootloader image before this firmware is entered at all, so no
 	 * application state -- including a broken power gate -- can reach it.
 	 */
+	/* THE POWER MACHINE'S STARTING STATE, and it is chosen here because this
+	 * is the one place that knows which of the two boots happened. Both
+	 * initialisers start shutdown DISARMED -- see RELEASE-TO-REARM in
+	 * st_pwr_hold.h -- so on the recovery path, where nobody is necessarily
+	 * touching anything, the first control pass observes FUNCTION up and
+	 * arms it; and on the gate path the module performs OFF -> ON itself and
+	 * keeps it disarmed until the finger leaves the button. */
 	if (!(wake_reas & POWER_RESETREAS_DOG_Msk) &&
 	    g_last_fault_reason == 0xFFFFFFFFu) {
 		/* (a valid fault breadcrumb also skips standby: the user was
@@ -9493,6 +9510,8 @@ int main(void)
 		 * wipe the very forensics we just preserved) */
 		int64_t hold_t = -1;
 		uint32_t blink = 0;
+
+		st_pwr_init_off(&s_pwr);
 		while (1) {
 			feed_wdt();
 			/* v1.2.3-r7: apply the saved brightness at the TOP of the
@@ -9557,15 +9576,19 @@ int main(void)
 				st_pwr_service(&s_pwr, &in, &out);
 
 				if (out.on_due) {
-					/* THE TRANSACTION IS CLOSED ON THE WAY
-					 * OUT. The player is still holding
-					 * FUNCTION as the device comes up, and a
-					 * transaction carried into the main loop
-					 * would reach ST_PWR_OFF_MS a few seconds
-					 * later and switch off what it just
-					 * switched on. The next rising edge
-					 * starts a fresh one. */
-					st_pwr_reset(&s_pwr);
+					/* NOTHING IS RESET ON THE WAY OUT, and
+					 * that is the point. st_pwr_service()
+					 * has just performed OFF -> ON inside
+					 * the module and left shutdown DISARMED
+					 * because the finger that did it is
+					 * still on the button. Carrying that
+					 * state into the main loop unchanged is
+					 * what makes the same press unable to
+					 * switch off what it just switched on;
+					 * a reset here would hand the arm back
+					 * and reintroduce ON -> OFF in one
+					 * press. See RELEASE-TO-REARM in
+					 * st_pwr_hold.h. */
 					break;                    /* -> full power-on */
 				}
 				if (out.elapsed_ms > 0) {
@@ -9639,8 +9662,36 @@ int main(void)
 			k_msleep(40);
 		}
 		all_off();
-		/* wait for release so the hold doesn't bleed into the FUNCTION logic */
-		while (pwr_pressed()) { feed_wdt(); k_msleep(20); }
+		/*
+		 * THE SPIN THAT USED TO LIVE HERE IS GONE.
+		 *
+		 * st54 waited here for the button to come up -- `while
+		 * (pwr_pressed())` -- "so the hold doesn't bleed into the
+		 * FUNCTION logic". What it was really standing in for is the
+		 * rule that now lives in st_pwr_hold.c: the press that turned
+		 * the device on cannot also turn it off. That rule is now
+		 * structural, held in the power state machine, and proven by
+		 * the A1-A10 suite, so the spin is no longer load-bearing.
+		 *
+		 * And it had a real cost. Holding FUNCTION past the 2.000 s
+		 * wake did not keep a booted device on -- it stalled the boot
+		 * entirely: LEDs dark, no codec, no audio, until the finger
+		 * lifted. A 30-second hold produced 30 seconds of an apparently
+		 * dead instrument. The contract says the device must REMAIN ON
+		 * while that press is held, which means booting normally
+		 * underneath it.
+		 *
+		 * The dispatcher is not exposed by removing it. A lone held
+		 * FUNCTION selects nothing: every FUNCTION gesture needs a
+		 * second control, and power_hold_service() runs above all of
+		 * them regardless.
+		 */
+	} else {
+		/* NO POWER-ON GESTURE HAPPENED -- watchdog recovery, or a boot
+		 * carrying a fault breadcrumb. The machine starts ON, and (like
+		 * every entry point) DISARMED, so the first control pass with
+		 * FUNCTION up arms shutdown. */
+		st_pwr_init_on(&s_pwr);
 	}
 
 	controls_init();                /* power the button ladders + ADC + serial */
@@ -10357,8 +10408,14 @@ int main(void)
 				/* Only once it is clearly a hold, so a quick tap
 				 * (song change) does not flash it. Clear BOTH
 				 * rows so the countdown fills cleanly against a
-				 * dark track row. */
-				if (hold_ms > 400) {
+				 * dark track row.
+				 *
+				 * AND ONLY WHILE SHUTDOWN IS ARMED. During the press
+				 * that woke the device the timer still advances -- it
+				 * is the same clock -- but no shutdown can come of it,
+				 * and a countdown filling toward an event that cannot
+				 * happen is a lie told in LEDs. */
+				if (hold_ms > 400 && st_pwr_off_armed(&s_pwr)) {
 					int lit = (int)((hold_ms * NUM_LEDS) /
 							 HOLD_MS_TO_OFF) + 1;
 

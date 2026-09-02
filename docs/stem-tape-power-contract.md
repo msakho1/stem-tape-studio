@@ -15,6 +15,56 @@ POWER ON    OFF → FUNCTION only, continuously, 2.000 s → ON
 POWER OFF   ON  → FUNCTION only, continuously, 5.000 s → OFF
 ```
 
+### 1.0 Release-to-rearm
+
+**A single uninterrupted FUNCTION press cannot both power the device on and
+later power it off. The press that causes ON must be physically released before
+any OFF transaction can begin.**
+
+```
+OFF
+ → FUNCTION down
+ → 2.000 s
+ → ON, shutdown DISARMED
+ → FUNCTION still down
+ → remains ON, indefinitely
+ → FUNCTION RELEASED
+ → shutdown ARMED
+ → FUNCTION down again
+ → 5.000 s
+ → OFF
+```
+
+This is part of the contract, not a timing workaround. Without it the two
+thresholds sit on one clock with no state between them, and seven seconds under
+one finger produces two transitions.
+
+**What arms shutdown, and it is the only thing that does:** `st_pwr_service()`
+observing FUNCTION physically up. There is exactly one `off_armed = true` in the
+codebase, it sits inside `if (!in->fn_down)`, and **gate E-4 asserts both the
+count and the position**. Neither initialiser grants it — `st_pwr_init_on()` and
+`st_pwr_init_off()` both start disarmed — so no reset, re-init, feature
+consumption, combo flag, transport state or dispatcher state can fake a release,
+because none of them can reach that line. A boot that happens to occur under a
+held finger owes that finger's release exactly like a boot caused by one.
+
+**The arming state is not "prior state influencing a transaction"**, and the
+distinction matters because the rule below forbids exactly that. The rising edge
+still forgets everything. Arming does not shorten, lengthen, pause or poison a
+transaction — it decides whether a new OFF transaction may exist at all, which
+is a property of *the press*, not of any gesture that preceded it.
+
+**One thing st54 did that st59 does not:** st54 spun in the boot path
+(`while (pwr_pressed())`) waiting for the button to come up. That stalled the
+boot entirely under a held finger — dark LEDs, no codec, no audio, until it
+lifted — which is not "remains on". The spin is removed; the rule it stood in
+for is now structural. A lone held FUNCTION selects nothing in the dispatcher
+(every FUNCTION gesture needs a second control), and `power_hold_service()` runs
+above all of them regardless. **This is a real behavioural change to the boot
+path and it is on the acceptance list (ON-11/ON-12).**
+
+### 1.1 The transaction rule
+
 **A power hold is a self-contained physical transaction. Nothing that happened
 before FUNCTION went down may influence it.**
 
@@ -149,6 +199,12 @@ AIN0 and AIN1 both have measured band tables behind them
 (`firmware/stemtape_player/docs/ladder-measured.json`, `ain1-measured.json`);
 the fader rails have no equivalent.
 
+**It stays labelled ESTIMATED until M3 is captured on an SP-1.** No amount of
+host testing, mutation testing or CI can promote it: F7 and F8 prove the
+detector behaves correctly *given* a threshold, not that 16 is the right
+threshold. A number that separates a hand from the noise floor can only come
+from the noise floor.
+
 ### Captures required before this number is settled
 
 | # | Condition | Why it matters |
@@ -200,19 +256,15 @@ not the compiled constant.
 | ON-8 | release that Track, keep holding | full fresh 2.000 s needed | |
 | ON-9 | 20 short taps in a row | never turns on | |
 | ON-10 | ON-1…ON-9 repeated from **battery/off wake** | identical behaviour to standby | |
-| ON-11 | turn on, then **keep holding FUNCTION** without releasing | see below | |
+| ON-11 | turn on, then **keep holding FUNCTION** for 5 s, 10 s, 30 s | stays on; boot completes normally underneath the held finger | |
+| ON-12 | during ON-11, watch the LEDs from the moment of wake | the instrument boots (LEDs, audio) while held — **st54 stalled here until release** | |
+| ON-13 | release after ON-11, then hold 5.000 s | powers off — the release re-armed it | |
+| ON-14 | tap FUNCTION several times, then hold 2.000 s and keep holding 10 s | wakes once, does **not** then power off | |
+| ON-15 | watchdog/fault reboot, FUNCTION untouched, then hold 5.000 s | powers off — the first pass with the button up armed it | |
 
-**ON-11 is an open behavioural question, not a known-good expectation.** The
-standby loop calls `st_pwr_reset()` before it breaks, so the transaction that
-turned the device on is closed and a finger still on FUNCTION starts a *fresh*
-one in the main loop. Read literally — "from ON, FUNCTION only for 5.000
-continuous seconds is OFF" — that is correct: ~7 s of unbroken hold turns the
-device on and then off again. In practice the boot sequence (eMMC bring-up,
-library load) consumes part of that window and the player has released long
-before, so this may never be reachable. **Which of the two happens cannot be
-determined from source.** Measure it, and if it is reachable, the owner decides
-whether the ON transition should additionally suppress the OFF timer until
-FUNCTION is next released. Do not "fix" it before it is measured.
+ON-11 through ON-15 are the **release-to-rearm** rule (§1.0). ON-12 is the one
+deliberate behavioural change from st54 and the one to watch for surprises:
+booting under a held button was previously impossible.
 
 ### 5.2 Power-off
 
@@ -276,6 +328,13 @@ mode · FX engaged · mute/solo held · bank/grid state · transport stopped.
 | sub-threshold noise never blocks | ✅ F7 | ✅ M-M | ✅ | — | **❌ M3** | ❌ |
 | real fader movement does block | ✅ F8 | ✅ M-F | ✅ | — | **❌ M3** | ❌ |
 | ADC failure is not activity | ✅ F11 | — | ✅ | — | ❌ | ❌ |
+| **one press, at most one transition** | ✅ **A3/A7** | ✅ M-N | ✅ | ✅ **E-4** | ❌ | ❌ |
+| **the wake press owes a release** | ✅ **A4** | ✅ M-N | ✅ | ✅ E-4 | ❌ | ❌ |
+| **an earlier tap cannot pre-arm the wake** | ✅ **A11** | ✅ M-O | ✅ | ✅ E-4 | ❌ | ❌ |
+| **only a physical release arms shutdown** | ✅ **A9** | ✅ M-P/M-Q | ✅ | ✅ E-4 | ❌ | ❌ |
+| **no software reset can fake the release** | ✅ **A9(b)** | ✅ M-Q | ✅ | ✅ E-4 | n/a | n/a |
+| **the second press is an ordinary 5 s hold** | ✅ **A5/A6** | ✅ M-L | ✅ | — | ❌ | ❌ |
+| **both wake entries obey it identically** | ✅ **A10** | — | ✅ (same code) | — | ❌ | ❌ |
 | `power_off()` absent from gated branch | — | — | ✅ | ✅ E-1 | n/a | n/a |
 | service above every dispatcher | — | — | ✅ | ✅ E-2 | n/a | n/a |
 | **ADC/ladder decode on real rails** | — | — | — | — | **❌** | **❌** |
@@ -307,8 +366,36 @@ mutating, not by reading:
   constant to 1 genuinely changes nothing. Raising it does: **M-H2 (→ 3) is
   killed by F14**, which now pins the depth in both directions.
 
-All thirteen are killed or explained. The surviving-mutant list is the honest
-statement of what the suite does not constrain, and it is now: M-H only.
+### The release-to-rearm sweep (st59)
+
+Six further mutants target the guard specifically. **One survived the first
+sweep, and it was a real gap:**
+
+* **M-O, deleting the disarm at the ON transition, broke nothing.** Every A-case
+  began from a fresh `st_pwr_init_off()` and never released FUNCTION before the
+  successful hold, so `off_armed` was still false from initialisation and the
+  missing line could not be observed. It is observable by the most ordinary
+  gesture there is: tap FUNCTION (that release arms shutdown), then hold
+  properly — without the disarm, the press that wakes the instrument switches it
+  off three seconds later. **A11 added**, and it kills M-O.
+* **M-N** (drop the `off_armed` guard from `off_due`) → killed, 9 checks. This is
+  the mutation the contract asks for by name: with it, a continuous hold becomes
+  capable of ON → OFF.
+* **M-P** (arm on every pass rather than on release) → killed, 15.
+* **M-Q** (an initialiser grants the arm) → killed, 3.
+* **M-S** (`on_due` as a level rather than an edge) → killed, 21.
+* **M-R** (make `off_due` reachable while the device is OFF) → **survives, and is
+  equivalent**: the transition disarms in the same pass, so `off_due` is false
+  either way, and from the next pass the device is ON and the `else` runs
+  regardless. The `else` is defence in depth, not observable behaviour.
+
+Gate **E-4 is itself mutation-tested**: adding a second `off_armed = true`,
+moving the assignment out of the `!fn_down` branch, and deleting the
+transition's disarm each make the gate fail, and the unmutated source passes.
+
+All nineteen mutants are killed or explained. The surviving-mutant list — the
+honest statement of what the suite does not constrain — is **M-H and M-R**, both
+documented above as equivalent.
 
 ### Manually inspected only — no mechanical proof
 

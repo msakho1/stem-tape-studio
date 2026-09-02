@@ -300,26 +300,97 @@ typedef struct {
  * is to perform that transition immediately, without consulting anything. */
 typedef struct {
 	int64_t elapsed_ms;    /* the one authoritative timer, for the countdown */
-	bool    on_due;        /* elapsed >= ST_PWR_ON_MS  */
-	bool    off_due;       /* elapsed >= ST_PWR_OFF_MS */
+	bool    on_due;        /* THE OFF->ON TRANSITION, this pass only (edge) */
+	bool    off_due;       /* the ON->OFF transition is due NOW */
 	bool    other_active;  /* the settled verdict, for tests and diagnostics */
 	bool    began;         /* this pass was the rising edge -- a transaction
 				* started and everything was forgotten */
+	bool    device_on;     /* the module's own view of the power state */
+	bool    off_armed;     /* false = a release is owed before OFF is possible */
 } st_pwr_out_t;
 
-/* The whole power system's state: the timer, the faders, and the edge. */
+/*
+ * ======================================================================
+ * RELEASE-TO-REARM -- ONE PRESS, AT MOST ONE POWER TRANSITION
+ * ======================================================================
+ *
+ *   A SINGLE UNINTERRUPTED FUNCTION PRESS CANNOT BOTH POWER THE DEVICE ON
+ *   AND LATER POWER IT OFF. The press that causes ON must be physically
+ *   released before any OFF transaction can begin.
+ *
+ * Without this the two thresholds sit on one clock: hold from OFF and the
+ * device turns on at 2.000 s, then keeps counting under the same finger and
+ * switches off again at 5.000 s. Seven seconds of one press, two transitions.
+ * That is not the SP-1's behaviour and it is not a timing quirk to paper over
+ * with a boot-duration guess -- it is a missing state in the power machine.
+ *
+ * THE MACHINE:
+ *
+ *   OFF  --FUNCTION only, 2.000 s-->  ON, shutdown DISARMED
+ *   ON, DISARMED  --FUNCTION still down-->  stays ON, indefinitely
+ *   ON, DISARMED  --FUNCTION RELEASED-->    ON, shutdown ARMED
+ *   ON, ARMED     --FUNCTION only, 5.000 s-->  OFF
+ *
+ * WHAT ARMS SHUTDOWN, AND IT IS THE ONLY THING THAT DOES: observing FUNCTION
+ * physically up in st_pwr_service(). There is exactly one assignment of `true`
+ * to off_armed in this module, it lives in the `!in->fn_down` branch, and CI
+ * asserts both facts. No initialiser sets it -- st_pwr_init_on() and
+ * st_pwr_init_off() both start DISARMED, so a boot that happens to occur with
+ * a finger on FUNCTION owes a release exactly like a boot caused by one. There
+ * is therefore no reset, no re-init, no feature flag, no combo state, no
+ * transport state and no dispatcher state that can fake a release, because
+ * none of them can reach the only line that grants it.
+ *
+ * THE ARMING STATE IS NOT "PRIOR STATE INFLUENCING A TRANSACTION", and the
+ * distinction matters because Stage 0's other rule forbids exactly that. The
+ * rising edge still forgets everything: elapsed, the settled verdict, its
+ * candidate, every fader baseline. Arming does not shorten, lengthen, pause or
+ * poison a transaction -- it decides whether a new OFF transaction may exist at
+ * all, which is a property of the PRESS, not of any gesture that preceded it.
+ */
+
+/* The whole power system's state: the timer, the faders, the edge, the power
+ * state and the arming guard. */
 typedef struct {
 	st_pwr_hold_t  hold;
 	st_pwr_fader_t fader;
 	bool           fn_prev;
+	bool           device_on;
+	bool           off_armed;
 } st_pwr_t;
 
-/* Cold state. No transaction, nothing settled, no fader baselines. */
-void st_pwr_reset(st_pwr_t *p);
+/*
+ * THE TWO ENTRY POINTS, and there is no third.
+ *
+ * st_pwr_init_off()  the device is OFF and the gate is running: charge-standby,
+ *                    or a battery/SYSTEM_OFF wake. st_pwr_service() itself
+ *                    performs the OFF->ON transition when the hold completes.
+ *
+ * st_pwr_init_on()   the device came up WITHOUT a power-on gesture -- a
+ *                    watchdog recovery, or a boot carrying a fault breadcrumb.
+ *                    No human necessarily pressed anything.
+ *
+ * BOTH START DISARMED. From a cold boot with the button up the very first
+ * service pass observes FUNCTION high and arms shutdown immediately, so the
+ * common case costs nothing; and a boot that happens under a held finger
+ * correctly owes that finger's release. Neither function can grant the arm,
+ * which is what makes the guard unfakeable rather than merely unfaked.
+ */
+void st_pwr_init_off(st_pwr_t *p);
+void st_pwr_init_on(st_pwr_t *p);
+
+/* For the countdown UI: a hold that cannot fire must not be drawn as one. */
+static inline bool st_pwr_off_armed(const st_pwr_t *p) { return p->off_armed; }
+static inline bool st_pwr_device_on(const st_pwr_t *p) { return p->device_on; }
 
 /*
  * ONE PASS, ONE DECISION. Pure: no Zephyr, no GPIO, no ADC, no clock of its
  * own, no allocation, bounded time. `out` is fully written every call.
+ *
+ * on_due is an EDGE, true only on the pass that performs OFF->ON, so a caller
+ * cannot see it twice for one hold. off_due is a level and stays true while the
+ * conditions hold, because the caller's response to it is power_off(), which
+ * does not return.
  *
  * There is no parameter through which feature code could provide, modify,
  * suppress, consume, reset or otherwise influence this decision -- st_pwr_in_t

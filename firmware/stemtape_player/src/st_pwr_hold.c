@@ -130,12 +130,29 @@ bool st_pwr_fader_sample(st_pwr_fader_t *f, uint32_t idx, int32_t raw,
 
 /* ---- the transaction: see st_pwr_hold.h ------------------------------- */
 
-void st_pwr_reset(st_pwr_t *p)
+static void st_pwr_init(st_pwr_t *p, bool device_on)
 {
 	st_pwr_hold_reset(&p->hold);
 	st_pwr_fader_reset(&p->fader);
-	p->fn_prev = false;
+	p->fn_prev   = false;
+	p->device_on = device_on;
+
+	/*
+	 * DISARMED, IN BOTH ENTRY POINTS, DELIBERATELY.
+	 *
+	 * This is the only place either initialiser could have granted the arm,
+	 * and it does not. Shutdown becomes possible in exactly one way -- by
+	 * st_pwr_service() observing FUNCTION physically UP -- so a boot under a
+	 * held finger owes that finger's release just as a boot caused by one
+	 * does, and no re-init anywhere can be used to fake it.
+	 *
+	 * From a cold boot with the button up this costs one control pass.
+	 */
+	p->off_armed = false;
 }
+
+void st_pwr_init_off(st_pwr_t *p) { st_pwr_init(p, false); }
+void st_pwr_init_on(st_pwr_t *p)  { st_pwr_init(p, true); }
 
 void st_pwr_service(st_pwr_t *p, const st_pwr_in_t *in, st_pwr_out_t *out)
 {
@@ -156,6 +173,23 @@ void st_pwr_service(st_pwr_t *p, const st_pwr_in_t *in, st_pwr_out_t *out)
 		st_pwr_hold_reset(&p->hold);
 		st_pwr_fader_reset(&p->fader);
 	}
+
+	/*
+	 * ---- THE ONLY LINE IN THIS PROJECT THAT ARMS SHUTDOWN --------------
+	 *
+	 * A physical FUNCTION release, observed here, and nothing else. Not an
+	 * initialiser, not a reset, not a feature flag, not a combo, not the
+	 * dispatcher, not a boot-duration guess. One press therefore causes at
+	 * most one power transition: the press that turned the device on is
+	 * still down, so it is still disarmed, no matter how long it is held.
+	 *
+	 * CI asserts that this assignment appears exactly once in this file and
+	 * that it sits inside this branch.
+	 */
+	if (!in->fn_down) {
+		p->off_armed = true;
+	}
+
 	p->fn_prev = in->fn_down;
 
 	/*
@@ -174,6 +208,36 @@ void st_pwr_service(st_pwr_t *p, const st_pwr_in_t *in, st_pwr_out_t *out)
 	out->elapsed_ms   = st_pwr_hold_tick(&p->hold, in->fn_down, other_raw,
 					      in->now_ms);
 	out->other_active = p->hold.other_active;
-	out->on_due       = st_pwr_hold_on_due(out->elapsed_ms);
-	out->off_due      = st_pwr_hold_off_due(out->elapsed_ms);
+
+	/*
+	 * ---- THE STATE MACHINE --------------------------------------------
+	 *
+	 * The two thresholds are not two independent comparisons on one clock;
+	 * they belong to different states, and only one of them can be reached
+	 * at a time. That is what makes ON -> OFF under a single press
+	 * structurally impossible rather than merely unlikely: while the device
+	 * is OFF the off threshold is not consulted at all, and the instant it
+	 * becomes ON the guard below is already false.
+	 */
+	out->on_due  = false;
+	out->off_due = false;
+
+	if (!p->device_on) {
+		if (st_pwr_hold_on_due(out->elapsed_ms)) {
+			p->device_on = true;
+
+			/* THE PRESS THAT TURNED IT ON OWES A RELEASE. It is
+			 * still down right now -- that is what completing the
+			 * hold means -- so the arm cannot be granted until the
+			 * finger physically leaves the button. */
+			p->off_armed = false;
+			out->on_due  = true;   /* an EDGE: one pass only */
+		}
+	} else {
+		out->off_due = p->off_armed &&
+			        st_pwr_hold_off_due(out->elapsed_ms);
+	}
+
+	out->device_on = p->device_on;
+	out->off_armed = p->off_armed;
 }
