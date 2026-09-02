@@ -963,6 +963,18 @@ static void pass_scr(rig_t *r, bool fn, int8_t rocker, const int32_t fader[4])
 
 static const int32_t FADERS_STILL[4] = { 1000, 1000, 1000, 1000 };
 
+/* Hold the rocker long enough for st_ctl's own 2-read settle to commit it.
+ * The rail is noisy and a raw read cannot be trusted; see st_ctl_t's
+ * scr_rock_cand for why this settle is shorter than the volume path's. */
+static void rock(rig_t *r, int8_t dir, const int32_t fader[4])
+{
+	uint32_t i;
+
+	for (i = 0; i < ST_CTL_SCRATCH_ROCKER_SETTLE; i++) {
+		pass_scr(r, true, dir, fader);
+	}
+}
+
 static void test_scratch_rocker_is_master(void)
 {
 	rig_t r;
@@ -975,7 +987,7 @@ static void test_scratch_rocker_is_master(void)
 	      "S1. and merely holding FUNCTION does not consume it -- the other "
 	      "FUNCTION chords still work until something actually moves");
 
-	pass_scr(&r, true, 1, FADERS_STILL);          /* rocker forward */
+	rock(&r, 1, FADERS_STILL);                    /* rocker forward */
 	CHECK(r.out.scratch_active, "S1. the rocker moving starts the gesture");
 	CHECK(r.out.scratch_target == ST_CTL_SCRATCH_MASTER,
 	      "S1. and its target is MASTER -- all four heads, locked");
@@ -988,12 +1000,12 @@ static void test_scratch_rocker_is_master(void)
 	CHECK(r.out.function_consumed, "S1. the FUNCTION press is spent");
 	CHECK(r.out.fader_consumed_mask == 0u, "S1. no fader is claimed");
 
-	pass_scr(&r, true, -1, FADERS_STILL);
+	rock(&r, -1, FADERS_STILL);
 	CHECK(r.out.scratch_drive_q16 == -ST_SCRATCH_DRIVE_FULL,
 	      "S1. held backward, full deflection the other way (%d)",
 	      r.out.scratch_drive_q16);
 
-	pass_scr(&r, true, 0, FADERS_STILL);
+	rock(&r, 0, FADERS_STILL);
 	CHECK(r.out.scratch_active && r.out.scratch_drive_q16 == 0,
 	      "S1. released mid-gesture, the gesture is STILL live and asks for "
 	      "zero -- the hand resting on the record, which is what slows the head");
@@ -1037,7 +1049,7 @@ static void test_scratch_first_mover_owns_the_gesture(void)
 	/* Rocker first, then a fader is brushed. */
 	rig_init(&r, 0);
 	pass_scr(&r, true, 0, f);
-	pass_scr(&r, true, 1, f);
+	rock(&r, 1, f);
 	CHECK(r.out.scratch_target == ST_CTL_SCRATCH_MASTER, "S3. the rocker took it");
 
 	f[0] += 300;
@@ -1055,7 +1067,7 @@ static void test_scratch_first_mover_owns_the_gesture(void)
 	f[1] += 300;
 	pass_scr(&r, true, 0, f);
 	CHECK(r.out.scratch_target == 1u, "S3. the fader took it");
-	pass_scr(&r, true, 1, f);
+	rock(&r, 1, f);
 	CHECK(r.out.scratch_target == 1u,
 	      "S3. and the rocker pressed mid-stem-scratch does not steal it either");
 }
@@ -1067,7 +1079,7 @@ static void test_scratch_ends_with_function(void)
 
 	rig_init(&r, 0);
 	pass_scr(&r, true, 0, f);
-	pass_scr(&r, true, 1, f);
+	rock(&r, 1, f);
 	CHECK(r.out.scratch_active, "S4. gesture live");
 
 	pass_scr(&r, false, 1, f);
@@ -1142,7 +1154,7 @@ static void test_scratch_suppresses_the_reverse_double_tap(void)
 
 	rig_init(&r, 0);
 	pass_scr(&r, true, 0, f);
-	pass_scr(&r, true, 1, f);
+	rock(&r, 1, f);
 	CHECK(r.out.scratch_active, "S5. shuttling the song with FUNCTION held");
 
 	/* Now brush Track 1 twice, which outside a scratch is the reverse
@@ -1156,11 +1168,51 @@ static void test_scratch_suppresses_the_reverse_double_tap(void)
 	      "(%d fired) -- the scratch owns this FUNCTION press", g_rev_seen);
 }
 
+/*
+ * THE RAIL IS NOISY, and a single sample must not be believed either way.
+ * main.c records that raw reads of AIN1 caused spurious volume and tempo
+ * jumps; here the same noise would either start a gesture nobody asked for or
+ * drop the drive to zero in the middle of a held shuttle -- a stutter the hand
+ * would feel as the control failing.
+ */
+static void test_a_single_noisy_sample_moves_nothing(void)
+{
+	rig_t r;
+
+	/* One spurious forward sample in the middle of an idle hold. */
+	rig_init(&r, 0);
+	pass_scr(&r, true, 0, FADERS_STILL);
+	pass_scr(&r, true, 1, FADERS_STILL);        /* the glitch */
+	pass_scr(&r, true, 0, FADERS_STILL);
+	CHECK(!r.out.scratch_active,
+	      "S8. one spurious sample does not start a gesture");
+
+	/* And one spurious RELEASE in the middle of a real held press. */
+	rig_init(&r, 0);
+	pass_scr(&r, true, 0, FADERS_STILL);
+	rock(&r, 1, FADERS_STILL);
+	rock(&r, 1, FADERS_STILL);
+	CHECK(r.out.scratch_drive_q16 == ST_SCRATCH_DRIVE_FULL,
+	      "S8. a genuinely held rocker drives at full deflection");
+
+	pass_scr(&r, true, 0, FADERS_STILL);        /* the glitch */
+	CHECK(r.out.scratch_drive_q16 == ST_SCRATCH_DRIVE_FULL,
+	      "S8. and one spurious release does NOT drop the drive mid-shuttle (%d) -- "
+	      "the hand would feel that as the control failing",
+	      r.out.scratch_drive_q16);
+
+	/* A real release, held, does. */
+	rock(&r, 0, FADERS_STILL);
+	CHECK(r.out.scratch_drive_q16 == 0,
+	      "S8. a sustained release is believed, and the head slows");
+}
+
 static void test_rocker_without_function_is_not_a_scratch(void)
 {
 	rig_t r;
 
 	rig_init(&r, 0);
+	pass_scr(&r, false, 1, FADERS_STILL);
 	pass_scr(&r, false, 1, FADERS_STILL);
 	pass_scr(&r, false, 1, FADERS_STILL);
 	CHECK(!r.out.scratch_active,
@@ -1195,6 +1247,7 @@ int main(void)
 	test_scratch_ends_with_function();
 	test_an_unsampled_fader_is_not_a_movement();
 	test_scratch_suppresses_the_reverse_double_tap();
+	test_a_single_noisy_sample_moves_nothing();
 	test_rocker_without_function_is_not_a_scratch();
 
 	printf("\n");

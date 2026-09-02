@@ -63,6 +63,10 @@
  * discipline the ladder uses, for the same reason. */
 #define ST_CTL_VOL_SETTLE 3u
 
+/* Agreeing reads that commit a rocker DIRECTION for the scratch gesture. See
+ * st_ctl_t's scr_rock_cand for why this is 2 and not ST_CTL_VOL_SETTLE's 3. */
+#define ST_CTL_SCRATCH_ROCKER_SETTLE 2u
+
 /*
  * THE SCRATCH TARGET. 0..3 are the stems; this is what "all four, locked"
  * is called. Deliberately outside the stem range rather than a separate
@@ -309,6 +313,27 @@ typedef struct {
 	 * movement, or grabbing a fader would scratch by the distance between
 	 * wherever it sits and wherever it sat last time it was polled.
 	 */
+	/*
+	 * THE ROCKER'S OWN DEBOUNCE, and why it is not ST_CTL_VOL_SETTLE.
+	 *
+	 * The AIN1 rail is noisy -- main.c's own comment records that single
+	 * raw reads caused spurious volume and tempo jumps -- so the rocker
+	 * cannot be taken raw. But the volume path settles over 3 reads (24 ms)
+	 * because it COMMITS A DISCRETE ACTION and a false positive there is a
+	 * wrong loop division that stays wrong.
+	 *
+	 * A scratch is neither. It drives a continuous integrator where a false
+	 * positive costs one tick of ramp and self-corrects, and where latency
+	 * is felt directly in the hand: a 60 ms press is about 8 passes, so 24
+	 * ms of settle would eat a third of it at each end and blunt exactly the
+	 * short gestures that make scratching. Two reads is the compromise --
+	 * 16 ms, enough to reject the single-sample jumps that were actually
+	 * observed, cheap enough that a short press survives.
+	 */
+	int8_t   scr_rock_cand;
+	uint8_t  scr_rock_n;
+	int8_t   scr_rock;         /* the settled direction */
+
 	uint8_t  scr_target;       /* ST_CTL_SCRATCH_MASTER, a stem, or ST_CTL_SCRATCH_NONE */
 	int32_t  scr_fader_prev[ST_PL_STEMS];
 	uint32_t scr_last_ms;

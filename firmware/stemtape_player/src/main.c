@@ -9836,20 +9836,60 @@ int main(void)
 			st_ctl_in_t ci;
 
 			memset(&ci, 0, sizeof(ci));
+
 			/*
-			 * NOT SAMPLED, said explicitly. memset leaves these 0,
-			 * which st_ctl reads as "this fader is at position 0"
-			 * -- a real reading, not an absent one. Four faders
-			 * reporting a constant 0 never move, so no gesture can
-			 * start and nothing breaks; but "did not report" and
-			 * "reported zero" are different facts and only one of
-			 * them is true here. The scratch wiring that fills
-			 * these in properly is the next commit; until it lands
-			 * this states the truth rather than relying on a
-			 * coincidence that a later edit could remove.
+			 * ---- THE SCRATCH CONTROLS -------------------------
+			 *
+			 * THE ROCKER, as a direction. Raw: st_ctl settles it
+			 * itself over two agreeing passes, which is shorter
+			 * than the volume path's three because a scratch feels
+			 * the latency in the hand -- see st_ctl_t's own note.
+			 */
+			ci.rocker_dir = (st_vraw == VOL_TEMPO_UP)   ?  1 :
+					 (st_vraw == VOL_TEMPO_DOWN) ? -1 : 0;
+
+			/*
+			 * THE FADERS, and this is where the ~32 ms round-robin
+			 * is not good enough.
+			 *
+			 * A volume slider updating every 32 ms is imperceptible.
+			 * A hand on a record sampled at 31 Hz is not: the
+			 * movement between samples is the whole signal, and at
+			 * that rate most of a scratch falls between two reads.
+			 *
+			 * So while FUNCTION is held the cadence changes. Before
+			 * a gesture has an owner, ALL FOUR are read every pass,
+			 * because which fader the hand will move is exactly
+			 * what is not yet known. Once one is chosen, only that
+			 * one is read -- the other three go back to -1, "not
+			 * sampled", and st_ctl correctly treats them as not
+			 * moved rather than as sitting at zero.
+			 *
+			 * The cost is bounded and brief: four blocking ADC
+			 * reads instead of one, only while FUNCTION is down and
+			 * only until the hand commits. Ordinary playback never
+			 * takes this path, and its round-robin below is
+			 * untouched.
 			 */
 			for (uint32_t fk = 0; fk < ST_PL_STEMS; fk++) {
 				ci.fader_raw[fk] = -1;
+			}
+			if (pwr_pressed() && stem_ctl) {
+				const uint8_t tgt = g_stem_ctl_out.scratch_active
+						     ? g_stem_ctl_out.scratch_target
+						     : ST_CTL_SCRATCH_NONE;
+
+				if (tgt < ST_PL_STEMS) {
+					ci.fader_raw[tgt] =
+						ladder_read(&adc_ladder[LAD_FADER0 + tgt]);
+				} else if (tgt == ST_CTL_SCRATCH_NONE) {
+					for (uint32_t fk = 0; fk < ST_PL_STEMS; fk++) {
+						ci.fader_raw[fk] = ladder_read(
+							&adc_ladder[LAD_FADER0 + fk]);
+					}
+				}
+				/* tgt == MASTER: the rocker owns the gesture and
+				 * no fader is read at all. */
 			}
 			ci.ladder_raw     = st_trk_raw;
 			ci.track_consumed_mask = s_fx_track_claim;
@@ -10060,7 +10100,27 @@ int main(void)
 					k_msleep(25);
 					continue;
 				}
-				if (vb != VOL_NONE) {
+				/*
+				 * THE SCRATCH OWNS FUNCTION + ROCKER WHENEVER A
+				 * STEM SONG IS SELECTED.
+				 *
+				 * This branch is the inherited Tape Looper's
+				 * CHOP divider, and it is classic-only: the stem
+				 * path clears g_chop_req every block, and with no
+				 * classic content (the source-absence gate proves
+				 * that fail-closed) it is already a no-op here.
+				 * So nothing audible is lost -- but leaving it
+				 * running would still let a shuttle rewrite
+				 * g_chop_div and persist it to g_meta, which is
+				 * state churn on a gesture that means something
+				 * else entirely.
+				 *
+				 * Same ownership rule st_ctl.h states for the
+				 * Track buttons and PLAY: with a stem song, the
+				 * stem instrument owns the surface; without one,
+				 * the Looper is untouched.
+				 */
+				if (vb != VOL_NONE && !g_stem_ctl_out.rocker_consumed) {
 					if (vb == cp_cand) { if (cp_cnt < 1000) cp_cnt++; }
 					else { cp_cand = vb; cp_cnt = 1; }
 					if (cp_cnt == 3) {          /* committed press edge */
@@ -10733,7 +10793,20 @@ int main(void)
 			 * ADC time low; see the ladder_read comment for why that matters. */
 			{
 				static int fi;
-				int fv = ladder_read(&adc_ladder[LAD_FADER0 + fi]);
+				/*
+				 * A FADER BEING SCRATCHED IS NOT A VOLUME
+				 * CONTROL. Without this, moving a stem's fader
+				 * under FUNCTION would scratch it AND fade it
+				 * out at the same time -- one physical movement
+				 * doing two things, which is the bug st_ctl's
+				 * whole arbitration exists to prevent. The mask
+				 * says which fader the gesture has claimed.
+				 */
+				const bool claimed =
+					(g_stem_ctl_out.fader_consumed_mask &
+					 (uint8_t)(1u << fi)) != 0u;
+				int fv = claimed ? -1
+						  : ladder_read(&adc_ladder[LAD_FADER0 + fi]);
 				if (fv >= 0) {        /* ADC error -> hold the last volume */
 					uint32_t q = (uint32_t)fv * 256u / 3700u;
 					trk[fi].vol_q8 = (uint16_t)(q > 256u ? 256u : q);
@@ -10870,7 +10943,18 @@ int main(void)
 				static uint32_t dclick_base;    /* the speed BEFORE that click */
 				/* tempo LOCKED while a take is in flight: a mid-take speed
 				 * glide records the warp into the loop (tape-bend artifact) */
+				/*
+				 * A ROCKER THE SCRATCH HAS CLAIMED IS NOT A
+				 * PITCH CONTROL. Without this, a master shuttle
+				 * would also transpose the song a half semitone
+				 * per press -- and the transposition would still
+				 * be there after the hand came off the record,
+				 * which is the worst kind of side effect: silent
+				 * at the time, audible afterwards, and with no
+				 * gesture to undo it.
+				 */
 				int dir = (g_rec_track >= 0) ? 0 :
+					  g_stem_ctl_out.rocker_consumed ? 0 :
 					  (vcommit == VOL_TEMPO_UP) ? 1 :
 					  (vcommit == VOL_TEMPO_DOWN) ? -1 : 0;
 				int step = 0;

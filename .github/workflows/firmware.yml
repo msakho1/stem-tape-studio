@@ -2822,6 +2822,23 @@ jobs:
             || { echo "first-mover-wins is gone -- a brushed fader can abandon a master shuttle"; exit 1; }
           grep -q 'is a reference, not a 1800-count movement' audit/ctl-selftest.txt \
             || { echo "an unsampled fader can be read as a full-range movement"; exit 1; }
+          grep -q 'does NOT drop the drive mid-shuttle' audit/ctl-selftest.txt \
+            || { echo "the rocker debounce is gone -- rail noise would stutter a shuttle"; exit 1; }
+
+          # AND THE SUPPRESSIONS MUST REACH main.c. st_ctl publishing a claim
+          # nobody honours is the same bug as not claiming at all: the gesture
+          # would scratch AND transpose, or scratch AND fade the stem out.
+          M=firmware/stemtape_player/src/main.c
+          grep -q 'g_stem_ctl_out.rocker_consumed ? 0 :' "$M" \
+            || { echo "the pitch handler still sees a rocker the scratch claimed"; exit 1; }
+          grep -q 'g_stem_ctl_out.fader_consumed_mask &' "$M" \
+            || { echo "the volume round-robin still writes a fader being scratched"; exit 1; }
+          grep -q 'vb != VOL_NONE && !g_stem_ctl_out.rocker_consumed' "$M" \
+            || { echo "the classic chop path still reinterprets a scratch shuttle"; exit 1; }
+          grep -q 'ci.rocker_dir = (st_vraw == VOL_TEMPO_UP)' "$M" \
+            || { echo "the rocker is not fed to the gesture at all"; exit 1; }
+          grep -q 'ladder_read(&adc_ladder\[LAD_FADER0 + tgt\])' "$M" \
+            || { echo "the active fader is not sampled at the scratch cadence"; exit 1; }
 
           # THE CHORD MUST NOT PAUSE THE SONG. Reported from hardware:
           # FUNCTION + PLAY toggled slow playback AND paused, because

@@ -39,7 +39,10 @@ void st_ctl_scratch_end(st_ctl_t *c)
 	for (k = 0; k < ST_PL_STEMS; k++) {
 		c->scr_fader_prev[k] = ST_CTL_FADER_NONE;
 	}
-	c->scr_last_ms = 0u;
+	c->scr_last_ms   = 0u;
+	c->scr_rock_cand = 0;
+	c->scr_rock_n    = 0u;
+	c->scr_rock      = 0;
 }
 
 /*
@@ -93,6 +96,21 @@ static void scratch_service(st_ctl_t *c, const st_ctl_in_t *in, st_ctl_out_t *ou
 		return;
 	}
 
+	/* SETTLE THE ROCKER before anything reads it. Two agreeing passes; a
+	 * disagreeing one restarts the count and leaves the settled value
+	 * alone, so a single noisy sample cannot release a held press. */
+	if (in->rocker_dir == c->scr_rock) {
+		c->scr_rock_n = 0u;
+	} else if (in->rocker_dir == c->scr_rock_cand) {
+		if (++c->scr_rock_n >= ST_CTL_SCRATCH_ROCKER_SETTLE) {
+			c->scr_rock   = c->scr_rock_cand;
+			c->scr_rock_n = 0u;
+		}
+	} else {
+		c->scr_rock_cand = in->rocker_dir;
+		c->scr_rock_n    = 1u;
+	}
+
 	dt_us = (in->now_ms - c->scr_last_ms) * 1000u;
 	c->scr_last_ms = in->now_ms ? in->now_ms : 1u;
 	if (dt_us == 0u) {
@@ -133,7 +151,7 @@ static void scratch_service(st_ctl_t *c, const st_ctl_in_t *in, st_ctl_out_t *ou
 	 * not steal a master shuttle mid-movement.
 	 */
 	if (c->scr_target == ST_CTL_SCRATCH_NONE) {
-		if (in->rocker_dir != 0) {
+		if (c->scr_rock != 0) {
 			c->scr_target = ST_CTL_SCRATCH_MASTER;
 		} else {
 			for (k = 0; k < ST_PL_STEMS; k++) {
@@ -156,7 +174,7 @@ static void scratch_service(st_ctl_t *c, const st_ctl_in_t *in, st_ctl_out_t *ou
 	}
 
 	if (c->scr_target == ST_CTL_SCRATCH_MASTER) {
-		drive = st_scratch_drive_from_rocker(in->rocker_dir);
+		drive = st_scratch_drive_from_rocker(c->scr_rock);
 		out->rocker_consumed = true;
 	} else {
 		drive = fdrive[c->scr_target];
