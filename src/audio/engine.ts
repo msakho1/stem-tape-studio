@@ -1143,6 +1143,19 @@ export class AudioEngine {
     return p != null && p.target === live;
   }
 
+  /**
+   * The SONG position a lane's newest voice is reading RIGHT NOW, derived from
+   * the shared integrated-rate timeline (never from a JS timer). Null when the
+   * lane has no live voice.
+   */
+  private laneAudiblePosition(t: TrackRuntime, now: number): number | null {
+    const live = t.sources[t.sources.length - 1];
+    if (!live) return null;
+    return live.startPos + (this.timeline.positionAt(now) - this.timeline.positionAt(live.startAt));
+  }
+
+
+
   private pendingRelease: ({
     at: number;
     pos: number;
