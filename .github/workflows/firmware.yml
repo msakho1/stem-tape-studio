@@ -2363,11 +2363,12 @@ jobs:
           # how long a press lasted in order to pick a behaviour, scratch and
           # scrub have become two systems with a seam between them, which is
           # exactly what this design forbids.
-          grep -qE '(SCRATCH|SCRUB)_(MODE|TIMEOUT|THRESHOLD)_MS' \
-            firmware/stemtape_player/src/st_scratch.h \
-            firmware/stemtape_player/src/st_scratch.c \
-            && { echo "a scratch/scrub mode threshold appeared -- they are one state machine"; exit 1; }
-          true
+          if grep -qE '(SCRATCH|SCRUB)_(MODE|TIMEOUT|THRESHOLD)_MS' \
+               firmware/stemtape_player/src/st_scratch.h \
+               firmware/stemtape_player/src/st_scratch.c; then
+            echo "a scratch/scrub mode threshold appeared -- they are one state machine"
+            exit 1
+          fi
           {
             echo '### Stem Tape signed-head velocity clamp'
             echo '```text'
@@ -2574,21 +2575,34 @@ jobs:
           # AND THE RATE MUST REACH THE READ. An envelope that never becomes
           # a read position is a fade waiting to happen.
           # The cursor fraction became PER STEM when the resampler's carried
-          # state did, and the RUN became per stem when the playheads did, so
-          # these two match the arrays rather than the scalars. The question
-          # they ask is unchanged: the rate must reach the read, and the
-          # source/output domain conversion must be applied.
-          grep -q 'rate_q16, s_stem_rate_frac, run_k' "$M" || {
-            echo "  the renderer is not given the transport rate"; fail=1; }
-          grep -q 'out_n = st_rs_out_frames(run, frac_max, rate_q16)' "$M" || {
+          # state did, the RUN became per stem when the playheads did, and the
+          # RATE became per stem when an isolated stem scratch had to move one
+          # head while the others kept running. All three now match arrays
+          # rather than scalars. The question is unchanged: the rate must reach
+          # the read, and the source/output domain conversion must be applied.
+          grep -q 'stem_rate_q16, s_stem_rate_frac, run_k' "$M" || {
+            echo "  the renderer is not given the per-stem rates"; fail=1; }
+          grep -q 'out_n = st_rs_out_frames(run, s_stem_rate_frac\[0\], stem_rate_q16\[0\])' "$M" || {
             echo "  the source/output domain conversion is not applied"; fail=1; }
-          # AND THE CONVERSION MUST USE THE WORST-CASE HEAD. `run` is the
-          # minimum across the four playheads; pairing it with anything but
-          # the LARGEST carried fraction would let some head be asked for a
-          # source frame its own run does not contain, which is reading the
-          # next group's bytes as if they were this one's.
-          grep -q 'if (s_stem_rate_frac\[sk\] > frac_max)' "$M" || {
-            echo "  out_n is not sized by the worst-supplied head"; fail=1; }
+          # AND THE CONVERSION MUST USE THE WORST-CASE HEAD -- but which head
+          # that IS changed with the rate.
+          #
+          # It used to be the one carrying the largest cursor fraction, since a
+          # bigger fraction crosses a source frame sooner, and with one rate for
+          # the whole block that was exactly right. Rate now dominates: a head
+          # at 4x exhausts `run` in a quarter of the output frames a head at 1x
+          # does, whatever fraction either carries. So the gate no longer looks
+          # for a max-fraction scan -- it requires the MINIMUM over the heads,
+          # each asked at its own rate. Anything less would let a fast head be
+          # asked for a source frame its own run does not contain, which is
+          # reading the next group's bytes as if they were this one's.
+          grep -q 'if (n_k < out_n)' "$M" || {
+            echo "  out_n is not the minimum over the heads at their own rates"; fail=1; }
+          # And the OLD rule must be gone, not merely unused: a surviving
+          # max-fraction scan would mean two sizing rules in one function.
+          if grep -q 'frac_max' "$M"; then
+            echo "  the retired max-fraction sizing is still present"; fail=1
+          fi
           [ "$fail" = 0 ] || exit 1
           echo "inertia wiring: PLAY/STOP move the reel, and the reel moves the tape"
           {

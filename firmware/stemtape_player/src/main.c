@@ -2609,7 +2609,8 @@ static void stem_render_run(const uint8_t *const grp[ST_PL_STEMS],
 			     uint32_t f0, uint32_t n, int16_t *s,
 			     uint32_t peak[ST11_STEM_COUNT],
 			     st_seam_t *seam, uint32_t transport,
-			     uint32_t rate_q16, uint32_t frac_io[ST_PL_STEMS],
+			     const uint32_t rate_q16[ST_PL_STEMS],
+			     uint32_t frac_io[ST_PL_STEMS],
 			     const uint32_t src_avail[ST_PL_STEMS],
 			     uint32_t used_out[ST_PL_STEMS],
 			     const st_stream_t heads[ST_PL_STEMS],
@@ -2672,17 +2673,30 @@ static void stem_render_run(const uint8_t *const grp[ST_PL_STEMS],
 	 * four-forward playback is bit-identical to a build without any of
 	 * this: the full-playback gate's output hash is the proof.
 	 */
+	/*
+	 * `together` now also asks whether the heads share a SPEED, because the
+	 * rate is no longer one number for the whole block. The shared decode
+	 * walks ONE cursor for all four stems, so it is correct only when they
+	 * agree on direction, position AND rate -- one stem scratching drops
+	 * the whole block onto the variable-rate path, which is right, and is
+	 * why an isolated scratch costs CPU on the other three as well as on
+	 * itself.
+	 *
+	 * Folded into the loop that already walks the stems rather than added
+	 * as a second pass: this runs once per run, on the deadline thread.
+	 */
 	bool together = true;
 
 	for (sp = 0; sp < ST_PL_STEMS; sp++) {
 		frac[sp] = frac_io[sp];
 		cur[sp]  = 0u;
-		if (dirs[sp] < 0 || frame_in_group[sp] != frame_in_group[0]) {
+		if (dirs[sp] < 0 || frame_in_group[sp] != frame_in_group[0] ||
+		    rate_q16[sp] != rate_q16[0]) {
 			together = false;
 		}
 	}
 
-	const bool unity = (rate_q16 == ST_RS_ONE) && stem_rs_all_aligned() && together;
+	const bool unity = (rate_q16[0] == ST_RS_ONE) && stem_rs_all_aligned() && together;
 
 	for (uint32_t k = 0; k < n; k++) {
 		const uint32_t f = f0 + k;
@@ -2782,7 +2796,7 @@ static void stem_render_run(const uint8_t *const grp[ST_PL_STEMS],
 			 * most once and this is what it always was.
 			 */
 			for (sp = 0; sp < ST_PL_STEMS; sp++) {
-				frac[sp] += rate_q16;
+				frac[sp] += rate_q16[sp];
 				while (frac[sp] >= ST_RS_ONE) {
 					frac[sp] -= ST_RS_ONE;
 					cur[sp]++;
@@ -3330,6 +3344,30 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 	const uint32_t rate_q16 = st_rs_rate_clamp(
 		(uint32_t)(((uint64_t)pitch_q16 *
 			     st_inertia_env_q16(&s_stem_inertia)) >> 16));
+	/*
+	 * ---- ONE RATE PER HEAD -------------------------------------------
+	 *
+	 * The render loop used to take a single rate for the whole block. It
+	 * cannot any more: an isolated stem scratch moves ONE head while the
+	 * other three keep running forward at the transport's rate, and that
+	 * is not expressible as one number.
+	 *
+	 * Every entry is the transport rate here. Nothing yet writes a
+	 * different one -- the gesture that will is step 3 -- so this commit
+	 * changes the SHAPE of the quantity and not its value, and ordinary
+	 * playback stays bit-identical (the full-playback gate's 0x2a737e00
+	 * hash is the proof, not the intent).
+	 *
+	 * `rate_q16` itself stays, because the things that are genuinely
+	 * song-level -- the seam's duck length, the loop's arming arithmetic --
+	 * belong to the transport and not to any one head.
+	 */
+	uint32_t stem_rate_q16[ST_PL_STEMS];
+
+	for (uint32_t rk = 0; rk < ST_PL_STEMS; rk++) {
+		stem_rate_q16[rk] = rate_q16;
+	}
+
 	/* The seam's duck length converted from output frames into the tape
 	 * the playhead covers while it runs. See the arm clamp below. */
 	const uint32_t seam_src = st_rs_src_for_out(ST_SEAM_FRAMES, rate_q16);
@@ -4054,23 +4092,43 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 		 * same number and everything below reduces to what shipped;
 		 * during a ramp it is more, because the tape is passing more
 		 * slowly than the output is being produced. */
-		/* SIZED BY THE HEAD THAT WILL CONSUME THE MOST SOURCE, which
-		 * is the one whose cursor fraction is largest: a bigger carried
-		 * fraction crosses a source frame sooner, so it runs out of
-		 * `run` first. `run` is already the minimum across heads, so
-		 * pairing it with the maximum fraction is the conservative
-		 * corner and no head can be asked for a frame the run does not
-		 * contain. All four fractions are equal until a head diverges,
-		 * and then this is exactly stem 0's value again. */
+		/* SIZED BY THE HEAD THAT RUNS OUT OF SOURCE FIRST.
+		 *
+		 * That used to be found by pairing `run` with the largest
+		 * carried fraction, since a bigger fraction crosses a source
+		 * frame sooner. With one rate for the whole block that was
+		 * exactly right. It is not any more: rate now dominates the
+		 * fraction, so a head at 4x exhausts the run in a quarter of
+		 * the output frames a head at 1x does, whatever fraction each
+		 * is carrying. Asking with the worst fraction and one rate
+		 * would over-produce for the fastest head and read past the
+		 * source it actually has. */
 		{
-			uint32_t frac_max = s_stem_rate_frac[0];
-
+			/*
+			 * THE OUTPUT COUNT IS THE MINIMUM OVER THE HEADS, and
+			 * with per-stem rates that is no longer the same as
+			 * asking once with the worst fraction.
+			 *
+			 * `run` source frames buy a different number of output
+			 * frames at each head's own rate: a stem at 4x exhausts
+			 * the run in a quarter of the frames a stem at 1x does.
+			 * Producing more than the slowest-supplied head can
+			 * cover would read past the source it actually has --
+			 * so every head is asked, and the smallest answer wins.
+			 *
+			 * At a shared rate every term is identical and this is
+			 * exactly the single call it replaces, which is what
+			 * keeps ordinary playback bit-identical.
+			 */
+			out_n = st_rs_out_frames(run, s_stem_rate_frac[0], stem_rate_q16[0]);
 			for (sk = 1; sk < ST_PL_STEMS; sk++) {
-				if (s_stem_rate_frac[sk] > frac_max) {
-					frac_max = s_stem_rate_frac[sk];
+				const uint32_t n_k = st_rs_out_frames(run, s_stem_rate_frac[sk],
+								       stem_rate_q16[sk]);
+
+				if (n_k < out_n) {
+					out_n = n_k;
 				}
 			}
-			out_n = st_rs_out_frames(run, frac_max, rate_q16);
 		}
 
 		/* ---- A FIFTH BOUND, IN THE OUTPUT DOMAIN: this block ----- */
@@ -4133,7 +4191,7 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 		stem_render_run(grp, fis, &stem_prepared, m0, md, mv,
 				 f, out_n, s, stem_peak, &s_stem_seam,
 				 s_stem_transport,
-				 rate_q16, s_stem_rate_frac, run_k,
+				 stem_rate_q16, s_stem_rate_frac, run_k,
 				 stem_used, g_stem_stream, dirs);
 		f += out_n;
 		/* THE PLAYHEAD ADVANCES BY WHAT WAS ACTUALLY READ, which is
