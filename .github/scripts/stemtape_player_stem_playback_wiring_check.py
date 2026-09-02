@@ -471,6 +471,10 @@ REQUIRED_SUBSTRINGS = {
         # FUNCTION + rocker is a real performance interaction, and a timer that
         # could not see the rocker would shut the device down underneath one.
         "(void)power_hold_service(st_ladder_mask(&fx_track_ladder) != 0u ||",
+        # THE DECISION IS NOT MADE HERE. The glue hands physical facts to the
+        # pure service and acts on its answer; every branch that decides
+        # anything is in st_pwr_hold.c and host-tested.
+        "st_pwr_service(&s_pwr, &in, &out);",
     ],
     "stem_ctl_apply": [
         # THE PUBLISHED MASK IS WHAT REACHES THE MIXER.
@@ -796,7 +800,8 @@ def main() -> int:
     if not svc_body:
         report.append("- **MISSING**: power_hold_service() is not defined")
         fail = True
-    elif "g_stem_ctl_out" in svc_body or "function_consumed" in svc_body:
+    elif ("g_stem_ctl_out" in svc_body or "function_consumed" in svc_body or
+          "combo_seen" in svc_body or "g_playing" in svc_body):
         report.append("- **MISSING/BAD**: power_hold_service() reads dispatcher state. "
                        "Musical consumption and safety suppression must stay different "
                        "things (postmortem P2/P5)")

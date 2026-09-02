@@ -127,3 +127,53 @@ bool st_pwr_fader_sample(st_pwr_fader_t *f, uint32_t idx, int32_t raw,
 	}
 	return st_pwr_fader_active(f, now_ms);
 }
+
+/* ---- the transaction: see st_pwr_hold.h ------------------------------- */
+
+void st_pwr_reset(st_pwr_t *p)
+{
+	st_pwr_hold_reset(&p->hold);
+	st_pwr_fader_reset(&p->fader);
+	p->fn_prev = false;
+}
+
+void st_pwr_service(st_pwr_t *p, const st_pwr_in_t *in, st_pwr_out_t *out)
+{
+	bool other_raw;
+
+	/*
+	 * THE RISING EDGE IS THE WHOLE OF THE TRANSACTION RULE.
+	 *
+	 * Beginning a hold means forgetting everything that preceded it:
+	 * st_pwr_hold_reset() drops elapsed AND the settled verdict AND its
+	 * candidate, st_pwr_fader_reset() drops every baseline so the next
+	 * sample of each fader re-seeds rather than comparing against a
+	 * position from a previous hold. Nothing from before this edge can
+	 * extend, suppress, pause, restart or poison what follows.
+	 */
+	out->began = (in->fn_down && !p->fn_prev);
+	if (out->began) {
+		st_pwr_hold_reset(&p->hold);
+		st_pwr_fader_reset(&p->fader);
+	}
+	p->fn_prev = in->fn_down;
+
+	/*
+	 * THE FADERS ARE ONLY SAMPLED INSIDE A TRANSACTION. Outside one there
+	 * is nothing to protect and nothing to remember -- and a baseline kept
+	 * across the gap is exactly the stale state this design forbids.
+	 */
+	if (in->fn_down) {
+		(void)st_pwr_fader_sample(&p->fader, in->fader_idx,
+					   in->fader_raw, in->now_ms);
+	}
+
+	other_raw = in->ain0_active || in->ain1_active ||
+		     (in->fn_down && st_pwr_fader_active(&p->fader, in->now_ms));
+
+	out->elapsed_ms   = st_pwr_hold_tick(&p->hold, in->fn_down, other_raw,
+					      in->now_ms);
+	out->other_active = p->hold.other_active;
+	out->on_due       = st_pwr_hold_on_due(out->elapsed_ms);
+	out->off_due      = st_pwr_hold_off_due(out->elapsed_ms);
+}

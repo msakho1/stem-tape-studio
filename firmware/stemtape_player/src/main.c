@@ -156,21 +156,35 @@
  * session's patience. */
 #define ST_RC_SWEEP_REPS 24u
 
-/* st57: STAGE 0 -- the power contract, and nothing else.
+/* st58: STAGE 0 -- the power contract as a TRANSACTION, and nothing else.
  *
  * st55 (the scratch series) is burned and its tag is not reused; st56 named a
  * build whose power BEHAVIOUR was wrong (2.5 s, and a control map that omitted
- * AIN1), so it is not reused either. This build is st54 plus one safety change:
- * the power transitions moved out of feature-gated code into one authoritative
- * timer -- FUNCTION-only for 2.000 s ON, 5.000 s OFF, zeroed the instant any
- * other physical control is active. No head, no residency, no scratch
- * work is in it -- those are Stage 2 and later, and are deliberately NOT mixed
- * into a build whose job is to prove the device can always be switched off.
- * docs/postmortems/2026-09-scratch-series.md sections 3.0 and 4. */
+ * AIN1), so it is not reused either. st57's binaries went out with a published
+ * hash and then a real defect was found in them -- a fader baseline that
+ * survived across holds turned the 5.000 s guarantee into 24.7 s -- so that tag
+ * is retired rather than re-cut.
+ *
+ * This build is st54 plus one safety change: the power transitions moved out of
+ * feature-gated code into one authoritative timer -- FUNCTION-only for 2.000 s
+ * ON, 5.000 s OFF, zeroed the instant any other physical control is active --
+ * and the whole decision moved into st_pwr_service(), which is pure and
+ * host-tested. A power hold is a self-contained physical transaction: the
+ * FUNCTION rising edge drops every piece of prior state, and the battery-wake
+ * path now goes through the same 2.000 s gate as charge-standby instead of
+ * booting on any press.
+ *
+ * No head, no residency, no scratch work is in it -- those are Stage 2 and
+ * later, and are deliberately NOT mixed into a build whose job is to prove the
+ * device can always be switched off.
+ *
+ * docs/postmortems/2026-09-scratch-series.md sections 3.0 and 4;
+ * docs/stem-tape-power-contract.md for the control map, the proof matrix and
+ * the hardware acceptance list this build has NOT yet been run against. */
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st57-VOLCAL"
+#define ST_BUILD_TAG "st58-VOLCAL"
 #else
-#define ST_BUILD_TAG "st57"
+#define ST_BUILD_TAG "st58"
 #endif
 #include "st_track_hold.h"
 
@@ -8611,18 +8625,13 @@ static void led_seq_begin(st_led_seq_t seq)
 }
 
 
-/* THE POWER TIMER'S ENTIRE STATE. Declared here because the countdown reads
- * it and this file's readers come first; the rule, both thresholds and the
- * debounce live in st_pwr_hold.h, and power_hold_service() below is the ONLY
- * writer. */
-static st_pwr_hold_t s_pwr_hold;
-
-/* THE FADERS' STATE. The detector itself lives in st_pwr_hold.c, where it is
- * host-tested -- see that header for why it is a per-sample DELTA and what the
- * displacement version it replaces got wrong (a fader moved with FUNCTION up
- * stranded 19.7 s of "in use", making a 5.000 s hold take 24.7 s). */
-static st_pwr_fader_t s_pwr_fader;
-static uint8_t        s_fader_rr;
+/* THE POWER SYSTEM'S ENTIRE STATE -- the timer, the fader baselines and the
+ * FUNCTION edge, in one object owned by st_pwr_hold.c. Declared here because
+ * the countdown reads it and this file's readers come first;
+ * power_hold_service() below is the ONLY writer, and it writes only by handing
+ * the object to st_pwr_service(). */
+static st_pwr_t s_pwr;
+static uint8_t  s_fader_rr;
 
 static void led_service(void)
 {
@@ -9172,84 +9181,62 @@ static void power_off(void)
  * measured-good baseline performs during ordinary play, and a third of what
  * st55 did. After st55 that is not a detail.
  */
-static bool fader_activity_poll(int64_t now_ms)
-{
-	const uint8_t fi = s_fader_rr;
-	const int fv = ladder_read(&adc_ladder[LAD_FADER0 + fi]);
-
-	s_fader_rr = (uint8_t)((fi + 1u) & (NTRK - 1u));
-	return st_pwr_fader_sample(&s_pwr_fader, fi, (int32_t)fv, now_ms);
-}
-
 /*
  * ======================================================================
- * THE POWER TIMER'S ONE CALLER
+ * THE POWER TRANSACTION'S ONLY CALLER -- I/O, AND NOTHING ELSE
  * ======================================================================
- * st_pwr_hold.h owns the rule, both thresholds and the debounce. This is the
- * only wiring, and its whole job is to answer one question honestly:
+ * Every decision lives in st_pwr_service() (st_pwr_hold.c), which is pure and
+ * host-tested end to end, including the failure-injection suite. What remains
+ * here is four reads and one call:
  *
- *     is any physical control other than FUNCTION being used right now?
+ *   pwr_pressed()   FUNCTION, one GPIO register read. No ADC, and NOT on the
+ *                   shared BTN_COM rail that produced st55's phantom solo.
+ *   ain0_active     the SETTLED PLAY/Track state st_ladder already computed
+ *                   from this pass's own reading. No extra conversion.
+ *   ain1            the decoded VOL / rocker / FX-chord band from this pass's
+ *                   own reading. No extra conversion.
+ *   one fader       round-robin, ONE ladder_read(), and only while FUNCTION is
+ *                   down -- during which the ordinary round-robin fader read
+ *                   never runs (the FUNCTION branch ends every path in
+ *                   `continue`). So the pass performs exactly three
+ *                   ladder_read() calls whether FUNCTION is held or not: the
+ *                   count the measured-good baseline performs during ordinary
+ *                   play, and a third of what st55 did.
  *
- * THE MAP, and it is a map rather than a convenient subset. An earlier version
- * of this took settled AIN0 only and excluded AIN1 "because it is noisy". That
- * defined a safety rule by what happened to be easy to sample, and FUNCTION +
- * rocker is a real performance interaction -- a timer that could not see the
- * rocker would shut the device down underneath one.
- *
- *   AIN0     PLAY + Track 1..4         st_ladder's SETTLED mask/play, already
- *                                      debounced over three agreeing reads
- *                                      against measured bands, ticked at the
- *                                      top of this same pass. No extra read.
- *   AIN1     VOL up/down, rocker       st_vol_decode() of the pass's own
- *            FWD/RWD, the FX chord     reading. Raw here; st_pwr_hold_tick()
- *                                      settles it. No extra read.
- *   AIN3/6/2/7  four faders            MOVEMENT, above.
- *
- * CALLED UNCONDITIONALLY, ONCE PER PASS, ABOVE EVERY DISPATCHER. It is not
- * inside the FUNCTION branch, not inside any `if`, and not
- * reachable-only-when-some-flag-is-clear, which is precisely what st55 turned
- * out to depend on.
+ * THIS FUNCTION DECIDES NOTHING, AND CANNOT. st_pwr_in_t has no field a
+ * feature could set, there is no branch here that could gate the call, and no
+ * dispatcher state is in scope. It is this small because the last version was
+ * not, and the part that was not pure was the part that was wrong: a fader
+ * baseline surviving across holds turned the 5.000 s guarantee into 24.7 s,
+ * through three commits and two green CI runs.
  *
  * Returns the elapsed clean FUNCTION-only hold so the countdown reads the SAME
- * value that decides the shutdown -- one timer, never a second clock.
- *
- * `g_stem_ctl_out` is not read here and must never be. CI asserts that about
- * this function and about its call site.
+ * value that fires the shutdown.
  */
 static int64_t power_hold_service(bool ain0_active, enum vol_btn ain1)
 {
-	static bool s_fn_prev;
-	const bool fn = pwr_pressed();
-	const int64_t now = k_uptime_get();   /* ONE clock read for the pass */
-	bool other;
-	int64_t elapsed;
+	st_pwr_in_t in;
+	st_pwr_out_t out;
 
-	/*
-	 * THE RISING EDGE FORGETS EVERY FADER, and this line is the whole of a
-	 * fix worth stating rather than burying. The poll only runs while
-	 * FUNCTION is down, so without this the detector's memory of where each
-	 * fader sat dates from the LAST hold -- and an ordinary volume change
-	 * made in between reads as movement the moment FUNCTION is pressed
-	 * again. With the displacement detector this file used to carry, a
-	 * 500 -> 3000 fader move stranded 19.7 s of "in use" and turned the
-	 * 5.000 s hold into 24.7 s: the safety invariant broken by stale state,
-	 * which is exactly st55's failure in different clothes.
-	 *
-	 * Only movement DURING this hold may delay this hold.
-	 */
-	if (fn && !s_fn_prev) {
-		st_pwr_fader_reset(&s_pwr_fader);
+	memset(&in, 0, sizeof(in));
+	in.fn_down     = pwr_pressed();
+	in.ain0_active = ain0_active;
+	in.ain1_active = (ain1 != VOL_NONE);
+	in.now_ms      = k_uptime_get();
+	in.fader_raw   = -1;
+	if (in.fn_down) {
+		in.fader_idx = s_fader_rr;
+		in.fader_raw =
+			(int32_t)ladder_read(&adc_ladder[LAD_FADER0 + s_fader_rr]);
+		s_fader_rr = (uint8_t)((s_fader_rr + 1u) & (NTRK - 1u));
 	}
-	s_fn_prev = fn;
 
-	other = ain0_active || (ain1 != VOL_NONE) ||
-		 (fn && fader_activity_poll(now));
-	elapsed = st_pwr_hold_tick(&s_pwr_hold, fn, other, now);
+	st_pwr_service(&s_pwr, &in, &out);
 
-	if (st_pwr_hold_off_due(elapsed)) {
+	if (out.off_due) {
 		power_off();                 /* never returns */
 	}
-	return elapsed;
+	return out.elapsed_ms;
 }
 
 /* STEM TAPE: enter_dfu() -- the Tape Looper's in-firmware "hold Track1+Track4
@@ -9460,7 +9447,46 @@ int main(void)
 	 * A power-button wake or watchdog recovery skips straight to full boot —
 	 * and even if the bootloader scrubs RESETREAS, the user waking the device
 	 * is already holding the button, so the hold path turns it on anyway. */
-	if (!(wake_reas & (POWER_RESETREAS_OFF_Msk | POWER_RESETREAS_DOG_Msk)) &&
+	/*
+	 * ---- THE POWER-ON GATE, AND WHAT IS EXEMPT FROM IT -----------------
+	 *
+	 * A POWER-BUTTON WAKE NOW GOES THROUGH THE GATE TOO. It used to be
+	 * excluded -- POWER_RESETREAS_OFF_Msk skipped straight to a full boot,
+	 * so a single accidental FUNCTION press in a pocket, bag or case woke
+	 * the chip and booted the instrument with no hold at all. Device-owner
+	 * ruling: that is not acceptable, and both entry paths must expose the
+	 * one behaviour:
+	 *
+	 *     OFF  ->  FUNCTION only, continuously, 2.000 s  ->  ON
+	 *
+	 * Below, that is enforced by the SAME st_pwr_service() the shutdown
+	 * uses, on the same st_pwr_t, at the lower of its two thresholds. A
+	 * release or any other intentional control before 2.000 s resets the
+	 * transaction completely; on battery with the button up the loop then
+	 * SYSTEM_OFFs again, which is what "did not hold long enough" means.
+	 *
+	 * WHAT REMAINS EXEMPT, deliberately:
+	 *
+	 *   DOG   a watchdog recovery must come back up on its own. Requiring a
+	 *         human to hold a button after a crash would leave a wedged
+	 *         device dark until someone noticed it.
+	 *   a valid fault breadcrumb -- same reason, plus the battery-idle path
+	 *         below would SYSTEM_OFF and wipe the forensics.
+	 *
+	 * AND ONE HONEST UNCERTAINTY. The comment this replaces observed that
+	 * the bootloader may scrub RESETREAS, in which case an OFF wake already
+	 * arrived here with neither bit set and already took the hold path. If
+	 * that is what this unit's bootloader does, this change alters nothing
+	 * on the wake path and only the 600 ms -> 2.000 s threshold moves. Which
+	 * of the two is happening cannot be determined from this source, and is
+	 * on the hardware acceptance list rather than asserted here.
+	 *
+	 * THE BOOTLOADER RECOVERY PATH IS UNTOUCHED AND UNTOUCHABLE by any of
+	 * this: SP-1 off, hold Track 1 + Track 4, insert USB. That scan runs in
+	 * the bootloader image before this firmware is entered at all, so no
+	 * application state -- including a broken power gate -- can reach it.
+	 */
+	if (!(wake_reas & POWER_RESETREAS_DOG_Msk) &&
 	    g_last_fault_reason == 0xFFFFFFFFu) {
 		/* (a valid fault breadcrumb also skips standby: the user was
 		 * mid-session, and the battery standby path would SYSTEM_OFF and
@@ -9496,38 +9522,53 @@ int main(void)
 			{
 				/* STANDBY HAS ITS OWN LADDER STATE, and must:
 				 * main()'s fx_track_ladder is declared far below
-				 * this loop, for the running instrument. Reusing
-				 * it here would not compile, and sharing one
-				 * across two phases would carry a settled mask
-				 * from standby into the first passes of play. */
+				 * this loop, for the running instrument. Sharing
+				 * one would carry a settled mask out of standby
+				 * into the first passes of play. */
 				static st_ladder_t on_ladder;
 				static bool on_ladder_seeded;
 				const int on_trk = ladder_read(&adc_ladder[LAD_TRACKS]);
 				const int on_vol = ladder_read(&adc_ladder[LAD_VOL]);
-				bool on_other;
-				int64_t on_ms;
+				st_pwr_in_t in;
+				st_pwr_out_t out;
 
 				if (!on_ladder_seeded) {
 					st_ladder_reset(&on_ladder);
 					on_ladder_seeded = true;
 				}
 				st_ladder_update(&on_ladder, on_trk);
-				on_other = st_ladder_mask(&on_ladder) != 0u ||
-					    st_ladder_play(&on_ladder) ||
-					    st_vol_decode(on_vol) != VOL_NONE;
-				on_ms = st_pwr_hold_tick(&s_pwr_hold, pwr_pressed(),
-							  on_other, k_uptime_get());
-				if (st_pwr_hold_on_due(on_ms)) {
-					/* THE TIMER IS RESET ON THE WAY OUT, and it
-					 * has to be: the player is still holding
+
+				/* THE SAME SERVICE, THE SAME TRANSACTION RULE,
+				 * the lower threshold. Faders are not sampled
+				 * here -- in standby the audio path is not
+				 * running and the round-robin that would feed
+				 * them has not started, so fader_raw stays -1
+				 * and st_pwr_service() treats every fader as
+				 * unseeded. The rocker, VOL, PLAY and the Track
+				 * buttons are all live, which is what the
+				 * contract requires of the ON hold. */
+				memset(&in, 0, sizeof(in));
+				in.fn_down     = pwr_pressed();
+				in.ain0_active = st_ladder_mask(&on_ladder) != 0u ||
+						  st_ladder_play(&on_ladder);
+				in.ain1_active = st_vol_decode(on_vol) != VOL_NONE;
+				in.fader_raw   = -1;
+				in.now_ms      = k_uptime_get();
+				st_pwr_service(&s_pwr, &in, &out);
+
+				if (out.on_due) {
+					/* THE TRANSACTION IS CLOSED ON THE WAY
+					 * OUT. The player is still holding
 					 * FUNCTION as the device comes up, and a
-					 * timer carried into the main loop would
-					 * reach ST_PWR_OFF_MS a few seconds later
-					 * and switch off what it just switched on. */
-					st_pwr_hold_reset(&s_pwr_hold);
+					 * transaction carried into the main loop
+					 * would reach ST_PWR_OFF_MS a few seconds
+					 * later and switch off what it just
+					 * switched on. The next rising edge
+					 * starts a fresh one. */
+					st_pwr_reset(&s_pwr);
 					break;                    /* -> full power-on */
 				}
-				if (on_ms > 0) {
+				if (out.elapsed_ms > 0) {
 					led_on(0);                /* press feedback */
 					hold_t = 0;               /* "a hold is running" */
 				} else {
@@ -10310,7 +10351,7 @@ int main(void)
 			 * LED change and does not belong in a safety commit. */
 			{
 				const int64_t hold_ms =
-					st_pwr_hold_elapsed_ms(&s_pwr_hold,
+					st_pwr_hold_elapsed_ms(&s_pwr.hold,
 								k_uptime_get());
 
 				/* Only once it is clearly a hold, so a quick tap

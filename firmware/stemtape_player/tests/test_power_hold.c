@@ -658,6 +658,380 @@ static void test_a_failed_adc_read_is_not_movement(void)
 	      "GOOD reading, not against the error");
 }
 
+/* ======================================================================
+ * THE TRANSACTION, AND THE FAILURE-INJECTION SUITE
+ * ======================================================================
+ * Everything above drives the timer. Everything below drives the SERVICE --
+ * the complete decision that sits immediately before power_off(), with only
+ * I/O left outside it. That distinction is the point: the 24.7 s defect
+ * survived three commits and two green CI runs because the timer had tests and
+ * the glue did not.
+ *
+ * Each case below recreates a class of stale state that has already fooled
+ * this project, and each must end in one of exactly TWO outcomes:
+ *
+ *   1. a clean uninterrupted FUNCTION-only hold succeeds at its exact
+ *      deadline, or
+ *   2. genuine concurrent physical activity resets the transaction completely
+ *
+ * No stale software state may produce a third.
+ */
+
+#define FADER_POLL_MS 32   /* one fader per four ~8 ms control passes */
+
+typedef struct {
+	st_pwr_t p;
+	int64_t  now;
+	uint8_t  rr;
+	int32_t  fader_pos[ST_PWR_FADERS];
+} svc_t;
+
+static void svc_init(svc_t *s)
+{
+	uint32_t k;
+
+	memset(s, 0, sizeof(*s));
+	st_pwr_reset(&s->p);
+	s->now = 100000;
+	for (k = 0; k < ST_PWR_FADERS; k++) {
+		s->fader_pos[k] = 2000;   /* mid-travel, resting */
+	}
+}
+
+/*
+ * Run `ms` of control passes at the REAL 8 ms cadence, round-robining the
+ * faders exactly as main.c does. Returns the `now` at which off_due first
+ * appeared, or -1.
+ */
+static int64_t svc_run(svc_t *s, bool fn, bool ain0, bool ain1, int64_t ms)
+{
+	const int64_t end = s->now + ms;
+	int64_t off_at = -1;
+	int pass = 0;
+
+	while (s->now < end) {
+		st_pwr_in_t in;
+		st_pwr_out_t out;
+
+		memset(&in, 0, sizeof(in));
+		in.fn_down     = fn;
+		in.ain0_active = ain0;
+		in.ain1_active = ain1;
+		in.now_ms      = s->now;
+		in.fader_raw   = -1;
+		if (fn && (pass % 4) == 0) {
+			in.fader_idx = s->rr;
+			in.fader_raw = s->fader_pos[s->rr];
+			s->rr = (uint8_t)((s->rr + 1u) & (ST_PWR_FADERS - 1u));
+		}
+		st_pwr_service(&s->p, &in, &out);
+		if (off_at < 0 && out.off_due) {
+			off_at = s->now;
+		}
+		s->now += 8;
+		pass++;
+	}
+	return off_at;
+}
+
+/* ---- F1: a fader moved BEFORE the transaction ------------------------- */
+static void test_F1_a_fader_moved_before_function_went_down(void)
+{
+	svc_t s;
+	int64_t start, off_at;
+
+	svc_init(&s);
+	/* The user slid every fader to a new position with FUNCTION UP. The
+	 * service never saw it, and must not care. */
+	s.fader_pos[0] = 3600;
+	s.fader_pos[1] = 120;
+	s.fader_pos[2] = 3000;
+	s.fader_pos[3] = 500;
+
+	start = s.now;
+	off_at = svc_run(&s, true, false, false, ST_PWR_OFF_MS + 200);
+	CHECK(off_at >= 0 && off_at - start < ST_PWR_OFF_MS + 16,
+	      "F1. four faders moved before FUNCTION went down: still off at "
+	      "%lld ms (the displacement detector took 24,700)",
+	      (long long)(off_at - start));
+}
+
+/* ---- F2: stale ladder state at the rising edge ------------------------ */
+static void test_F2_a_control_active_at_the_rising_edge(void)
+{
+	svc_t s;
+	int64_t released_at, off_at;
+
+	svc_init(&s);
+	/* PLAY is already down when FUNCTION goes down. */
+	(void)svc_run(&s, true, true, false, 1500);
+	released_at = s.now;
+	off_at = svc_run(&s, true, false, false, ST_PWR_OFF_MS + 200);
+
+	CHECK(off_at >= 0, "F2. a control active at the rising edge: still "
+	      "powers off once it is released");
+	CHECK(off_at - released_at >= ST_PWR_OFF_MS,
+	      "F2. ...after a FULL fresh %d ms (%lld), not counting the 1.5 s "
+	      "the chord occupied", ST_PWR_OFF_MS,
+	      (long long)(off_at - released_at));
+}
+
+/* ---- F3: a control released while FUNCTION stays held ----------------- */
+static void test_F3_control_released_mid_hold(void)
+{
+	svc_t s;
+	int64_t released_at, off_at;
+
+	svc_init(&s);
+	(void)svc_run(&s, true, false, false, 4900);   /* nearly there */
+	(void)svc_run(&s, true, true, false, 300);     /* PLAY pressed */
+	released_at = s.now;
+	off_at = svc_run(&s, true, false, false, ST_PWR_OFF_MS + 200);
+
+	CHECK(off_at >= 0 && off_at - released_at >= ST_PWR_OFF_MS,
+	      "F3. a control released mid-hold restarts the transaction: a "
+	      "full %d ms after the release, the 4.9 s NOT banked",
+	      ST_PWR_OFF_MS);
+}
+
+/* ---- F4: repeated interruption near the deadline ---------------------- */
+static void test_F4_repeated_interruption_near_the_deadline(void)
+{
+	svc_t s;
+	int64_t off_at = -1;
+	int i;
+
+	svc_init(&s);
+	/* Twenty times: get to 4.9 s, then touch a Track for 100 ms. */
+	for (i = 0; i < 20 && off_at < 0; i++) {
+		off_at = svc_run(&s, true, false, false, 4900);
+		if (off_at < 0) {
+			off_at = svc_run(&s, true, true, false, 100);
+		}
+	}
+	CHECK(off_at < 0,
+	      "F4. twenty interruptions at 4.9 s never accumulate to a "
+	      "shutdown -- 98 s of FUNCTION down, no power-off");
+
+	/* And the moment the interruptions stop, it works. */
+	off_at = svc_run(&s, true, false, false, ST_PWR_OFF_MS + 200);
+	CHECK(off_at >= 0, "F4. ...and it powers off as soon as they stop");
+}
+
+/* ---- F5: repeated short taps must never accumulate -------------------- */
+static void test_F5_repeated_taps_never_accumulate(void)
+{
+	svc_t s;
+	int64_t off_at = -1;
+	int i;
+
+	svc_init(&s);
+	for (i = 0; i < 40 && off_at < 0; i++) {
+		off_at = svc_run(&s, true, false, false, 400);   /* tap */
+		if (off_at < 0) {
+			off_at = svc_run(&s, false, false, false, 100);
+		}
+	}
+	CHECK(off_at < 0,
+	      "F5. forty 400 ms taps (16 s of FUNCTION down) never accumulate "
+	      "toward %d ms", ST_PWR_OFF_MS);
+}
+
+/* ---- F6: a single-sample phantom cannot reset ------------------------- */
+static void test_F6_a_phantom_single_sample_does_not_reset(void)
+{
+	svc_t s;
+	st_pwr_in_t in;
+	st_pwr_out_t out;
+	int64_t before;
+
+	svc_init(&s);
+	(void)svc_run(&s, true, false, false, 4900);
+	before = s.p.hold.since_ms;
+
+	/* ONE pass with a phantom Track press, then back to quiet. */
+	memset(&in, 0, sizeof(in));
+	in.fn_down = true; in.ain0_active = true; in.fader_raw = -1;
+	in.now_ms = s.now;
+	st_pwr_service(&s.p, &in, &out);
+	s.now += 8;
+
+	CHECK(s.p.hold.since_ms == before,
+	      "F6. a single phantom sample at 4.9 s does not reset the "
+	      "transaction (%u agreeing passes are required)",
+	      ST_PWR_SETTLE_PASSES);
+	CHECK(svc_run(&s, true, false, false, 200) >= 0,
+	      "F6. ...and the hold completes on time despite it");
+}
+
+/* ---- F7: sub-threshold fader noise for the whole hold ----------------- */
+static void test_F7_subthreshold_fader_noise_never_blocks(void)
+{
+	svc_t s;
+	int64_t start, off_at;
+	int pass = 0;
+	const int64_t end_at = 100000 + ST_PWR_OFF_MS + 400;
+
+	svc_init(&s);
+	start = s.now;
+	off_at = -1;
+	while (s.now < end_at && off_at < 0) {
+		st_pwr_in_t in;
+		st_pwr_out_t out;
+
+		memset(&in, 0, sizeof(in));
+		in.fn_down = true;
+		in.now_ms  = s.now;
+		in.fader_raw = -1;
+		if ((pass % 4) == 0) {
+			/* jitter one count under the threshold, alternating */
+			in.fader_idx = s.rr;
+			in.fader_raw = 2000 + ((pass & 8) ? 1 : -1) *
+					(ST_PWR_FADER_MOVE_COUNTS - 1);
+			s.rr = (uint8_t)((s.rr + 1u) & (ST_PWR_FADERS - 1u));
+		}
+		st_pwr_service(&s.p, &in, &out);
+		if (out.off_due) {
+			off_at = s.now;
+		}
+		s.now += 8;
+		pass++;
+	}
+	CHECK(off_at >= 0 && off_at - start < ST_PWR_OFF_MS + 16,
+	      "F7. sub-threshold fader jitter for the whole hold never delays "
+	      "it (off at %lld ms)", (long long)(off_at - start));
+}
+
+/* ---- F8: above-threshold intentional fader activity DOES block -------- */
+static void test_F8_real_fader_movement_blocks_and_then_releases(void)
+{
+	svc_t s;
+	int64_t off_at, stopped_at;
+	int pass = 0;
+
+	svc_init(&s);
+	/* A hand sweeping fader 0 for 8 s while FUNCTION is held. */
+	off_at = -1;
+	while (pass < 8000 / 8 && off_at < 0) {
+		st_pwr_in_t in;
+		st_pwr_out_t out;
+
+		memset(&in, 0, sizeof(in));
+		in.fn_down = true;
+		in.now_ms  = s.now;
+		in.fader_raw = -1;
+		if ((pass % 4) == 0) {
+			s.fader_pos[0] += 40;      /* > threshold per poll */
+			if (s.fader_pos[0] > 3600) {
+				s.fader_pos[0] = 200;
+			}
+			in.fader_idx = 0;
+			in.fader_raw = s.fader_pos[0];
+		}
+		st_pwr_service(&s.p, &in, &out);
+		if (out.off_due) {
+			off_at = s.now;
+		}
+		s.now += 8;
+		pass++;
+	}
+	CHECK(off_at < 0,
+	      "F8. a fader swept for 8 s while FUNCTION is held never powers "
+	      "off");
+
+	stopped_at = s.now;
+	off_at = svc_run(&s, true, false, false, ST_PWR_OFF_MS + 400);
+	CHECK(off_at >= 0 && off_at - stopped_at >= ST_PWR_OFF_MS,
+	      "F8. ...and a full fresh %d ms is required after the hand stops",
+	      ST_PWR_OFF_MS);
+}
+
+/* ---- F9: the transaction forgets, structurally ------------------------ */
+static void test_F9_the_rising_edge_forgets_everything(void)
+{
+	svc_t s;
+	st_pwr_in_t in;
+	st_pwr_out_t out;
+
+	svc_init(&s);
+	/* Build up settled "other active" state and fader baselines. */
+	(void)svc_run(&s, true, true, true, 1000);
+	CHECK(s.p.hold.other_active,
+	      "F9. the settled verdict is ACTIVE before the release");
+
+	/* FUNCTION released, then pressed again: the rising edge. */
+	(void)svc_run(&s, false, true, true, 100);
+	memset(&in, 0, sizeof(in));
+	in.fn_down = true; in.fader_raw = -1; in.now_ms = s.now;
+	st_pwr_service(&s.p, &in, &out);
+
+	CHECK(out.began, "F9. the rising edge is reported as a new transaction");
+	CHECK(!s.p.hold.other_active && s.p.hold.cand_n == 0u,
+	      "F9. ...the settled verdict and its candidate are forgotten");
+	CHECK(s.p.fader.moved_ms == 0 &&
+	      s.p.fader.last[0] == ST_PWR_FADER_UNSEEDED &&
+	      s.p.fader.last[1] == ST_PWR_FADER_UNSEEDED &&
+	      s.p.fader.last[2] == ST_PWR_FADER_UNSEEDED &&
+	      s.p.fader.last[3] == ST_PWR_FADER_UNSEEDED,
+	      "F9. ...and every fader baseline is dropped");
+	CHECK(out.elapsed_ms == 0,
+	      "F9. ...and elapsed starts at zero");
+}
+
+/* ---- F10: the ON threshold, through the service ----------------------- */
+static void test_F10_the_on_threshold_through_the_service(void)
+{
+	svc_t s;
+	st_pwr_in_t in;
+	st_pwr_out_t out;
+	int64_t start, on_at = -1;
+
+	svc_init(&s);
+	start = s.now;
+	while (s.now < start + ST_PWR_ON_MS + 100 && on_at < 0) {
+		memset(&in, 0, sizeof(in));
+		in.fn_down = true; in.fader_raw = -1; in.now_ms = s.now;
+		st_pwr_service(&s.p, &in, &out);
+		if (out.on_due) {
+			on_at = s.now;
+		}
+		s.now += 8;
+	}
+	CHECK(on_at >= 0 && on_at - start >= ST_PWR_ON_MS &&
+	      on_at - start < ST_PWR_ON_MS + 8,
+	      "F10. ON is due at %lld ms, first pass at or past %d",
+	      (long long)(on_at - start), ST_PWR_ON_MS);
+}
+
+/* ---- F11: an ADC failure is not activity ------------------------------ */
+static void test_F11_adc_failure_is_not_activity(void)
+{
+	svc_t s;
+	st_pwr_in_t in;
+	st_pwr_out_t out;
+	int64_t start, off_at = -1;
+	int pass = 0;
+
+	svc_init(&s);
+	start = s.now;
+	while (s.now < start + ST_PWR_OFF_MS + 200 && off_at < 0) {
+		memset(&in, 0, sizeof(in));
+		in.fn_down = true;
+		in.now_ms  = s.now;
+		/* EVERY fader read fails. */
+		in.fader_raw = ((pass % 4) == 0) ? -1 : -1;
+		in.fader_idx = s.rr;
+		st_pwr_service(&s.p, &in, &out);
+		if (out.off_due) {
+			off_at = s.now;
+		}
+		s.now += 8;
+		pass++;
+	}
+	CHECK(off_at >= 0 && off_at - start < ST_PWR_OFF_MS + 16,
+	      "F11. an ADC that fails every read does not block the hold");
+}
+
 int main(void)
 {
 	printf("power contract -- ON %d ms, OFF %d ms, settle %u passes, "
@@ -686,6 +1060,17 @@ int main(void)
 	RUN(test_the_hand_leaving_a_fader_is_forgotten_promptly);
 	RUN(test_fader_noise_below_the_threshold_is_not_movement);
 	RUN(test_a_failed_adc_read_is_not_movement);
+	RUN(test_F1_a_fader_moved_before_function_went_down);
+	RUN(test_F2_a_control_active_at_the_rising_edge);
+	RUN(test_F3_control_released_mid_hold);
+	RUN(test_F4_repeated_interruption_near_the_deadline);
+	RUN(test_F5_repeated_taps_never_accumulate);
+	RUN(test_F6_a_phantom_single_sample_does_not_reset);
+	RUN(test_F7_subthreshold_fader_noise_never_blocks);
+	RUN(test_F8_real_fader_movement_blocks_and_then_releases);
+	RUN(test_F9_the_rising_edge_forgets_everything);
+	RUN(test_F10_the_on_threshold_through_the_service);
+	RUN(test_F11_adc_failure_is_not_activity);
 
 	printf("\n%d cases, %d checks, %d failures\n", g_cases, g_checks, g_failures);
 	return g_failures ? 1 : 0;

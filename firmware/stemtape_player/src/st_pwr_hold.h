@@ -251,4 +251,81 @@ _Static_assert(ST_PWR_ON_MS < ST_PWR_OFF_MS,
 	       "would always reach the off threshold too");
 #endif
 
+/*
+ * ======================================================================
+ * THE TRANSACTION -- one call, every decision, nothing platform-bound
+ * ======================================================================
+ *
+ *     A POWER HOLD IS A SELF-CONTAINED PHYSICAL TRANSACTION.
+ *     NOTHING THAT HAPPENED BEFORE FUNCTION WENT DOWN MAY INFLUENCE IT.
+ *
+ * On the RISING EDGE of FUNCTION the transaction begins, and beginning it
+ * means forgetting: elapsed goes to zero, the settled "other control" verdict
+ * and its candidate are cleared, and every fader baseline is dropped so the
+ * next sample of each re-seeds. No ladder history, no fader displacement, no
+ * feature flag, no combo, no gesture ownership, no dispatcher state and no
+ * transport state can reach across that edge.
+ *
+ * DURING the transaction, three things and only three can happen:
+ *   FUNCTION released                      -> elapsed = 0
+ *   intentional other physical activity    -> elapsed = 0
+ *   otherwise                              -> elapsed advances monotonically
+ *
+ * WHY THIS LAYER EXISTS AT ALL, stated plainly because it is a correction.
+ * The timer had 62 host checks and was right; the GLUE that fed it had none
+ * and was wrong. A fader detector living in main.c kept a slowly-chasing
+ * reference that was only updated while FUNCTION was held, so an ordinary
+ * volume change made with FUNCTION UP stranded 19.7 s of "fader in use" and
+ * turned the 5.000 s hold into 24.7 s. Three commits and two green CI runs
+ * carried that defect, because "green CI" was evidence about the tested half.
+ *
+ * So the whole decision moved here. What remains in main.c is I/O and nothing
+ * else: read a GPIO, read a ladder, read the clock, call power_off(). Every
+ * branch that DECIDES anything is below, is pure, and is driven end to end by
+ * tests/test_power_hold.c.
+ */
+
+/* One control pass, as the caller observed it. Everything the decision needs
+ * and nothing it does not -- there is no field here a feature could set. */
+typedef struct {
+	bool    fn_down;      /* FUNCTION, straight off its own GPIO */
+	bool    ain0_active;  /* SETTLED PLAY/Track state (st_ladder) */
+	bool    ain1_active;  /* decoded VOL/rocker/FX chord != none */
+	int32_t fader_raw;    /* this pass's round-robin fader reading, <0 = none */
+	uint8_t fader_idx;    /* which fader that reading belongs to */
+	int64_t now_ms;       /* monotonic milliseconds */
+} st_pwr_in_t;
+
+/* What the pass decided. The caller's ONLY correct response to on_due/off_due
+ * is to perform that transition immediately, without consulting anything. */
+typedef struct {
+	int64_t elapsed_ms;    /* the one authoritative timer, for the countdown */
+	bool    on_due;        /* elapsed >= ST_PWR_ON_MS  */
+	bool    off_due;       /* elapsed >= ST_PWR_OFF_MS */
+	bool    other_active;  /* the settled verdict, for tests and diagnostics */
+	bool    began;         /* this pass was the rising edge -- a transaction
+				* started and everything was forgotten */
+} st_pwr_out_t;
+
+/* The whole power system's state: the timer, the faders, and the edge. */
+typedef struct {
+	st_pwr_hold_t  hold;
+	st_pwr_fader_t fader;
+	bool           fn_prev;
+} st_pwr_t;
+
+/* Cold state. No transaction, nothing settled, no fader baselines. */
+void st_pwr_reset(st_pwr_t *p);
+
+/*
+ * ONE PASS, ONE DECISION. Pure: no Zephyr, no GPIO, no ADC, no clock of its
+ * own, no allocation, bounded time. `out` is fully written every call.
+ *
+ * There is no parameter through which feature code could provide, modify,
+ * suppress, consume, reset or otherwise influence this decision -- st_pwr_in_t
+ * has no such field, and adding one would be a visible change to a struct this
+ * header documents as the safety boundary.
+ */
+void st_pwr_service(st_pwr_t *p, const st_pwr_in_t *in, st_pwr_out_t *out);
+
 #endif /* STEMTAPE_PLAYER_PWR_HOLD_H_ */
