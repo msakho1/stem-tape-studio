@@ -430,6 +430,126 @@ export function sampleBrightness(c: Candidate, t: number, index: number): number
   }
 }
 
+// ---------------------------------------------------------- modifiers ------
+
+/** Loop accent duty — the fraction of a loop cycle the wrap tick occupies. */
+const LOOP_TICK = 0.14;
+const MUTE_CEILING = BRIGHT_TAIL; // hot source audio can never look "active"
+const NON_SOLO_SCALE = 0.32;
+const SOLO_SCALE = 1.35;
+
+function cyclePhase(m: LedModifier, t: number, fallbackPeriod: number): number {
+  if (m.phase != null) return ((m.phase % 1) + 1) % 1; // real audio wrap anchor
+  const p = m.periodMs || fallbackPeriod;
+  return (t % p) / p;
+}
+
+/**
+ * Composition, not arbitration. Each persistent state SHAPES the winning base
+ * layer instead of replacing it, so loop + reverse + FX + slow all remain
+ * readable at once.
+ */
+export function applyModifiers(base: number, mods: readonly LedModifier[], t: number): number {
+  let v = base;
+  for (const m of mods) {
+    switch (m.kind) {
+      case "mute":
+        // Strongly suppressed but still present: reads as muted, never active.
+        v = Math.min(MUTE_CEILING, Math.round(v * 0.16));
+        break;
+      case "solo":
+        // Emphasis WITHOUT flattening: the meter still moves underneath.
+        v = Math.round(Math.min(BRIGHT_FULL, Math.max(v, BRIGHT_DIM) * SOLO_SCALE));
+        break;
+      case "non-solo":
+        v = Math.round(v * NON_SOLO_SCALE);
+        break;
+      case "loop": {
+        // Wrap tick on the real loop phase when the engine offers one.
+        const ph = cyclePhase(m, t, PERIOD.latchedBlink);
+        v = ph < LOOP_TICK ? Math.max(v, 104) : Math.round(v * 0.82);
+        break;
+      }
+      case "reverse": {
+        // Backwards stutter notch — unique to the reversed lane, and the
+        // stem's own activity keeps modulating between notches.
+        const ph = cyclePhase(m, t, PERIOD.latchedBlink);
+        v = ph >= 0.62 && ph < 0.86 ? Math.round(v * 0.28) : v;
+        break;
+      }
+      case "fx": {
+        // FX presence: a lifted floor plus a shallow ripple. Never a takeover.
+        const ph = cyclePhase(m, t, PERIOD.blink);
+        const ripple = 1 + 0.16 * Math.sin(ph * Math.PI * 2);
+        v = Math.round(Math.max(v, 26) * ripple);
+        break;
+      }
+      case "slow": {
+        // Persistent but subtle: a slow sag, always below the unmodified level.
+        const ph = cyclePhase(m, t, 1600);
+        v = Math.round(v * (0.72 + 0.14 * (1 - Math.cos(ph * Math.PI * 2)) / 2));
+        break;
+      }
+      case "scratch": {
+        // Scratch readiness — the compositor already consumes master and
+        // per-stem scratch flags; the scratch engine only has to set them.
+        const ph = cyclePhase(m, t, 160);
+        v = ph < 0.5 ? Math.min(BRIGHT_FULL, v + 34) : Math.round(v * 0.55);
+        break;
+      }
+    }
+  }
+  return Math.max(0, Math.min(BRIGHT_FULL, Math.round(v)));
+}
+
+/** Modifier keys whose winning base must NOT be reshaped (finite/critical). */
+const UNCOMPOSED: PrecedenceKey[] = [
+  "power",
+  "error",
+  "connectGreeting",
+  "loading",
+  "rejectionFlash",
+  "confirmationFlash",
+  "heads",
+  "scrub",
+];
+
+function anyFxEngaged(s: AuthoritativeSp1LedState): boolean {
+  return s.banks.some((b) => b.latched || b.momentary);
+}
+
+function trackModifiers(s: AuthoritativeSp1LedState, i: number): LedModifier[] {
+  const t = s.tracks[i]!;
+  const mods: LedModifier[] = [];
+  if (!t.loaded) return mods;
+  if (t.muted) mods.push({ kind: "mute" });
+  else if (t.soloed) mods.push({ kind: "solo" });
+  else if (s.anySolo) mods.push({ kind: "non-solo" });
+
+  const looping = s.globalLoop.active || s.globalLoop.latched || t.looping;
+  if (looping) mods.push({ kind: "loop", phase: s.loopPhase, periodMs: loopPeriodFor(s.globalLoop.division) });
+  if (t.reverse) mods.push({ kind: "reverse" });
+  // Authoritative FX state, overlay open or not. Stem-scoped FX only accents
+  // the stem it is actually applied to.
+  if (anyFxEngaged(s) && (s.fxScope === "global" || s.activeStem === i)) mods.push({ kind: "fx" });
+  if (s.slow) mods.push({ kind: "slow" });
+  if (s.scratch.master || t.scratching) mods.push({ kind: "scratch" });
+  return mods;
+}
+
+function sideModifiers(s: AuthoritativeSp1LedState, index: number): LedModifier[] {
+  const mods: LedModifier[] = [];
+  const looping = s.globalLoop.active || s.globalLoop.latched;
+  // The loop keeps its wrap tick on the PLAY-side LED even when an FX bank
+  // owns that LED, so FX can never erase the loop indication.
+  if (looping && index === PLAY_SIDE_INDEX)
+    mods.push({ kind: "loop", phase: s.loopPhase, periodMs: loopPeriodFor(s.globalLoop.division) });
+  if (s.slow && index === PLAY_SIDE_INDEX) mods.push({ kind: "slow" });
+  if (s.scratch.master && index === PLAY_SIDE_INDEX) mods.push({ kind: "scratch" });
+  return mods;
+}
+
+
 function pick(cands: Candidate[]): { win: Candidate; lost: Candidate | null; restore: Candidate | null } {
   const sorted = [...cands].sort((a, b) => PRECEDENCE[b.key] - PRECEDENCE[a.key]);
   const win = sorted[0]!;
