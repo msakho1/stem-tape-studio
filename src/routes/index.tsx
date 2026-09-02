@@ -255,6 +255,21 @@ function LabPage() {
               ▷ {demoBusy ? "loading…" : "try demo"}
             </button>
           </div>
+
+          <nav className="flex w-full items-center gap-6 lg:hidden" aria-label="Site">
+            <span className="st-tab" data-on>
+              instrument
+            </span>
+            <Link to="/device" className="st-tab">
+              uploader
+            </Link>
+            <Link to="/firmware" className="st-tab">
+              firmware
+            </Link>
+            <Link to="/about" className="st-tab">
+              about
+            </Link>
+          </nav>
         </div>
       </header>
 
