@@ -236,7 +236,11 @@
 [data-led-mode] .st-led__core,
 [data-led-mode] .st-led__halo {
   animation: none !important;
+  /* LED Stage 2: the envelope provides the smoothing — a CSS transition here
+     would smear the realtime meter. Scoped to engine-driven LEDs only. */
+  transition: none;
 }
+
 
 [data-led-mode]:not([data-led-mode="off"]) .st-led__halo {
   opacity: 0.35;
