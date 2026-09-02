@@ -1469,6 +1469,39 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Stem Tape ESCAPE HATCH -- a 2.5 s power hold, from every feature state
+        # POSTMORTEM P1 AND P7. st55 made the device impossible to switch off,
+        # and the mechanism was that the 2.5 s timer lived inside a branch a
+        # feature flag guarded -- so the flag did not pause the countdown, it
+        # deleted the variable the countdown was made of.
+        #
+        # src/st_pwr_hold.c is the escape hatch as its own pure module, whose
+        # argument list is the safety property: two physical facts and a clock,
+        # with nowhere to put a feature flag. This step proves the hold fires
+        # from EVERY suppressor st54 actually contains -- both producers of
+        # function_consumed, all three gestures that set combo_seen, the FN+VOL
+        # chord, plus live FX and solo state -- enumerated rather than sampled,
+        # because a test that held FUNCTION from a clean idle state would have
+        # passed on st55 too.
+        #
+        # It also proves the other half of the rule: a chord held down still
+        # never powers off, and releasing it RESTARTS the clock rather than
+        # banking the chord's duration.
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          cc -std=c11 -Wall -Wextra -Ifirmware/stemtape_player/src \
+            firmware/stemtape_player/src/st_pwr_hold.c \
+            firmware/stemtape_player/tests/test_power_hold.c \
+            -o audit/test_power_hold
+          ./audit/test_power_hold | tee audit/power-hold.txt
+          {
+            echo '### Stem Tape escape hatch (power-off from every feature state)'
+            echo '```text'
+            cat audit/power-hold.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Stem Tape INDEPENDENT-HEAD CONTRACT -- measured through the REAL ring
         # THE CONTRACT A HEAD MUST MEET BEFORE SCRATCH IS REBUILT ON IT.
         #

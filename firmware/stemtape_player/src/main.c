@@ -156,10 +156,18 @@
  * session's patience. */
 #define ST_RC_SWEEP_REPS 24u
 
+/* st56: STAGE 0 -- the escape hatch, and nothing else.
+ *
+ * st55 (the scratch series) is burned and its tag is not reused. This build is
+ * st54 plus one safety change: the power-off hold moved out of a feature-gated
+ * branch into its own unconditional module. No head, no residency, no scratch
+ * work is in it -- those are Stage 2 and later, and are deliberately NOT mixed
+ * into a build whose job is to prove the device can always be switched off.
+ * docs/postmortems/2026-09-scratch-series.md sections 3.0 and 4. */
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st54-VOLCAL"
+#define ST_BUILD_TAG "st56-VOLCAL"
 #else
-#define ST_BUILD_TAG "st54"
+#define ST_BUILD_TAG "st56"
 #endif
 #include "st_track_hold.h"
 
@@ -197,6 +205,7 @@ static volatile uint32_t g_diag_window_ms = 500u;
 #include "st_seam.h"
 #include "st_pitch.h"
 #include "st_fnplay.h"
+#include "st_pwr_hold.h"
 #include "st_readcost.h"
 #include "st_stem_meter.h"
 #include "st_inertia.h"
@@ -286,8 +295,13 @@ static bool charging(void);
 #define BQ_NCHG_PIN     22u   /* charge status, open-drain, LOW = charging now      */
 #define BQ_NPGOOD_PIN   24u   /* power good,    open-drain, LOW = USB power present  */
 
-/* hold this long (ms) to power off - "a few seconds" like the real device */
-#define HOLD_MS_TO_OFF  2500
+/* Hold this long (ms) to power off -- "a few seconds" like the real device.
+ *
+ * TAKEN FROM st_pwr_hold.h, not restated. That module owns the escape hatch
+ * and its threshold; this name survives only because the countdown LEDs and
+ * several comments still read better with it. Two definitions of the one
+ * number is exactly how a safety threshold drifts. */
+#define HOLD_MS_TO_OFF  ST_PWR_HOLD_MS
 
 /* ---- button ladders (Milestone 1: read + report the controls) ----
  * The PLAY/track and Vol/FWD/RWD buttons are resistor ladders read on the
@@ -8594,6 +8608,12 @@ static void led_seq_begin(st_led_seq_t seq)
 }
 
 
+/* THE ESCAPE HATCH'S ENTIRE STATE. Declared here because led_service() reads
+ * it (the countdown is its top tier) and led_service() comes first in this
+ * file; the rule and the wiring live in st_pwr_hold.h and in
+ * power_hold_service() below, which is the ONLY writer. */
+static st_pwr_hold_t s_pwr_hold = { ST_PWR_HOLD_IDLE };
+
 static void led_service(void)
 {
 	st_led_inputs_t in;
@@ -9095,6 +9115,47 @@ static void power_off(void)
 	NRF_POWER->SYSTEMOFF = 1u;
 	__DSB();
 	for (;;) { /* CPU is now off; wakes via the bootloader on button press */ }
+}
+
+/*
+ * ======================================================================
+ * THE ESCAPE HATCH, and the one place it is decided
+ * ======================================================================
+ * st_pwr_hold.h owns the rule and the threshold; this is the only wiring.
+ *
+ * CALLED UNCONDITIONALLY, ONCE PER PASS, ABOVE EVERY DISPATCHER. It is not
+ * inside the FUNCTION branch, not inside any `if`, and not reachable-only-when
+ * some flag is clear -- which is precisely what st55 turned out to depend on.
+ * The postmortem's P1 and P2 are this function existing and being called here.
+ *
+ * IT IS HANDED TWO PHYSICAL FACTS AND A CLOCK, and there is nowhere to hand it
+ * anything else:
+ *
+ *   pwr_pressed()   FUNCTION, straight off its own GPIO -- one register read,
+ *                   no ADC, not on the shared BTN_COM rail that produced st55's
+ *                   phantom Vocal solo.
+ *   other_down      the SETTLED AIN0 ladder: any Track bit or PLAY, after
+ *                   st_ladder's three agreeing reads. DEBOUNCED deliberately --
+ *                   tests/test_power_hold.c shows a phantom recurring faster
+ *                   than the threshold WOULD hold the hatch shut, so a raw
+ *                   reading here would reintroduce the class of fault this
+ *                   whole exercise is about.
+ *
+ * AIN1 (VOLUME / the rocker) is deliberately NOT part of `other_down`. It is
+ * the rail whose own comment records spurious jumps from single raw reads, its
+ * only FUNCTION chord (the chop divider) is a tap rather than a hold, and that
+ * divider is classic-only and already a no-op in stem mode. Excluding it keeps
+ * the escape hatch off the noisier of the two ladders entirely.
+ *
+ * `g_stem_ctl_out` is not read here, and must never be. The CI wiring gate
+ * asserts that about this call site.
+ */
+static void power_hold_service(bool other_down)
+{
+	if (st_pwr_hold_tick(&s_pwr_hold, pwr_pressed(), other_down,
+			      k_uptime_get())) {
+		power_off();                 /* never returns */
+	}
 }
 
 /* STEM TAPE: enter_dfu() -- the Tape Looper's in-firmware "hold Track1+Track4
@@ -9650,6 +9711,15 @@ int main(void)
 		 * anything can zero st_trk_raw. See its declaration for why the
 		 * overlay cannot read the dispatcher's mask instead. */
 		st_ladder_update(&fx_track_ladder, st_trk_raw);
+
+		/* ---- THE ESCAPE HATCH RUNS FIRST -----------------------------
+		 * Above st_ctl_service(), above stem_ctl_apply(), above the
+		 * FUNCTION branch, above every `continue` any of them take. The
+		 * settled AIN0 state is already available from the tick just
+		 * above -- no extra conversion, and debounced, which
+		 * test_power_hold.c shows is required rather than merely tidy. */
+		power_hold_service(st_ladder_mask(&fx_track_ladder) != 0u ||
+				    st_ladder_play(&fx_track_ladder));
 #if ST_VOL_CAL
 		/* AIN1 CALIBRATION CAPTURE -- st20-VOLCAL images only. Temporary,
 		 * exactly like the st16-cal build that produced
@@ -10056,18 +10126,64 @@ int main(void)
 				continue;
 			}
 
-			if (held >= HOLD_MS_TO_OFF)
-				power_off();             /* never returns */
+			/* THE SHUTDOWN IS NOT DECIDED HERE ANY MORE.
+			 *
+			 * It moved to power_hold_service(), called
+			 * unconditionally at the top of this pass. This branch is
+			 * feature-gated -- `!g_stem_ctl_out.function_consumed`
+			 * is right there in its condition -- and a
+			 * feature-gated branch is not a place the escape hatch
+			 * may live. That is the whole of postmortem 2.1: nothing
+			 * blocked power_off(), the flag simply deleted the
+			 * variable the countdown was made of, and then fell
+			 * through to the release path with the button still
+			 * down.
+			 *
+			 * `held` survives because the gestures below genuinely
+			 * are this branch's business: the tap-tempo window, the
+			 * grid clear, the FN+PLAY toggle. Those are musical and
+			 * they may be consumed. Shutdown may not.
+			 *
+			 * THE COUNTDOWN STAYS HERE, and is now drawn from the
+			 * ESCAPE HATCH'S OWN CLOCK rather than from press_start.
+			 * The two can disagree -- press_start dates from the
+			 * FUNCTION-down edge whatever else was pressed, while
+			 * the hatch restarts whenever another control is down --
+			 * and a countdown that fills at a different rate from
+			 * the shutdown it predicts is worse than none.
+			 *
+			 * IT IS STILL INSIDE A FEATURE-GATED BRANCH, and that is
+			 * a known, deliberate Stage 0 limitation rather than an
+			 * oversight: a hold whose FUNCTION press some feature
+			 * consumed still powers the device off on time, but
+			 * shows no countdown while doing it. Moving the display
+			 * up would mean led_service() writing pins outside
+			 * led_apply_frame(), which its own wiring gate rejects
+			 * and rightly so -- the countdown belongs in
+			 * st_led_mvp_decide() as a real top tier, which is an
+			 * LED change and does not belong in a safety commit. */
+			{
+				const int64_t hold_ms =
+					st_pwr_hold_elapsed_ms(&s_pwr_hold,
+								k_uptime_get());
 
-			/* show the power-off countdown only once it's clearly a hold, so a
-			 * quick tap (song change) doesn't flash it. Clear BOTH rows so the
-			 * countdown fills cleanly against a dark track row. */
-			if (held > 400) {
-				int lit = (int)((held * NUM_LEDS) / HOLD_MS_TO_OFF) + 1;
-				if (lit > NUM_LEDS) lit = NUM_LEDS;
-				all_off();
-				track_all_off();
-				for (int i = 0; i < lit; i++) led_on(i);
+				/* Only once it is clearly a hold, so a quick tap
+				 * (song change) does not flash it. Clear BOTH
+				 * rows so the countdown fills cleanly against a
+				 * dark track row. */
+				if (hold_ms > 400) {
+					int lit = (int)((hold_ms * NUM_LEDS) /
+							 HOLD_MS_TO_OFF) + 1;
+
+					if (lit > NUM_LEDS) {
+						lit = NUM_LEDS;
+					}
+					all_off();
+					track_all_off();
+					for (int i = 0; i < lit; i++) {
+						led_on(i);
+					}
+				}
 			}
 			k_msleep(25);
 			continue;

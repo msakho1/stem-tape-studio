@@ -450,7 +450,23 @@ REQUIRED_SUBSTRINGS = {
         # FUNCTION ARBITRATION HAPPENS FIRST. The dispatcher runs above the
         # FUNCTION branch, and a press it consumed never reaches that branch
         # -- which is what makes the loop latch reachable at all.
+        #
+        # THIS LINE USED TO BE PINNED AS REQUIRED SOURCE TEXT, and that was a
+        # mistake worth recording rather than quietly deleting. The gate was
+        # written to protect the loop latch; nobody wrote the complementary
+        # gate proving power-off stays reachable. So when st55 made the
+        # shutdown unreachable through exactly this construct, CI stayed
+        # green -- and would have gone RED had the bug been fixed. A gate that
+        # pins an `if` condition is pinning BOTH branches, and both need a
+        # stated owner. See docs/postmortems/2026-09-scratch-series.md 0.3.
+        #
+        # The branch itself still exists and is still feature-gated, which is
+        # correct: what it now guards is musical (tap tempo, the grid clear,
+        # the FN+PLAY toggle) and those MAY be consumed. What it no longer
+        # guards is the shutdown. That is asserted below, by absence.
         "if (pwr_pressed() && !g_stem_ctl_out.function_consumed) {",
+        # THE ESCAPE HATCH IS UNCONDITIONAL, ABOVE EVERY DISPATCHER.
+        "power_hold_service(st_ladder_mask(&fx_track_ladder) != 0u ||",
     ],
     "stem_ctl_apply": [
         # THE PUBLISHED MASK IS WHAT REACHES THE MIXER.
@@ -709,6 +725,81 @@ def main() -> int:
             report.append("- present: led_service() writes no LED mask directly -- it gathers "
                            "state, calls st_led_mvp_decide(), and renders through "
                            "led_apply_frame() alone")
+    report.append("")
+
+    # ---- THE ESCAPE HATCH ----
+    #
+    # THE GATE THAT USED TO BE HERE PROTECTED THE BUG. It required the literal
+    # text `if (pwr_pressed() && !g_stem_ctl_out.function_consumed) {` to
+    # exist, to keep the loop latch reachable, and nobody ever wrote the
+    # complementary check. st55 made shutdown unreachable through exactly that
+    # construct and CI stayed green -- and would have gone red on the fix.
+    # See docs/postmortems/2026-09-scratch-series.md, section 0.3.
+    #
+    # These three checks are that complement. They are stated as ABSENCE and
+    # STRUCTURE rather than as a pinned line, because what must be true is not
+    # "this text exists" but "the shutdown is not reachable-only-when a feature
+    # flag is clear".
+    report.append("### The escape hatch: power-off cannot be taken hostage")
+
+    main_body = substrings_in_function(lines, func_of_line, "main")
+
+    # E-1. The shutdown does not live inside the feature-gated FUNCTION branch.
+    #      That branch opens on the pinned condition above and closes at the
+    #      "just released" test; power_off() must not appear anywhere between.
+    gate_open = "if (pwr_pressed() && !g_stem_ctl_out.function_consumed) {"
+    gate_close = "if (press_start >= 0) {"
+    if gate_open in main_body and gate_close in main_body:
+        a = main_body.index(gate_open)
+        b = main_body.index(gate_close, a)
+        if "power_off()" in main_body[a:b]:
+            report.append("- **MISSING/BAD**: power_off() is called from inside the "
+                           "feature-gated FUNCTION branch. A feature flag can then "
+                           "make the device impossible to switch off, which is "
+                           "exactly what st55 did (postmortem 2.1)")
+            fail = True
+        else:
+            report.append("- present: the feature-gated FUNCTION branch contains no "
+                           "power_off() -- what it still guards is musical (tap tempo, "
+                           "grid clear, the FN+PLAY toggle) and those MAY be consumed")
+    else:
+        report.append("- **MISSING**: could not locate the FUNCTION branch to check "
+                       "it for a shutdown call")
+        fail = True
+
+    # E-2. There IS an unconditional escape hatch, above every dispatcher.
+    if "power_hold_service(" in main_body:
+        idx = main_body.index("power_hold_service(")
+        for later in ("st_ctl_service(&g_stem_ctl", "stem_ctl_apply()", gate_open):
+            if later in main_body and main_body.index(later) < idx:
+                report.append("- **MISSING/BAD**: power_hold_service() is called AFTER "
+                               "`" + later + "` -- the escape hatch must run above every "
+                               "dispatcher, not among them")
+                fail = True
+                break
+        else:
+            report.append("- present: power_hold_service() runs above st_ctl_service(), "
+                           "stem_ctl_apply() and the FUNCTION branch, unconditionally, "
+                           "once per pass")
+    else:
+        report.append("- **MISSING**: no unconditional power_hold_service() call in main()")
+        fail = True
+
+    # E-3. NOTHING FEATURE-SHAPED REACHES IT. The decision function takes two
+    #      physical facts and a clock; if a g_stem_ctl_out field ever appears
+    #      in the service or in its call, the type separation has been undone.
+    svc_body = substrings_in_function(lines, func_of_line, "power_hold_service")
+    if not svc_body:
+        report.append("- **MISSING**: power_hold_service() is not defined")
+        fail = True
+    elif "g_stem_ctl_out" in svc_body or "function_consumed" in svc_body:
+        report.append("- **MISSING/BAD**: power_hold_service() reads dispatcher state. "
+                       "Musical consumption and safety suppression must stay different "
+                       "things (postmortem P2/P5)")
+        fail = True
+    else:
+        report.append("- present: power_hold_service() reads no dispatcher state -- "
+                       "only pwr_pressed(), a debounced ladder fact and the clock")
     report.append("")
 
     # ---- STEM TAPE TRACK-BUTTON PROOF ----
