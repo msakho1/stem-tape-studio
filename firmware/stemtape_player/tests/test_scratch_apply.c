@@ -57,6 +57,27 @@ static atomic_t g_stem_scratch_req =
 static st_stream_t g_stem_stream[ST_PL_STEMS];
 static uint8_t     s_stem_transport;
 
+/* ---- what main.c's LOOP-WRAP block needs, beyond the above ------------ */
+static bool     s_rs_prev_valid[ST_PL_STEMS];
+static uint32_t s_stem_rate_frac[ST_PL_STEMS];
+static uint32_t s_stem_jump_pend;
+#define ST_SEAM_JUMP_WRAP 1u
+static atomic_t g_stem_loop_wraps = ATOMIC_INIT(0);
+static inline void atomic_inc(atomic_t *a) { a->v++; }
+
+/*
+ * ONE PASS OF main.c's PER-HEAD LOOP WRAP, lifted the same way the apply block
+ * is. Reverse-in-loop was built for the reverse feature and the scratch
+ * inherits it untouched -- the rule is keyed on hd->reverse, which is exactly
+ * the flag the scratch sets. That inheritance is the claim this exercises.
+ */
+static void loop_wrap_block(bool lp_on, uint32_t lp_lo, uint32_t lp_end)
+{
+	uint32_t sk;
+
+#include "loop_wrap_block.inc"
+}
+
 /* One block of the real application, lifted from main.c. */
 static void apply_block(uint32_t rate_q16, uint32_t stem_rate_q16[ST_PL_STEMS])
 {
@@ -82,6 +103,28 @@ static void heads_init(void)
 	}
 	s_stem_transport = 0u;
 	atomic_set(&g_stem_scratch_req, ST_SCR_PACK(ST_SCR_T_NONE, 0));
+}
+
+/*
+ * ADVANCE EACH HEAD BY WHAT ITS OWN RATE ACTUALLY BUYS in one block.
+ *
+ * The first version advanced a flat 128 frames whatever the rate was, so a 2x
+ * scratch travelled no faster than 1x -- which understates how often a gesture
+ * reaches a loop boundary, and would have reported a comfortable seek rate
+ * that the real transport does not enjoy. Direction still comes from the
+ * head's own `reverse`, as it does in the render.
+ */
+static void advance_at_rate(const uint32_t rate[ST_PL_STEMS])
+{
+	uint32_t k;
+
+	for (k = 0; k < ST_PL_STEMS; k++) {
+		const uint32_t n = (uint32_t)(((uint64_t)BLK_FRAMES * rate[k]) / ST_RS_ONE);
+
+		(void)st_stream_advance_frames(&g_stem_stream[k], n ? n : 1u);
+		st_stream_sector_ready(&g_stem_stream[k],
+			st_stream_required_sector(&g_stem_stream[k]));
+	}
 }
 
 /* Run n blocks with a published gesture; return the last rate array. */
@@ -417,6 +460,107 @@ static void test_repeated_press_release(void)
 	}
 }
 
+/*
+ * SCENARIO 9: SCRATCHING INSIDE A LOOP.
+ *
+ * The scratch adds no loop code at all. Its only effect on direction is
+ * hd->reverse, and main.c's per-head wrap is keyed on that same flag -- so a
+ * scratched head crossing loop_start wraps to loop_end by the machinery the
+ * reverse feature already built. This drives BOTH real blocks together, the
+ * apply and the wrap, to check that inheritance actually holds.
+ *
+ * AND IT ASKS THE STARVATION QUESTION. Every wrap is a seek, every seek
+ * invalidates residency, and a gesture that oscillates ACROSS the boundary
+ * seeks repeatedly. The eMMC clamp was derived for travel, not for that -- so
+ * the number of wraps a boundary-crossing scratch produces is worth knowing
+ * rather than assuming.
+ */
+static void test_scratch_across_a_loop_boundary(void)
+{
+	const uint32_t lp_lo  = 300u * ST11_FRAMES_PER_SECTOR;
+	const uint32_t lp_end = 308u * ST11_FRAMES_PER_SECTOR;   /* 8 sectors, ~85 ms */
+	uint32_t r[ST_PL_STEMS];
+	uint32_t i;
+	uint32_t wraps_before, wraps_after;
+
+	heads_init();
+	for (i = 0; i < ST_PL_STEMS; i++) {
+		(void)st_stream_seek(&g_stem_stream[i], lp_lo + 64u);
+	}
+
+	/* Scratch the master BACKWARD, out through loop_start. */
+	wraps_before = (uint32_t)atomic_get(&g_stem_loop_wraps);
+	for (i = 0; i < 60u; i++) {
+		atomic_set(&g_stem_scratch_req,
+			    ST_SCR_PACK(ST_SCR_T_MASTER, -ST_SCRATCH_DRIVE_FULL));
+		apply_block(ST_RS_ONE, r);
+		/* the run the render would have consumed, at the applied rate */
+		advance_at_rate(r);
+		loop_wrap_block(true, lp_lo, lp_end);
+	}
+	wraps_after = (uint32_t)atomic_get(&g_stem_loop_wraps);
+
+	CHECK(g_stem_stream[0].reverse, "A12. the master gesture reversed every head");
+	for (i = 0; i < ST_PL_STEMS; i++) {
+		CHECK(g_stem_stream[i].song_frame >= lp_lo &&
+		      g_stem_stream[i].song_frame < lp_end,
+		      "A12. stem %u is still INSIDE the loop (%u, window %u..%u) -- a "
+		      "backward scratch wrapped it to loop_end rather than escaping",
+		      i, g_stem_stream[i].song_frame, lp_lo, lp_end);
+	}
+	CHECK(wraps_after > wraps_before,
+	      "A12. and it really did wrap (%u times) -- the case is not passing "
+	      "because nothing reached the boundary", wraps_after - wraps_before);
+
+	printf("       %u wraps in 60 blocks of backward scratching\n",
+	       wraps_after - wraps_before);
+}
+
+/*
+ * THE OSCILLATION, which is the expensive shape: a hand working right on the
+ * loop point, crossing it back and forth. Every crossing seeks and every seek
+ * invalidates residency, so this counts them.
+ */
+static void test_oscillating_on_the_loop_point(void)
+{
+	const uint32_t lp_lo  = 300u * ST11_FRAMES_PER_SECTOR;
+	const uint32_t lp_end = 308u * ST11_FRAMES_PER_SECTOR;
+	uint32_t r[ST_PL_STEMS];
+	uint32_t i, wraps_before, wraps_after;
+
+	heads_init();
+	for (i = 0; i < ST_PL_STEMS; i++) {
+		(void)st_stream_seek(&g_stem_stream[i], lp_lo + 32u);
+	}
+	wraps_before = (uint32_t)atomic_get(&g_stem_loop_wraps);
+
+	for (i = 0; i < 240u; i++) {
+		const int32_t d = ((i / 6u) & 1u) ? ST_SCRATCH_DRIVE_FULL
+						   : -ST_SCRATCH_DRIVE_FULL;
+		uint32_t k;
+
+		(void)k;
+		atomic_set(&g_stem_scratch_req, ST_SCR_PACK(ST_SCR_T_MASTER, d));
+		apply_block(ST_RS_ONE, r);
+		advance_at_rate(r);
+		loop_wrap_block(true, lp_lo, lp_end);
+	}
+	wraps_after = (uint32_t)atomic_get(&g_stem_loop_wraps);
+
+	for (i = 0; i < ST_PL_STEMS; i++) {
+		CHECK(g_stem_stream[i].song_frame >= lp_lo &&
+		      g_stem_stream[i].song_frame < lp_end,
+		      "A13. after 240 blocks oscillating on the loop point, stem %u is "
+		      "still inside the window (%u)", i, g_stem_stream[i].song_frame);
+	}
+	printf("       %u wraps in 240 blocks (%.1f%% of blocks caused a seek)\n",
+	       wraps_after - wraps_before,
+	       100.0 * (wraps_after - wraps_before) / 240.0);
+	CHECK(true, "A13. wrap rate reported above -- every wrap is a seek, and a "
+	      "seek invalidates residency, so this is the number the eMMC budget "
+	      "has to survive");
+}
+
 int main(void)
 {
 	printf("== Stem Tape SCRATCH APPLIED (main.c's own block, on stubs) ==\n");
@@ -431,6 +575,8 @@ int main(void)
 	RUN(test_a_latched_reverse_survives_a_scratch);
 	RUN(test_each_stem_scratches_alone);
 	RUN(test_repeated_press_release);
+	RUN(test_scratch_across_a_loop_boundary);
+	RUN(test_oscillating_on_the_loop_point);
 
 	printf("\n%d distinct test cases, %d assertion checks\n", g_cases, g_checks);
 	if (g_failures) {

@@ -2451,7 +2451,10 @@ jobs:
           set -euo pipefail
           python3 .github/scripts/stemtape_player_extract_scratch_apply.py \
             firmware/stemtape_player/src/main.c \
-            firmware/stemtape_player/tests/scratch_apply_block.inc
+            firmware/stemtape_player/tests/scratch_apply_block.inc apply
+          python3 .github/scripts/stemtape_player_extract_scratch_apply.py \
+            firmware/stemtape_player/src/main.c \
+            firmware/stemtape_player/tests/loop_wrap_block.inc loopwrap
           cc -std=c11 -Wall -Wextra -Werror \
             -Ifirmware/stemtape_player/src -Ifirmware/stemtape_player/tests \
             firmware/stemtape_player/src/st_stem_stream.c \
@@ -2487,6 +2490,22 @@ jobs:
             grep -q "A10. $st" audit/scratch-apply-selftest.txt \
               || { echo "stem '$st' is no longer covered by the isolated-scratch case"; exit 1; }
           done
+
+          # SCRATCHING INSIDE A LOOP adds no loop code: the scratch's only
+          # effect on direction is hd->reverse, and main.c's per-head wrap is
+          # keyed on that same flag, so a scratched head crossing loop_start
+          # wraps to loop_end by machinery the reverse feature already built.
+          # These drive BOTH real blocks together to check that inheritance
+          # actually holds -- and report the seek rate a boundary-crossing
+          # gesture produces, since every wrap invalidates residency and the
+          # eMMC clamp was derived for travel rather than for repeated seeks.
+          grep -q 'wrapped it to loop_end rather than escaping' audit/scratch-apply-selftest.txt \
+            || { echo "a backward scratch can escape the loop window"; exit 1; }
+          grep -q 'the case is not passing because nothing reached the boundary' \
+            audit/scratch-apply-selftest.txt \
+            || { echo "the loop case no longer proves it reached the boundary"; exit 1; }
+          grep -q 'of blocks caused a seek' audit/scratch-apply-selftest.txt \
+            || { echo "the boundary-oscillation seek rate is no longer measured"; exit 1; }
           {
             echo '### Stem Tape scratch, applied'
             echo '```text'
