@@ -1149,10 +1149,15 @@ export class AudioEngine {
    * lane has no live voice.
    */
   private laneAudiblePosition(t: TrackRuntime, now: number): number | null {
-    const live = t.sources[t.sources.length - 1];
+    // The AUDIBLE voice is the newest one that has already started; a voice
+    // scheduled ahead of `now` (a committed wrap) is not being heard yet.
+    let live: LiveSource | undefined;
+    for (const s of t.sources) if (s.startAt <= now && (!live || s.startAt >= live.startAt)) live = s;
+    if (!live) live = t.sources[t.sources.length - 1];
     if (!live) return null;
     return live.startPos + (this.timeline.positionAt(now) - this.timeline.positionAt(live.startAt));
   }
+
 
 
 
