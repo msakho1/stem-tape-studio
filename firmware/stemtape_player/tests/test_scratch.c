@@ -653,7 +653,7 @@ static void test_release_coasts_back_to_unity(void)
 		int32_t d_q16;
 
 		ticks++;
-		if (!st_scratch_coast(&s, PASS_US)) { break; }
+		if (!st_scratch_coast(&s, PASS_US, ST_SCRATCH_UNITY_Q16)) { break; }
 		now = rate_of(&s);
 		d_q16 = st_scratch_rate_q16(&s) - prev_q16;
 		if (d_q16 < 0) { d_q16 = -d_q16; }
@@ -677,15 +677,49 @@ static void test_release_coasts_back_to_unity(void)
 	/* Releasing AT unity is not a coast at all -- there is nothing to walk. */
 	st_scratch_begin(&s, ST_SCRATCH_UNITY_Q16, ST_SCRATCH_MAX_RATE_MASTER_Q16);
 	(void)st_scratch_release(&s);
-	CHECK(!s.coasting && !st_scratch_coast(&s, PASS_US),
-	      "R1. releasing a head already at unity coasts not at all");
+	CHECK(!st_scratch_coast(&s, PASS_US, ST_SCRATCH_UNITY_Q16),
+	      "R1. releasing a head already AT the target coasts not at all");
+
+	/*
+	 * THE TARGET IS A PARAMETER, and that is the fix for a real bug: the
+	 * first version walked to a hard-coded 1.0x, so a release while the
+	 * pitch rocker was set finished at unity while the transport was at
+	 * 1.19x and stepped the rate 19% in one block.
+	 */
+	{
+		const int32_t pitched = 78000;   /* ~1.19x */
+		st_scratch_t p;
+		uint32_t n;
+
+		st_scratch_begin(&p, pitched, ST_SCRATCH_MAX_RATE_MASTER_Q16);
+		(void)hold(&p, -ST_SCRATCH_DRIVE_FULL, 400u);
+		(void)st_scratch_release(&p);
+		for (n = 0; n < 500u; n++) {
+			if (!st_scratch_coast(&p, PASS_US, pitched)) { break; }
+		}
+		CHECK(st_scratch_rate_q16(&p) == pitched,
+		      "R1. a coast toward a PITCHED transport rate ends exactly there "
+		      "(%d), not at unity -- no step at the handover",
+		      st_scratch_rate_q16(&p));
+
+		/* Signed, so a latched reverse is coasted back to. */
+		st_scratch_begin(&p, -65536, ST_SCRATCH_MAX_RATE_MASTER_Q16);
+		(void)hold(&p, ST_SCRATCH_DRIVE_FULL, 400u);
+		(void)st_scratch_release(&p);
+		for (n = 0; n < 500u; n++) {
+			if (!st_scratch_coast(&p, PASS_US, -65536)) { break; }
+		}
+		CHECK(st_scratch_rate_q16(&p) == -65536,
+		      "R1. and toward a NEGATIVE target it returns to reverse, so a "
+		      "latched direction survives the gesture");
+	}
 
 	/* And re-grabbing mid-coast cancels it, so a fast second gesture is not
 	 * fighting a ramp it cannot see. */
 	st_scratch_begin(&s, ST_SCRATCH_UNITY_Q16, ST_SCRATCH_MAX_RATE_MASTER_Q16);
 	(void)hold(&s, -ST_SCRATCH_DRIVE_FULL, 400u);
 	(void)st_scratch_release(&s);
-	(void)st_scratch_coast(&s, PASS_US);
+	(void)st_scratch_coast(&s, PASS_US, ST_SCRATCH_UNITY_Q16);
 	st_scratch_begin(&s, st_scratch_rate_q16(&s), ST_SCRATCH_MAX_RATE_MASTER_Q16);
 	CHECK(!s.coasting && s.engaged,
 	      "R1. grabbing again mid-coast cancels the coast and resumes the gesture");

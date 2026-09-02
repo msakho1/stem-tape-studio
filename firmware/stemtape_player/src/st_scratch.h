@@ -314,11 +314,26 @@ static inline int32_t st_scratch_rate_q16(const st_scratch_t *s)
 int32_t st_scratch_release(st_scratch_t *s);
 
 /*
- * Advance a coast. Returns true while the rate is still short of unity, false
- * once it has arrived -- at which point the caller stops overriding and the
- * transport's own rate takes over seamlessly, because the two are equal.
+ * Advance a coast toward `target_q16`, the SIGNED rate the transport will
+ * resume at. Returns true while still short of it, false once it has arrived
+ * -- at which point the caller stops overriding and the transport takes over
+ * seamlessly, because the two numbers are equal.
+ *
+ * THE TARGET IS PASSED IN, NOT ASSUMED TO BE UNITY, and that is not a
+ * generalisation for its own sake. The first version walked to a hard-coded
+ * 1.0x. With the pitch rocker set the transport runs at up to 1.19x, so the
+ * coast finished at 1.0x, the override dropped, and the rate jumped 0.19x in
+ * one block -- a 19% speed step, audible as a pitch glitch, on every release
+ * while pitched. The handover is only seamless if the coast ends on the number
+ * the transport is actually about to use.
+ *
+ * SIGNED, because the head may have been reverse-toggled before the gesture
+ * began. Coasting to a positive rate would silently cancel that latch: the
+ * player reversed a stem, scratched it, let go, and found it playing forward
+ * with no gesture to explain it. Direction returns to whatever the head was
+ * in; only the POSITION is left where the scratch put it.
  */
-bool st_scratch_coast(st_scratch_t *s, uint32_t dt_us);
+bool st_scratch_coast(st_scratch_t *s, uint32_t dt_us, int32_t target_q16);
 
 /* Unity, in the same Q16 the transport uses. */
 #define ST_SCRATCH_UNITY_Q16 65536

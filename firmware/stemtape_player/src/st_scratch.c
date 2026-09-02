@@ -132,15 +132,21 @@ int32_t st_scratch_release(st_scratch_t *s)
 {
 	s->engaged   = false;
 	s->drive_q16 = 0;
-	s->coasting  = (s->rate_q16 != ST_SCRATCH_UNITY_Q16);
+	/* Always true: whether there is anything to walk is st_scratch_coast()'s
+	 * question, because only it is told the target. */
+	s->coasting  = true;
 	return s->rate_q16;
 }
 
-bool st_scratch_coast(st_scratch_t *s, uint32_t dt_us)
+bool st_scratch_coast(st_scratch_t *s, uint32_t dt_us, int32_t target_q16)
 {
 	int32_t step;
 
 	if (!s->coasting) {
+		return false;
+	}
+	if (s->rate_q16 == target_q16) {
+		s->coasting = false;
 		return false;
 	}
 	if (dt_us == 0u) {
@@ -168,8 +174,8 @@ bool st_scratch_coast(st_scratch_t *s, uint32_t dt_us)
 		step = 1;
 	}
 
-	s->rate_q16 = walk_toward(s->rate_q16, ST_SCRATCH_UNITY_Q16, step);
-	if (s->rate_q16 == ST_SCRATCH_UNITY_Q16) {
+	s->rate_q16 = walk_toward(s->rate_q16, target_q16, step);
+	if (s->rate_q16 == target_q16) {
 		s->coasting = false;
 		return false;
 	}

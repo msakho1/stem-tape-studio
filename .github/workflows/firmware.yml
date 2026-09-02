@@ -2469,6 +2469,24 @@ jobs:
             || { echo "an isolated stem scratch is disturbing the other three"; exit 1; }
           grep -q 'not from where it started and not resynced' audit/scratch-apply-selftest.txt \
             || { echo "releasing a gesture is moving the head -- it must resume where it was left"; exit 1; }
+
+          # THE TWO HANDOVER RULES, both of which were wrong first.
+          #
+          # The coast walked to a hard-coded 1.0x, so with the pitch rocker set
+          # (the transport runs to 1.19x) it finished at unity, dropped the
+          # override, and stepped the rate 0.19x in a single block -- a 19%
+          # speed jump on every release while pitched. And coasting to a
+          # POSITIVE rate cancelled a reverse the player had latched, leaving a
+          # stem playing forward with nothing to explain it.
+          grep -q "EXACTLY the transport's pitched rate" audit/scratch-apply-selftest.txt \
+            || { echo "the coast no longer ends on the rate the transport resumes at"; exit 1; }
+          grep -q 'it does not cancel a mode' audit/scratch-apply-selftest.txt \
+            || { echo "a scratch is silently cancelling a latched reverse"; exit 1; }
+          # And every stem, not just whichever one happened to get tested.
+          for st in vocal drums bass instrument; do
+            grep -q "A10. $st" audit/scratch-apply-selftest.txt \
+              || { echo "stem '$st' is no longer covered by the isolated-scratch case"; exit 1; }
+          done
           {
             echo '### Stem Tape scratch, applied'
             echo '```text'

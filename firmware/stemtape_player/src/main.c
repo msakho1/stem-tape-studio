@@ -3425,6 +3425,18 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 		 * was being moved rather than to all of them.
 		 */
 		static uint8_t s_scr_owner = ST_SCR_T_NONE;
+		/*
+		 * THE DIRECTION THE HEAD WAS IN WHEN THE HAND ARRIVED.
+		 *
+		 * A stem may have been reverse-toggled before the gesture. The
+		 * coast has to return it to THAT, not to forward: coasting to a
+		 * positive rate would silently cancel the latch -- the player
+		 * reversed a stem, scratched it, let go, and found it playing
+		 * forward with nothing to explain it. Position is left where the
+		 * scratch put it; direction goes back to the mode the player
+		 * chose.
+		 */
+		static bool s_scr_was_rev;
 		const atomic_val_t sv = atomic_get(&g_stem_scratch_req);
 		const uint8_t tgt = ST_SCR_TGT(sv);
 		const bool live = (tgt != ST_SCR_T_NONE);
@@ -3446,6 +3458,7 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 				g_stem_stream[k].reverse ? -(int32_t)rate_q16
 							  : (int32_t)rate_q16;
 
+			s_scr_was_rev = g_stem_stream[k].reverse;
 			st_scratch_begin(&s_scr, signed_now,
 					  (tgt == ST_SCR_T_MASTER)
 					   ? ST_SCRATCH_MAX_RATE_MASTER_Q16
@@ -3458,7 +3471,18 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 			st_scratch_set_drive(&s_scr, ST_SCR_DRIVE(sv));
 			st_scratch_tick(&s_scr, ST_SCR_BLOCK_US);
 		} else {
-			(void)st_scratch_coast(&s_scr, ST_SCR_BLOCK_US);
+			/*
+			 * COAST TO WHAT THE TRANSPORT WILL ACTUALLY RESUME AT,
+			 * not to a hard-coded 1.0x. With the pitch rocker set
+			 * the transport runs up to 1.19x, and a coast that
+			 * finished at unity would drop the override and step
+			 * the rate 0.19x in one block -- a 19% speed jump,
+			 * audible as a pitch glitch, on every release while
+			 * pitched. Signed, so a latched reverse survives.
+			 */
+			(void)st_scratch_coast(&s_scr, ST_SCR_BLOCK_US,
+						s_scr_was_rev ? -(int32_t)rate_q16
+							       : (int32_t)rate_q16);
 		}
 
 		if (live) {

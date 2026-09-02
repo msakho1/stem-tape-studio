@@ -96,6 +96,18 @@ static void run_blocks(uint8_t tgt, int32_t drive, uint32_t n,
 	}
 }
 
+/* The same, at an arbitrary transport rate -- the pitch rocker's domain. */
+static void run_blocks_at(uint32_t rate, uint8_t tgt, int32_t drive, uint32_t n,
+			   uint32_t out[ST_PL_STEMS])
+{
+	uint32_t i;
+
+	for (i = 0; i < n; i++) {
+		atomic_set(&g_stem_scratch_req, ST_SCR_PACK(tgt, drive));
+		apply_block(rate, out);
+	}
+}
+
 /* ---- cases ------------------------------------------------------------ */
 
 static void test_no_gesture_leaves_every_rate_alone(void)
@@ -255,6 +267,156 @@ static void test_no_rate_ever_exceeds_the_renderer(void)
 	CHECK(worst > 0u, "A7. and never hands it zero, which would stall the transport");
 }
 
+/*
+ * SCENARIO 8: scratching from NON-UNITY VARISPEED.
+ *
+ * This is the case that found the bug. The coast walked to a hard-coded 1.0x,
+ * so with the pitch rocker set -- the transport runs to 1.19x -- it finished
+ * at unity, the override dropped, and the rate stepped 0.19x in a single
+ * block. A 19% speed jump, audible as a pitch glitch, on every release while
+ * pitched. The handover is seamless only if the coast ends on the number the
+ * transport is about to use.
+ */
+static void test_scratch_from_pitched_playback_hands_back_exactly(void)
+{
+	const uint32_t pitched = 78000u;   /* ~1.19x, st_pitch's eMMC-capped max */
+	uint32_t r[ST_PL_STEMS];
+	uint32_t i;
+	bool handed_back = false;
+
+	heads_init();
+	run_blocks_at(pitched, ST_SCR_T_MASTER, -ST_SCRATCH_DRIVE_FULL, 60u, r);
+	CHECK(g_stem_stream[0].reverse,
+	      "A8. a gesture started from pitched playback still reverses");
+
+	for (i = 0; i < 300u; i++) {
+		atomic_set(&g_stem_scratch_req, ST_SCR_PACK(ST_SCR_T_NONE, 0));
+		apply_block(pitched, r);
+		if (!g_stem_stream[0].reverse && r[0] == pitched) {
+			handed_back = true;
+			break;
+		}
+	}
+	CHECK(handed_back,
+	      "A8. and hands back at EXACTLY the transport's pitched rate (%u), not at "
+	      "unity -- no step at the handover", pitched);
+
+	/* The bug's signature, stated so a regression names itself: finishing at
+	 * unity while the transport is pitched. */
+	CHECK(r[0] != ST_RS_ONE || pitched == ST_RS_ONE,
+	      "A8. specifically NOT 1.0x, which is where the first version stopped");
+}
+
+/*
+ * SCENARIO: scratching a stem that was already REVERSE-TOGGLED.
+ *
+ * Reverse is a latch the player set deliberately. Coasting to a positive rate
+ * would cancel it silently: reverse a stem, scratch it, let go, and find it
+ * playing forward with nothing to explain it. Position is left where the
+ * scratch put it; direction returns to the mode that was chosen.
+ */
+static void test_a_latched_reverse_survives_a_scratch(void)
+{
+	uint32_t r[ST_PL_STEMS];
+	uint32_t i;
+
+	heads_init();
+	st_stream_set_reverse(&g_stem_stream[3], true);   /* the player's latch */
+
+	run_blocks(3u, ST_SCRATCH_DRIVE_FULL, 40u, r);    /* scratch it FORWARD */
+	CHECK(!g_stem_stream[3].reverse,
+	      "A9. scratching forward really does drive it forward mid-gesture");
+
+	/* The coast takes ~14 blocks; 100 is well past it, and a fixed count
+	 * keeps the case from depending on state the block keeps to itself. */
+	for (i = 0; i < 100u; i++) {
+		atomic_set(&g_stem_scratch_req, ST_SCR_PACK(ST_SCR_T_NONE, 0));
+		apply_block(ST_RS_ONE, r);
+	}
+	CHECK(g_stem_stream[3].reverse,
+	      "A9. and letting go returns it to the REVERSE the player latched -- a "
+	      "scratch moves the tape, it does not cancel a mode");
+	CHECK(r[3] == ST_RS_ONE,
+	      "A9. at the transport's own speed (%u)", r[3]);
+}
+
+/* SCENARIOS 2-5: every stem, not just the one that happened to be tested. */
+static void test_each_stem_scratches_alone(void)
+{
+	static const char *NAMES[4] = { "vocal", "drums", "bass", "instrument" };
+	uint32_t sk;
+
+	for (sk = 0; sk < ST_PL_STEMS; sk++) {
+		uint32_t r[ST_PL_STEMS];
+		uint32_t k;
+		bool others_clean = true;
+
+		heads_init();
+		run_blocks((uint8_t)sk, -ST_SCRATCH_DRIVE_FULL, 40u, r);
+
+		for (k = 0; k < ST_PL_STEMS; k++) {
+			if (k == sk) { continue; }
+			if (g_stem_stream[k].reverse || r[k] != ST_RS_ONE) {
+				others_clean = false;
+			}
+		}
+		CHECK(g_stem_stream[sk].reverse && r[sk] > ST_RS_ONE && others_clean,
+		      "A10. %s (stem %u) scratches alone; the other three are forward at "
+		      "unity and undisturbed", NAMES[sk], sk);
+	}
+}
+
+/* SCENARIO 11: repeated FUNCTION press/release, including re-grabbing before
+ * the previous coast has finished -- which is what a player doing two scratches
+ * in a row actually produces. */
+static void test_repeated_press_release(void)
+{
+	uint32_t r[ST_PL_STEMS];
+	uint32_t cycle;
+	uint32_t worst = 0u;
+
+	heads_init();
+	for (cycle = 0; cycle < 12u; cycle++) {
+		uint32_t i, k;
+
+		run_blocks(ST_SCR_T_MASTER,
+			    (cycle & 1u) ? -ST_SCRATCH_DRIVE_FULL : ST_SCRATCH_DRIVE_FULL,
+			    9u, r);
+		/* Let go for only THREE blocks -- far less than the coast needs. */
+		for (i = 0; i < 3u; i++) {
+			atomic_set(&g_stem_scratch_req, ST_SCR_PACK(ST_SCR_T_NONE, 0));
+			apply_block(ST_RS_ONE, r);
+		}
+		for (k = 0; k < ST_PL_STEMS; k++) {
+			if (r[k] > worst) { worst = r[k]; }
+			if (r[k] != r[0]) {
+				CHECK(false, "A11. heads diverged on cycle %u", cycle);
+				return;
+			}
+		}
+	}
+	CHECK(worst <= ST_RS_RATE_MAX,
+	      "A11. 12 press/release cycles with re-grabs mid-coast stay inside the "
+	      "renderer's span (worst %u)", worst);
+	CHECK(true, "A11. and all four heads stayed locked through every one");
+
+	/* And a final full release still settles. */
+	{
+		uint32_t i;
+		bool settled = false;
+
+		for (i = 0; i < 300u; i++) {
+			atomic_set(&g_stem_scratch_req, ST_SCR_PACK(ST_SCR_T_NONE, 0));
+			apply_block(ST_RS_ONE, r);
+			if (!g_stem_stream[0].reverse && r[0] == ST_RS_ONE) {
+				settled = true;
+				break;
+			}
+		}
+		CHECK(settled, "A11. and the last release still settles back to normal play");
+	}
+}
+
 int main(void)
 {
 	printf("== Stem Tape SCRATCH APPLIED (main.c's own block, on stubs) ==\n");
@@ -265,6 +427,10 @@ int main(void)
 	RUN(test_release_coasts_then_hands_back);
 	RUN(test_the_head_keeps_the_position_the_gesture_left);
 	RUN(test_no_rate_ever_exceeds_the_renderer);
+	RUN(test_scratch_from_pitched_playback_hands_back_exactly);
+	RUN(test_a_latched_reverse_survives_a_scratch);
+	RUN(test_each_stem_scratches_alone);
+	RUN(test_repeated_press_release);
 
 	printf("\n%d distinct test cases, %d assertion checks\n", g_cases, g_checks);
 	if (g_failures) {
