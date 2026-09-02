@@ -9514,14 +9514,26 @@ int main(void)
 			 * no audio is running here, which is the whole point of
 			 * standby. */
 			{
+				/* STANDBY HAS ITS OWN LADDER STATE, and must:
+				 * main()'s fx_track_ladder is declared far below
+				 * this loop, for the running instrument. Reusing
+				 * it here would not compile, and sharing one
+				 * across two phases would carry a settled mask
+				 * from standby into the first passes of play. */
+				static st_ladder_t on_ladder;
+				static bool on_ladder_seeded;
 				const int on_trk = ladder_read(&adc_ladder[LAD_TRACKS]);
 				const int on_vol = ladder_read(&adc_ladder[LAD_VOL]);
 				bool on_other;
 				int64_t on_ms;
 
-				st_ladder_update(&fx_track_ladder, on_trk);
-				on_other = st_ladder_mask(&fx_track_ladder) != 0u ||
-					    st_ladder_play(&fx_track_ladder) ||
+				if (!on_ladder_seeded) {
+					st_ladder_reset(&on_ladder);
+					on_ladder_seeded = true;
+				}
+				st_ladder_update(&on_ladder, on_trk);
+				on_other = st_ladder_mask(&on_ladder) != 0u ||
+					    st_ladder_play(&on_ladder) ||
 					    st_vol_decode(on_vol) != VOL_NONE;
 				on_ms = st_pwr_hold_tick(&s_pwr_hold, pwr_pressed(),
 							  on_other, k_uptime_get());

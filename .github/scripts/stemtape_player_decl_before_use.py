@@ -125,8 +125,63 @@ def main():
         print("  fails the ARM build -- this catches it without one.")
         return 1
 
+    # ------------------------------------------------------------------
+    # THE SAME MISTAKE, ONE SCOPE DOWN: a LOCAL of main() used above its
+    # own declaration.
+    #
+    # The check above catches a file-local static called before it is
+    # declared. This catches its twin, which the ARM build has now caught
+    # twice that this script did not: main() is ~1700 lines long and has
+    # phases (charge-standby, then the running instrument) that are far
+    # apart, so a variable declared for the second phase is easy to reach
+    # for from the first. `st_ladder_t fx_track_ladder` is declared for the
+    # running loop and was referenced from the standby loop above it --
+    # which is a hard "undeclared (first use in this function)" error and
+    # cost a full CI cycle to learn.
+    #
+    # DELIBERATELY CONSERVATIVE. It only considers declarations whose type
+    # is one of this file's own st_*_t names, only inside main(), and it
+    # skips any name that is ALSO a file-scope symbol (where an earlier use
+    # is legitimately the outer one). A narrow check that never cries wolf
+    # is worth more here than a general one that gets switched off.
+    # SCANNED ON THE COMMENT-STRIPPED TEXT, not the raw file. On its first
+    # writing this scanned `raw` and flagged the very comment that explains
+    # the bug ("main()'s fx_track_ladder is declared far below this loop"),
+    # which is the same mistake the scratch series' block extractor made.
+    # strip_comments_and_strings() preserves offsets, so line numbers taken
+    # from `raw` still point at the real source.
+    main_m = re.search(r"^int main\(void\)\s*\n\{", src, re.M)
+    local_problems = []
+    if main_m:
+        body = src[main_m.end():]
+        file_scope = set(re.findall(r"^static\s+[\w \*]+?(\w+)\s*[;=\[]",
+                                     src, re.M))
+        for d in re.finditer(r"^\s*(?:static\s+)?(st_\w+_t)\s+(\w+)\s*[;=\[]",
+                              body, re.M):
+            name = d.group(2)
+            if name in file_scope:
+                continue
+            for u in re.finditer(r"\b" + re.escape(name) + r"\b", body):
+                if u.start() < d.start():
+                    line = raw.count("\n", 0, main_m.end() + u.start()) + 1
+                    decl = raw.count("\n", 0, main_m.end() + d.start()) + 1
+                    local_problems.append((line, name, decl))
+                    break
+
+    if local_problems:
+        print("FAIL: a local of main() is used above its own declaration")
+        for line, name, decl_line in sorted(set(local_problems)):
+            print("  %s:%d uses %s, which main() does not declare until line %d"
+                  % (path, line, name, decl_line))
+        print()
+        print("  gcc reports this as \"undeclared (first use in this")
+        print("  function)\" and the ARM build fails -- this catches it")
+        print("  without one.")
+        return 1
+
     print("PASS: every file-local static is declared before it is called")
     print("  %d static definitions checked" % len(definitions))
+    print("PASS: no local of main() is used above its own declaration")
     return 0
 
 
