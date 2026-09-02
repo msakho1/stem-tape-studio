@@ -1,15 +1,24 @@
 # Postmortem — the scratch series (st54/st55), and how it trapped an SP-1 powered on
 
-**Status:** closed by full revert. `st53` (`bd8114b`) is the flashable baseline
-again. See §4.1 on the `st53-known-good` tag — it exists locally but this
-session's credentials cannot create tags on the remote.
-**Failed build:** `st55` — series head `3558c91`, build tag `st55`.
-**Revert:** `51a97ee`, tree byte-identical to `bd8114b`, binary hash identical
-(`cb9d4a73…eb713`).
-**Severity:** highest so far. A performance gesture made the device's only
-software power-off path unreachable. The unit could not be switched off and
+**Status:** closed by full revert of the scratch series.
+**Baseline restored to:** **`st54`** — the last build confirmed working on
+hardware. Tree state `d9aedfc`; binary `44ed7885…ec9c`, 115,148 B. See §4.1.
+**Failed build:** `st55` — series head `3558c91`.
+**Severity:** **release-safety defect.** A performance gesture made the device's
+only software power-off path unreachable. The unit could not be switched off and
 would have stayed on until the battery drained. It also produced continuous
 audio corruption and permanently displaced a stem's playhead.
+
+> **This is a release-safety defect, not an acceptable consequence of
+> experimental development.** The SP-1 it happened on *was* the dedicated test
+> device. That is not a mitigation and it is not the finding. Being the test
+> device does not make it acceptable for firmware to strand it. The failure is
+> that an experimental build was allowed to disable the test device's own
+> recovery and power-off path — the exact thing that makes a device safe to
+> experiment on. A development unit must always be able to escape bad firmware
+> **immediately**, without waiting for battery depletion. §3.0 states that as a
+> rule with priority over every feature; §4 makes it a precondition of producing
+> a flashable artifact at all.
 
 This document exists so the same class of failure is not reachable again. It is
 written to be read by someone who was not there.
@@ -18,9 +27,19 @@ written to be read by someone who was not there.
 
 ## 0. Corrections to the record
 
-Two things I previously told you were wrong, and one gate turns out to have been
-protecting the bug. Correcting them here because the rest of the analysis
+Four things I previously told you were wrong, and one gate turns out to have
+been protecting the bug. Correcting them here because the rest of the analysis
 depends on getting them right.
+
+0. **The baseline is st54, not st53.** I reverted one commit too far. `st54`
+   (`3b77ee7`, tree `d9aedfc`) is the last build that was flashed and confirmed
+   working; `st53` (`bd8114b`) is merely the last commit before the meter fix.
+   The difference is real firmware — st54 corrects the Track meter's brightness
+   constants, which were still 24-bit against 16-bit samples and made the LEDs
+   read 256× low. Restoring to st53 would have shipped you a known display bug
+   in the name of safety. The tree is now `d9aedfc` + this document, build tag
+   `st54`, and §4.1 pins its binary identity. **I should have asked which build
+   you last confirmed rather than assuming the commit before the series head.**
 
 1. **`st_stream_set_reverse()` does not flush residency.** My revert commit
    message says direction changes "re-primed the whole ring". That is false.
@@ -49,11 +68,11 @@ depends on getting them right.
 
 ## 1. Every change the series introduced
 
-`git diff bd8114b 3558c91` — 24 files, +4535 / −101. Fifteen commits, of which
-eleven are scratch. The four non-scratch commits (`b3914fb`, `3b77ee7`,
-`74c6561`, `d9aedfc` — the meter-domain fix, the companion docs, the cross-party
-index fixture) were removed by taking the revert literally and are recoverable;
-they are inventoried in §1.7 and are not implicated in any failure.
+The scratch series proper is **`d9aedfc..3558c91`** — eleven commits, 12 files,
++3395 / −58. The wider range `bd8114b..3558c91` (24 files, +4535 / −101) also
+contains st54 and two doc commits, which are **not** part of the series, are not
+implicated in any failure, and are in the restored baseline. They are
+inventoried in §1.7 so the boundary is unambiguous.
 
 ### 1.1 `src/st_scratch.h` / `src/st_scratch.c` — NEW, 621 lines
 
@@ -231,14 +250,24 @@ earlier version passed a gutted block). **The technique is sound and should come
 back.** What it cannot do is supply a realistic environment, which is the actual
 gap.
 
-### 1.7 Non-scratch changes in the same range (removed by the literal revert)
+### 1.7 What is NOT part of the series — the baseline boundary
 
-| Commit | What | Implicated? |
-|---|---|---|
-| `3b77ee7` st54 | `st_stem_meter.h` constants derived from `ST11_PCM_BIT_DEPTH` instead of hard-coded 24-bit; `glide()` given a minimum step of 1 so a proportional decay terminates | No. **Real bug fix** — Track LEDs currently read 256× low on the restored baseline. Worth re-landing on its own. |
-| `b3914fb`, `74c6561` | two v1.3 companion docs | No |
-| `d9aedfc` | companion index record as a cross-party fixture + its test | No |
-| — | comment-only edits in `st_ab_session.c`, `st_fx.h`, `st_stem_mix.c` | No |
+These sit between `bd8114b` and the first scratch commit. They are **in the
+restored baseline** and none is implicated in any failure. Listed because my
+first revert removed them by mistake (§0.0) and the boundary needs to be
+unambiguous.
+
+| Commit | What | In baseline? | Implicated? |
+|---|---|---|---|
+| `b3914fb` | v1.3 companion Lovable prompt (doc) | yes | No |
+| **`3b77ee7` = st54** | `st_stem_meter.h` constants derived from `ST11_PCM_BIT_DEPTH` instead of hard-coded 24-bit; `glide()` given a minimum step of 1 so a proportional decay terminates. **The firmware change that makes st54 st54.** | **yes** | No — a bug *fix*. Without it the Track LEDs read 256× low. |
+| `74c6561` | v1.3 companion verification doc | yes | No |
+| `d9aedfc` | companion index record as a cross-party fixture + `test_stix_companion_produced_record` | yes | No |
+| — | comment-only edits in `st_ab_session.c`, `st_fx.h`, `st_stem_mix.c` (part of st54's domain cleanup) | yes | No |
+
+`d9aedfc` and `3b77ee7` produce the **same firmware image** — everything after
+st54 in this list is docs, a fixture and a host test. So "the st54 binary" and
+"the `d9aedfc` binary" are one artifact, identified in §4.1.
 
 ---
 
@@ -277,7 +306,7 @@ physically down:
    released, and `press_start = -1` **destroys the timer**. It does not pause —
    even if the consumption later cleared, the 2.5 s would restart from zero;
 3. execution then continues past the branch into the ordinary control decode,
-   which in st53 is *never* reached with FUNCTION down because of the `continue`
+   which in the baseline is *never* reached with FUNCTION down because of the `continue`
    at 10069. That fall-through is §2.2.
 
 **Every path that can consume FUNCTION.** `c->fn_consumed` is set in exactly
@@ -327,7 +356,7 @@ AIN3/6/2/7  ── ladder_read() ──► fader round-robin ──► trk[fi].v
 Two separate leaks, and it matters which is which:
 
 **(a) The solo did not come from a fall-through.** `stem_ctl_apply()` is called
-at `main.c:9797`, *above* the FUNCTION branch, in both st53 and st55, and it
+at `main.c:9797`, *above* the FUNCTION branch, in both the baseline and st55, and it
 writes `trk[k].solo` from `track_mask` unconditionally. That path is identical
 in both builds. So the phantom solo means AIN0 genuinely read a Track band with
 no finger on a Track button — three consecutive in-band readings.
@@ -378,14 +407,14 @@ boolean, and breaking one broke the other.
 
 | Situation | `ladder_read()` calls per pass | conversions (2 each) |
 |---|---|---|
-| st53, ordinary play | TRACKS, VOL, 1 round-robin fader | 3 → **6** |
-| st53, **FUNCTION held** | TRACKS, VOL only — `continue` skips the rest | 2 → **4** |
+| baseline, ordinary play | TRACKS, VOL, 1 round-robin fader | 3 → **6** |
+| baseline, **FUNCTION held** | TRACKS, VOL only — `continue` skips the rest | 2 → **4** |
 | st55, FUNCTION held, no owner | TRACKS, VOL, **4 faders**, 1 round-robin, +1 release-path | 7–8 → **14–16** |
 | st55, FUNCTION held, owner latched | TRACKS, VOL, 1 fader, 1 round-robin, +1 | 4–5 → **8–10** |
 
 **st55 made the most expensive situation the one that occurs while the player is
-performing, and it made it 3.5–4× more expensive than st53's, in the one case
-st53 had deliberately made cheapest.**
+performing, and it made it 3.5–4× more expensive than the baseline's, in the one
+case the baseline had deliberately made cheapest.**
 
 **Why all four were polled before an owner existed.** Because the design made the
 *hardware* answer "which fader is the hand on?" instead of the *player*. There
@@ -743,6 +772,55 @@ unmeasured.
 
 ## 3. Failure-prevention architecture
 
+### 3.0 The escape-hatch rule — above everything below
+
+Everything in §3.1–§3.9 is engineering discipline. This one is not negotiable
+against any of it, and it is stated first because the rest of the document is
+subordinate to it.
+
+> **The device must always be able to escape bad firmware immediately, without
+> waiting for battery depletion. This holds for the dedicated development unit
+> exactly as it holds for a production one.**
+
+Four consequences, in force:
+
+**E1 — "Test device" is not a mitigation.** A development SP-1 is the unit that
+runs the *most* experimental firmware, so it needs escape more than any other
+unit, not less. Nothing in a risk assessment may discount a stranding failure on
+the grounds that the affected device was a test device. In this incident that
+framing would have hidden the entire defect: the build did not merely misbehave,
+it removed the property that makes experimenting safe at all.
+
+**E2 — Recovery outranks every feature state.** Power-off and bootloader entry
+sit above the whole musical layer in priority. There is no feature state,
+gesture, mode, chord, latch, overlay or error condition from which they are
+unavailable. "Higher priority" here means *structurally unreachable by feature
+code*, not "checked first".
+
+**E3 — No feature may consume, mask, delay, reset or otherwise influence either
+path.** Including indirectly: a feature must not be able to affect the *timer*,
+the *state* the timer lives in, or the *branch* the timer is evaluated in.
+§2.1's failure was indirect — nothing "blocked" `power_off()`; a flag reset
+`press_start` and the timer stopped existing.
+
+**E4 — At least one escape route must be outside the application entirely.**
+Today that is the bootloader combo: SP-1 **off**, hold **Track 1 + Track 4**,
+insert USB → UF2 mode (one track light). It lives in the bootloader, so no
+application firmware can intercept it. It must never be traded away, and if a
+future change would make it conditional on anything the application does, that
+change does not ship.
+
+**Classification rule.** A build that touches **power, FUNCTION dispatch,
+bootloader entry, watchdog behaviour, transport recovery, or input arbitration**
+is **automatically high-risk**. High-risk builds do not produce a flashable
+artifact until the dedicated safety tests in §4 have run and passed. This is a
+property of the *diff*, not of anyone's judgement about how risky the change
+feels — the st55 diff touched four of those six, and no one classified it as
+anything.
+
+st55 violated E1, E2 and E3. E4 is the only reason this incident ended in a
+revert rather than a dead unit.
+
 Every invariant below is stated so it can be **mechanically checked**. An
 invariant without a named enforcement mechanism is a wish, and this document's
 whole thesis is that the previous round had plenty of wishes.
@@ -754,8 +832,10 @@ whole thesis is that the previous round had plenty of wishes.
 | P1 | The shutdown timer is not inside any feature-gated branch. `press_start`/`held` are maintained by a dedicated `power_hold_service()` called **unconditionally**, before any dispatcher, taking only the raw FUNCTION GPIO. | New host test `test_power_hold.c`: 2500 ms of FUNCTION down fires shutdown **for every reachable combination of consumed-flags** — exhaustive over the flag set, not a sampled subset. |
 | P2 | No feature may consume, mask, delay or reset the long-hold. `function_consumed` is renamed `function_musically_consumed` and is **structurally incapable** of reaching the power path — the power service does not take it as a parameter. | Wiring gate: the power service's call site must have **no** `g_stem_ctl_out` reference in its condition. Replaces the current gate that pins the opposite. |
 | P3 | The existing gate at `stem_playback_wiring_check.py:453` is **deleted and inverted**: the line it requires is the bug. | The gate that replaces it asserts the *absence* of any `function_consumed` term guarding `power_off()`'s enclosing branch. |
-| P4 | The bootloader route stays reachable independently of firmware: SP-1 **off**, hold **Track 1 + Track 4**, insert USB → UF2 mode (one track light). It lives in the bootloader, not this firmware, and nothing here can intercept it. | Documented in the release notes of every build; already true, now stated so it is never traded away. |
+| P4 | The bootloader route stays reachable independently of firmware: SP-1 **off**, hold **Track 1 + Track 4**, insert USB → UF2 mode (one track light). It lives in the bootloader, not this firmware, and nothing here can intercept it. (E4.) | Documented in the release notes of every build; already true, now stated so it is never traded away. |
 | P5 | Musical consumption and safety suppression are **different types**. Two fields, never one boolean. | Compile-time: the power service's signature cannot accept the musical type. |
+| P6 | **If an application-level recovery or bootloader-entry path exists, it is regression-tested like power-off.** Today there is none in the application — the only route is P4's bootloader combo, which this firmware cannot reach or influence. If one is ever added, P1/P2/P3's treatment applies to it identically and unconditionally. | The absence is asserted: a gate fails if any application code writes the bootloader-entry register or double-reset marker, so a route cannot appear untested. |
+| P7 | **Any new FUNCTION handling ships with an explicit test proving a 2.5 s power hold still works from every possible feature state.** Not a sampled subset: the test enumerates the feature-state space (loop armed/active/latched, FX overlay held, reverse latched per stem, solo/mute combinations, transport playing/stopped, any future gesture state) and asserts shutdown from each. | `test_power_hold.c`, and a checklist item that fails review if a diff touches FUNCTION dispatch without extending its enumeration. |
 
 ### 3.2 Input ownership
 
@@ -788,7 +868,7 @@ whole thesis is that the previous round had plenty of wishes.
 
 | # | Invariant | Enforcement |
 |---|---|---|
-| S1 | No blocking ADC or diagnostic work is added to the hot loop without a **measured** budget first. | A new CI gate counts `ladder_read()` / `adc_read_dt()` call sites reachable per control pass and fails above a pinned ceiling. The ceiling starts at st53's count. |
+| S1 | No blocking ADC or diagnostic work is added to the hot loop without a **measured** budget first. | A new CI gate counts `ladder_read()` / `adc_read_dt()` call sites reachable per control pass and fails above a pinned ceiling. The ceiling starts at the baseline's count. |
 | S2 | Scratch input sampling fits inside the already-proven v1.3 streaming budget — it does not get its own. | The clamp derivation gains a **control-thread term**. A clamp that bounds only the eMMC while the control thread steals the CPU that serves it is not a bound. |
 | S3 | Normal playback and unaffected stems never starve because a control is being sampled. | Physical test, on hardware, before any flash is offered: sustained gesture at maximum rate with `g_starve_cnt[]` and `g_stem_underrun_count` read out and required to be **zero**. |
 | S4 | The measured hardware calibration in `ladder_read()`'s comment (24 conv/pass = starves, 6 = safe) is promoted from a comment to a **checked constant**. | The S1 ceiling is that constant. |
@@ -836,59 +916,84 @@ whole thesis is that the previous round had plenty of wishes.
 
 Agreed and in force from now:
 
-1. **Restore and tag the last known-good build.** Restored — `51a97ee` is
-   byte-identical to `bd8114b` and produces an identical binary. The tag is
-   **not** pushed: `st53-known-good` was created locally, annotated with the
-   binary hash, sizes and a pointer to this document, but `git push origin
-   st53-known-good` is refused with HTTP 403. This session's credentials can
-   write `refs/heads/claude/*` and cannot create tags, and that is not something
-   to work around. To create it from a checkout with normal push rights:
-
-   ```
-   git tag -a st53-known-good bd8114b -m "st53: last build confirmed working on hardware"
-   git push origin st53-known-good
-   ```
-
-   Until then the restore point is the SHA. `bd8114b` is an ancestor of this
-   branch and is named in the revert commit, here, and in the release identity
-   below, so losing the tag does not lose the restore point:
+1. **Restore and tag the last known-good build.** Restored to **st54** — the
+   build you last flashed and confirmed working. The tree is `d9aedfc` plus this
+   document; build tag `st54`; the firmware image is byte-for-byte the one CI
+   produced for `d9aedfc`:
 
    | | |
    |---|---|
-   | commit | `bd8114b990d8bbc321784b9f0587452ea461c060` |
+   | tree | `d9aedfc9ba1c2a33c0e4c8c96a15b73a98535003` |
+   | build tag | `st54` |
    | bin | 115,148 bytes |
-   | sha256 | `cb9d4a73731877ee0c7146be86a94d3e048253458d77c5d7bbd4fc3fd84eb713` |
-   | FLASH / RAM | 115,148 B (12.61%) / 203,486 B (77.62%) |
-2. **Replacement scratch work stays on its own branch**, off
+   | **sha256** | **`44ed7885b9e6fff2cf0f1d7b6ec418d64e0d7e2d38cd29a28a6de5a68d77ec9c`** |
+   | FLASH / RAM | 115,148 B (12.61%) / 203,486 B used, 58,658 B free of 256 KB |
+
+   For contrast, so the two are never confused again: `st53` (`bd8114b`) builds
+   to `cb9d4a73731877ee0c7146be86a94d3e048253458d77c5d7bbd4fc3fd84eb713` at the
+   same size. **If a flashed image hashes to `cb9d4a73…`, it is st53 and the
+   Track LEDs will read 256× low.**
+
+   The tag is **not** pushed: `st54-known-good` was created locally but
+   `git push origin st54-known-good` is refused with HTTP 403. This session's
+   credentials can write `refs/heads/claude/*` and cannot create tags, and that
+   is not something to route around. From a checkout with normal push rights:
+
+   ```
+   git tag -a st54-known-good d9aedfc -m "st54: last build confirmed working on hardware"
+   git push origin st54-known-good
+   ```
+
+   Until then the restore point is the SHA, which is an ancestor of this branch
+   and named here and in the restore commit — so losing the tag does not lose
+   the restore point.
+
+2. **Preconditions for a flashable artifact.** A build is not offered for
+   flashing — and a high-risk build (§3.0's classification rule) does not
+   produce an artifact at all — until every one of these has run and passed:
+
+   | | Precondition | Enforced by |
+   |---|---|---|
+   | a | **Normal power-off is regression-tested.** 2.5 s FUNCTION hold fires shutdown. | P1, `test_power_hold.c` |
+   | b | **Application-level recovery / bootloader entry is regression-tested if one exists.** If none exists, its absence is asserted so one cannot appear untested. | P6 |
+   | c | **Musical gesture handling is provably unable to consume either path.** Not "checked first" — structurally unable, by type and by call signature. | P2, P5 |
+   | d | **Recovery has higher priority than every feature state.** | E2, P1 |
+   | e | **Any new FUNCTION handling has an explicit test proving a 2.5 s hold still works from every possible feature state.** | P7 |
+   | f | **Any build touching power, FUNCTION dispatch, bootloader entry, watchdog behaviour, transport recovery, or input arbitration is automatically high-risk** and requires the dedicated safety tests above before an artifact is produced. Classification is by diff, not by judgement. | §3.0 |
+
+   st55 would have been stopped by (a), (c), (d) and (e) independently, and
+   would have been classified high-risk by (f) on four of the six triggers.
+
+3. **Replacement scratch work stays on its own branch**, off
    `claude/stemtape-m0-safety-audit-1vg9pq`, and does not merge into the
    baseline branch until it has been flashed and accepted on hardware.
-3. **Automated regression tests before any new scratch code**, covering:
+4. **Automated regression tests before any new scratch code**, covering:
    power-off reachability (P1/P2), FUNCTION arbitration (I1–I4), gain/solo/mute
    isolation (H1, F1), head synchronisation (T3/H3), no transport reset
    (F1/F2/R2), residency survival across rapid direction changes (R1/R3/R4).
    **These land first, on the baseline, and pass, before a line of scratch code
-   is written.** Several of them will fail against st53 as written — that is the
+   is written.** Several of them will fail against st54 as written — that is the
    point, and those are baseline bugs to fix or explicitly accept.
-4. **A deterministic recovery path scratch cannot intercept** — P1–P4. The
+5. **A deterministic recovery path scratch cannot intercept** — P1–P4. The
    bootloader combo (P4) is the hardware backstop; P1's unconditional
    `power_hold_service()` is the firmware one.
-5. **Staged build-up, one flashable increment at a time:**
+6. **Staged build-up, one flashable increment at a time:**
 
    | Stage | Scope | Must remain true |
    |---|---|---|
-   | 0 | Regression tests only, no feature | Everything st53 does |
-   | 1 | Input ownership only — arbitration, **no transport movement** | + P1–P5, I1–I4 |
+   | 0 | Regression tests only, no feature | Everything st54 does |
+   | 1 | Input ownership only — arbitration, **no transport movement** | + E1–E4, P1–P7, I1–I4 |
    | 2 | Real **master** head movement, low signed rates, no sign changes | + T1–T4, H1–H4 |
    | 3 | Repeated sign changes without residency invalidation | + R1–R4, S1–S4 |
    | 4 | Release / coast behaviour | + H4, F1–F4 |
    | 5 | Isolated one-stem movement — **only after** the fader-noise capture | + G1–G5 |
    | 6 | Acceleration and feel tuning | + N1–N3 |
 
-6. **At every stage, everything previously working stays working** — playback,
+7. **At every stage, everything previously working stays working** — playback,
    pitch, FX, loop, slow mode, reverse, power. Proven by the existing gates
    (including the `0x2a737e00` playback hash) plus the new ones, not by
    inspection.
-7. **No flash request without a written delta.** Every request to flash states:
+8. **No flash request without a written delta.** Every request to flash states:
    what changed from the previous known-good build, which regressions are
    mechanically prevented and by which named test, and — new — **which
    properties are still unproven and what the worst case is if they are wrong.**
@@ -897,7 +1002,7 @@ Agreed and in force from now:
 
 **One more, added from this analysis and not on your list:**
 
-8. **A CI gate that pins a source line must state which property it protects, and
+9. **A CI gate that pins a source line must state which property it protects, and
    the complementary property must also be gated.** The gate at
    `stem_playback_wiring_check.py:453` froze a construct in place to protect the
    loop latch, and in doing so made the power-off bug un-fixable without turning
@@ -913,7 +1018,7 @@ Nothing above closes without these. Listed so they are not quietly skipped again
 | # | Measurement | Blocks |
 |---|---|---|
 | M1 | `adc_read_dt()` wall time on this build, per channel, on the main thread | S1's ceiling; any honest CPU budget |
-| M2 | AIN0 raw trace under the st53 schedule vs. a 4-fader schedule, FUNCTION held, no fingers | Confirms or refutes §2.4's coupling attribution |
+| M2 | AIN0 raw trace under the baseline schedule vs. a 4-fader schedule, FUNCTION held, no fingers | Confirms or refutes §2.4's coupling attribution |
 | M3 | Resting-hand fader noise on AIN3/6/2/7 — the equivalent of `firmware/stemtape_player/docs/ladder-measured.json` | G2, G3, N3; **isolated fader scratch does not ship without it** |
 | M4 | Streamer throughput vs. control-pass ADC count, swept | S1, S2, S4 |
 | M5 | Shortest click-free accel ramp, by ear, on hardware | N1, N2 |
@@ -927,7 +1032,7 @@ Nothing above closes without these. Listed so they are not quietly skipped again
 |---|---|---|---|---|
 | `scratch_service()` asserts `function_consumed` continuously, and the 2.5 s timer lives inside the branch that flag guards | **Device could not be switched off; stayed on until battery drain** | One boolean served both "don't double-interpret this press" and "don't run the shutdown timer"; `press_start = -1` on the fall-through destroyed the timer outright | Unconditional `power_hold_service()` taking only the raw GPIO; musical vs. safety consumption are different types; power path cannot reference gesture state | `test_power_hold.c` — shutdown fires at 2500 ms for **every** reachable consumed-flag combination (P1, P2) |
 | CI gate pins `if (pwr_pressed() && !…function_consumed)` as required source text | Bug was frozen in place; fixing it would have turned CI red | Gate written to protect the loop latch, complementary property never gated | Delete and invert: assert the **absence** of any gesture term guarding `power_off()`'s branch | The inverted gate itself (P3) |
-| Poll all four faders every pass while FUNCTION is held, before an owner exists | Crackling, transport dragging to a halt | 14–16 conversions/pass vs st53's 4 during a hold — past halfway to the 24/pass already measured to starve the card; no CPU budget gate exists | Explicit arm step; sample only after arming; ADC call-count ceiling pinned at st53's | ADC-call-count CI gate (S1, S4) + zero-starvation hardware test (S3) |
+| Poll all four faders every pass while FUNCTION is held, before an owner exists | Crackling, transport dragging to a halt | 14–16 conversions/pass vs the baseline's 4 during a hold — past halfway to the 24/pass already measured to starve the card; no CPU budget gate exists | Explicit arm step; sample only after arming; ADC call-count ceiling pinned at the baseline's | ADC-call-count CI gate (S1, S4) + zero-starvation hardware test (S3) |
 | Added converter traffic to the shared `BTN_COM` rail to read controls on that rail | **Phantom Vocal solo** while merely holding FUNCTION | Systematic periodic rail sag; T1's band (180–230) is the one nearest idle (≤110); `st_ladder`'s debounce rejects uncorrelated noise, not correlated bias | No added sampling in the un-armed state; arm from a control that is not on the contested rail; thresholds from measured rail noise | M2 capture + `test_ctl.c` replay of recorded traces (G2, G3, I3) |
 | Prefetch address flips `needed+1` ↔ `needed−R` on every sign change | Dropouts; heads freezing and never recovering | Direct-mapped ring, R=3/G=6 → forward and reverse read-ahead span **7 sectors over 6 slots** and provably alias; every flip evicts and costs 2550 µs; 32–64/s under master | Bidirectional read-ahead — one request covering both sides so a flip needs no new address; G ≥ 7 | `_Static_assert` on slot-set size (R4) + oscillation harness rewritten onto the **real** request-address arithmetic (R3) |
 | Free-window claim measured through an idealised head-centred cache model | "Oscillating is free" was false in exactly the case scratching lives in | Test modelled residency instead of using it; asserted `sector_ready()` unconditionally — the fact under test | Harness must reproduce the aliasing before it is trusted to deny it; report evictions, not distinct sectors | R3 |
@@ -955,5 +1060,12 @@ one CI gate that touched that line was pinning the construct rather than the
 property. None of those three is a subtle bug. All three were visible in the
 source I was editing.
 
-`bd8114b` is the restore point (§4.1). The staged plan in §4 does not begin
-until §3's tests exist and pass.
+And the unit it happened to was the dedicated test device — which is the point,
+not the mitigation. A development SP-1 is the one that runs the most
+experimental firmware, so it is the one that most needs to be able to escape it.
+A build that removes that ability has not merely misbehaved; it has taken away
+the thing that made experimenting on that unit safe in the first place. §3.0 is
+in the document because of this incident, and it outranks everything else in it.
+
+**st54** (`d9aedfc`, bin `44ed7885…ec9c`) is the restore point (§4.1). The staged
+plan in §4 does not begin until §3's tests exist and pass.

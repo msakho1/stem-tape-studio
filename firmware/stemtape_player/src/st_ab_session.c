@@ -527,11 +527,13 @@ static bool accumulate_one_sector_planar(uint32_t stem_hash[ST11_STEM_COUNT],
 		for (f = 0; f < ST_PL_FRAMES_PER_GROUP; f++) {
 			const uint8_t *frame = group + st_pl_frame_off(f);
 
-			/* The six stored bytes ARE the checksummed bytes: L
-			 * then R, signed 24-bit little-endian, exactly the
-			 * order src/sp1/song.ts hashes them in. Decoding to
-			 * int32 and re-encoding would be the same six bytes
-			 * back again. */
+			/* The stored bytes ARE the checksummed bytes: L then
+			 * R, signed little-endian at ST11_PCM_BIT_DEPTH,
+			 * exactly the order src/sp1/song.ts hashes them in --
+			 * four bytes a frame at v1.3, six at v1.2. Decoding to
+			 * int32 and re-encoding would be the same bytes back
+			 * again, which is why ST_PL_FRAME_BYTES is folded
+			 * whole rather than sample by sample. */
 			stem_hash[h.stem] = st_checksum32_update(stem_hash[h.stem], frame,
 								   ST_PL_FRAME_BYTES);
 		}

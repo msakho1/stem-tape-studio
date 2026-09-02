@@ -93,8 +93,29 @@
 
 #include <stdint.h>
 
-/* Full-scale magnitude in the 24-bit stored domain. */
-#define ST_STEM_METER_FULL_SCALE 8388607u
+#include "st_v11_format.h"
+
+/*
+ * FULL SCALE IN THE STORED DOMAIN, DERIVED -- not a literal, because a
+ * literal is exactly how this got it wrong once.
+ *
+ * The peaks this module is fed come from stem_render_run(), which meters the
+ * sample st_pl_decode_stem_inline() produced. That sample is signed at
+ * ST11_PCM_BIT_DEPTH bits, so its full scale is 2^(depth-1) - 1: 8388607 at
+ * v1.2's 24 bits, 32767 at v1.3's 16.
+ *
+ * When the stored width moved to 16 bits this constant stayed at the 24-bit
+ * value, and so did REF and FLOOR below. Nothing failed: the meter's own tests
+ * are written against these same constants, so they scale with whatever the
+ * constants say and cannot see a disagreement with the PRODUCER. What actually
+ * happened on hardware is that every peak arrived 256x smaller than the window
+ * REF and FLOOR describe -- the entire body range sat above the largest number
+ * a 16-bit sample can be, so body_lit was structurally zero and the Track row
+ * could never rise above MIN_ON. tests/test_stem_meter.c now closes that with
+ * a case that decodes a real full-scale stored frame and asserts it lands
+ * here, which is the only kind of check that can catch a domain drift.
+ */
+#define ST_STEM_METER_FULL_SCALE ((1u << (ST11_PCM_BIT_DEPTH - 1u)) - 1u)
 
 /* ======================================================================
  * THE TUNING SET. Every one of these is meant to be changed by eye on real
@@ -170,8 +191,11 @@
  * silent stem is visibly OFF rather than merely dim, which is what makes the
  * display readable at a glance. Raise it if quiet stems look "never quite off"
  * on hardware.
+ *
+ * Expressed as a fraction of full scale rather than as a magnitude, so it
+ * stays -72 dBFS at any stored width: 2048 at 24 bits, 8 at 16.
  */
-#define ST_STEM_METER_FLOOR 2048u
+#define ST_STEM_METER_FLOOR ((ST_STEM_METER_FULL_SCALE + 1u) / 4096u)
 
 /*
  * SENSITIVITY -- the magnitude at which the BODY reaches its own ceiling.
@@ -184,7 +208,9 @@
  * almost never sit there, so referencing the top of the number range would
  * spend the brightest part of the display on levels the music never reaches.
  */
-#define ST_STEM_METER_REF 4194304u   /* -6 dBFS in the 24-bit domain */
+/* Half of full scale, at whatever the stored width is: 4194304 at 24 bits,
+ * 16384 at 16. */
+#define ST_STEM_METER_REF ((ST_STEM_METER_FULL_SCALE + 1u) / 2u)
 
 /*
  * BODY DISPLAY RANGE -- how many octaves below the reference the body's own
