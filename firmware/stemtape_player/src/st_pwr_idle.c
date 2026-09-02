@@ -120,9 +120,15 @@ void st_pwr_gov_service(st_pwr_gov_t *g, const st_pwr_gov_in_t *in,
 	activity = in->fn_down || in->ain0_active || in->ain1_active ||
 		    fader_moved;
 
-	out->idle_elapsed_ms = st_pwr_idle_tick(&g->idle, in->transport_active,
+	/* AN ACTIVE UPLOAD IS USE, exactly like a turning reel: minutes long,
+	 * with nobody touching a control. It joins the IDLE rule here and the
+	 * MANUAL rule nowhere -- st_pwr_service() above was already called and
+	 * never saw it. */
+	out->idle_elapsed_ms = st_pwr_idle_tick(&g->idle,
+						 in->transport_active ||
+						 in->transfer_active,
 						 activity, in->now_ms);
-	out->in_use = in->transport_active || activity;
+	out->in_use = in->transport_active || in->transfer_active || activity;
 
 	/*
 	 * IDLE ONLY SHUTS DOWN A DEVICE THAT IS ON. While the wake gate is

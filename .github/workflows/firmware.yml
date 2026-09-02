@@ -1520,6 +1520,12 @@ jobs:
             firmware/stemtape_player/tests/test_power_idle.c \
             -o audit/test_power_idle
           ./audit/test_power_idle | tee audit/power-idle.txt
+          # THE TRANSFER CASES ARE NOT OPTIONAL: st60 could not service the
+          # power hold at all during a USB upload, and nothing caught it.
+          grep -q 'X4. ...and at 5000 ms it DOES' audit/power-idle.txt || {
+            echo "  the manual hold no longer fires during a transfer"; exit 1; }
+          grep -q 'X1. a 10-minute upload never triggers' audit/power-idle.txt || {
+            echo "  an active upload no longer suppresses the idle timer"; exit 1; }
           {
             echo '### Stem Tape idle auto-shutdown (playback is active use)'
             echo '```text'

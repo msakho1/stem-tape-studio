@@ -156,51 +156,53 @@
  * session's patience. */
 #define ST_RC_SWEEP_REPS 24u
 
-/* st60: STAGE 0 -- the complete power system: wake, manual shutdown, idle.
+/* st61: STAGE 0 -- the escape hatch reaches EVERY iteration, proven by
+ * control flow.
  *
- * Retired tags, none re-cut: st55 (the scratch series, burned); st56 (wrong
- * power behaviour -- 2.5 s, and a control map that omitted AIN1); st57
- * (published binaries carrying the 24.7 s fader defect); st58 (a single press
- * could cause two power transitions); st59 (correct, but with no idle
- * auto-shutdown -- an intermediate software-proven build, never a hardware
- * candidate).
+ * Retired, none re-cut: st55 (burned), st56 (2.5 s, no AIN1), st57 (the 24.7 s
+ * fader defect shipped), st58 (one press could cause two transitions), st59
+ * (no idle shutdown), st60 (correct in every module, but the control loop
+ * could skip the whole power service during a USB upload).
  *
- * THREE INDEPENDENT APPLICATION-LEVEL PROTECTIONS, plus one outside it:
+ * WHAT st60 GOT WRONG. `if (g_xfer_mode) { ...; continue; }` sat ~100 lines
+ * ABOVE power_hold_service(), so for the entire duration of a USB transfer
+ * neither the manual 5.000 s hold nor the 300 s idle timer was evaluated at
+ * all. That is the st55 shape exactly -- the power decision underneath a
+ * feature-gated early exit -- and the gate that was supposed to prevent it
+ * checked only the call's position against three named callees while printing
+ * "runs unconditionally, once per pass".
+ *
+ * st61: the three ADC reads and the power service move to the very top of the
+ * loop, above every `continue`; gate E-8 replaces E-2 and proves by CONTROL
+ * FLOW that no continue/break/return/goto exists between the loop's opening
+ * brace and the call, at any depth. Eight synthetic early exits, in eight
+ * different shapes, each turn CI red.
+ *
+ * An active upload is USE for the idle timer (transfer_active joins
+ * transport_active in st_pwr_gov_in_t) and is NOTHING to the manual hold
+ * (st_pwr_in_t has no such field). A deliberate hold shuts the device down
+ * mid-upload, which the A/B commit design makes safe by construction: a
+ * REPLACE session writes only the frozen INACTIVE pair, and one 512-byte index
+ * block carrying ST11_INDEX_MAGIC and a higher generation is the only thing
+ * that can promote it.
  *
  *   A  wake       OFF --FUNCTION only 2.000 s--> ON, shutdown DISARMED
- *   B  manual     ON, ARMED --FUNCTION only 5.000 s--> OFF
- *                 (armed only by a physical FUNCTION release after the wake:
- *                  one uninterrupted press causes at most one transition)
+ *   B  manual     ON, ARMED --FUNCTION only 5.000 s--> OFF, from EVERY state
  *   C  idle       true inactivity 300.000 s --> OFF
  *   D  recovery   Track 1 + Track 4 + USB, in the bootloader, unreachable
- *                 from any of the above
  *
- * IDLE IS ABOUT THE INSTRUMENT, NOT THE USER. Stem Tape can be used like an
- * iPod and a song can run past five minutes, so the idle clock advances only
- * while the transport is NOT traversing the song AND no physical control is
- * being used. transport_active is `g_playing || st_inertia_moving()` -- the
- * reel turning, including the audible spin-down after a STOP. Every playback
- * mode drives that same reel, so loop, reverse, slow, pitch, FX-over-playback
- * and every future scratch or scrub suppress the idle shutdown without needing
- * a case of their own. LED animation, meters, diagnostics, USB and eMMC
- * housekeeping, streamer bookkeeping and stale feature/combo/gesture state do
- * not, and cannot: st_pwr_gov_in_t has no field they could set.
- *
- * A and B are structurally blind to the transport -- st_pwr_in_t has no
- * transport field and st_pwr_hold.c never mentions one -- so playback can
- * never suppress the manual escape hatch. C never reads off_armed or any
- * feature flag, so a wake press held down cannot disable the backstop. The two
- * shutdown routes meet only in st_pwr_gov_service()'s final OR.
+ * power_off() now acknowledges on the LEDs BEFORE the bounded cleanup, so a
+ * correct gesture is visibly accepted at once rather than up to 13 s later.
  *
  * No head, no residency, no scratch work is in this build.
  *
- * docs/stem-tape-power-contract.md is the contract, the physical control map,
- * the proof matrix and the hardware acceptance list this build has NOT been
- * run against. */
+ * docs/stem-tape-power-contract.md is the contract, the control map, the
+ * proof matrix and the hardware acceptance list this build has NOT been run
+ * against. */
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st60-VOLCAL"
+#define ST_BUILD_TAG "st61-VOLCAL"
 #else
-#define ST_BUILD_TAG "st60"
+#define ST_BUILD_TAG "st61"
 #endif
 #include "st_pwr_idle.h"
 #include "st_track_hold.h"
@@ -9094,6 +9096,35 @@ static void stop_and_flush(void)
 /* ---------- power off ---------- */
 static void power_off(void)
 {
+	/*
+	 * ---- ACKNOWLEDGE FIRST, CLEAN UP SECOND ---------------------------
+	 *
+	 * The gesture is complete the moment we are called, so the instrument
+	 * says so BEFORE it does any work. Until st61 this ran after
+	 * stop_and_flush(), which is bounded at ~13.0 s in the worst case --
+	 * a user who performed a correct 5.000 s hold could stare at an
+	 * unchanged display for that long, conclude it had not worked, and let
+	 * go. (Letting go changes nothing: this function never returns. But
+	 * they had no way to know that.)
+	 *
+	 * NORMAL LATENCY IS TENS OF MILLISECONDS. Both waits below break
+	 * immediately when there is nothing outstanding, which is the case
+	 * during ordinary playback. The bounds exist for the pathological case,
+	 * and NEITHER may be shortened or cancelled:
+	 *
+	 *   3.0 s max   an in-progress take must be finalized, or it is lost
+	 *               or left partial. Cancelling loses the recording.
+	 *   10.0 s max  the eMMC's volatile write cache must reach the medium,
+	 *               or a just-committed song can vanish across the power
+	 *               cut. Cancelling risks exactly the corruption the A/B
+	 *               design exists to prevent.
+	 *
+	 * So the fix for the wait is not a smaller constant -- it is telling
+	 * the player immediately that the device heard them.
+	 */
+	led_seq_begin(ST_LED_SEQ_SHUTDOWN);
+	led_service();                       /* the first frame, now, not in 13 s */
+
 	stop_and_flush();                    /* never lose an in-progress recording */
 
 	/* SHUTDOWN ANIMATION, through the ONE semantic owner.
@@ -9108,7 +9139,10 @@ static void power_off(void)
 	 * sequence's own total (a fixed 400 ms) plus one 8 ms tick, and the
 	 * watchdog is fed every pass. It ends by forcing every LED pin
 	 * physically low regardless of how it exited. */
-	led_seq_begin(ST_LED_SEQ_SHUTDOWN);
+	/* The sequence is already running (begun above, before the cleanup).
+	 * This loop plays out whatever of it remains; if the cleanup outlasted
+	 * the animation the guard simply does not spin and shutdown_leds()
+	 * below forces dark either way. */
 	{
 		uint32_t guard = 0;
 
@@ -9274,6 +9308,13 @@ static int64_t power_hold_service(bool ain0_active, enum vol_btn ain1)
 	 */
 	in.transport_active = (g_playing != 0) ||
 			       st_inertia_moving(&s_stem_inertia);
+
+	/* AN ACTIVE UPLOAD IS USE -- for the IDLE timer only. It reaches
+	 * st_pwr_gov_in_t and stops there: st_pwr_in_t has no transfer field, so
+	 * the manual 5.000 s hold cannot see it and cannot be suppressed by it.
+	 * A deliberate hold switches the device off mid-upload, which the A/B
+	 * commit design makes safe (see the call site's own note). */
+	in.transfer_active = (g_xfer_mode != 0u);
 
 	/* One fader per pass, round-robin, and only a read that ALREADY
 	 * happened. While FUNCTION is down the ordinary poll below is skipped
@@ -9878,6 +9919,48 @@ int main(void)
 	while (1) {
 		feed_wdt();
 
+		/* ================================================================
+		 * THE ESCAPE HATCH RUNS FIRST -- LITERALLY FIRST
+		 * ================================================================
+		 * Above the transfer branch, above st_ctl_service(), above
+		 * stem_ctl_apply(), above the FUNCTION branch, and above EVERY
+		 * `continue` in this loop. Gate E-8 proves that by control flow
+		 * rather than by position relative to three named callees, which
+		 * is what the previous gate checked while claiming this.
+		 *
+		 * IT WAS NOT ALWAYS TRUE. Until st61 this block sat a hundred
+		 * lines BELOW `if (g_xfer_mode) { ...; continue; }`, so for the
+		 * whole duration of a USB upload neither the manual 5.000 s hold
+		 * nor the idle timer was evaluated at all -- the st55 shape
+		 * exactly: the power decision underneath a feature-gated early
+		 * exit. The three ADC reads move up with it because the control
+		 * map needs them; they are the same three reads the pass always
+		 * performed, just taken before anything can skip them.
+		 *
+		 * Aborting an upload this way is safe BY CONSTRUCTION, not by
+		 * cleanup: a REPLACE session writes only the frozen INACTIVE
+		 * song+index pair (st_ab_session.h), and the sole thing that can
+		 * promote it is one 512-byte index block carrying
+		 * ST11_INDEX_MAGIC and a higher generation. Lose power before
+		 * that block lands and the previous song is still selected; lose
+		 * power during it and the block either lands whole or fails CRC,
+		 * and st_stix_select_active() picks the other, intact record.
+		 * There is no ordering in which a half-written upload becomes
+		 * the active song. */
+		int  st_trk_raw = ladder_read(&adc_ladder[LAD_TRACKS]);
+		int  st_vol_raw = ladder_read(&adc_ladder[LAD_VOL]);
+		enum vol_btn st_vraw = st_vol_decode(st_vol_raw);
+
+		/* Tick the overlay's ladder on the TRUE reading, here, before
+		 * anything can zero st_trk_raw. See its declaration for why the
+		 * overlay cannot read the dispatcher's mask instead. */
+		st_ladder_update(&fx_track_ladder, st_trk_raw);
+
+		(void)power_hold_service(st_ladder_mask(&fx_track_ladder) != 0u ||
+					  st_ladder_play(&fx_track_ladder),
+					  st_vraw);
+
+
 		/* USB block-transfer in progress: audio is paused and the streamer is
 		 * servicing reads/writes. Ignore the controls, but keep the LEDs on
 		 * the ONE owner rather than painting the track row here.
@@ -9997,24 +10080,6 @@ int main(void)
 			stem_slow_toggle();
 		}
 
-		int  st_trk_raw = ladder_read(&adc_ladder[LAD_TRACKS]);
-		int  st_vol_raw = ladder_read(&adc_ladder[LAD_VOL]);
-		enum vol_btn st_vraw = st_vol_decode(st_vol_raw);
-
-		/* Tick the overlay's ladder on the TRUE reading, here, before
-		 * anything can zero st_trk_raw. See its declaration for why the
-		 * overlay cannot read the dispatcher's mask instead. */
-		st_ladder_update(&fx_track_ladder, st_trk_raw);
-
-		/* ---- THE ESCAPE HATCH RUNS FIRST -----------------------------
-		 * Above st_ctl_service(), above stem_ctl_apply(), above the
-		 * FUNCTION branch, above every `continue` any of them take. The
-		 * settled AIN0 state is already available from the tick just
-		 * above -- no extra conversion, and debounced, which
-		 * test_power_hold.c shows is required rather than merely tidy. */
-		(void)power_hold_service(st_ladder_mask(&fx_track_ladder) != 0u ||
-					  st_ladder_play(&fx_track_ladder),
-					  st_vraw);
 #if ST_VOL_CAL
 		/* AIN1 CALIBRATION CAPTURE -- st20-VOLCAL images only. Temporary,
 		 * exactly like the st16-cal build that produced

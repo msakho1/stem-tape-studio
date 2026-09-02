@@ -52,6 +52,17 @@
  * callback is running" or "the streamer thread is alive" -- both of which are
  * true forever and would disable the idle shutdown entirely.
  *
+ * AN ACTIVE USB UPLOAD IS ALSO ACTIVE USE.
+ *
+ * `transfer_active` enters the idle rule exactly as `transport_active` does,
+ * and for the same reason: a multi-minute upload is the instrument being used,
+ * and nobody is touching a control during it. It enters the MANUAL rule not at
+ * all. A deliberate FUNCTION-only 5.000 s hold must switch the device off
+ * during an upload -- the A/B commit design makes that safe by construction
+ * (an interrupted upload writes only the frozen INACTIVE pair, and the single
+ * 512-byte magic block is the only thing that can promote it), so there is no
+ * integrity reason to suppress the escape hatch and every safety reason not to.
+ *
  * ======================================================================
  * THREE INDEPENDENT PROTECTIONS
  * ======================================================================
@@ -167,6 +178,7 @@ typedef struct {
 	int32_t fader_raw;         /* this pass's round-robin reading, <0 = none */
 	uint8_t fader_idx;         /* which fader that reading belongs to */
 	bool    transport_active;  /* THE REEL IS TURNING -- see the top of file */
+	bool    transfer_active;   /* a USB block upload is in progress */
 	int64_t now_ms;
 } st_pwr_gov_in_t;
 

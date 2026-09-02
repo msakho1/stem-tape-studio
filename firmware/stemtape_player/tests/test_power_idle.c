@@ -55,6 +55,8 @@ typedef struct {
 
 static void rig_run(rig_t *r, bool transport, bool fn, bool ain0, bool ain1,
 		     int64_t ms);
+static void rig_run_x(rig_t *r, bool transport, bool transfer, bool fn,
+		       bool ain0, bool ain1, int64_t ms);
 
 /*
  * A RUNNING INSTRUMENT: powered on, shutdown ARMED, idle clock at zero.
@@ -99,6 +101,13 @@ static int64_t rig_mark(const rig_t *r) { return r->now - PASS_MS; }
 static void rig_run(rig_t *r, bool transport, bool fn, bool ain0, bool ain1,
 		     int64_t ms)
 {
+	rig_run_x(r, transport, false, fn, ain0, ain1, ms);
+}
+
+/* The same rig with the USB transfer flag exposed. */
+static void rig_run_x(rig_t *r, bool transport, bool transfer, bool fn,
+		       bool ain0, bool ain1, int64_t ms)
+{
 	const int64_t end = r->now + ms;
 	int pass = 0;
 
@@ -111,6 +120,7 @@ static void rig_run(rig_t *r, bool transport, bool fn, bool ain0, bool ain1,
 		in.ain0_active      = ain0;
 		in.ain1_active      = ain1;
 		in.transport_active = transport;
+		in.transfer_active  = transfer;
 		in.now_ms           = r->now;
 		in.fader_raw        = -1;
 		/* one fader per four passes, exactly as main.c round-robins */
@@ -685,6 +695,140 @@ static void test_idle_never_fires_while_the_device_is_off(void)
  */
 
 /* ======================================================================
+ * TRANSFER MODE -- an upload is use, but it is not a shield
+ * ======================================================================
+ *
+ * ADDED BECAUSE THE ESCAPE HATCH WAS NOT REACHED AT ALL DURING AN UPLOAD.
+ * Until st61 `if (g_xfer_mode) { ...; continue; }` sat above
+ * power_hold_service() in the control loop, so for the whole duration of a
+ * USB transfer neither the manual hold nor the idle timer was evaluated --
+ * the st55 shape exactly. The old E-2 gate reported the call as
+ * "unconditional" while checking only its position against three named
+ * callees. E-8 now proves it by control flow, and these cases prove the
+ * resulting behaviour.
+ *
+ * ABORTING AN UPLOAD THIS WAY IS SAFE BY CONSTRUCTION. A REPLACE session
+ * writes only the frozen INACTIVE song+index pair; the sole thing that can
+ * promote it is one 512-byte index block carrying ST11_INDEX_MAGIC and a
+ * higher generation, written only after a real read-back verification. Lose
+ * power before that block lands and the previous song is still selected; lose
+ * power during it and the block either lands whole or fails CRC, and
+ * st_stix_select_active() picks the other, intact record.
+ */
+
+static void test_X1_active_transfer_is_not_idle(void)
+{
+	rig_t r;
+
+	rig_init(&r);
+	/* Ten minutes of upload, nobody touching a control. */
+	rig_run_x(&r, false, true, false, false, false, 600000);
+	CHECK(r.n_idle_off == 0 && r.n_off == 0,
+	      "X1. a 10-minute upload never triggers the idle shutdown");
+	CHECK(r.n_in_use == (int)(600000 / PASS_MS),
+	      "X1. ...and every pass reported the instrument in use");
+}
+
+static void test_X2_transfer_ends_and_the_interval_begins(void)
+{
+	rig_t r;
+	int64_t ended_at;
+
+	rig_init(&r);
+	rig_run_x(&r, false, true, false, false, false, 400000);
+	ended_at = rig_mark(&r);
+	rig_idle_until(&r, ended_at, ST_PWR_IDLE_MS);
+	CHECK(r.n_off == 0,
+	      "X2. the idle interval starts when the upload ENDS, not when the "
+	      "last button was pressed");
+	rig_idle(&r, 400);
+	CHECK(r.n_idle_off > 0 && r.off_at - ended_at >= ST_PWR_IDLE_MS,
+	      "X2. ...and runs its full %d ms from there", ST_PWR_IDLE_MS);
+}
+
+static void test_X3_X4_manual_hold_works_during_a_transfer(void)
+{
+	rig_t r;
+	int64_t pressed_at;
+
+	/* 4.999 s during an upload: still on. */
+	rig_init(&r);
+	rig_run_x(&r, false, true, false, false, false, 20000);
+	pressed_at = r.now;
+	rig_run_x(&r, false, true, true, false, false, ST_PWR_OFF_MS - 1);
+	CHECK(r.n_off == 0,
+	      "X3. FUNCTION-only for %d ms during an upload does NOT shut down",
+	      ST_PWR_OFF_MS - 1);
+
+	/* 5.000 s: it must. */
+	rig_run_x(&r, false, true, true, false, false, 200);
+	CHECK(r.n_manual_off > 0 &&
+	      r.off_at - pressed_at >= ST_PWR_OFF_MS &&
+	      r.off_at - pressed_at < ST_PWR_OFF_MS + PASS_MS * 2,
+	      "X4. ...and at %d ms it DOES, via the manual route (measured "
+	      "%lld) -- an upload is use, not a shield", ST_PWR_OFF_MS,
+	      (long long)(r.off_at - pressed_at));
+	CHECK(r.n_idle_off == 0,
+	      "X4. ...and not via idle, which the transfer correctly suppressed");
+}
+
+static void test_X5_a_host_streaming_forever_cannot_suppress_the_hatch(void)
+{
+	rig_t r;
+	int64_t pressed_at;
+	int n;
+
+	rig_init(&r);
+	/* An hour of continuous transfer -- a buggy companion in a retry loop,
+	 * or simply a very large library. The 15 s host-idle timeout never
+	 * fires because the host never goes idle. */
+	for (n = 0; n < 12; n++) {
+		rig_run_x(&r, false, true, false, false, false, 300000);
+	}
+	CHECK(r.n_off == 0, "X5. an hour of unbroken transfer: still on");
+
+	pressed_at = r.now;
+	rig_run_x(&r, false, true, true, false, false, ST_PWR_OFF_MS + 200);
+	CHECK(r.n_manual_off > 0 && r.off_at - pressed_at >= ST_PWR_OFF_MS,
+	      "X5. ...and a deliberate 5.000 s hold still shuts it down. A host "
+	      "that keeps sending cannot hold the device hostage");
+}
+
+static void test_X6_transfer_does_not_reach_the_manual_timer(void)
+{
+	rig_t a, b;
+	int64_t pa, pb;
+
+	/* THE INDEPENDENCE, MEASURED. The same hold, once with the transfer
+	 * flag set and once without, must produce the SAME deadline to the
+	 * millisecond -- transfer_active reaches st_pwr_gov_in_t and stops
+	 * there; st_pwr_in_t has no such field for it to enter. */
+	rig_init(&a); pa = a.now;
+	rig_run_x(&a, false, true,  true, false, false, ST_PWR_OFF_MS + 200);
+
+	rig_init(&b); pb = b.now;
+	rig_run_x(&b, false, false, true, false, false, ST_PWR_OFF_MS + 200);
+
+	CHECK(a.off_at - pa == b.off_at - pb && a.n_manual_off > 0,
+	      "X6. the manual deadline is identical with and without a transfer "
+	      "in progress (%lld == %lld)", (long long)(a.off_at - pa),
+	      (long long)(b.off_at - pb));
+}
+
+static void test_X7_transfer_and_playback_are_both_use(void)
+{
+	rig_t r;
+
+	rig_init(&r);
+	/* Both at once is legal (playback pauses during a transfer in
+	 * production, but the module must not care which is set). */
+	rig_run_x(&r, true, true, false, false, false, 400000);
+	CHECK(r.n_off == 0 && r.n_in_use == (int)(400000 / PASS_MS),
+	      "X7. transport and transfer together: in use on every pass, no "
+	      "shutdown");
+}
+
+/* ======================================================================
  * The wake handoff (§10): a wake starts the idle system clean
  * ====================================================================== */
 
@@ -794,6 +938,12 @@ int main(void)
 	RUN(test_22_manual_works_regardless_of_idle_elapsed);
 	RUN(test_23_idle_works_while_manual_is_disarmed);
 	RUN(test_24_neither_mechanism_can_suppress_the_other);
+	RUN(test_X1_active_transfer_is_not_idle);
+	RUN(test_X2_transfer_ends_and_the_interval_begins);
+	RUN(test_X3_X4_manual_hold_works_during_a_transfer);
+	RUN(test_X5_a_host_streaming_forever_cannot_suppress_the_hatch);
+	RUN(test_X6_transfer_does_not_reach_the_manual_timer);
+	RUN(test_X7_transfer_and_playback_are_both_use);
 	RUN(test_or_is_exactly_the_or);
 	RUN(test_idle_never_fires_while_the_device_is_off);
 	RUN(test_wake_discards_historical_idle);

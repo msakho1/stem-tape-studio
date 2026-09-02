@@ -530,6 +530,15 @@ REQUIRED_SUBSTRINGS = {
 }
 
 
+def strip_c_comments(s: str) -> str:
+    """Blank comments while preserving line numbering, so a gate can never be
+    satisfied -- or broken -- by its own explanatory prose. The scratch series
+    shipped an extractor that matched its own comment; this is that lesson."""
+    s = re.sub(r"/\*.*?\*/", lambda m: "\n" * m.group(0).count("\n"), s, flags=re.S)
+    s = re.sub(r"//[^\n]*", "", s)
+    return s
+
+
 def calls_in_function(lines: list[str], func_of_line: dict[int, str | None], func_name: str) -> set[str]:
     """Every bare-call symbol (`name(`, skipping comment-only lines) found
     textually inside `func_name`'s own body, using func_of_line's already-
@@ -775,23 +784,94 @@ def main() -> int:
                        "it for a shutdown call")
         fail = True
 
-    # E-2. There IS an unconditional escape hatch, above every dispatcher.
-    if "power_hold_service(" in main_body:
-        idx = main_body.index("power_hold_service(")
-        for later in ("st_ctl_service(&g_stem_ctl", "stem_ctl_apply()", gate_open):
-            if later in main_body and main_body.index(later) < idx:
-                report.append("- **MISSING/BAD**: power_hold_service() is called AFTER "
-                               "`" + later + "` -- the escape hatch must run above every "
-                               "dispatcher, not among them")
-                fail = True
-                break
-        else:
-            report.append("- present: power_hold_service() runs above st_ctl_service(), "
-                           "stem_ctl_apply() and the FUNCTION branch, unconditionally, "
-                           "once per pass")
-    else:
-        report.append("- **MISSING**: no unconditional power_hold_service() call in main()")
+    # E-2 / E-8. THE ESCAPE HATCH IS REACHED ON EVERY ITERATION, PROVEN BY
+    #            CONTROL FLOW rather than by position relative to three
+    #            named callees.
+    #
+    # THE PREVIOUS VERSION OF THIS CHECK WAS WRONG, and wrong in the way that
+    # matters: it compared the call's index against st_ctl_service(),
+    # stem_ctl_apply() and the FUNCTION branch, then printed "runs above ...
+    # UNCONDITIONALLY, once per pass". It never looked for early exits. For
+    # months `if (g_xfer_mode) { ...; continue; }` sat a hundred lines above
+    # the call, so throughout every USB upload neither the manual hold nor the
+    # idle timer ran at all -- and this gate reported the opposite.
+    #
+    # A checker whose success message asserts more than the checker establishes
+    # is worse than no checker. So the rule is now mechanical and total:
+    #
+    #   between the main control loop's opening brace and the
+    #   power_hold_service() call there may be NO continue, break, return or
+    #   goto at any nesting depth -- no exceptions, no allowlist.
+    #
+    # Anything a future feature adds above the hatch therefore fails the build,
+    # whatever shape it takes.
+    code = strip_c_comments(text)
+    clines = code.split("\n")
+    svc_i = None
+    for i, ln in enumerate(clines):
+        if "power_hold_service(st_ladder_mask" in ln:
+            svc_i = i
+            break
+
+    # THE ENCLOSING LOOP, FOUND BY BRACE DEPTH, not by picking the nearest
+    # `while (1)` textually above. main() contains several loops -- the
+    # charge-standby gate has its own, with its own legitimate `break` on the
+    # wake transition -- and scanning the wrong one produced a false failure
+    # the first time this gate was written. Walk backwards from the call until
+    # the brace depth rises above the call's own level and the line opens a
+    # loop: that is the loop the call actually lives in.
+    loop_i = None
+    if svc_i is not None:
+        depth = 0
+        for i in range(svc_i - 1, -1, -1):
+            depth += clines[i].count("}") - clines[i].count("{")
+            if depth < 0:
+                s = clines[i].strip()
+                if s.endswith("{") and re.match(r"^(while\s*\(\s*1\s*\)|for\s*\(\s*;\s*;\s*\))", s):
+                    loop_i = i
+                    break
+                depth = 0   # some other enclosing block; keep going outward
+
+    if loop_i is None or svc_i is None or svc_i <= loop_i:
+        report.append("- **MISSING/BAD**: could not locate the main control loop and "
+                       "its power_hold_service() call. This gate fails closed: if the "
+                       "structure it proves cannot be found, it is not proven")
         fail = True
+    else:
+        offenders = []
+        for i in range(loop_i + 1, svc_i):
+            for kw in ("continue", "break", "return", "goto"):
+                if re.search(r"\b" + kw + r"\b\s*[;a-zA-Z_]", clines[i]):
+                    offenders.append((i + 1, kw, clines[i].strip()[:60]))
+        if offenders:
+            report.append("- **MISSING/BAD**: " + str(len(offenders)) + " early exit(s) "
+                           "can skip power_hold_service(). A feature branch that "
+                           "`continue`s above the escape hatch is exactly the st55 "
+                           "failure. Offenders:")
+            for ln, kw, txt_ in offenders:
+                report.append("    - line " + str(ln) + ": `" + kw + "` -- " + txt_)
+            fail = True
+        else:
+            report.append("- present: between the control loop's opening brace (line " +
+                           str(loop_i + 1) + ") and power_hold_service() (line " +
+                           str(svc_i + 1) + ") there is NO continue, break, return or "
+                           "goto at any depth. The hatch is reached on every iteration "
+                           "that executes application code -- proven by control flow, "
+                           "not by ordering against named callees")
+
+        # And it must still precede every dispatcher, which the old check did
+        # get right and which remains necessary but not sufficient.
+        after = "\n".join(clines[svc_i:])
+        before = "\n".join(clines[loop_i:svc_i])
+        for later in ("st_ctl_service(&g_stem_ctl", "stem_ctl_apply()"):
+            if later in before:
+                report.append("- **MISSING/BAD**: `" + later + "` runs BEFORE the "
+                               "escape hatch")
+                fail = True
+        if "g_xfer_mode" in before:
+            report.append("- **MISSING/BAD**: the transfer branch is above the escape "
+                           "hatch again")
+            fail = True
 
     # E-3. NOTHING FEATURE-SHAPED REACHES IT. The decision function takes two
     #      physical facts and a clock; if a g_stem_ctl_out field ever appears
