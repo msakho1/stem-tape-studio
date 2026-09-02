@@ -6,10 +6,10 @@ import {
   levelFromRms,
 } from "../stemActivity";
 import { resolveSp1LedFrame, sp1LedStateFrom } from "../sp1LedEngine";
-import { initialState, type SurfaceState } from "@/machine/surface";
+import { initialSurfaceState, type SurfaceState } from "@/machine/surface";
 
 function loadedPlaying(): SurfaceState {
-  const base = initialState();
+  const base = initialSurfaceState();
   return {
     ...base,
     playing: true,
