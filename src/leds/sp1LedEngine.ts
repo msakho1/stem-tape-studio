@@ -54,6 +54,7 @@ export type Sp1LedMode =
   | "rapid-pulse"
   | "breathe"
   | "chase"
+  | "activity"
   | "one-shot-single-flash"
   | "one-shot-double-flash";
 
@@ -62,7 +63,8 @@ export type PhaseAnchor =
   | "app-clock"
   | "gesture-start"
   | "loop-wrap"
-  | "one-shot-start";
+  | "one-shot-start"
+  | "stem-audio";
 
 export const BRIGHT_FULL = 127;
 export const BRIGHT_DIM = 40;
@@ -149,6 +151,11 @@ export interface AuthoritativeSp1LedState {
   loading: boolean;
   error: string | null;
   playing: boolean;
+  /**
+   * LED Stage 2 — per-stem activity, 0..1, one INDEPENDENT envelope per stem
+   * measured off that stem's own post-fader/post-solo analyser tap.
+   */
+  levels: readonly number[];
   tracks: Sp1LedTrackState[];
   activeStem: number;
   anySolo: boolean;
@@ -167,7 +174,11 @@ export interface AuthoritativeSp1LedState {
 }
 
 /** Projects the reducer state onto the authoritative LED state. */
-export function sp1LedStateFrom(state: SurfaceState, now: number): AuthoritativeSp1LedState {
+export function sp1LedStateFrom(
+  state: SurfaceState,
+  now: number,
+  levels: readonly number[] = [0, 0, 0, 0],
+): AuthoritativeSp1LedState {
   const perf = state.perf;
   const fx = fxStateOf(perf, fxTargetOf(perf));
   const banks: Sp1LedBankState[] = [0, 1, 2, 3].map((i) => {
@@ -198,6 +209,7 @@ export function sp1LedStateFrom(state: SurfaceState, now: number): Authoritative
     loading: false,
     error: state.grid.rejected ? "grid rejected" : null,
     playing: state.playing,
+    levels,
     tracks: state.tracks.map((t, i) => ({
       loaded: t.content !== "empty",
       muted: t.content === "muted",
@@ -279,9 +291,12 @@ interface Candidate {
   chaseSlot?: number;
   /** One-shot start time on the app clock. */
   startedAt?: number;
+  /** Activity mode: 0..1 envelope level for this stem. */
+  level?: number;
 }
 
 const ANIMATED_MODES: Sp1LedMode[] = [
+  "activity",
   "blink",
   "rapid-pulse",
   "breathe",
@@ -305,6 +320,13 @@ export function sampleBrightness(c: Candidate, t: number, index: number): number
       return BRIGHT_DIM;
     case "solid":
       return BRIGHT_FULL;
+    case "activity": {
+      // Base layer: the stem's own audible level. Silence reads genuinely
+      // quiet; a transient reads as a hit. No compression to "fully on".
+      const level = Math.max(0, Math.min(1, c.level ?? 0));
+      const base = Math.max(floor, BRIGHT_TAIL * 0.5);
+      return Math.round(base + (BRIGHT_FULL - base) * level);
+    }
     case "blink":
     case "rapid-pulse": {
       const p = period || PERIOD.blink;
@@ -445,13 +467,28 @@ function trackCandidates(s: AuthoritativeSp1LedState, i: number): Candidate[] {
     if (s.activeStem === i && t.loaded)
       out.push({ mode: "breathe", owner: `active stem ${i + 1}`, key: "activeStem", provenance: "stem-tape-override", periodMs: PERIOD.breathe });
     if (t.loaded && !t.muted)
-      out.push({
-        mode: s.playing ? "breathe" : "dim",
-        owner: s.playing ? `stem ${i + 1} playing` : `stem ${i + 1} loaded, stopped`,
-        key: "transport",
-        provenance: "tape-looper-source",
-        periodMs: s.playing ? PERIOD.breathe : null,
-      });
+      out.push(
+        s.playing
+          ? {
+              // LED Stage 2: the base playback layer is this stem's own audio
+              // activity, not a free-running decorative breathe.
+              mode: "activity",
+              owner: `stem ${i + 1} activity`,
+              key: "transport",
+              provenance: "stem-tape-override",
+              periodMs: null,
+              phaseAnchor: "stem-audio",
+              level: s.levels?.[i] ?? 0,
+              floor: 6,
+            }
+          : {
+              mode: "dim",
+              owner: `stem ${i + 1} loaded, stopped`,
+              key: "transport",
+              provenance: "tape-looper-source",
+              periodMs: null,
+            },
+      );
   }
 
   if (t.pressed)

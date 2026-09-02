@@ -360,6 +360,8 @@ export class AudioEngine {
   private normalTap: AnalyserNode | null = null;
 
   private tracks: TrackRuntime[] = [];
+  /** Reusable per-stem analysis buffers for the LED meter (no per-call alloc). */
+  private meterBufs: (Float32Array<ArrayBuffer> | undefined)[] = [];
   private timeline = new TapeTimeline(1);
   /** Correction 6 — the one authoritative timeline event stream. */
   readonly timelineBus = new TapeTimelineBus();
@@ -3086,15 +3088,33 @@ export class AudioEngine {
 
   /** Per-stem post-FX RMS — proves a stem's own path is sounding. */
   trackRms(): number[] {
-    return this.tracks.map((t) => {
-      const a = t.analyser;
-      const buf = new Float32Array(a.fftSize);
+    const out = [0, 0, 0, 0];
+    this.trackRmsInto(out);
+    return out;
+  }
+
+  /**
+   * Allocation-stable per-stem RMS for the LED meter. One reusable analysis
+   * buffer per stem, written in place, so sampling at 60 Hz produces no
+   * garbage. Reads the SAME post-fader / post-solo analyser tap as trackRms().
+   */
+  trackRmsInto(out: number[]): number[] {
+    for (let i = 0; i < this.tracks.length; i++) {
+      const a = this.tracks[i]!.analyser;
+      let buf = this.meterBufs[i];
+      if (!buf || buf.length !== a.fftSize) {
+        buf = new Float32Array(a.fftSize);
+        this.meterBufs[i] = buf;
+      }
       a.getFloatTimeDomainData(buf);
       let sum = 0;
-      for (let i = 0; i < buf.length; i++) sum += buf[i]! * buf[i]!;
-      return Math.sqrt(sum / buf.length);
-    });
+      for (let n = 0; n < buf.length; n++) sum += buf[n]! * buf[n]!;
+      out[i] = Math.sqrt(sum / buf.length);
+    }
+    for (let i = this.tracks.length; i < out.length; i++) out[i] = 0;
+    return out;
   }
+
 
   /** Normal (non-scrub) playback paths per stem — 1 per loaded, playing stem. */
 
