@@ -156,46 +156,53 @@
  * session's patience. */
 #define ST_RC_SWEEP_REPS 24u
 
-/* st59: STAGE 0 -- the power contract as a TRANSACTION, with release-to-rearm.
+/* st60: STAGE 0 -- the complete power system: wake, manual shutdown, idle.
  *
- * st55 (the scratch series) is burned and its tag is not reused; st56 named a
- * build whose power BEHAVIOUR was wrong (2.5 s, and a control map that omitted
- * AIN1); st57's binaries went out with a published hash before a real defect
- * was found in them (a fader baseline surviving across holds turned the
- * 5.000 s guarantee into 24.7 s); st58 was correct as far as it went but let a
- * single uninterrupted press cause TWO power transitions -- on at 2.000 s, off
- * again at 5.000 s, seven seconds under one finger. None of those tags is
- * re-cut.
+ * Retired tags, none re-cut: st55 (the scratch series, burned); st56 (wrong
+ * power behaviour -- 2.5 s, and a control map that omitted AIN1); st57
+ * (published binaries carrying the 24.7 s fader defect); st58 (a single press
+ * could cause two power transitions); st59 (correct, but with no idle
+ * auto-shutdown -- an intermediate software-proven build, never a hardware
+ * candidate).
  *
- * THIS BUILD IS st54 PLUS ONE SAFETY CHANGE, and the change is now complete:
+ * THREE INDEPENDENT APPLICATION-LEVEL PROTECTIONS, plus one outside it:
  *
- *   OFF --FUNCTION only 2.000 s--> ON, shutdown DISARMED
- *   ON, DISARMED --still held--> stays ON, indefinitely
- *   ON, DISARMED --FUNCTION RELEASED--> ON, shutdown ARMED
- *   ON, ARMED --FUNCTION only 5.000 s--> OFF
+ *   A  wake       OFF --FUNCTION only 2.000 s--> ON, shutdown DISARMED
+ *   B  manual     ON, ARMED --FUNCTION only 5.000 s--> OFF
+ *                 (armed only by a physical FUNCTION release after the wake:
+ *                  one uninterrupted press causes at most one transition)
+ *   C  idle       true inactivity 300.000 s --> OFF
+ *   D  recovery   Track 1 + Track 4 + USB, in the bootloader, unreachable
+ *                 from any of the above
  *
- * A single uninterrupted FUNCTION press cannot both power the device on and
- * later power it off. The whole decision -- both thresholds, the control map,
- * the transaction rule and the arming guard -- lives in st_pwr_service(),
- * which is pure and host-tested end to end; main.c contributes four reads and
- * one call. Shutdown is armed in exactly one place in the codebase, by
- * observing FUNCTION physically up, and CI asserts that count.
+ * IDLE IS ABOUT THE INSTRUMENT, NOT THE USER. Stem Tape can be used like an
+ * iPod and a song can run past five minutes, so the idle clock advances only
+ * while the transport is NOT traversing the song AND no physical control is
+ * being used. transport_active is `g_playing || st_inertia_moving()` -- the
+ * reel turning, including the audible spin-down after a STOP. Every playback
+ * mode drives that same reel, so loop, reverse, slow, pitch, FX-over-playback
+ * and every future scratch or scrub suppress the idle shutdown without needing
+ * a case of their own. LED animation, meters, diagnostics, USB and eMMC
+ * housekeeping, streamer bookkeeping and stale feature/combo/gesture state do
+ * not, and cannot: st_pwr_gov_in_t has no field they could set.
  *
- * The battery-wake path goes through the same 2.000 s gate as charge-standby
- * instead of booting on any press.
+ * A and B are structurally blind to the transport -- st_pwr_in_t has no
+ * transport field and st_pwr_hold.c never mentions one -- so playback can
+ * never suppress the manual escape hatch. C never reads off_armed or any
+ * feature flag, so a wake press held down cannot disable the backstop. The two
+ * shutdown routes meet only in st_pwr_gov_service()'s final OR.
  *
- * No head, no residency, no scratch work is in it -- those are Stage 2 and
- * later, and are deliberately NOT mixed into a build whose job is to prove the
- * device can always be switched off.
+ * No head, no residency, no scratch work is in this build.
  *
- * docs/postmortems/2026-09-scratch-series.md sections 3.0 and 4;
- * docs/stem-tape-power-contract.md for the control map, the proof matrix and
- * the hardware acceptance list this build has NOT yet been run against. */
+ * docs/stem-tape-power-contract.md is the contract, the physical control map,
+ * the proof matrix and the hardware acceptance list this build has NOT been
+ * run against. */
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st59-VOLCAL"
+#define ST_BUILD_TAG "st60-VOLCAL"
 #else
-#define ST_BUILD_TAG "st59"
+#define ST_BUILD_TAG "st60"
 #endif
+#include "st_pwr_idle.h"
 #include "st_track_hold.h"
 
 /*
@@ -8640,8 +8647,21 @@ static void led_seq_begin(st_led_seq_t seq)
  * the countdown reads it and this file's readers come first;
  * power_hold_service() below is the ONLY writer, and it writes only by handing
  * the object to st_pwr_service(). */
-static st_pwr_t s_pwr;
-static uint8_t  s_fader_rr;
+static st_pwr_gov_t s_pwr_gov;
+static uint8_t      s_fader_rr;
+
+/* THE LAST FADER READING TAKEN ANYWHERE THIS PASS, published for the idle
+ * detector. The FUNCTION branch's own read publishes here too, so the governor
+ * sees a fader sample whether FUNCTION is down or up WITHOUT a second ADC
+ * conversion -- the pass still performs exactly three ladder_read() calls. The
+ * reading is at most one control pass (~8 ms) old, which is nothing against a
+ * 300,000 ms clock. */
+static int32_t s_fader_pub_raw = -1;
+static uint8_t s_fader_pub_idx;
+
+/* Shorthand so the countdown and the standby loop read the same object the
+ * governor writes. */
+#define s_pwr (s_pwr_gov.pwr)
 
 static void led_service(void)
 {
@@ -9225,28 +9245,60 @@ static void power_off(void)
  */
 static int64_t power_hold_service(bool ain0_active, enum vol_btn ain1)
 {
-	st_pwr_in_t in;
-	st_pwr_out_t out;
+	st_pwr_gov_in_t in;
+	st_pwr_gov_out_t out;
 
 	memset(&in, 0, sizeof(in));
 	in.fn_down     = pwr_pressed();
 	in.ain0_active = ain0_active;
 	in.ain1_active = (ain1 != VOL_NONE);
 	in.now_ms      = k_uptime_get();
-	in.fader_raw   = -1;
+
+	/*
+	 * TRANSPORT ACTIVE = THE REEL IS TURNING. st_pwr_idle.h documents why
+	 * this is the definition and CI pins this exact expression.
+	 *
+	 * g_playing is the transport request; st_inertia_moving() covers the
+	 * spin-down after a STOP, which is audible pitched audio read from the
+	 * tape and therefore still playback. Every mode that manipulates the
+	 * song -- loop, reverse, slow, pitch, FX over live playback, and every
+	 * future scratch or scrub -- drives this same reel, so none of them
+	 * needs a special case and none of them can be forgotten.
+	 *
+	 * NOT "the audio callback exists" and NOT "the streamer thread is
+	 * alive": both are true forever and would disable the idle shutdown.
+	 *
+	 * s_stem_inertia is written by the audio thread. This is a plain read
+	 * of one enum from the control thread; the worst case is a verdict one
+	 * control pass stale, against a 300,000 ms clock.
+	 */
+	in.transport_active = (g_playing != 0) ||
+			       st_inertia_moving(&s_stem_inertia);
+
+	/* One fader per pass, round-robin, and only a read that ALREADY
+	 * happened. While FUNCTION is down the ordinary poll below is skipped
+	 * (that branch ends every path in `continue`), so this branch performs
+	 * the read and publishes it; while FUNCTION is up the ordinary poll
+	 * publishes its own. Either way: no extra conversion. */
 	if (in.fn_down) {
-		in.fader_idx = s_fader_rr;
-		in.fader_raw =
+		s_fader_pub_idx = s_fader_rr;
+		s_fader_pub_raw =
 			(int32_t)ladder_read(&adc_ladder[LAD_FADER0 + s_fader_rr]);
 		s_fader_rr = (uint8_t)((s_fader_rr + 1u) & (NTRK - 1u));
 	}
+	in.fader_idx    = s_fader_pub_idx;
+	in.fader_raw    = s_fader_pub_raw;
+	s_fader_pub_raw = -1;            /* consumed; do not re-count it */
 
-	st_pwr_service(&s_pwr, &in, &out);
+	st_pwr_gov_service(&s_pwr_gov, &in, &out);
 
-	if (out.off_due) {
+	/* ONE RESPONSE, TWO ROUTES. The manual 5.000 s hold and the 300 s idle
+	 * expiry are qualified independently inside the governor and meet only
+	 * in this flag -- see st_pwr_idle.h. */
+	if (out.power_off_request) {
 		power_off();                 /* never returns */
 	}
-	return out.elapsed_ms;
+	return out.hold_elapsed_ms;
 }
 
 /* STEM TAPE: enter_dfu() -- the Tape Looper's in-firmware "hold Track1+Track4
@@ -9511,7 +9563,7 @@ int main(void)
 		int64_t hold_t = -1;
 		uint32_t blink = 0;
 
-		st_pwr_init_off(&s_pwr);
+		st_pwr_gov_init_off(&s_pwr_gov);
 		while (1) {
 			feed_wdt();
 			/* v1.2.3-r7: apply the saved brightness at the TOP of the
@@ -9548,8 +9600,8 @@ int main(void)
 				static bool on_ladder_seeded;
 				const int on_trk = ladder_read(&adc_ladder[LAD_TRACKS]);
 				const int on_vol = ladder_read(&adc_ladder[LAD_VOL]);
-				st_pwr_in_t in;
-				st_pwr_out_t out;
+				st_pwr_gov_in_t in;
+				st_pwr_gov_out_t out;
 
 				if (!on_ladder_seeded) {
 					st_ladder_reset(&on_ladder);
@@ -9572,8 +9624,13 @@ int main(void)
 						  st_ladder_play(&on_ladder);
 				in.ain1_active = st_vol_decode(on_vol) != VOL_NONE;
 				in.fader_raw   = -1;
+				/* The device is OFF: no reel, no audio. The
+				 * governor's idle route is gated on device_on
+				 * and cannot fire here; this loop's own
+				 * battery-idle rule below is what applies. */
+				in.transport_active = false;
 				in.now_ms      = k_uptime_get();
-				st_pwr_service(&s_pwr, &in, &out);
+				st_pwr_gov_service(&s_pwr_gov, &in, &out);
 
 				if (out.on_due) {
 					/* NOTHING IS RESET ON THE WAY OUT, and
@@ -9591,7 +9648,7 @@ int main(void)
 					 * st_pwr_hold.h. */
 					break;                    /* -> full power-on */
 				}
-				if (out.elapsed_ms > 0) {
+				if (out.hold_elapsed_ms > 0) {
 					led_on(0);                /* press feedback */
 					hold_t = 0;               /* "a hold is running" */
 				} else {
@@ -9691,7 +9748,7 @@ int main(void)
 		 * carrying a fault breadcrumb. The machine starts ON, and (like
 		 * every entry point) DISARMED, so the first control pass with
 		 * FUNCTION up arms shutdown. */
-		st_pwr_init_on(&s_pwr);
+		st_pwr_gov_init_on(&s_pwr_gov);
 	}
 
 	controls_init();                /* power the button ladders + ADC + serial */
@@ -11025,6 +11082,13 @@ int main(void)
 					uint32_t q = (uint32_t)fv * 256u / 3700u;
 					trk[fi].vol_q8 = (uint16_t)(q > 256u ? 256u : q);
 				}
+				/* PUBLISHED FOR THE IDLE DETECTOR. A fader moved with
+				 * FUNCTION up is intentional use and must keep the
+				 * device awake, and this is the reading that already
+				 * exists -- power_hold_service() consumes it on the
+				 * next pass rather than taking a second conversion. */
+				s_fader_pub_idx = (uint8_t)fi;
+				s_fader_pub_raw = (int32_t)fv;
 				fi = (fi + 1) & 3;
 			}
 

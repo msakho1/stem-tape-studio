@@ -474,7 +474,7 @@ REQUIRED_SUBSTRINGS = {
         # THE DECISION IS NOT MADE HERE. The glue hands physical facts to the
         # pure service and acts on its answer; every branch that decides
         # anything is in st_pwr_hold.c and host-tested.
-        "st_pwr_service(&s_pwr, &in, &out);",
+        "st_pwr_gov_service(&s_pwr_gov, &in, &out);",
     ],
     "stem_ctl_apply": [
         # THE PUBLISHED MASK IS WHAT REACHES THE MIXER.
@@ -801,14 +801,15 @@ def main() -> int:
         report.append("- **MISSING**: power_hold_service() is not defined")
         fail = True
     elif ("g_stem_ctl_out" in svc_body or "function_consumed" in svc_body or
-          "combo_seen" in svc_body or "g_playing" in svc_body):
+          "combo_seen" in svc_body):
         report.append("- **MISSING/BAD**: power_hold_service() reads dispatcher state. "
                        "Musical consumption and safety suppression must stay different "
                        "things (postmortem P2/P5)")
         fail = True
     else:
         report.append("- present: power_hold_service() reads no dispatcher state -- "
-                       "only pwr_pressed(), a debounced ladder fact and the clock")
+                       "only pwr_pressed(), debounced ladder facts, the transport "
+                       "fact and the clock")
     # E-4. RELEASE-TO-REARM IS UNFAKEABLE, asserted in the module's own source.
     #
     #      The rule is that ONE uninterrupted FUNCTION press causes at most one
@@ -832,6 +833,15 @@ def main() -> int:
         # series shipped an extractor that matched its own explanation.
         mod_code = re.sub(r"/\*.*?\*/", "", mod_src, flags=re.S)
         mod_code = re.sub(r"//[^\n]*", "", mod_code)
+    mod_idle_code = ""
+    try:
+        with open(str(Path(main_c_path).with_name("st_pwr_idle.c")), "r",
+                  encoding="utf-8") as fh:
+            mod_idle_code = re.sub(r"//[^\n]*", "",
+                                    re.sub(r"/\*.*?\*/", "", fh.read(), flags=re.S))
+    except OSError:
+        report.append("- **MISSING**: st_pwr_idle.c not readable beside main.c")
+        fail = True
         arms = [m.start() for m in re.finditer(r"off_armed\s*=\s*true", mod_code)]
         guard = mod_code.find("if (!in->fn_down) {")
         if len(arms) != 1:
@@ -861,6 +871,67 @@ def main() -> int:
             report.append("- present: the OFF->ON transition disarms shutdown, so the "
                            "waking press owes its own release regardless of what "
                            "preceded it")
+
+    # E-5. TRANSPORT FEEDS IDLE AND NOTHING ELSE.
+    #
+    #      g_playing IS now read in power_hold_service() -- it is the transport
+    #      fact the idle timer needs, so forbidding it outright (as this gate
+    #      used to) is the wrong line. The right line is that transport must
+    #      never reach the MANUAL escape hatch: playback able to suppress,
+    #      extend or fake the 5.000 s FUNCTION hold would be the st55 failure
+    #      in new clothes. st_pwr_in_t has no transport field, and st_pwr_hold.c
+    #      must not mention the transport at all.
+    if mod_src:
+        bad = [w for w in ("g_playing", "transport", "inertia", "st_stream")
+               if w in mod_code]
+        if bad:
+            report.append("- **MISSING/BAD**: st_pwr_hold.c mentions " +
+                           ", ".join(bad) + ". The manual FUNCTION escape hatch must "
+                           "be blind to the transport")
+            fail = True
+        else:
+            report.append("- present: st_pwr_hold.c never mentions the transport -- "
+                           "the manual 5.000 s hold is structurally blind to playback, "
+                           "and st_pwr_in_t has no field through which it could be told")
+
+    # E-6. THE TRANSPORT DEFINITION IS THE REEL, PINNED.
+    #
+    #      "the audio callback exists" and "the streamer thread is alive" are
+    #      both true forever and would disable the idle shutdown entirely. The
+    #      semantic test is whether the reel is TURNING, which every playback
+    #      mode drives -- normal, loop, reverse, slow, pitch, FX over playback,
+    #      and every future scratch or scrub. st_inertia_moving() is what keeps
+    #      the audible spin-down after a STOP counted as playback rather than
+    #      starting the idle clock several hundred ms early.
+    if "st_inertia_moving(&s_stem_inertia)" in svc_body and "g_playing" in svc_body:
+        report.append("- present: transport_active is `g_playing || "
+                       "st_inertia_moving()` -- the reel turning, including the "
+                       "audible spin-down after a STOP")
+    else:
+        report.append("- **MISSING/BAD**: power_hold_service() does not derive "
+                       "transport_active from BOTH g_playing and "
+                       "st_inertia_moving(&s_stem_inertia). A definition based on a "
+                       "running callback or thread is true forever and disables the "
+                       "idle shutdown; one based on g_playing alone starts the idle "
+                       "clock during the audible spin-down")
+        fail = True
+
+    # E-7. IDLE NEVER READS THE MANUAL GUARD.
+    #
+    #      If the idle route consulted off_armed, a wake press held down would
+    #      leave the device unable to switch itself off by EITHER route -- the
+    #      release-to-rearm guard would have silently disabled the backstop.
+    if mod_idle_code:
+        seg = (mod_idle_code.split("out->idle_off_due")[1][:200]
+               if "out->idle_off_due" in mod_idle_code else "off_armed")
+        if "off_armed" in seg or "function_consumed" in mod_idle_code:
+            report.append("- **MISSING/BAD**: the idle verdict reads the manual path's "
+                           "arming guard or a consumption flag. The two shutdown routes "
+                           "must be independently qualified")
+            fail = True
+        else:
+            report.append("- present: the idle verdict reads device_on and its own "
+                           "clock -- never off_armed, never a feature flag")
     report.append("")
 
     # ---- STEM TAPE TRACK-BUTTON PROOF ----

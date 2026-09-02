@@ -87,6 +87,78 @@ On the **rising edge** of FUNCTION:
 Nothing outside the transaction may extend, suppress, pause, restart or poison
 it.
 
+### 1.2 Idle auto-shutdown — playback is active use
+
+```
+STOPPED / inactive, untouched, 300.000 s  →  OFF
+```
+
+**Idle is a statement about the instrument, not about the user.** Stem Tape can
+be used like an iPod and a song can easily run past five minutes. A timer
+measuring "time since last human input" would switch the device off in the
+middle of a seven-minute song — a worse failure than the one it prevents.
+
+```
+idle = the transport is not traversing the song
+       AND no intentional physical control is being used
+```
+
+**`transport_active` is pinned, by gate E-6, to exactly:**
+
+```c
+in.transport_active = (g_playing != 0) || st_inertia_moving(&s_stem_inertia);
+```
+
+*The reel is turning.* `g_playing` is the transport request;
+`st_inertia_moving()` covers the spin-down after a STOP, which is audible,
+pitched audio read from the tape and therefore still playback — without it the
+idle clock would start several hundred milliseconds early, mid-sound.
+
+This is one expression rather than a list of modes **because every mode that
+manipulates the song drives the same reel**: normal playback, loop, reverse,
+slow, pitch/varispeed, FX over live playback, solo/mute while playing, and
+every future master scratch, isolated stem scratch, scrub and shuttle. None of
+them needs a case here and none of them can be forgotten — a transport mode
+that did not move the reel would not produce audio either.
+
+**Rejected definitions, and why.** "The audio callback exists" and "the
+streamer thread is running" are both true forever and would disable the idle
+shutdown entirely. Gate E-6 fails the build if the expression stops naming both
+`g_playing` and `st_inertia_moving`.
+
+**What is not use.** LED animation, meter animation, housekeeping, diagnostics,
+counters, background USB servicing, background eMMC work, streamer bookkeeping
+while stopped, a feature flag merely remaining set, stale combo state, stale
+gesture ownership, stale reverse/FX/solo state with nothing playing. None of
+these has a path into the decision: `st_pwr_gov_in_t` has six fields — three
+physical rails, a fader reading, `transport_active`, and a clock.
+
+**What resets the idle clock** (when the transport is inactive): FUNCTION,
+PLAY, Track 1–4, VOL ±, rocker FWD/RWD, FX chord activity, intentional movement
+of any of the four faders. Reset, never pause: when use stops, a full fresh
+300.000 s is required.
+
+### 1.3 The three mechanisms are independent
+
+| | Qualified by | Never reads |
+|---|---|---|
+| **A** wake, 2.000 s | FUNCTION + the control map | transport, idle |
+| **B** manual, 5.000 s | FUNCTION + the control map + `off_armed` | transport, idle |
+| **C** idle, 300.000 s | transport + the control map + `device_on` | `off_armed`, feature flags |
+
+They meet in exactly one place: `st_pwr_gov_service()`'s final
+`power_off_request = off_due || idle_off_due`.
+
+`st_pwr_in_t` **has no transport field** and `st_pwr_hold.c` never mentions the
+transport — gate E-5 fails the build otherwise. That is the structural
+guarantee that playback can never suppress, extend or fake the manual escape
+hatch, which would be the st55 failure in new clothes. In the other direction,
+gate E-7 asserts the idle verdict never reads `off_armed`, so a wake press held
+down cannot disable the backstop.
+
+**D — bootloader recovery** (Track 1 + Track 4 + USB) runs before this image is
+entered and is unreachable from all of the above.
+
 ### The two invariants, which pull against each other
 
 **Safety.** *I am never more than one clean 5.000-second FUNCTION-only hold away
@@ -109,6 +181,7 @@ but FUNCTION is released.
 | input settle | `ST_PWR_SETTLE_PASSES` | 2 passes (~16 ms) | 2 |
 | fader movement | `ST_PWR_FADER_MOVE_COUNTS` | **16 counts — UNMEASURED, see §4** | — |
 | fader activity hold | `ST_PWR_FADER_ACTIVE_MS` | 250 ms | — |
+| **idle** | `ST_PWR_IDLE_MS` | **300000 ms** | 37,500 |
 
 `st_pwr_service()` returns **elapsed**, and both thresholds plus the LED
 countdown read that one value. There is no second clock.
@@ -281,6 +354,32 @@ booting under a held button was previously impossible.
 | OFF-9 | after each of OFF-4…OFF-8, stop and keep holding | full fresh 5.000 s | |
 | OFF-10 | move a fader **before** pressing FUNCTION, then hold | **exactly 5.000 s** — this is the 24.7 s defect | |
 
+### 5.2b Idle auto-shutdown — the section that needs a stopwatch and patience
+
+| # | Action | Required | Measured |
+|---|---|---|---|
+| ID-1 | stop the transport, do not touch anything | powers off after ~5:00 — **record the actual time** | |
+| ID-2 | play a song continuously past 5:00 | does **not** power off | |
+| ID-3 | play a song longer than 7 minutes end to end | plays to the end | |
+| ID-4 | loop continuously past 5:00 | does not power off | |
+| ID-5 | reverse playback past 5:00 | does not power off | |
+| ID-6 | slow mode past 5:00 | does not power off | |
+| ID-7 | pitched/varispeed past 5:00 | does not power off | |
+| ID-8 | FX engaged over live playback past 5:00 | does not power off | |
+| ID-9 | stop playback, then wait | the 5-minute interval starts **at the stop**, not at the last button | |
+| ID-10 | at ~4:50–4:59 press PLAY | timer resets; another full 5:00 required | |
+| ID-11 | repeat ID-10 with a Track | resets | |
+| ID-12 | repeat ID-10 with the rocker | resets | |
+| ID-13 | repeat ID-10 with VOL ± | resets | |
+| ID-14 | repeat ID-10 with **each** of the four faders | resets — all four | |
+| ID-15 | leave the unit stopped, untouched, on a bench overnight | powers off once at ~5:00 and stays off — resting analog noise does **not** keep it awake | |
+| ID-16 | stop the transport, then hold FUNCTION 5.000 s | manual shutdown still fires on time, regardless of idle elapsed | |
+
+ID-15 is the one M3 is really about. If the fader noise floor is above
+`ST_PWR_FADER_MOVE_COUNTS`, the idle timer will be reset by noise forever and
+the device will never sleep — the battery-drain failure this whole stage exists
+to prevent, arriving by a different road.
+
 ### 5.3 Performance safety — hold each chord > 5 s, device must NOT power off
 
 FUNCTION + PLAY · FUNCTION + each Track · FUNCTION + Track double-tap (reverse)
@@ -335,6 +434,17 @@ mode · FX engaged · mute/solo held · bank/grid state · transport stopped.
 | **no software reset can fake the release** | ✅ **A9(b)** | ✅ M-Q | ✅ | ✅ E-4 | n/a | n/a |
 | **the second press is an ordinary 5 s hold** | ✅ **A5/A6** | ✅ M-L | ✅ | — | ❌ | ❌ |
 | **both wake entries obey it identically** | ✅ **A10** | — | ✅ (same code) | — | ❌ | ❌ |
+| **idle fires at exactly 300.000 s** | ✅ 1 ms rig | ✅ I-11/I-15 | ✅ | — | ❌ | ❌ |
+| **playback suppresses idle (7-min song)** | ✅ 10–16 | ✅ I-1/I-3 | ✅ | ✅ E-6 | ❌ | ❌ |
+| **spin-down counts as playback** | — | — | ✅ | ✅ E-6 | ❌ | ❌ |
+| **every control resets idle** | ✅ 3–8 | ✅ I-4/5/6/7 | ✅ | — | ❌ | ❌ |
+| **background activity does not** | ✅ 17–21 | ✅ I-2 | ✅ | — | ❌ | ❌ |
+| **idle never banks partial credit** | ✅ 9 | ✅ I-11 | ✅ | — | ❌ | ❌ |
+| **wake discards historical idle** | ✅ wake | — *(equivalent, see below)* | ✅ | — | ❌ | ❌ |
+| **idle inert while the device is OFF** | ✅ off | ✅ I-14 | ✅ | — | ❌ | ❌ |
+| **transport cannot reach the manual hold** | ✅ 24c | — | ✅ | ✅ **E-5** | ❌ | ❌ |
+| **idle does not read `off_armed`** | — *(unreachable, see below)* | — | ✅ | ✅ **E-7** | n/a | n/a |
+| **either route alone reaches power_off()** | ✅ OR | ✅ I-12/I-13 | ✅ | — | ❌ | ❌ |
 | `power_off()` absent from gated branch | — | — | ✅ | ✅ E-1 | n/a | n/a |
 | service above every dispatcher | — | — | ✅ | ✅ E-2 | n/a | n/a |
 | **ADC/ladder decode on real rails** | — | — | — | — | **❌** | **❌** |
@@ -393,7 +503,42 @@ Gate **E-4 is itself mutation-tested**: adding a second `off_armed = true`,
 moving the assignment out of the `!fn_down` branch, and deleting the
 transition's disarm each make the gate fail, and the unmutated source passes.
 
-All nineteen mutants are killed or explained. The surviving-mutant list — the
+### The idle sweep (st60)
+
+Sixteen mutants against `st_pwr_idle.c`. **Three survived the first sweep, and
+two were real gaps in the tests:**
+
+* **I-13, dropping the manual route from the final OR, broke nothing** — because
+  the rig counted `off_due` *inside* `if (out.power_off_request)`. It never
+  looked at a route unless the combined flag had already fired. The rig now
+  counts each route independently and asserts
+  `power_off_request == off_due || idle_off_due` on every pass of every case.
+* **I-14, letting idle fire while the device is OFF, broke nothing** — no case
+  sat at the wake gate for a full five minutes. In production the standby loop
+  acts only on `on_due`, so it was inert; "currently inert" is how a latent
+  defect is described the day before it is wired up. A six-minute
+  device-off case was added.
+* **I-2, dropping the transport from `in_use`**, was caught only because the
+  playback cases now assert `in_use` on every pass — the reason they stay on
+  must be the reel, not an accident of the timer.
+
+**Two documented equivalent mutants, with the reachability argument rather than
+a claim:**
+
+* **I-9 / I-16, making the idle verdict depend on `off_armed`, cannot be killed
+  by any input.** `off_armed` is granted by any pass with FUNCTION up; FUNCTION
+  down is intentional activity and pins the idle clock at zero; so a 300,000 ms
+  idle expiry requires 300,000 ms of FUNCTION being up, which necessarily armed
+  shutdown on its first pass. At the moment idle expires, `off_armed` is always
+  true. The independence is real and enforced — **gate E-7** asserts the idle
+  verdict does not mention `off_armed` — but it is **structurally inspected, not
+  host-proven.**
+* **I-10, removing the idle re-init at the ON transition,** is equivalent
+  because the wake press is itself intentional activity and has already pinned
+  the clock. The explicit re-init stays as defence in depth: it makes the
+  guarantee independent of that coincidence.
+
+All nineteen manual-path mutants are killed or explained. The surviving-mutant list — the
 honest statement of what the suite does not constrain — is **M-H and M-R**, both
 documented above as equivalent.
 
