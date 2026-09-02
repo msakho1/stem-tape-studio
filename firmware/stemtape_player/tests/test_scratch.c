@@ -575,6 +575,67 @@ static void test_master_heads_cannot_drift(void)
 	      "bit-identical -- the integrator is deterministic, so locked heads stay locked");
 }
 
+/*
+ * THE HAND COMING OFF THE RECORD IS THE LAST PLACE A SIGN FLIP COULD HIDE.
+ *
+ * At release the head may be at -2.6x while ordinary playback is +1.0. Handing
+ * the transport straight back its own rate steps 3.6x of tape speed between
+ * one block and the next -- and does it worst exactly where a player uses it
+ * most, coming out of a reverse scratch. The coast walks it instead.
+ */
+static void test_release_coasts_back_to_unity(void)
+{
+	st_scratch_t s;
+	double max_step = 0.0, prev;
+	uint32_t t, ticks = 0u;
+	bool crossed_zero = false;
+
+	st_scratch_begin(&s, ST_SCRATCH_UNITY_Q16, ST_SCRATCH_MAX_RATE_MASTER_Q16);
+	(void)hold(&s, -ST_SCRATCH_DRIVE_FULL, 400u);      /* full reverse shuttle */
+	CHECK(rate_of(&s) < -2.0, "R1. shuttling in reverse at %.2fx", rate_of(&s));
+
+	prev = rate_of(&s);
+	(void)st_scratch_release(&s);
+	CHECK(s.coasting, "R1. releasing FUNCTION starts a coast, it does not snap");
+
+	for (t = 0; t < 2000u * 1000u; t += PASS_US) {
+		double now;
+
+		ticks++;
+		if (!st_scratch_coast(&s, PASS_US)) { break; }
+		now = rate_of(&s);
+		if (fabs(now - prev) > max_step) { max_step = fabs(now - prev); }
+		if (fabs(now) < 0.5) { crossed_zero = true; }
+		prev = now;
+	}
+
+	CHECK(rate_of(&s) == 1.0,
+	      "R1. and it arrives exactly at unity (%.4fx), so the override can be "
+	      "dropped with no step at the handover", rate_of(&s));
+	CHECK(crossed_zero,
+	      "R1. passing through the zero region on the way, not around it");
+	CHECK(max_step <= (ST_SCRATCH_MAX_RATE_MASTER_Q16 / 65536.0) *
+	      ((double)PASS_US / 1000.0) / (double)ST_SCRATCH_DECEL_MS + 1e-6,
+	      "R1. never moving more than one ramp step in a tick (%.4fx)", max_step);
+	printf("       coast took %u ticks (%.0f ms)\n", ticks, ticks * PASS_US / 1000.0);
+
+	/* Releasing AT unity is not a coast at all -- there is nothing to walk. */
+	st_scratch_begin(&s, ST_SCRATCH_UNITY_Q16, ST_SCRATCH_MAX_RATE_MASTER_Q16);
+	(void)st_scratch_release(&s);
+	CHECK(!s.coasting && !st_scratch_coast(&s, PASS_US),
+	      "R1. releasing a head already at unity coasts not at all");
+
+	/* And re-grabbing mid-coast cancels it, so a fast second gesture is not
+	 * fighting a ramp it cannot see. */
+	st_scratch_begin(&s, ST_SCRATCH_UNITY_Q16, ST_SCRATCH_MAX_RATE_MASTER_Q16);
+	(void)hold(&s, -ST_SCRATCH_DRIVE_FULL, 400u);
+	(void)st_scratch_release(&s);
+	(void)st_scratch_coast(&s, PASS_US);
+	st_scratch_begin(&s, st_scratch_rate_q16(&s), ST_SCRATCH_MAX_RATE_MASTER_Q16);
+	CHECK(!s.coasting && s.engaged,
+	      "R1. grabbing again mid-coast cancels the coast and resumes the gesture");
+}
+
 static void test_the_fader_maps_movement_not_position(void)
 {
 	/* Standing still asks for nothing, wherever the fader physically is. */
@@ -658,6 +719,7 @@ int main(void)
 	RUN(test_grabbing_a_moving_tape_starts_from_its_motion);
 	RUN(test_the_clamp_is_never_exceeded);
 	RUN(test_master_heads_cannot_drift);
+	RUN(test_release_coasts_back_to_unity);
 	RUN(test_the_fader_maps_movement_not_position);
 	RUN(test_the_rocker_reports_direction_only);
 

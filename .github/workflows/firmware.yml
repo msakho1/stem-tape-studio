@@ -2388,6 +2388,15 @@ jobs:
             audit/scratch-clamp-selftest.txt \
             || { echo "the zero-crossing continuity case did not run"; exit 1; }
 
+          # THE HAND COMING OFF THE RECORD is the last place a sign flip could
+          # hide: at release the head may be at -2.6x while ordinary playback
+          # is +1.0, and handing the transport straight back its own rate would
+          # step 3.6x between one block and the next -- worst exactly where a
+          # player uses it most, coming out of a reverse scratch.
+          grep -q 'the override can be dropped with no step at the handover' \
+            audit/scratch-clamp-selftest.txt \
+            || { echo "the release coast is gone -- letting go would be a hard sign flip"; exit 1; }
+
           # AND NO TIMEOUT MAY APPEAR. The moment something in here measures
           # how long a press lasted in order to pick a behaviour, scratch and
           # scrub have become two systems with a seam between them, which is

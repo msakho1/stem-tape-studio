@@ -221,6 +221,7 @@ typedef struct {
 	int32_t  drive_q16;    /* signed; what the control is currently asking for */
 	int32_t  max_rate_q16; /* the eMMC clamp for this target -- never exceeded */
 	bool     engaged;      /* the gesture is live (FUNCTION held) */
+	bool     coasting;     /* the hand has left; walking back to unity */
 } st_scratch_t;
 
 /*
@@ -254,11 +255,32 @@ static inline int32_t st_scratch_rate_q16(const st_scratch_t *s)
 }
 
 /*
- * End the gesture -- the hand leaves the record. The rate is handed back to
- * the caller so it can be fed to st_scrub's release ramp; this module stops
- * having an opinion at that point, and deliberately does NOT move the head.
+ * End the gesture -- the hand leaves the record -- and begin COASTING back to
+ * unity. Returns the signed rate at the moment of release.
+ *
+ * THE COAST IS NOT OPTIONAL, and this is where the spec's "smoothed through
+ * zero rather than a hard sign flip" is actually earned. At release the head
+ * may be running at -2.6x; ordinary playback is +1.0. Simply handing the
+ * transport back its own rate would step across 3.6x of tape speed between one
+ * block and the next, which is the discontinuity the whole design forbids --
+ * and it would be worst exactly where a player uses it most, coming out of a
+ * reverse scratch.
+ *
+ * So the integrator keeps running with nobody pushing it, walking to +1.0 on
+ * the same ramp arithmetic as everything else. No second engine, no separate
+ * release path: the hand leaving is just another target.
  */
 int32_t st_scratch_release(st_scratch_t *s);
+
+/*
+ * Advance a coast. Returns true while the rate is still short of unity, false
+ * once it has arrived -- at which point the caller stops overriding and the
+ * transport's own rate takes over seamlessly, because the two are equal.
+ */
+bool st_scratch_coast(st_scratch_t *s, uint32_t dt_us);
+
+/* Unity, in the same Q16 the transport uses. */
+#define ST_SCRATCH_UNITY_Q16 65536
 
 /*
  * ---- the two controls, mapped to drive ------------------------------------

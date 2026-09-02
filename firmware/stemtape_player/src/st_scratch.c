@@ -47,6 +47,7 @@ void st_scratch_begin(st_scratch_t *s, int32_t from_rate_q16, uint32_t max_rate_
 	s->rate_q16  = from_rate_q16;
 	s->drive_q16 = 0;
 	s->engaged   = true;
+	s->coasting  = false;   /* re-grabbing mid-coast cancels it */
 }
 
 void st_scratch_set_drive(st_scratch_t *s, int32_t drive_q16)
@@ -131,7 +132,48 @@ int32_t st_scratch_release(st_scratch_t *s)
 {
 	s->engaged   = false;
 	s->drive_q16 = 0;
+	s->coasting  = (s->rate_q16 != ST_SCRATCH_UNITY_Q16);
 	return s->rate_q16;
+}
+
+bool st_scratch_coast(st_scratch_t *s, uint32_t dt_us)
+{
+	int32_t step;
+
+	if (!s->coasting) {
+		return false;
+	}
+	if (dt_us == 0u) {
+		return true;
+	}
+
+	/*
+	 * THE DECEL RAMP, not the accel one, and not st_scrub's tape inertia.
+	 *
+	 * Coming off a record is a hand releasing, so it belongs to the quick
+	 * ramp -- the same one a mid-gesture release uses, which is what makes
+	 * letting go feel like one thing rather than two. st_scrub's ramp is
+	 * the motor spinning up after STOP, measured in hundreds of
+	 * milliseconds; using it here would leave the song audibly sliding back
+	 * to pitch long after the hand was clear.
+	 *
+	 * Rounded up for the same reason the tick's step is: an integer step
+	 * that rounds to zero never arrives, and this one would strand the
+	 * transport permanently off-speed.
+	 */
+	step = (int32_t)(((int64_t)s->max_rate_q16 * dt_us +
+			   (int64_t)ST_SCRATCH_DECEL_MS * 1000 - 1) /
+			  ((int64_t)ST_SCRATCH_DECEL_MS * 1000));
+	if (step <= 0) {
+		step = 1;
+	}
+
+	s->rate_q16 = walk_toward(s->rate_q16, ST_SCRATCH_UNITY_Q16, step);
+	if (s->rate_q16 == ST_SCRATCH_UNITY_Q16) {
+		s->coasting = false;
+		return false;
+	}
+	return true;
 }
 
 int32_t st_scratch_drive_from_fader(int32_t delta_counts, uint32_t dt_us)
