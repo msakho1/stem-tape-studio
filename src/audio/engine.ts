@@ -858,6 +858,20 @@ export class AudioEngine {
     return Math.min(this.duration, this.timeline.positionAt(this.ctx.currentTime));
   }
 
+  /**
+   * READ-ONLY loop-wrap anchor for the LED compositor: 0..1 through the
+   * current global loop, derived from the same derived playhead. Returns null
+   * when there is no global loop. Touches no transport state.
+   */
+  loopPhase(): number | null {
+    const l = this.globalLoop;
+    if (!l || !(l.lengthS > 0)) return null;
+    const p = (this.position() - l.start) / l.lengthS;
+    return ((p % 1) + 1) % 1;
+  }
+
+
+
   private timelineFrozenAt = 0;
 
   // ---------------------------------------------------------------- sources

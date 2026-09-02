@@ -133,6 +133,12 @@ export interface Sp1LedTrackState {
   soloed: boolean;
   linked: boolean;
   pressed: boolean;
+  /** Per-lane tape reverse (universal lane layer), independent of Heads. */
+  reverse?: boolean;
+  /** This lane's own capture loop. */
+  looping?: boolean;
+  /** Scratch readiness — isolated stem scratch (fed by the scratch engine). */
+  scratching?: boolean;
   head: { loaded: boolean; muted: boolean; reverse: boolean; latched: boolean };
 }
 
@@ -163,6 +169,16 @@ export interface AuthoritativeSp1LedState {
   fxScope: "global" | "stem";
   banks: Sp1LedBankState[];
   globalLoop: { active: boolean; latched: boolean; division: 1 | 2 | 4 | 8 };
+  /**
+   * Real loop-wrap anchor, 0..1 through the current global loop, derived from
+   * the audio engine's own position. `null` when the engine has no loop phase
+   * to offer — the accent then falls back to the app clock.
+   */
+  loopPhase?: number | null;
+  /** Persistent slowed-tape state (musical rate below unity). */
+  slow?: boolean;
+  /** Scratch readiness — master (all-stem) scratch, fed by the scratch engine. */
+  scratch?: { master: boolean };
   scrub: { direction: 0 | 1 | -1; speedIndex: ScrubSpeedIndex; latched: boolean; inertia: boolean };
   heads: { active: boolean };
   song: number;
@@ -170,15 +186,30 @@ export interface AuthoritativeSp1LedState {
   /** Physical SP-1 recognized on the wire — finite greeting chase, or null. */
   connectGreeting: { startedAt: number } | null;
   /** Finite one-shots, expressed as absolute app-clock start times. */
-  flash: { kind: "fx-latch" | "fx-unlatch" | "heads-reject"; startedAt: number } | null;
+  flash: { kind: "fx-latch" | "fx-unlatch" | "heads-reject" | "pitch"; startedAt: number } | null;
 }
+
+/** Extra LED-only context the reducer does not carry. */
+export interface Sp1LedContext {
+  levels?: readonly number[];
+  /** 0..1 phase through the global loop, from the audio engine. */
+  loopPhase?: number | null;
+  scratch?: { master?: boolean; stems?: readonly boolean[] };
+  /** Momentary semitone/rate confirmation, app-clock start time. */
+  pitchFlashAt?: number | null;
+}
+
 
 /** Projects the reducer state onto the authoritative LED state. */
 export function sp1LedStateFrom(
   state: SurfaceState,
   now: number,
-  levels: readonly number[] = [0, 0, 0, 0],
+  levelsOrContext: readonly number[] | Sp1LedContext = [0, 0, 0, 0],
 ): AuthoritativeSp1LedState {
+  const ctx: Sp1LedContext = Array.isArray(levelsOrContext)
+    ? { levels: levelsOrContext as readonly number[] }
+    : (levelsOrContext as Sp1LedContext);
+  const levels = ctx.levels ?? [0, 0, 0, 0];
   const perf = state.perf;
   const fx = fxStateOf(perf, fxTargetOf(perf));
   const banks: Sp1LedBankState[] = [0, 1, 2, 3].map((i) => {
@@ -201,6 +232,10 @@ export function sp1LedStateFrom(
       return { kind: "heads-reject" as const, startedAt: state.headsRejectFlashAt };
     if (state.fxFlashAt != null && now - state.fxFlashAt >= 0 && now - state.fxFlashAt < PERIOD.oneShotSingle)
       return { kind: "fx-latch" as const, startedAt: state.fxFlashAt };
+    // Momentary pitch/semitone confirmation. Purely finite: once it expires the
+    // LED returns to whatever the composite says, with no state of its own.
+    if (ctx.pitchFlashAt != null && now - ctx.pitchFlashAt >= 0 && now - ctx.pitchFlashAt < PERIOD.oneShotSingle)
+      return { kind: "pitch" as const, startedAt: ctx.pitchFlashAt };
     return null;
   })();
 
@@ -216,6 +251,9 @@ export function sp1LedStateFrom(
       soloed: perf.tracks[i]!.soloed,
       linked: perf.tracks[i]!.linked,
       pressed: state.pressed.includes(`track-button-${i + 1}` as never),
+      reverse: t.laneReverse,
+      looping: t.laneLoop.active,
+      scratching: ctx.scratch?.stems?.[i] === true,
       head: { loaded: t.content !== "empty", muted: t.headMuted, reverse: t.headReverse, latched: t.headLatched },
     })),
     activeStem: perf.activeStem,
@@ -224,6 +262,9 @@ export function sp1LedStateFrom(
     fxScope: perf.fxScope === "global" ? "global" : "stem",
     banks,
     globalLoop: { ...state.globalLoop },
+    loopPhase: ctx.loopPhase ?? null,
+    slow: state.speed < 0.995,
+    scratch: { master: ctx.scratch?.master === true },
     scrub: {
       direction: state.globalScrub,
       speedIndex: state.scrubSpeed,
@@ -242,6 +283,7 @@ export function sp1LedStateFrom(
     flash,
   };
 }
+
 
 // ------------------------------------------------------------ resolve ------
 
@@ -265,7 +307,32 @@ export interface ResolvedSp1Led {
   lostTo: string | null;
   /** Owner this LED restores to when a temporary behaviour ends. */
   restoreTo: string | null;
+  /**
+   * Persistent states composed ON TOP of the winning base, in application
+   * order. These do not replace the base layer — they shape it, so loop,
+   * reverse, FX, mute/solo, slow and scratch can all read at once.
+   */
+  modifiers: LedModifierKind[];
 }
+
+/** Composable persistent states, applied over the winning base candidate. */
+export type LedModifierKind =
+  | "mute"
+  | "solo"
+  | "non-solo"
+  | "loop"
+  | "reverse"
+  | "fx"
+  | "slow"
+  | "scratch";
+
+interface LedModifier {
+  kind: LedModifierKind;
+  /** Loop accent uses the real audio wrap phase when one exists. */
+  phase?: number | null;
+  periodMs?: number;
+}
+
 
 export interface ResolvedPhysicalLedFrame {
   leds: ResolvedSp1Led[];
@@ -363,6 +430,126 @@ export function sampleBrightness(c: Candidate, t: number, index: number): number
   }
 }
 
+// ---------------------------------------------------------- modifiers ------
+
+/** Loop accent duty — the fraction of a loop cycle the wrap tick occupies. */
+const LOOP_TICK = 0.14;
+const MUTE_CEILING = BRIGHT_TAIL; // hot source audio can never look "active"
+const NON_SOLO_SCALE = 0.32;
+const SOLO_SCALE = 1.35;
+
+function cyclePhase(m: LedModifier, t: number, fallbackPeriod: number): number {
+  if (m.phase != null) return ((m.phase % 1) + 1) % 1; // real audio wrap anchor
+  const p = m.periodMs || fallbackPeriod;
+  return (t % p) / p;
+}
+
+/**
+ * Composition, not arbitration. Each persistent state SHAPES the winning base
+ * layer instead of replacing it, so loop + reverse + FX + slow all remain
+ * readable at once.
+ */
+export function applyModifiers(base: number, mods: readonly LedModifier[], t: number): number {
+  let v = base;
+  for (const m of mods) {
+    switch (m.kind) {
+      case "mute":
+        // Strongly suppressed but still present: reads as muted, never active.
+        v = Math.min(MUTE_CEILING, Math.round(v * 0.16));
+        break;
+      case "solo":
+        // Emphasis WITHOUT flattening: the meter still moves underneath.
+        v = Math.round(Math.min(BRIGHT_FULL, Math.max(v, BRIGHT_DIM) * SOLO_SCALE));
+        break;
+      case "non-solo":
+        v = Math.round(v * NON_SOLO_SCALE);
+        break;
+      case "loop": {
+        // Wrap tick on the real loop phase when the engine offers one.
+        const ph = cyclePhase(m, t, PERIOD.latchedBlink);
+        v = ph < LOOP_TICK ? Math.max(v, 104) : Math.round(v * 0.82);
+        break;
+      }
+      case "reverse": {
+        // Backwards stutter notch — unique to the reversed lane, and the
+        // stem's own activity keeps modulating between notches.
+        const ph = cyclePhase(m, t, PERIOD.latchedBlink);
+        v = ph >= 0.62 && ph < 0.86 ? Math.round(v * 0.28) : v;
+        break;
+      }
+      case "fx": {
+        // FX presence: a lifted floor plus a shallow ripple. Never a takeover.
+        const ph = cyclePhase(m, t, PERIOD.blink);
+        const ripple = 1 + 0.16 * Math.sin(ph * Math.PI * 2);
+        v = Math.round(Math.max(v, 26) * ripple);
+        break;
+      }
+      case "slow": {
+        // Persistent but subtle: a slow sag, always below the unmodified level.
+        const ph = cyclePhase(m, t, 1600);
+        v = Math.round(v * (0.72 + 0.14 * (1 - Math.cos(ph * Math.PI * 2)) / 2));
+        break;
+      }
+      case "scratch": {
+        // Scratch readiness — the compositor already consumes master and
+        // per-stem scratch flags; the scratch engine only has to set them.
+        const ph = cyclePhase(m, t, 160);
+        v = ph < 0.5 ? Math.min(BRIGHT_FULL, v + 34) : Math.round(v * 0.55);
+        break;
+      }
+    }
+  }
+  return Math.max(0, Math.min(BRIGHT_FULL, Math.round(v)));
+}
+
+/** Modifier keys whose winning base must NOT be reshaped (finite/critical). */
+const UNCOMPOSED: PrecedenceKey[] = [
+  "power",
+  "error",
+  "connectGreeting",
+  "loading",
+  "rejectionFlash",
+  "confirmationFlash",
+  "heads",
+  "scrub",
+];
+
+function anyFxEngaged(s: AuthoritativeSp1LedState): boolean {
+  return s.banks.some((b) => b.latched || b.momentary);
+}
+
+function trackModifiers(s: AuthoritativeSp1LedState, i: number): LedModifier[] {
+  const t = s.tracks[i]!;
+  const mods: LedModifier[] = [];
+  if (!t.loaded) return mods;
+  if (t.muted) mods.push({ kind: "mute" });
+  else if (t.soloed) mods.push({ kind: "solo" });
+  else if (s.anySolo) mods.push({ kind: "non-solo" });
+
+  const looping = s.globalLoop.active || s.globalLoop.latched || t.looping;
+  if (looping) mods.push({ kind: "loop", phase: s.loopPhase ?? null, periodMs: loopPeriodFor(s.globalLoop.division) });
+  if (t.reverse) mods.push({ kind: "reverse" });
+  // Authoritative FX state, overlay open or not. Stem-scoped FX only accents
+  // the stem it is actually applied to.
+  if (anyFxEngaged(s) && (s.fxScope === "global" || s.activeStem === i)) mods.push({ kind: "fx" });
+  if (s.slow) mods.push({ kind: "slow" });
+  if (s.scratch?.master || t.scratching) mods.push({ kind: "scratch" });
+  return mods;
+}
+
+function sideModifiers(s: AuthoritativeSp1LedState, index: number): LedModifier[] {
+  const mods: LedModifier[] = [];
+  const looping = s.globalLoop.active || s.globalLoop.latched;
+  // The loop keeps its wrap tick on the PLAY-side LED even when an FX bank
+  // owns that LED, so FX can never erase the loop indication.
+  if (looping && index === PLAY_SIDE_INDEX)
+    mods.push({ kind: "loop", phase: s.loopPhase ?? null, periodMs: loopPeriodFor(s.globalLoop.division) });
+  if (s.slow && index === PLAY_SIDE_INDEX) mods.push({ kind: "slow" });
+  if (s.scratch?.master && index === PLAY_SIDE_INDEX) mods.push({ kind: "scratch" });
+  return mods;
+}
+
+
 function pick(cands: Candidate[]): { win: Candidate; lost: Candidate | null; restore: Candidate | null } {
   const sorted = [...cands].sort((a, b) => PRECEDENCE[b.key] - PRECEDENCE[a.key]);
   const win = sorted[0]!;
@@ -406,7 +593,18 @@ function trackCandidates(s: AuthoritativeSp1LedState, i: number): Candidate[] {
       phaseAnchor: "one-shot-start",
       periodMs: PERIOD.oneShotDouble,
     });
+  if (s.flash?.kind === "pitch")
+    out.push({
+      mode: "one-shot-single-flash",
+      owner: "semitone / rate confirmation (momentary)",
+      key: "confirmationFlash",
+      provenance: "stem-tape-override",
+      startedAt: s.flash.startedAt,
+      phaseAnchor: "one-shot-start",
+      periodMs: PERIOD.oneShotSingle,
+    });
   if (s.flash?.kind === "fx-latch" || s.flash?.kind === "fx-unlatch")
+
     out.push({
       mode: "one-shot-single-flash",
       owner: "FX latch confirmation — all four Track LEDs flash once",
@@ -452,48 +650,48 @@ function trackCandidates(s: AuthoritativeSp1LedState, i: number): Candidate[] {
     });
   }
 
-  if (s.fxOverlay) {
-    if (t.soloed) out.push({ mode: "solid", owner: `stem ${i + 1} soloed`, key: "muteSoloLink", provenance: "stem-tape-override" });
-    else if (!t.linked)
-      out.push({ mode: "blink", owner: `stem ${i + 1} unlinked`, key: "muteSoloLink", provenance: "stem-tape-override", periodMs: PERIOD.latchedBlink });
-    else if (s.activeStem === i)
-      out.push({ mode: "breathe", owner: `active stem ${i + 1}`, key: "activeStem", provenance: "stem-tape-override", periodMs: PERIOD.breathe });
-    else out.push({ mode: "dim", owner: `stem ${i + 1} idle (overlay)`, key: "base", provenance: "stem-tape-override" });
-  } else {
+  // ---- base layer -----------------------------------------------------
+  // During PLAY every loaded stem's base is its OWN audio activity — mute,
+  // solo, loop, reverse, FX, slow and scratch are composed over it as
+  // modifiers (see trackModifiers) rather than replacing it.
+  const meterBase = s.playing && t.loaded;
+  if (meterBase)
+    out.push({
+      mode: "activity",
+      owner: `stem ${i + 1} activity`,
+      key: "transport",
+      provenance: "stem-tape-override",
+      periodMs: null,
+      phaseAnchor: "stem-audio",
+      level: s.levels?.[i] ?? 0,
+      floor: 6,
+    });
+  else if (t.loaded)
+    out.push({
+      mode: "dim",
+      owner: `stem ${i + 1} loaded, stopped`,
+      key: "transport",
+      provenance: "tape-looper-source",
+      periodMs: null,
+    });
+
+  // ---- stopped / overlay-only semantics --------------------------------
+  // These are the states that have no meter to shape, so they still own the
+  // LED outright. While playing they become modifiers instead.
+  if (!meterBase) {
     if (t.soloed) out.push({ mode: "solid", owner: `stem ${i + 1} soloed`, key: "muteSoloLink", provenance: "stem-tape-override" });
     if (t.muted) out.push({ mode: "dim", owner: `stem ${i + 1} muted`, key: "muteSoloLink", provenance: "tape-looper-source" });
-    if (!t.linked)
-      out.push({ mode: "blink", owner: `stem ${i + 1} unlinked`, key: "muteSoloLink", provenance: "stem-tape-override", periodMs: PERIOD.latchedBlink });
-    // LED Stage 2: during PLAY the stem's own audio activity is the base
-    // layer — selection must not replace it with a free-running breathe.
-    // (A composable selected-stem accent lands in Stage 3+.)
-    if (s.activeStem === i && t.loaded && !(s.playing && !t.muted))
+    if (s.activeStem === i && t.loaded)
       out.push({ mode: "breathe", owner: `active stem ${i + 1}`, key: "activeStem", provenance: "stem-tape-override", periodMs: PERIOD.breathe });
-
-    if (t.loaded && !t.muted)
-      out.push(
-        s.playing
-          ? {
-              // LED Stage 2: the base playback layer is this stem's own audio
-              // activity, not a free-running decorative breathe.
-              mode: "activity",
-              owner: `stem ${i + 1} activity`,
-              key: "transport",
-              provenance: "stem-tape-override",
-              periodMs: null,
-              phaseAnchor: "stem-audio",
-              level: s.levels?.[i] ?? 0,
-              floor: 6,
-            }
-          : {
-              mode: "dim",
-              owner: `stem ${i + 1} loaded, stopped`,
-              key: "transport",
-              provenance: "tape-looper-source",
-              periodMs: null,
-            },
-      );
+    if (s.fxOverlay && !t.soloed && t.linked && s.activeStem !== i)
+      out.push({ mode: "dim", owner: `stem ${i + 1} idle (overlay)`, key: "base", provenance: "stem-tape-override" });
   }
+  // Link state is an editing affordance, not a performance state: it only owns
+  // the LED when there is no live meter to preserve, or while the FX overlay
+  // (where linking is edited) is open.
+  if (!t.linked && (!meterBase || s.fxOverlay))
+    out.push({ mode: "blink", owner: `stem ${i + 1} unlinked`, key: "muteSoloLink", provenance: "stem-tape-override", periodMs: PERIOD.latchedBlink });
+
 
   if (t.pressed)
     out.push({ mode: "solid", owner: `Track ${i + 1} held (input feedback)`, key: "fxSelection", provenance: "implementation-observation" });
@@ -593,7 +791,24 @@ function sideCandidates(s: AuthoritativeSp1LedState, index: number): Candidate[]
         key: "fxSelection",
         provenance: "stem-tape-override",
       });
+  } else {
+    // Authoritative FX state, overlay CLOSED: an engaged bank stays visible on
+    // its own side LED. Loop keeps its wrap tick over the top (sideModifiers).
+    const bank = s.banks[slot]!;
+    if (bank.momentary || bank.latched) {
+      const gate = bank.algorithmId === "gate";
+      out.push({
+        mode: gate ? "rapid-pulse" : "blink",
+        owner: `${bank.label} ${bank.latched ? "latched" : "momentary"} (${s.fxScope} scope, overlay closed)`,
+        key: "fxActive",
+        provenance: "stem-tape-override",
+        periodMs: gate ? PERIOD.rapidPulse : PERIOD.blink,
+        floor: bank.latched ? 32 : 0,
+        phaseAnchor: "app-clock",
+      });
+    }
   }
+
 
   if (s.heads.active && index === 7)
     out.push({ mode: "breathe", owner: "heads mode active", key: "heads", provenance: "stem-tape-override", periodMs: PERIOD.breathe });
@@ -622,22 +837,37 @@ export function resolveSp1LedFrame(
   const leds: ResolvedSp1Led[] = PHYSICAL_LED_MAP.map((slot) => {
     const cands = slot.index < 4 ? trackCandidates(state, slot.index) : sideCandidates(state, slot.index);
     const { win, lost, restore } = pick(cands);
+    const base = sampleBrightness(win, animationTimeMs, slot.index);
+    // Momentary overrides and safety-critical owners are never reshaped; every
+    // other winner is composed with the persistent modifier layers.
+    const mods =
+      state.power === "off" || UNCOMPOSED.includes(win.key)
+        ? []
+        : slot.index < 4
+          ? trackModifiers(state, slot.index)
+          : sideModifiers(state, slot.index);
+    const composed = mods.length ? applyModifiers(base, mods, animationTimeMs) : base;
+    const kinds = mods.map((m) => m.kind);
     return {
       index: slot.index,
       id: slot.id,
       name: slot.name,
       mode: win.mode,
-      brightness: Math.max(0, Math.min(127, Math.round(sampleBrightness(win, animationTimeMs, slot.index)))),
+      brightness: Math.max(0, Math.min(127, Math.round(composed))),
       floor: win.floor ?? 0,
-      owner: win.owner,
+      owner: kinds.length ? `${win.owner} + ${kinds.join("+")}` : win.owner,
       precedenceKey: win.key,
       precedence: PRECEDENCE[win.key],
-      phaseAnchor: win.phaseAnchor ?? (isAnimatedMode(win.mode) ? "app-clock" : "none"),
+      phaseAnchor:
+        kinds.includes("loop") && state.loopPhase != null
+          ? "loop-wrap"
+          : (win.phaseAnchor ?? (isAnimatedMode(win.mode) ? "app-clock" : "none")),
       periodMs: win.periodMs ?? null,
-      direction: win.direction ?? "none",
+      direction: kinds.includes("reverse") ? "reverse" : (win.direction ?? "none"),
       provenance: win.provenance,
       lostTo: lost ? lost.owner : null,
       restoreTo: restore ? restore.owner : null,
+      modifiers: kinds,
     };
   });
 
@@ -645,12 +875,16 @@ export function resolveSp1LedFrame(
     leds,
     values: leds.map((l) => l.brightness),
     signature: leds
-      .map((l) => `${l.index}:${l.mode}:${l.owner}:${l.precedence}:${l.periodMs ?? "-"}:${l.direction}:${l.floor}`)
+      .map(
+        (l) =>
+          `${l.index}:${l.mode}:${l.owner}:${l.precedence}:${l.periodMs ?? "-"}:${l.direction}:${l.floor}:${l.modifiers.join(",")}`,
+      )
       .join("|"),
-    animated: leds.some((l) => isAnimatedMode(l.mode)),
+    animated: leds.some((l) => isAnimatedMode(l.mode) || l.modifiers.length > 0),
     animationTimeMs,
   };
 }
+
 
 /** `[T1 0, T2 0, T3 127, T4 0 | S1 127, S2 0, S3 0, S4 0] owner=…` */
 export function formatSp1Frame(frame: ResolvedPhysicalLedFrame): string {
