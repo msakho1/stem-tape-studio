@@ -593,7 +593,18 @@ function trackCandidates(s: AuthoritativeSp1LedState, i: number): Candidate[] {
       phaseAnchor: "one-shot-start",
       periodMs: PERIOD.oneShotDouble,
     });
+  if (s.flash?.kind === "pitch")
+    out.push({
+      mode: "one-shot-single-flash",
+      owner: "semitone / rate confirmation (momentary)",
+      key: "confirmationFlash",
+      provenance: "stem-tape-override",
+      startedAt: s.flash.startedAt,
+      phaseAnchor: "one-shot-start",
+      periodMs: PERIOD.oneShotSingle,
+    });
   if (s.flash?.kind === "fx-latch" || s.flash?.kind === "fx-unlatch")
+
     out.push({
       mode: "one-shot-single-flash",
       owner: "FX latch confirmation — all four Track LEDs flash once",
