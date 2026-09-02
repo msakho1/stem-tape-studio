@@ -533,7 +533,7 @@ function trackModifiers(s: AuthoritativeSp1LedState, i: number): LedModifier[] {
   // the stem it is actually applied to.
   if (anyFxEngaged(s) && (s.fxScope === "global" || s.activeStem === i)) mods.push({ kind: "fx" });
   if (s.slow) mods.push({ kind: "slow" });
-  if (s.scratch.master || t.scratching) mods.push({ kind: "scratch" });
+  if (s.scratch?.master || t.scratching) mods.push({ kind: "scratch" });
   return mods;
 }
 
@@ -545,7 +545,7 @@ function sideModifiers(s: AuthoritativeSp1LedState, index: number): LedModifier[
   if (looping && index === PLAY_SIDE_INDEX)
     mods.push({ kind: "loop", phase: s.loopPhase, periodMs: loopPeriodFor(s.globalLoop.division) });
   if (s.slow && index === PLAY_SIDE_INDEX) mods.push({ kind: "slow" });
-  if (s.scratch.master && index === PLAY_SIDE_INDEX) mods.push({ kind: "scratch" });
+  if (s.scratch?.master && index === PLAY_SIDE_INDEX) mods.push({ kind: "scratch" });
   return mods;
 }
 
