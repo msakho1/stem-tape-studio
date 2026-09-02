@@ -134,11 +134,11 @@ export interface Sp1LedTrackState {
   linked: boolean;
   pressed: boolean;
   /** Per-lane tape reverse (universal lane layer), independent of Heads. */
-  reverse: boolean;
+  reverse?: boolean;
   /** This lane's own capture loop. */
-  looping: boolean;
+  looping?: boolean;
   /** Scratch readiness — isolated stem scratch (fed by the scratch engine). */
-  scratching: boolean;
+  scratching?: boolean;
   head: { loaded: boolean; muted: boolean; reverse: boolean; latched: boolean };
 }
 
@@ -178,7 +178,7 @@ export interface AuthoritativeSp1LedState {
   /** Persistent slowed-tape state (musical rate below unity). */
   slow: boolean;
   /** Scratch readiness — master (all-stem) scratch, fed by the scratch engine. */
-  scratch: { master: boolean };
+  scratch?: { master: boolean };
   scrub: { direction: 0 | 1 | -1; speedIndex: ScrubSpeedIndex; latched: boolean; inertia: boolean };
   heads: { active: boolean };
   song: number;
