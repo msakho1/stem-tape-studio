@@ -61,6 +61,11 @@ export function useSp1LedFrame(state: SurfaceState): Sp1LedFrameHandle {
   /** LED Stage 2 — four independent envelopes + one reused RMS scratch array. */
   const envelopes = useRef(new StemActivityEnvelopes());
   const rmsRef = useRef<number[]>([0, 0, 0, 0]);
+  /** Momentary semitone/rate confirmation — LED-side only, no reducer state. */
+  const speedRef = useRef(state.speed);
+  const pitchFlashRef = useRef<number | null>(null);
+  /** One reused context object — the rAF path allocates nothing per frame. */
+  const ctxRef = useRef({ levels: [0, 0, 0, 0] as readonly number[], loopPhase: null as number | null, pitchFlashAt: null as number | null });
 
   useEffect(() => {
     let stopped = false;
@@ -71,15 +76,26 @@ export function useSp1LedFrame(state: SurfaceState): Sp1LedFrameHandle {
       // Metering is visual only: it reads the existing per-stem analyser taps
       // and never touches the audio graph. No allocation per sample.
       const playing = surface.playing && surface.power !== "off";
+      let loopPhase: number | null = null;
       if (playing) {
         try {
-          getAudioEngine().trackRmsInto(rmsRef.current);
+          const engine = getAudioEngine();
+          engine.trackRmsInto(rmsRef.current);
+          loopPhase = engine.loopPhase();
         } catch {
           rmsRef.current[0] = rmsRef.current[1] = rmsRef.current[2] = rmsRef.current[3] = 0;
         }
       }
-      const levels = envelopes.current.sample(rmsRef.current, t, playing);
-      const frame = resolveSp1LedFrame(sp1LedStateFrom(surface, t, levels), t - originRef.current);
+      if (surface.speed !== speedRef.current) {
+        speedRef.current = surface.speed;
+        pitchFlashRef.current = t;
+      }
+      const ctx = ctxRef.current;
+      ctx.levels = envelopes.current.sample(rmsRef.current, t, playing);
+      ctx.loopPhase = loopPhase;
+      ctx.pitchFlashAt = pitchFlashRef.current;
+      const frame = resolveSp1LedFrame(sp1LedStateFrom(surface, t, ctx), t - originRef.current);
+
       latest.current = frame;
       writeSp1LedDom(frame);
 
