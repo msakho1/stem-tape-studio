@@ -837,22 +837,37 @@ export function resolveSp1LedFrame(
   const leds: ResolvedSp1Led[] = PHYSICAL_LED_MAP.map((slot) => {
     const cands = slot.index < 4 ? trackCandidates(state, slot.index) : sideCandidates(state, slot.index);
     const { win, lost, restore } = pick(cands);
+    const base = sampleBrightness(win, animationTimeMs, slot.index);
+    // Momentary overrides and safety-critical owners are never reshaped; every
+    // other winner is composed with the persistent modifier layers.
+    const mods =
+      state.power === "off" || UNCOMPOSED.includes(win.key)
+        ? []
+        : slot.index < 4
+          ? trackModifiers(state, slot.index)
+          : sideModifiers(state, slot.index);
+    const composed = mods.length ? applyModifiers(base, mods, animationTimeMs) : base;
+    const kinds = mods.map((m) => m.kind);
     return {
       index: slot.index,
       id: slot.id,
       name: slot.name,
       mode: win.mode,
-      brightness: Math.max(0, Math.min(127, Math.round(sampleBrightness(win, animationTimeMs, slot.index)))),
+      brightness: Math.max(0, Math.min(127, Math.round(composed))),
       floor: win.floor ?? 0,
-      owner: win.owner,
+      owner: kinds.length ? `${win.owner} + ${kinds.join("+")}` : win.owner,
       precedenceKey: win.key,
       precedence: PRECEDENCE[win.key],
-      phaseAnchor: win.phaseAnchor ?? (isAnimatedMode(win.mode) ? "app-clock" : "none"),
+      phaseAnchor:
+        kinds.includes("loop") && state.loopPhase != null
+          ? "loop-wrap"
+          : (win.phaseAnchor ?? (isAnimatedMode(win.mode) ? "app-clock" : "none")),
       periodMs: win.periodMs ?? null,
-      direction: win.direction ?? "none",
+      direction: kinds.includes("reverse") ? "reverse" : (win.direction ?? "none"),
       provenance: win.provenance,
       lostTo: lost ? lost.owner : null,
       restoreTo: restore ? restore.owner : null,
+      modifiers: kinds,
     };
   });
 
@@ -860,12 +875,16 @@ export function resolveSp1LedFrame(
     leds,
     values: leds.map((l) => l.brightness),
     signature: leds
-      .map((l) => `${l.index}:${l.mode}:${l.owner}:${l.precedence}:${l.periodMs ?? "-"}:${l.direction}:${l.floor}`)
+      .map(
+        (l) =>
+          `${l.index}:${l.mode}:${l.owner}:${l.precedence}:${l.periodMs ?? "-"}:${l.direction}:${l.floor}:${l.modifiers.join(",")}`,
+      )
       .join("|"),
-    animated: leds.some((l) => isAnimatedMode(l.mode)),
+    animated: leds.some((l) => isAnimatedMode(l.mode) || l.modifiers.length > 0),
     animationTimeMs,
   };
 }
+
 
 /** `[T1 0, T2 0, T3 127, T4 0 | S1 127, S2 0, S3 0, S4 0] owner=…` */
 export function formatSp1Frame(frame: ResolvedPhysicalLedFrame): string {
