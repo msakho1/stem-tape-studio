@@ -791,7 +791,24 @@ function sideCandidates(s: AuthoritativeSp1LedState, index: number): Candidate[]
         key: "fxSelection",
         provenance: "stem-tape-override",
       });
+  } else {
+    // Authoritative FX state, overlay CLOSED: an engaged bank stays visible on
+    // its own side LED. Loop keeps its wrap tick over the top (sideModifiers).
+    const bank = s.banks[slot]!;
+    if (bank.momentary || bank.latched) {
+      const gate = bank.algorithmId === "gate";
+      out.push({
+        mode: gate ? "rapid-pulse" : "blink",
+        owner: `${bank.label} ${bank.latched ? "latched" : "momentary"} (${s.fxScope} scope, overlay closed)`,
+        key: "fxActive",
+        provenance: "stem-tape-override",
+        periodMs: gate ? PERIOD.rapidPulse : PERIOD.blink,
+        floor: bank.latched ? 32 : 0,
+        phaseAnchor: "app-clock",
+      });
+    }
   }
+
 
   if (s.heads.active && index === 7)
     out.push({ mode: "breathe", owner: "heads mode active", key: "heads", provenance: "stem-tape-override", periodMs: PERIOD.breathe });
