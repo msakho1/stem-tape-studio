@@ -2294,6 +2294,60 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Stem Tape SIGNED-HEAD VELOCITY CLAMP -- how fast a scratch may go
+        # Playback rate IS a data rate. At |r| the transport consumes stored
+        # audio |r| times faster and the eMMC must supply it |r| times faster,
+        # so past some |r| it simply cannot -- starvation by arithmetic, which
+        # no amount of buffering fixes. st_scratch.h therefore DERIVES the
+        # maximum signed velocity from the measured read-cost fit, the refill
+        # batch size and how many heads are moving, rather than picking a
+        # number that felt safe.
+        #
+        # Two kinds of case here, and the difference is the point. The first
+        # re-derives the clamp in floating point from first principles and
+        # requires it to agree with the header's integer form, so a
+        # hand-edited constant cannot drift from the measurement -- the same
+        # discipline test_ladder.c applies to the ladder bands. The second
+        # models nothing at all: it drives a synthetic oscillating gesture
+        # through the REAL st_stem_stream state machine and COUNTS the sectors
+        # demanded, so the claim that scratching inside the resident ring is
+        # free is measured against the production ring. A model that says
+        # scratching is affordable and a simulation that says it is not is
+        # exactly the disagreement worth finding before the audio thread ever
+        # sees a signed rate.
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          cc -std=c11 -Wall -Wextra -Werror -Ifirmware/stemtape_player/src \
+            firmware/stemtape_player/src/st_stem_stream.c \
+            firmware/stemtape_player/tests/test_scratch.c \
+            -lm -o audit/test_scratch
+          ./audit/test_scratch | tee audit/scratch-clamp-selftest.txt
+
+          # BOTH HALVES MUST KEEP RUNNING. The re-derivation alone would let a
+          # wrong-but-self-consistent model pass; the simulation alone would
+          # let a drifted constant pass. Neither is sufficient on its own, so
+          # neither may quietly disappear.
+          grep -q 'the measured fit says' audit/scratch-clamp-selftest.txt \
+            || { echo "the clamp is no longer checked against the measured fit"; exit 1; }
+          grep -q 'demanded 0 reads' audit/scratch-clamp-selftest.txt \
+            || { echo "the free-window simulation did not run, or is no longer free"; exit 1; }
+          grep -q 'so the free-window case above is measuring something real' \
+            audit/scratch-clamp-selftest.txt \
+            || { echo "the complementary travelling case is gone -- the free-window case may be vacuous"; exit 1; }
+
+          # THE CLAMP MUST BE DERIVED, NOT WRITTEN DOWN. A literal max rate in
+          # the header is the failure this whole step exists to prevent.
+          grep -q 'ST_SCRATCH_MAX_RATE_Q16(moving)' \
+            firmware/stemtape_player/src/st_scratch.h \
+            || { echo "the velocity clamp must be derived from the read-cost model"; exit 1; }
+          {
+            echo '### Stem Tape signed-head velocity clamp'
+            echo '```text'
+            cat audit/scratch-clamp-selftest.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Stem Tape v1.2 SONG-PLANAR addressing -- pure module AND the wired read path
         # THE FORMAT'S WHOLE JUSTIFICATION, as an executable claim. v1.1 weaves
         # all four stems into every frame, so a stem playing from a different
