@@ -506,6 +506,158 @@ static void test_at_the_real_control_cadence(void)
 	      "threshold (%lld ms)", (long long)(off_at - start));
 }
 
+/* ======================================================================
+ * THE FADERS -- the wiring defect this file did not have a test for
+ * ====================================================================== */
+
+/* One fader is polled once per four control passes (round-robin). */
+#define FADER_POLL_MS 32
+
+/*
+ * THE DEFECT, REPRODUCED AS A REGRESSION TEST.
+ *
+ * The first fader detector compared each rail against a reference that chased
+ * the reading at 4 counts per sample, called it in use above a 32-count gap,
+ * and only ever ran while FUNCTION was held. So an ordinary volume change made
+ * with FUNCTION UP left the reference stale by the whole movement: a
+ * 500 -> 3000 move stranded a 2500-count gap needing 617 polls to close, and
+ * 617 x 32 ms is 19.7 s. A 5.000 s hold would have taken 24.7 s.
+ *
+ * That is the safety invariant broken by stale state, which is st55's failure
+ * in different clothes. It was found by auditing the wiring, NOT by a test,
+ * because the wiring had none. This is that test.
+ */
+static void test_a_fader_moved_before_the_hold_does_not_delay_it(void)
+{
+	st_pwr_fader_t f;
+	st_pwr_hold_t h;
+	int64_t now = 100000, start, off_at = -1;
+	int p;
+
+	/* The user moved a fader 500 -> 3000 at some earlier time, with
+	 * FUNCTION up. Then they press FUNCTION. The rising edge forgets
+	 * everything -- that is the fix. */
+	st_pwr_fader_reset(&f);
+	st_pwr_hold_reset(&h);
+
+	start = now;
+	for (p = 0; p < (ST_PWR_OFF_MS + 500) / TICK_MS && off_at < 0; p++) {
+		/* Every fader sits STILL at its new position throughout. */
+		const bool fader_in_use =
+			((p % FADER_POLL_MS) == 0)
+			 ? st_pwr_fader_sample(&f, (uint32_t)((p / FADER_POLL_MS) & 3),
+						3000, now)
+			 : st_pwr_fader_active(&f, now);
+
+		if (st_pwr_hold_off_due(st_pwr_hold_tick(&h, true, fader_in_use,
+							  now))) {
+			off_at = now;
+		}
+		now += TICK_MS;
+	}
+
+	CHECK(off_at >= 0,
+	      "FADER. a fader moved BEFORE the hold does not block it");
+	CHECK(off_at - start == ST_PWR_OFF_MS,
+	      "FADER. ...and the hold still takes exactly %d ms, not %lld "
+	      "(the displacement version took 24,700)",
+	      ST_PWR_OFF_MS, (long long)(off_at - start));
+}
+
+static void test_a_fader_being_moved_holds_the_timer_at_zero(void)
+{
+	st_pwr_fader_t f;
+	st_pwr_hold_t h;
+	int64_t now = 100000, off_at = -1;
+	int32_t pos = 500;
+	int p;
+
+	st_pwr_fader_reset(&f);
+	st_pwr_hold_reset(&h);
+
+	/* A hand sweeping one fader steadily for 10 s: 1000 counts/s, so
+	 * 32 counts per 32 ms poll -- twice the threshold. */
+	for (p = 0; p < 10000 / TICK_MS && off_at < 0; p++) {
+		bool in_use;
+
+		if ((p % FADER_POLL_MS) == 0) {
+			pos += 32;
+			if (pos > 3700) {
+				pos = 500;
+			}
+			in_use = st_pwr_fader_sample(&f, 0u, pos, now);
+		} else {
+			in_use = st_pwr_fader_active(&f, now);
+		}
+		if (st_pwr_hold_off_due(st_pwr_hold_tick(&h, true, in_use, now))) {
+			off_at = now;
+		}
+		now += TICK_MS;
+	}
+	CHECK(off_at < 0,
+	      "FADER. a fader being swept for 10 s never powers off");
+}
+
+static void test_the_hand_leaving_a_fader_is_forgotten_promptly(void)
+{
+	st_pwr_fader_t f;
+	int64_t now = 100000;
+
+	st_pwr_fader_reset(&f);
+	(void)st_pwr_fader_sample(&f, 0u, 500, now);          /* seed */
+	now += FADER_POLL_MS;
+	CHECK(st_pwr_fader_sample(&f, 0u, 900, now),
+	      "FADER. a 400-count jump reads as in use");
+
+	/* The hand stops. The fader sits at 900. */
+	now += ST_PWR_FADER_ACTIVE_MS;
+	CHECK(!st_pwr_fader_sample(&f, 0u, 900, now),
+	      "FADER. ...and %d ms after it stops, it is not in use again -- "
+	      "the position it was left at is irrelevant",
+	      ST_PWR_FADER_ACTIVE_MS);
+}
+
+static void test_fader_noise_below_the_threshold_is_not_movement(void)
+{
+	st_pwr_fader_t f;
+	int64_t now = 100000;
+	int p;
+	bool ever_active = false;
+
+	st_pwr_fader_reset(&f);
+	/* +/- (threshold - 1) counts of jitter around a resting position, for
+	 * 20 s, on all four rails. */
+	for (p = 0; p < 20000 / FADER_POLL_MS; p++) {
+		const int32_t jitter = ((p & 1) ? 1 : -1) *
+					(ST_PWR_FADER_MOVE_COUNTS - 1);
+
+		if (st_pwr_fader_sample(&f, (uint32_t)(p & 3), 2000 + jitter,
+					 now)) {
+			ever_active = true;
+		}
+		now += FADER_POLL_MS;
+	}
+	CHECK(!ever_active,
+	      "FADER. 20 s of +/-%d-count jitter on all four rails is never "
+	      "movement", ST_PWR_FADER_MOVE_COUNTS - 1);
+}
+
+static void test_a_failed_adc_read_is_not_movement(void)
+{
+	st_pwr_fader_t f;
+	int64_t now = 100000;
+
+	st_pwr_fader_reset(&f);
+	(void)st_pwr_fader_sample(&f, 0u, 2000, now);
+	now += FADER_POLL_MS;
+	CHECK(!st_pwr_fader_sample(&f, 0u, -1, now),
+	      "FADER. an ADC error (-1) is not a movement");
+	now += FADER_POLL_MS;
+	CHECK(!st_pwr_fader_sample(&f, 0u, 2000, now),
+	      "FADER. ...and the sample after it compares against the last "
+	      "GOOD reading, not against the error");
+}
+
 int main(void)
 {
 	printf("power contract -- ON %d ms, OFF %d ms, settle %u passes, "
@@ -529,6 +681,11 @@ int main(void)
 	RUN(test_startup_any_other_control_resets_it);
 	RUN(test_the_two_thresholds_read_the_same_timer);
 	RUN(test_at_the_real_control_cadence);
+	RUN(test_a_fader_moved_before_the_hold_does_not_delay_it);
+	RUN(test_a_fader_being_moved_holds_the_timer_at_zero);
+	RUN(test_the_hand_leaving_a_fader_is_forgotten_promptly);
+	RUN(test_fader_noise_below_the_threshold_is_not_movement);
+	RUN(test_a_failed_adc_read_is_not_movement);
 
 	printf("\n%d cases, %d checks, %d failures\n", g_cases, g_checks, g_failures);
 	return g_failures ? 1 : 0;

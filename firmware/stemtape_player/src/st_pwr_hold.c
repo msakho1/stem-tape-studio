@@ -82,3 +82,48 @@ int64_t st_pwr_hold_elapsed_ms(const st_pwr_hold_t *h, int64_t now_ms)
 	}
 	return (now_ms > h->since_ms) ? (now_ms - h->since_ms) : 0;
 }
+
+/* ---- the faders: see st_pwr_hold.h for why this is a delta ------------- */
+
+void st_pwr_fader_reset(st_pwr_fader_t *f)
+{
+	uint32_t k;
+
+	for (k = 0; k < ST_PWR_FADERS; k++) {
+		f->last[k] = ST_PWR_FADER_UNSEEDED;
+	}
+	f->moved_ms = 0;
+}
+
+bool st_pwr_fader_active(const st_pwr_fader_t *f, int64_t now_ms)
+{
+	return f->moved_ms != 0 &&
+	       (now_ms - f->moved_ms) < ST_PWR_FADER_ACTIVE_MS;
+}
+
+bool st_pwr_fader_sample(st_pwr_fader_t *f, uint32_t idx, int32_t raw,
+			  int64_t now_ms)
+{
+	if (idx < ST_PWR_FADERS && raw >= 0) {
+		if (f->last[idx] == ST_PWR_FADER_UNSEEDED) {
+			/* THE FIRST SAMPLE OF A HOLD IS NEVER A MOVEMENT. It
+			 * establishes where the fader is; only what happens
+			 * afterwards is a hand. */
+			f->last[idx] = raw;
+		} else {
+			int32_t d = raw - f->last[idx];
+
+			if (d < 0) {
+				d = -d;
+			}
+			if (d >= ST_PWR_FADER_MOVE_COUNTS) {
+				f->moved_ms = now_ms;
+			}
+			/* The previous sample is ALWAYS updated, movement or
+			 * not. That is what stops a gap accumulating -- the
+			 * defect the header describes. */
+			f->last[idx] = raw;
+		}
+	}
+	return st_pwr_fader_active(f, now_ms);
+}

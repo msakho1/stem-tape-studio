@@ -8617,32 +8617,12 @@ static void led_seq_begin(st_led_seq_t seq)
  * writer. */
 static st_pwr_hold_t s_pwr_hold;
 
-/* A fader has moved this far from its slowly-tracking reference to count as
- * "in use". UNMEASURED -- postmortem measurement M3, the one input on the
- * power path whose noise floor has never been captured (AIN0 and AIN1 both
- * have measured band tables behind them; the fader rails do not). Both failure
- * directions are real: too small and rail noise resets the power timer
- * forever, which is the st55 class of bug through a different door; too large
- * and a slow deliberate fader move goes unseen. 32 counts is ~0.9% of the
- * ~3700-count travel -- far above the few LSB a 12-bit rail with a 20 us
- * acquisition jitters, and passed by any real hand movement within a sample or
- * two. Raise it if a resting hand ever blocks a shutdown; settle it once M3
- * exists. */
-#define ST_FADER_MOVE_COUNTS 32
-
-/* The reference chases the reading this fast, in counts per sample, so noise
- * never accumulates displacement and a hand that stops is forgotten within
- * (displacement / slew) samples rather than latching "in use" forever. */
-#define ST_FADER_REF_SLEW 4
-
-/* How long one seen movement keeps the faders counted as in use, so a hand
- * moving between round-robin samples reads as continuous rather than as a
- * train of separate touches. */
-#define ST_FADER_ACTIVE_MS 250
-
-static int     s_fader_ref[NTRK] = { -1, -1, -1, -1 };
-static int64_t s_fader_move_ms;
-static uint8_t s_fader_rr;
+/* THE FADERS' STATE. The detector itself lives in st_pwr_hold.c, where it is
+ * host-tested -- see that header for why it is a per-sample DELTA and what the
+ * displacement version it replaces got wrong (a fader moved with FUNCTION up
+ * stranded 19.7 s of "in use", making a 5.000 s hold take 24.7 s). */
+static st_pwr_fader_t s_pwr_fader;
+static uint8_t        s_fader_rr;
 
 static void led_service(void)
 {
@@ -9192,35 +9172,13 @@ static void power_off(void)
  * measured-good baseline performs during ordinary play, and a third of what
  * st55 did. After st55 that is not a detail.
  */
-static bool fader_activity_poll(void)
+static bool fader_activity_poll(int64_t now_ms)
 {
 	const uint8_t fi = s_fader_rr;
 	const int fv = ladder_read(&adc_ladder[LAD_FADER0 + fi]);
 
 	s_fader_rr = (uint8_t)((fi + 1u) & (NTRK - 1u));
-
-	if (fv >= 0) {
-		if (s_fader_ref[fi] < 0) {
-			s_fader_ref[fi] = fv;          /* first sight is not movement */
-		} else {
-			int d = fv - s_fader_ref[fi];
-
-			if (d < 0) {
-				d = -d;
-			}
-			if (d > ST_FADER_MOVE_COUNTS) {
-				s_fader_move_ms = k_uptime_get();
-			}
-			if (fv > s_fader_ref[fi]) {
-				s_fader_ref[fi] += ST_FADER_REF_SLEW;
-			} else if (fv < s_fader_ref[fi]) {
-				s_fader_ref[fi] -= ST_FADER_REF_SLEW;
-			}
-		}
-	}
-
-	return s_fader_move_ms != 0 &&
-	       (k_uptime_get() - s_fader_move_ms) < ST_FADER_ACTIVE_MS;
+	return st_pwr_fader_sample(&s_pwr_fader, fi, (int32_t)fv, now_ms);
 }
 
 /*
@@ -9260,11 +9218,33 @@ static bool fader_activity_poll(void)
  */
 static int64_t power_hold_service(bool ain0_active, enum vol_btn ain1)
 {
+	static bool s_fn_prev;
 	const bool fn = pwr_pressed();
-	const bool other = ain0_active || (ain1 != VOL_NONE) ||
-			    (fn && fader_activity_poll());
-	const int64_t elapsed = st_pwr_hold_tick(&s_pwr_hold, fn, other,
-						  k_uptime_get());
+	const int64_t now = k_uptime_get();   /* ONE clock read for the pass */
+	bool other;
+	int64_t elapsed;
+
+	/*
+	 * THE RISING EDGE FORGETS EVERY FADER, and this line is the whole of a
+	 * fix worth stating rather than burying. The poll only runs while
+	 * FUNCTION is down, so without this the detector's memory of where each
+	 * fader sat dates from the LAST hold -- and an ordinary volume change
+	 * made in between reads as movement the moment FUNCTION is pressed
+	 * again. With the displacement detector this file used to carry, a
+	 * 500 -> 3000 fader move stranded 19.7 s of "in use" and turned the
+	 * 5.000 s hold into 24.7 s: the safety invariant broken by stale state,
+	 * which is exactly st55's failure in different clothes.
+	 *
+	 * Only movement DURING this hold may delay this hold.
+	 */
+	if (fn && !s_fn_prev) {
+		st_pwr_fader_reset(&s_pwr_fader);
+	}
+	s_fn_prev = fn;
+
+	other = ain0_active || (ain1 != VOL_NONE) ||
+		 (fn && fader_activity_poll(now));
+	elapsed = st_pwr_hold_tick(&s_pwr_hold, fn, other, now);
 
 	if (st_pwr_hold_off_due(elapsed)) {
 		power_off();                 /* never returns */

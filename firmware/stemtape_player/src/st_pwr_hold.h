@@ -153,6 +153,85 @@ int64_t st_pwr_hold_tick(st_pwr_hold_t *h, bool fn_down, bool other_raw,
  * LEDs draw. An observation of the authoritative timer, never a second one. */
 int64_t st_pwr_hold_elapsed_ms(const st_pwr_hold_t *h, int64_t now_ms);
 
+/*
+ * ======================================================================
+ * THE FADERS: MOVEMENT, AND WHY IT IS A DELTA RATHER THAN A DISPLACEMENT
+ * ======================================================================
+ * The four faders are continuous rails, so "in use" cannot mean "at some
+ * position" -- it has to mean "a hand is moving one right now". They live here
+ * rather than in main.c because the FIRST version of this lived in main.c,
+ * was untested, and was wrong in a way that reproduced the very failure this
+ * module exists to prevent.
+ *
+ * WHAT WAS WRONG. That version compared each fader against a reference that
+ * chased the reading at 4 counts per sample, and called the fader in use while
+ * the gap exceeded 32 counts. The reference was only advanced while FUNCTION
+ * was held -- because that is the only time the poll runs -- so an ordinary
+ * volume change made with FUNCTION UP left the reference stale by the whole
+ * movement. A 500 -> 3000 fader move stranded a 2500-count gap that the
+ * 4-counts-per-sample slew needed 617 polls to close, and one fader is polled
+ * once per four control passes:
+ *
+ *     617 polls x 32 ms = 19.7 s of "fader in use"
+ *     a 5.000 s FUNCTION-only hold would have taken 24.7 s
+ *
+ * which is the safety invariant broken by stale state -- st55's failure
+ * wearing different clothes. It was found by auditing the wiring rather than
+ * by a test, because the wiring had no test. Hence this module.
+ *
+ * WHAT IS RIGHT. Movement is the DELTA BETWEEN CONSECUTIVE SAMPLES of the same
+ * fader, and the previous sample is re-seeded at the start of every hold:
+ *
+ *   noise            small deltas, below the threshold          -> not in use
+ *   a hand moving    large deltas, sample after sample          -> in use
+ *   the hand stops   deltas fall to zero                        -> not in use
+ *                                                                  within
+ *                                                                  ST_PWR_FADER_ACTIVE_MS
+ *   a past movement  forgotten -- the seed is taken fresh       -> not in use
+ *
+ * The failure profile is now BOUNDED IN THE SAFE DIRECTION. An over-sensitive
+ * threshold delays a shutdown by ST_PWR_FADER_ACTIVE_MS per noise event and
+ * could only block one if noise exceeded the threshold continuously for the
+ * whole five seconds. An under-sensitive one misses a movement slower than the
+ * threshold, which costs protection during that move but never costs the
+ * escape hatch. Neither can strand seconds of delay the way the displacement
+ * version did.
+ *
+ * ST_PWR_FADER_MOVE_COUNTS IS STILL UNMEASURED -- postmortem measurement M3.
+ * AIN0 and AIN1 have measured band tables behind them; the fader rails do not.
+ * 16 counts of ~3700 travel, at one sample per ~32 ms, is about 500 counts per
+ * second: comfortably above the few LSB a 12-bit rail with a 20 us acquisition
+ * jitters, and reached by any deliberate move. Settle it once M3 exists.
+ */
+#define ST_PWR_FADERS            4
+#define ST_PWR_FADER_MOVE_COUNTS 16
+#define ST_PWR_FADER_ACTIVE_MS   250
+#define ST_PWR_FADER_UNSEEDED    (-1)
+
+typedef struct {
+	int32_t last[ST_PWR_FADERS];  /* previous sample, or UNSEEDED */
+	int64_t moved_ms;             /* uptime of the last movement, 0 = none */
+} st_pwr_fader_t;
+
+/*
+ * Forget every fader. MUST be called on the rising edge of FUNCTION -- that is
+ * what makes a movement made while FUNCTION was up unable to delay the hold
+ * that follows it, and it is the whole of the fix described above.
+ */
+void st_pwr_fader_reset(st_pwr_fader_t *f);
+
+/*
+ * One fader sampled. `raw` < 0 means the ADC read failed and is ignored (the
+ * previous sample is kept, so a dropped read is not a movement). Returns
+ * whether ANY fader counts as in use right now.
+ */
+bool st_pwr_fader_sample(st_pwr_fader_t *f, uint32_t idx, int32_t raw,
+			  int64_t now_ms);
+
+/* The same verdict without sampling, for a caller that needs to ask twice in
+ * one pass. */
+bool st_pwr_fader_active(const st_pwr_fader_t *f, int64_t now_ms);
+
 /* The two verdicts, both read from the one timer. Written as helpers rather
  * than left to each caller's own `>=`, so the thresholds are compared in
  * exactly one place each. */
