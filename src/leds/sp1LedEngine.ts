@@ -464,8 +464,12 @@ function trackCandidates(s: AuthoritativeSp1LedState, i: number): Candidate[] {
     if (t.muted) out.push({ mode: "dim", owner: `stem ${i + 1} muted`, key: "muteSoloLink", provenance: "tape-looper-source" });
     if (!t.linked)
       out.push({ mode: "blink", owner: `stem ${i + 1} unlinked`, key: "muteSoloLink", provenance: "stem-tape-override", periodMs: PERIOD.latchedBlink });
-    if (s.activeStem === i && t.loaded)
+    // LED Stage 2: during PLAY the stem's own audio activity is the base
+    // layer — selection must not replace it with a free-running breathe.
+    // (A composable selected-stem accent lands in Stage 3+.)
+    if (s.activeStem === i && t.loaded && !(s.playing && !t.muted))
       out.push({ mode: "breathe", owner: `active stem ${i + 1}`, key: "activeStem", provenance: "stem-tape-override", periodMs: PERIOD.breathe });
+
     if (t.loaded && !t.muted)
       out.push(
         s.playing
