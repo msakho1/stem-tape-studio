@@ -650,48 +650,48 @@ function trackCandidates(s: AuthoritativeSp1LedState, i: number): Candidate[] {
     });
   }
 
-  if (s.fxOverlay) {
-    if (t.soloed) out.push({ mode: "solid", owner: `stem ${i + 1} soloed`, key: "muteSoloLink", provenance: "stem-tape-override" });
-    else if (!t.linked)
-      out.push({ mode: "blink", owner: `stem ${i + 1} unlinked`, key: "muteSoloLink", provenance: "stem-tape-override", periodMs: PERIOD.latchedBlink });
-    else if (s.activeStem === i)
-      out.push({ mode: "breathe", owner: `active stem ${i + 1}`, key: "activeStem", provenance: "stem-tape-override", periodMs: PERIOD.breathe });
-    else out.push({ mode: "dim", owner: `stem ${i + 1} idle (overlay)`, key: "base", provenance: "stem-tape-override" });
-  } else {
+  // ---- base layer -----------------------------------------------------
+  // During PLAY every loaded stem's base is its OWN audio activity — mute,
+  // solo, loop, reverse, FX, slow and scratch are composed over it as
+  // modifiers (see trackModifiers) rather than replacing it.
+  const meterBase = s.playing && t.loaded;
+  if (meterBase)
+    out.push({
+      mode: "activity",
+      owner: `stem ${i + 1} activity`,
+      key: "transport",
+      provenance: "stem-tape-override",
+      periodMs: null,
+      phaseAnchor: "stem-audio",
+      level: s.levels?.[i] ?? 0,
+      floor: 6,
+    });
+  else if (t.loaded)
+    out.push({
+      mode: "dim",
+      owner: `stem ${i + 1} loaded, stopped`,
+      key: "transport",
+      provenance: "tape-looper-source",
+      periodMs: null,
+    });
+
+  // ---- stopped / overlay-only semantics --------------------------------
+  // These are the states that have no meter to shape, so they still own the
+  // LED outright. While playing they become modifiers instead.
+  if (!meterBase) {
     if (t.soloed) out.push({ mode: "solid", owner: `stem ${i + 1} soloed`, key: "muteSoloLink", provenance: "stem-tape-override" });
     if (t.muted) out.push({ mode: "dim", owner: `stem ${i + 1} muted`, key: "muteSoloLink", provenance: "tape-looper-source" });
-    if (!t.linked)
-      out.push({ mode: "blink", owner: `stem ${i + 1} unlinked`, key: "muteSoloLink", provenance: "stem-tape-override", periodMs: PERIOD.latchedBlink });
-    // LED Stage 2: during PLAY the stem's own audio activity is the base
-    // layer — selection must not replace it with a free-running breathe.
-    // (A composable selected-stem accent lands in Stage 3+.)
-    if (s.activeStem === i && t.loaded && !(s.playing && !t.muted))
+    if (s.activeStem === i && t.loaded)
       out.push({ mode: "breathe", owner: `active stem ${i + 1}`, key: "activeStem", provenance: "stem-tape-override", periodMs: PERIOD.breathe });
-
-    if (t.loaded && !t.muted)
-      out.push(
-        s.playing
-          ? {
-              // LED Stage 2: the base playback layer is this stem's own audio
-              // activity, not a free-running decorative breathe.
-              mode: "activity",
-              owner: `stem ${i + 1} activity`,
-              key: "transport",
-              provenance: "stem-tape-override",
-              periodMs: null,
-              phaseAnchor: "stem-audio",
-              level: s.levels?.[i] ?? 0,
-              floor: 6,
-            }
-          : {
-              mode: "dim",
-              owner: `stem ${i + 1} loaded, stopped`,
-              key: "transport",
-              provenance: "tape-looper-source",
-              periodMs: null,
-            },
-      );
+    if (s.fxOverlay && !t.soloed && t.linked && s.activeStem !== i)
+      out.push({ mode: "dim", owner: `stem ${i + 1} idle (overlay)`, key: "base", provenance: "stem-tape-override" });
   }
+  // Link state is an editing affordance, not a performance state: it only owns
+  // the LED when there is no live meter to preserve, or while the FX overlay
+  // (where linking is edited) is open.
+  if (!t.linked && (!meterBase || s.fxOverlay))
+    out.push({ mode: "blink", owner: `stem ${i + 1} unlinked`, key: "muteSoloLink", provenance: "stem-tape-override", periodMs: PERIOD.latchedBlink });
+
 
   if (t.pressed)
     out.push({ mode: "solid", owner: `Track ${i + 1} held (input feedback)`, key: "fxSelection", provenance: "implementation-observation" });
