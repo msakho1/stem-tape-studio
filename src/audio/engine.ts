@@ -1212,11 +1212,12 @@ export class AudioEngine {
     for (let i = 0; i < this.tracks.length; i++) {
       const t = this.tracks[i]!;
       if (!t.loop.enabled) continue;
-      const live = t.sources[t.sources.length - 1];
-      if (!live) continue;
-      audible = live.startPos + (this.timeline.positionAt(now) - this.timeline.positionAt(live.startAt));
+      const p = this.laneAudiblePosition(t, now);
+      if (p == null) continue;
+      audible = p;
       break;
     }
+
     if (audible == null) {
       for (const t of this.tracks) t.loop = { ...t.loop, enabled: false };
       this.invalidateSeams();
