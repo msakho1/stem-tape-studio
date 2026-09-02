@@ -4558,9 +4558,20 @@ export class AudioEngine {
             });
           }
           const bounds = this.loopBounds(t);
-          // Loop-mode transitions are NOT click-free by themselves: entering or
-          // leaving the window relocates the read pointer.
-          const relocated = bounds && enabled ? this.relocateLane(t, bounds.start) : false;
+          // Loop ENTRY must never seek. If the lane's audible read pointer is
+          // already inside the new window, the voice is left strictly alone:
+          // playback keeps moving forward and the shared seam scheduler wraps
+          // it for the first time only when it naturally reaches loopEnd.
+          // A relocation happens ONLY when the pointer is outside the window
+          // (a chop jump or a window moved elsewhere), which genuinely has to
+          // move the read head.
+          let relocated = false;
+          if (bounds && enabled && this.ctx && this.requestedPlaying) {
+            const here = this.laneAudiblePosition(t, this.ctx.currentTime);
+            const inside = here != null && here >= bounds.start && here < bounds.end;
+            if (!inside) relocated = this.relocateLane(t, bounds.start);
+          }
+
           return this.ack(
             cmd,
             "completed",
