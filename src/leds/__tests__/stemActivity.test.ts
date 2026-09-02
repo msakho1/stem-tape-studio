@@ -13,7 +13,7 @@ function loadedPlaying(): SurfaceState {
   return {
     ...base,
     playing: true,
-    tracks: base.tracks.map((t) => ({ ...t, content: "loaded" as const })),
+    tracks: base.tracks.map((t) => ({ ...t, content: "loaded" as const })) as SurfaceState["tracks"],
   };
 }
 

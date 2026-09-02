@@ -25,6 +25,7 @@ function baseState(patch: Partial<AuthoritativeSp1LedState> = {}): Authoritative
     loading: false,
     error: null,
     playing: false,
+    levels: [0, 0, 0, 0],
     tracks: [track(), track(), track(), track()],
     activeStem: 0,
     anySolo: false,

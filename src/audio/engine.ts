@@ -361,7 +361,7 @@ export class AudioEngine {
 
   private tracks: TrackRuntime[] = [];
   /** Reusable per-stem analysis buffers for the LED meter (no per-call alloc). */
-  private meterBufs: (Float32Array | undefined)[] = [];
+  private meterBufs: (Float32Array<ArrayBuffer> | undefined)[] = [];
   private timeline = new TapeTimeline(1);
   /** Correction 6 — the one authoritative timeline event stream. */
   readonly timelineBus = new TapeTimelineBus();
