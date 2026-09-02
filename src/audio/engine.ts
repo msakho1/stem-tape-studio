@@ -360,6 +360,8 @@ export class AudioEngine {
   private normalTap: AnalyserNode | null = null;
 
   private tracks: TrackRuntime[] = [];
+  /** Reusable per-stem analysis buffers for the LED meter (no per-call alloc). */
+  private meterBufs: (Float32Array | undefined)[] = [];
   private timeline = new TapeTimeline(1);
   /** Correction 6 — the one authoritative timeline event stream. */
   readonly timelineBus = new TapeTimelineBus();
