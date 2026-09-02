@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AboutRouteImport } from './routes/about'
 import { Route as DeviceRouteImport } from './routes/device'
+import { Route as FirmwareRouteImport } from './routes/firmware'
 import { Route as ShopRouteImport } from './routes/shop'
 
 const IndexRoute = IndexRouteImport.update({
@@ -29,6 +30,11 @@ const DeviceRoute = DeviceRouteImport.update({
   path: '/device',
   getParentRoute: () => rootRouteImport,
 } as any)
+const FirmwareRoute = FirmwareRouteImport.update({
+  id: '/firmware',
+  path: '/firmware',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ShopRoute = ShopRouteImport.update({
   id: '/shop',
   path: '/shop',
@@ -39,12 +45,14 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/about': typeof AboutRoute
   '/device': typeof DeviceRoute
+  '/firmware': typeof FirmwareRoute
   '/shop': typeof ShopRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/about': typeof AboutRoute
   '/device': typeof DeviceRoute
+  '/firmware': typeof FirmwareRoute
   '/shop': typeof ShopRoute
 }
 export interface FileRoutesById {
@@ -52,20 +60,22 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/about': typeof AboutRoute
   '/device': typeof DeviceRoute
+  '/firmware': typeof FirmwareRoute
   '/shop': typeof ShopRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/about' | '/device' | '/shop'
+  fullPaths: '/' | '/about' | '/device' | '/firmware' | '/shop'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/about' | '/device' | '/shop'
-  id: '__root__' | '/' | '/about' | '/device' | '/shop'
+  to: '/' | '/about' | '/device' | '/firmware' | '/shop'
+  id: '__root__' | '/' | '/about' | '/device' | '/firmware' | '/shop'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AboutRoute: typeof AboutRoute
   DeviceRoute: typeof DeviceRoute
+  FirmwareRoute: typeof FirmwareRoute
   ShopRoute: typeof ShopRoute
 }
 
@@ -92,6 +102,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof DeviceRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/firmware': {
+      id: '/firmware'
+      path: '/firmware'
+      fullPath: '/firmware'
+      preLoaderRoute: typeof FirmwareRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/shop': {
       id: '/shop'
       path: '/shop'
@@ -106,6 +123,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AboutRoute: AboutRoute,
   DeviceRoute: DeviceRoute,
+  FirmwareRoute: FirmwareRoute,
   ShopRoute: ShopRoute,
 }
 export const routeTree = rootRouteImport
