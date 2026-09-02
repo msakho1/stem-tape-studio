@@ -794,6 +794,23 @@ function DevicePage() {
               </p>
             </div>
           </Link>
+          <nav className="flex w-full items-center gap-6 lg:hidden" aria-label="Site">
+            <Link to="/" className="st-tab">
+              instrument
+            </Link>
+            <Link to="/shop" className="st-tab">
+              shop
+            </Link>
+            <Link to="/firmware" className="st-tab">
+              firmware
+            </Link>
+            <Link to="/about" className="st-tab">
+              about
+            </Link>
+            <span className="st-tab" data-on>
+              uploader
+            </span>
+          </nav>
         </div>
       </header>
 
