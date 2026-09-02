@@ -1,7 +1,8 @@
 # Postmortem — the scratch series (st54/st55), and how it trapped an SP-1 powered on
 
-**Status:** closed by full revert. `st53` (`bd8114b`, tag `st53-known-good`) is the
-flashable baseline again.
+**Status:** closed by full revert. `st53` (`bd8114b`) is the flashable baseline
+again. See §4.1 on the `st53-known-good` tag — it exists locally but this
+session's credentials cannot create tags on the remote.
 **Failed build:** `st55` — series head `3558c91`, build tag `st55`.
 **Revert:** `51a97ee`, tree byte-identical to `bd8114b`, binary hash identical
 (`cb9d4a73…eb713`).
@@ -835,9 +836,29 @@ whole thesis is that the previous round had plenty of wishes.
 
 Agreed and in force from now:
 
-1. **Restore and tag the last known-good build.** Done — `st53-known-good` →
-   `bd8114b`, annotated with the binary hash, sizes, and a pointer to this
-   document.
+1. **Restore and tag the last known-good build.** Restored — `51a97ee` is
+   byte-identical to `bd8114b` and produces an identical binary. The tag is
+   **not** pushed: `st53-known-good` was created locally, annotated with the
+   binary hash, sizes and a pointer to this document, but `git push origin
+   st53-known-good` is refused with HTTP 403. This session's credentials can
+   write `refs/heads/claude/*` and cannot create tags, and that is not something
+   to work around. To create it from a checkout with normal push rights:
+
+   ```
+   git tag -a st53-known-good bd8114b -m "st53: last build confirmed working on hardware"
+   git push origin st53-known-good
+   ```
+
+   Until then the restore point is the SHA. `bd8114b` is an ancestor of this
+   branch and is named in the revert commit, here, and in the release identity
+   below, so losing the tag does not lose the restore point:
+
+   | | |
+   |---|---|
+   | commit | `bd8114b990d8bbc321784b9f0587452ea461c060` |
+   | bin | 115,148 bytes |
+   | sha256 | `cb9d4a73731877ee0c7146be86a94d3e048253458d77c5d7bbd4fc3fd84eb713` |
+   | FLASH / RAM | 115,148 B (12.61%) / 203,486 B (77.62%) |
 2. **Replacement scratch work stays on its own branch**, off
    `claude/stemtape-m0-safety-audit-1vg9pq`, and does not merge into the
    baseline branch until it has been flashed and accepted on hardware.
@@ -934,5 +955,5 @@ one CI gate that touched that line was pinning the construct rather than the
 property. None of those three is a subtle bug. All three were visible in the
 source I was editing.
 
-`st53-known-good` is the restore point. The staged plan in §4 does not begin
+`bd8114b` is the restore point (§4.1). The staged plan in §4 does not begin
 until §3's tests exist and pass.
