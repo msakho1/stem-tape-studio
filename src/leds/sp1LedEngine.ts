@@ -307,7 +307,32 @@ export interface ResolvedSp1Led {
   lostTo: string | null;
   /** Owner this LED restores to when a temporary behaviour ends. */
   restoreTo: string | null;
+  /**
+   * Persistent states composed ON TOP of the winning base, in application
+   * order. These do not replace the base layer — they shape it, so loop,
+   * reverse, FX, mute/solo, slow and scratch can all read at once.
+   */
+  modifiers: LedModifierKind[];
 }
+
+/** Composable persistent states, applied over the winning base candidate. */
+export type LedModifierKind =
+  | "mute"
+  | "solo"
+  | "non-solo"
+  | "loop"
+  | "reverse"
+  | "fx"
+  | "slow"
+  | "scratch";
+
+interface LedModifier {
+  kind: LedModifierKind;
+  /** Loop accent uses the real audio wrap phase when one exists. */
+  phase?: number | null;
+  periodMs?: number;
+}
+
 
 export interface ResolvedPhysicalLedFrame {
   leds: ResolvedSp1Led[];
