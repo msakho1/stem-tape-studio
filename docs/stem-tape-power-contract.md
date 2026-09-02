@@ -402,6 +402,12 @@ mode · FX engaged · mute/solo held · bank/grid state · transport stopped.
 | R-1 | with the SP-1 **off**, hold Track 1 + Track 4, insert USB | ONE track light — UF2 bootloader |
 | R-2 | repeat R-1 with a deliberately broken application image | still reaches the bootloader |
 
+**R-1/R-2 are the only evidence that will ever exist for mechanism D in this
+project.** The bootloader's source is not in this repository (§8.2), so its
+behaviour cannot be source-verified here — it is owner-confirmed. These two runs
+are confirmation of *existing* recovery behaviour, not a test of anything st60
+added; st60 adds no bootloader-facing code at all.
+
 ---
 
 ## 6. Proof matrix — what is actually proven, and how
@@ -562,3 +568,144 @@ Until then, every row in §6 with ❌ in the hardware columns is **unproven**, a
 that includes every requirement that depends on physical controls, ADC
 behaviour, real timing, battery wake, charge-standby wake, or the real
 `power_off()` path.
+
+---
+
+## 8. The four mechanisms, kept separate on purpose
+
+Three of these are application-level power *policy*. The fourth is *recovery*,
+lives outside the application, and is not ours. Blurring them is how "the
+device can always be switched off" stopped being true in st55.
+
+| | Mechanism | Trigger | Purpose | Owner |
+|---|---|---|---|---|
+| **A** | **Wake** | FUNCTION-only, continuously 2.000 s, from OFF | deliberate startup; a single accidental press in a pocket or bag must not boot it | `st_pwr_hold.c` |
+| **B** | **Manual shutdown** | after release-to-rearm, FUNCTION-only, continuously 5.000 s | deliberate user-requested shutdown; reachable from **every** application feature state | `st_pwr_hold.c` |
+| **C** | **Idle shutdown** | transport inactive **and** no intentional physical activity, 300.000 s | stock-style battery protection; a secondary application-level route if the unit is abandoned | `st_pwr_idle.c` |
+| **D** | **Bootloader recovery** | Track 1 + Track 4 held while USB/power is applied | recovery when the **application firmware itself** is broken | the SP-1 bootloader — **not this repository** |
+
+A, B and C converge on one platform transition and nothing else. Their
+qualification logic is disjoint — §1.3, gates E-5 and E-7. **D shares nothing
+with them at all**, including the failure modes: A/B/C are all code in the
+application image, so a sufficiently broken application can in principle
+compromise all three at once. That is precisely why D must not be, and is not,
+implemented here.
+
+### 8.1 D is not "running in the background"
+
+The bootloader is not a supervisor. It runs **at startup**, decides whether
+recovery was requested, and then either stays in firmware-update mode or hands
+control to Stem Tape and is done. While Stem Tape is running, no bootloader
+code is executing and nothing is watching the application on its behalf. (A
+`power_off()` → `SYSTEM_OFF` and the subsequent wake is a *fresh startup*, so
+the bootloader runs again then — at startup, as always, not concurrently.)
+
+### 8.2 What is source-verified about D, and what is not
+
+**Source-verified, in this repository:**
+
+* The application is **not** the reset vector.
+  `firmware/boards/teenageengineering/stem_player/stem_player.dts:179-180` —
+  *"TE bootloader lives below 0x20000; it loads the app at 0x20000, max size
+  0xDF000"* — and `stem_player_defconfig:8`. Something else runs first, by
+  construction. CI's "Image assertions (origin, bounds, …)" step checks the
+  origin fail-closed.
+* **No application code checks a Track 1 + Track 4 combo.** There is no such
+  mask test in `main.c`.
+* The **in-firmware** Track1+Track4→UF2 reset (`enter_dfu()`) was removed in
+  **`e887699`, 2026-08-20 02:39 UTC** — twelve days *before* st54
+  (`3b77ee7`, 2026-09-01 22:19) and st55 (`fc2d90b`, 2026-09-02 01:04). So the
+  surviving recovery path is the bootloader's, and it predates the scratch
+  series. The app no longer writes `GPREGRET` at all.
+* **st60 adds no bootloader-facing code.** `git diff d9aedfc..HEAD` over
+  `firmware/stemtape_player/src/` contains **zero** added lines matching
+  `gpregret|NVIC_SystemReset|dfu|uf2|UICR|0x10001`. Every "bootloader" hit in
+  that diff is a comment.
+
+**NOT source-verified, and it must not be presented as if it were:** that the
+bootloader actually scans Track 1 + Track 4 at power-up. **The bootloader's
+source is not in this repository** — `firmware/boards/teenageengineering/`
+contains board definitions only, and no bootloader source or image is vendored.
+The behaviour rests on the **device owner's confirmed procedure**, recorded in
+`3ce7d92` and `README.md:119-128`, corroborated by the distinguishing cue: the
+bootloader lights **one** track LED, whereas the removed `enter_dfu()` lit
+**all four** — two different code paths. Acceptance **R-1 / R-2** is what
+closes this, and until then D is *owner-confirmed, not source-verified*.
+
+---
+
+## 9. Would st60's idle shutdown have recovered st55? **No.**
+
+Asked and answered before flashing, because the answer determines whether C is
+a battery-protection feature or a fault backstop. It is the former.
+
+### 9.1 `transport_active` would have stayed true
+
+**`st_inertia_moving()` is not an independent liveness signal.** It is a pure
+function of `g_playing`:
+
+* `main.c:4401-4405` (st60; identical at `4552-4555` in st55) —
+  `if (g_playing) st_inertia_play(); else st_inertia_stop();`
+* `st_inertia_play()` drives SPINUP → RUNNING and **stays** RUNNING
+  (`st_inertia.c:91-99`, `:158-161`). Only `st_inertia_stop()` reaches STOPPED
+  (`:104-112`, `:168-171`), and it is called only while `g_playing == 0`.
+* `st_inertia_moving()` is `state != ST_INERTIA_STOPPED` (`st_inertia.h:139`).
+
+So `transport_active ≡ g_playing`, plus a bounded tail of at most
+`ST_INERTIA_SPINDOWN_MS` = 600 ms (`st_inertia.h:74`). It cannot latch true on
+its own.
+
+**And `g_playing` is a latch, not a liveness signal.** In st55 it has exactly
+three writers: the PLAY toggle (`main.c:9075`), the loop-restart path (`:4973`),
+and the transfer pause (`:6120`). Nothing in the streamer, the mailbox, the
+underrun path, `st_stream_*` or the scratch code writes it — `st_scratch.c`'s
+only match for "inertia" is a comment on line 151, and `st_ctl.c` has zero
+references to either symbol.
+
+The st55 stranded transport was in **UNDERRUN livelock**, producing no audio at
+all — postmortem §2.8: *"the head cannot advance because it has no sector, and
+it has no sector because the address will not hold still."* Through all of that,
+`g_playing` stayed exactly what the PLAY latch said. The user was scratching a
+playing song, so it was 1.
+
+> **`transport_active` means "the transport was commanded to run", not "the
+> transport is running."** For C's actual job — never cut off a seven-minute
+> song — that is exactly the right question. For fault recovery it is exactly
+> the wrong one: it is true *precisely* when the transport has stalled while
+> still commanded to run.
+
+### 9.2 And FUNCTION was being held, which is activity
+
+Independently of the above. The stranding was `function_consumed` re-asserted
+continuously by `scratch_service()` for as long as a target was latched (§2.1),
+and the target latched for the whole FUNCTION press with no way to disown it
+(§2.8) — so every escape attempt was another FUNCTION press, and §2.4's phantom
+ADC activity re-latched the scratch each time.
+
+In st60, `fn_down` is intentional physical activity and pins the idle clock at
+zero. Even with `g_playing == 0`, every attempt to escape would have reset the
+five minutes.
+
+### 9.3 Nor would the existing hardware watchdog have caught it
+
+Worth stating so it is not assumed. st55 did not hang: the control loop kept
+running — that is how the phantom Track presses and volume changes of §2.2
+happened at all — so `feed_wdt()` kept being called and the WDT kept being
+satisfied. It was a **livelock in data flow**, not a stalled CPU.
+
+### 9.4 The distinction this forces, and the line not to cross
+
+| | Question it answers | Correct input | Failure it catches |
+|---|---|---|---|
+| **C, idle shutdown** | *Is the instrument being **used**?* | `g_playing` — the command | an abandoned device flattening its battery |
+| **A future fault backstop** | *Is the instrument **working**?* | a **liveness** signal — frames actually delivered to I2S, `st_stream_sector_ready()` progress, the mailbox consumer index advancing | a commanded-but-stalled transport |
+
+`g_playing` is structurally incapable of answering the second question, and no
+tuning of C can make it do so.
+
+**Do not merge them.** Any liveness signal is legitimately false during a real
+pause, a momentary underrun or a slow seek; wiring one into C would trade the
+long-song guarantee — the whole reason §1.2 exists — for a fault case that has
+a proper, separate answer. **No watchdog is being implemented now.** This
+section exists so the next person does not reach for C when they mean the other
+thing.
