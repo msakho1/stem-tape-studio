@@ -527,7 +527,7 @@ function trackModifiers(s: AuthoritativeSp1LedState, i: number): LedModifier[] {
   else if (s.anySolo) mods.push({ kind: "non-solo" });
 
   const looping = s.globalLoop.active || s.globalLoop.latched || t.looping;
-  if (looping) mods.push({ kind: "loop", phase: s.loopPhase, periodMs: loopPeriodFor(s.globalLoop.division) });
+  if (looping) mods.push({ kind: "loop", phase: s.loopPhase ?? null, periodMs: loopPeriodFor(s.globalLoop.division) });
   if (t.reverse) mods.push({ kind: "reverse" });
   // Authoritative FX state, overlay open or not. Stem-scoped FX only accents
   // the stem it is actually applied to.
@@ -543,7 +543,7 @@ function sideModifiers(s: AuthoritativeSp1LedState, index: number): LedModifier[
   // The loop keeps its wrap tick on the PLAY-side LED even when an FX bank
   // owns that LED, so FX can never erase the loop indication.
   if (looping && index === PLAY_SIDE_INDEX)
-    mods.push({ kind: "loop", phase: s.loopPhase, periodMs: loopPeriodFor(s.globalLoop.division) });
+    mods.push({ kind: "loop", phase: s.loopPhase ?? null, periodMs: loopPeriodFor(s.globalLoop.division) });
   if (s.slow && index === PLAY_SIDE_INDEX) mods.push({ kind: "slow" });
   if (s.scratch?.master && index === PLAY_SIDE_INDEX) mods.push({ kind: "scratch" });
   return mods;
