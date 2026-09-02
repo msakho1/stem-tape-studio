@@ -257,19 +257,24 @@ mode · FX engaged · mute/solo held · bank/grid state · transport stopped.
 
 | Requirement | Host | Mutation | ARM build | Structural gate | HW measured | HW behaviour |
 |---|---|---|---|---|---|---|
-| 5.000 s exact threshold | ✅ 1 ms rig | — | ✅ | — | ❌ | ❌ |
-| 2.000 s exact threshold | ✅ | — | ✅ | — | ❌ | ❌ |
-| release resets at any point | ✅ 7 probes | — | ✅ | — | ❌ | ❌ |
-| other control resets completely | ✅ | — | ✅ | — | ❌ | ❌ |
-| fresh full hold required after | ✅ | — | ✅ | — | ❌ | ❌ |
-| 11 chords held 10 s never fire | ✅ | — | ✅ | — | ❌ | ❌ |
+| 5.000 s exact threshold | ✅ 1 ms rig | ✅ M-L | ✅ | — | ❌ | ❌ |
+| 2.000 s exact threshold | ✅ | ✅ M-L | ✅ | — | ❌ | ❌ |
+| release resets at any point | ✅ 7 probes | ✅ M-I | ✅ | — | ❌ | ❌ |
+| other control resets completely | ✅ | ✅ M-J | ✅ | — | ❌ | ❌ |
+| fresh full hold required after | ✅ | ✅ M-I | ✅ | — | ❌ | ❌ |
+| 11 chords held 10 s never fire | ✅ | ✅ M-J | ✅ | — | ❌ | ❌ |
 | 12 feature states still power off | ✅ | — | ✅ | — | ❌ | ❌ |
 | no feature input can reach the decision | ✅ (signature) | — | ✅ | ✅ E-3 | n/a | n/a |
-| rising edge forgets everything | ✅ F9 | — | ✅ | — | ❌ | ❌ |
-| stale fader cannot delay a hold | ✅ F1 | ✅ | ✅ | — | ❌ | ❌ |
-| single-sample phantom cannot reset | ✅ F6 | — | ✅ | — | ❌ | ❌ |
-| sub-threshold noise never blocks | ✅ F7 | — | ✅ | — | **❌ M3** | ❌ |
-| real fader movement does block | ✅ F8 | — | ✅ | — | **❌ M3** | ❌ |
+| AIN0 (PLAY, Tracks) resets the timer | ✅ F2/F3 | ✅ M-E | ✅ | — | ❌ | ❌ |
+| **AIN1 (VOL, rocker, FX) resets the timer** | ✅ **F12** | ✅ M-D | ✅ | — | ❌ | ❌ |
+| fader movement resets the timer | ✅ F8 | ✅ M-F | ✅ | — | **❌ M3** | ❌ |
+| rising edge forgets everything | ✅ F9 | ✅ M-A/M-B | ✅ | — | ❌ | ❌ |
+| stale fader cannot delay a hold | ✅ F1 | ✅ M-G | ✅ | — | ❌ | ❌ |
+| **faders sampled only inside a hold** | ✅ **F13** | ✅ M-C | ✅ | — | ❌ | ❌ |
+| single-sample phantom cannot reset | ✅ F6 | — *(see below)* | ✅ | — | ❌ | ❌ |
+| **settle depth, both directions** | ✅ **F14** | ✅ M-H2 | ✅ | — | ❌ | ❌ |
+| sub-threshold noise never blocks | ✅ F7 | ✅ M-M | ✅ | — | **❌ M3** | ❌ |
+| real fader movement does block | ✅ F8 | ✅ M-F | ✅ | — | **❌ M3** | ❌ |
 | ADC failure is not activity | ✅ F11 | — | ✅ | — | ❌ | ❌ |
 | `power_off()` absent from gated branch | — | — | ✅ | ✅ E-1 | n/a | n/a |
 | service above every dispatcher | — | — | ✅ | ✅ E-2 | n/a | n/a |
@@ -280,6 +285,30 @@ mode · FX engaged · mute/solo held · bank/grid state · transport stopped.
 | **the real `power_off()` path** | — | — | — | — | **❌** | **❌** |
 | **battery-wake vs standby parity** | — | — | ✅ (same code) | — | **❌** | **❌** |
 | **bootloader independence** | — | — | — | — | **❌** | **❌** |
+
+### The mutation sweep, and what it found
+
+Thirteen mutants were applied to `st_pwr_hold.c` and run against the suite.
+**Three survived the first sweep, and two of them were real gaps** — found by
+mutating, not by reading:
+
+* **M-D, deleting `|| in->ain1_active` from the control map, broke nothing.**
+  Every failure-injection case interrupted its hold with AIN0; `svc_run()`'s
+  `ain1` parameter was never once passed `true`. The AIN1 requirement — the one
+  the device owner specifically insisted on, because FUNCTION + rocker is a real
+  performance interaction — was asserted only against `st_pwr_hold_tick()`,
+  which cannot see how the service assembles its inputs. **F12 added.**
+* **M-C, sampling faders outside the transaction, broke nothing**, because
+  `main.c` passes `fader_raw = -1` with FUNCTION up and the harness copied that.
+  The module's own guarantee rested on the caller's discipline. **F13 added.**
+* **M-H, `ST_PWR_SETTLE_PASSES` → 1, is an equivalent mutant.** The tick's first
+  disagreeing sample lands in the `else` branch and sets `cand_n = 1` without
+  testing the threshold, so the effective depth is `max(2, N)`. Setting the
+  constant to 1 genuinely changes nothing. Raising it does: **M-H2 (→ 3) is
+  killed by F14**, which now pins the depth in both directions.
+
+All thirteen are killed or explained. The surviving-mutant list is the honest
+statement of what the suite does not constrain, and it is now: M-H only.
 
 ### Manually inspected only — no mechanical proof
 

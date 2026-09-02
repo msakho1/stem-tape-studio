@@ -1032,6 +1032,156 @@ static void test_F11_adc_failure_is_not_activity(void)
 	      "F11. an ADC that fails every read does not block the hold");
 }
 
+/* ---- F12: AIN1 IS A REAL CONTROL, THROUGH THE SERVICE ------------------
+ *
+ * ADDED BECAUSE A MUTANT SURVIVED. Deleting `|| in->ain1_active` from
+ * st_pwr_service()'s control map broke ZERO checks: every failure-injection
+ * case above interrupts the hold with AIN0, and svc_run()'s `ain1` parameter
+ * was never once passed true. The AIN1 requirement was therefore asserted only
+ * against st_pwr_hold_tick(), which cannot see how the service assembles its
+ * inputs -- the exact shape of the 24.7 s defect (the layer with the tests was
+ * not the layer with the bug).
+ *
+ * AIN1 carries VOL +/-, rocker FWD/RWD and the FX entry chord. FUNCTION +
+ * rocker is a legitimate performance interaction, so a timer blind to AIN1
+ * would shut the instrument down underneath a player's hand.
+ */
+static void test_F12_ain1_resets_the_transaction_through_the_service(void)
+{
+	svc_t s;
+	int64_t released_at, off_at, start;
+
+	/* (a) the rocker is already moving when FUNCTION goes down */
+	svc_init(&s);
+	(void)svc_run(&s, true, false, true, 1500);
+	released_at = s.now;
+	off_at = svc_run(&s, true, false, false, ST_PWR_OFF_MS + 200);
+	CHECK(off_at >= 0 && off_at - released_at >= ST_PWR_OFF_MS,
+	      "F12a. AIN1 active at the rising edge: a FULL fresh %d ms after "
+	      "it stops (%lld), the 1.5 s not banked", ST_PWR_OFF_MS,
+	      (long long)(off_at - released_at));
+
+	/* (b) VOL is pressed at 4.9 s -- the deadline must be lost, not met */
+	svc_init(&s);
+	(void)svc_run(&s, true, false, false, 4900);
+	(void)svc_run(&s, true, false, true, 300);
+	released_at = s.now;
+	off_at = svc_run(&s, true, false, false, ST_PWR_OFF_MS + 200);
+	CHECK(off_at >= 0 && off_at - released_at >= ST_PWR_OFF_MS,
+	      "F12b. AIN1 at 4.9 s resets completely: a full %d ms after the "
+	      "release", ST_PWR_OFF_MS);
+
+	/* (c) FUNCTION + rocker held for eight seconds must NEVER power off */
+	svc_init(&s);
+	off_at = svc_run(&s, true, false, true, 8000);
+	CHECK(off_at < 0,
+	      "F12c. FUNCTION + rocker held 8 s never powers off");
+
+	/* (d) and the same through the ON threshold, which the standby loop
+	 *     reaches with exactly this input */
+	svc_init(&s);
+	start = s.now;
+	(void)svc_run(&s, true, false, true, 3000);
+	CHECK(st_pwr_hold_elapsed_ms(&s.p.hold, s.now) == 0,
+	      "F12d. 3 s of FUNCTION + AIN1 leaves the ON timer at zero");
+	(void)start;
+}
+
+/* ---- F13: A FADER READING OFFERED OUTSIDE A TRANSACTION IS IGNORED -----
+ *
+ * ALSO ADDED BECAUSE A MUTANT SURVIVED. Changing the service's
+ * `if (in->fn_down)` fader-sampling guard to `if (1)` broke zero checks,
+ * because main.c passes fader_raw = -1 with FUNCTION up and svc_run() copies
+ * that. So the module's OWN guarantee -- "faders are sampled only inside a
+ * transaction" -- rested entirely on the caller's discipline.
+ *
+ * It must not. A future caller that has a fresh reading in hand (a background
+ * poll, a merged control pass) would otherwise seed baselines outside any
+ * hold, and the first hold afterwards would compare against a position from
+ * before it began. That IS the 24.7 s defect, reintroduced through a caller
+ * change rather than a module change.
+ */
+static void test_F13_fader_readings_outside_a_transaction_are_ignored(void)
+{
+	svc_t s;
+	st_pwr_in_t in;
+	st_pwr_out_t out;
+	int64_t start, off_at;
+	int pass;
+
+	svc_init(&s);
+
+	/* 2 s of passes with FUNCTION UP, feeding a REAL, WILDLY MOVING fader
+	 * reading on every single pass. Nothing here may be remembered. */
+	for (pass = 0; pass < 250; pass++) {
+		memset(&in, 0, sizeof(in));
+		in.fn_down   = false;
+		in.now_ms    = s.now;
+		in.fader_idx = (uint8_t)(pass & (ST_PWR_FADERS - 1u));
+		in.fader_raw = (int32_t)((pass * 271) % 3700);
+		st_pwr_service(&s.p, &in, &out);
+		s.now += 8;
+	}
+	CHECK(!st_pwr_fader_active(&s.p.fader, s.now),
+	      "F13. a fader swept for 2 s with FUNCTION UP leaves no movement "
+	      "state behind");
+
+	/* Now the hold, with every fader resting where svc_init left it. */
+	start = s.now;
+	off_at = svc_run(&s, true, false, false, ST_PWR_OFF_MS + 200);
+	CHECK(off_at >= 0 && off_at - start < ST_PWR_OFF_MS + 16,
+	      "F13. ...and the hold that follows takes exactly %d ms, not %lld",
+	      ST_PWR_OFF_MS, (long long)(off_at - start));
+}
+
+/* ---- F14: THE SETTLE DEPTH IS PINNED IN BOTH DIRECTIONS ----------------
+ *
+ * The debounce is a safety trade with a wrong answer on each side. Too
+ * shallow and one noisy sample destroys a 4.99 s hold; too deep and a
+ * released control keeps blocking, or -- worse -- a control still under a
+ * finger is forgotten and the device powers off during a gesture.
+ *
+ * NOTE ON ST_PWR_SETTLE_PASSES. The tick's first disagreeing sample lands in
+ * the `else` branch and sets cand_n = 1 WITHOUT testing the threshold, so the
+ * earliest a verdict can flip is the second agreeing sample. The effective
+ * depth is therefore max(2, ST_PWR_SETTLE_PASSES): setting the constant to 1
+ * changes nothing, which is why a mutation to `>= 1u` survives. Raising it
+ * does change behaviour, and this test pins that.
+ */
+static void test_F14_the_settle_depth_is_exactly_two_passes(void)
+{
+	st_pwr_hold_t h;
+	int64_t t = 500000;
+	int n;
+
+	/* RISING: two agreeing ACTIVE samples commit, and not before. */
+	st_pwr_hold_reset(&h);
+	(void)st_pwr_hold_tick(&h, true, false, t); t += TICK_MS;
+	(void)st_pwr_hold_tick(&h, true, true, t);  t += TICK_MS;
+	CHECK(!h.other_active, "F14. one ACTIVE sample does not commit");
+	(void)st_pwr_hold_tick(&h, true, true, t);  t += TICK_MS;
+	CHECK(h.other_active, "F14. the SECOND agreeing ACTIVE sample commits "
+	      "-- not the third or later");
+
+	/* FALLING: symmetric, and it must not take longer. A control released
+	 * mid-gesture that kept blocking would silently lengthen every hold. */
+	(void)st_pwr_hold_tick(&h, true, false, t); t += TICK_MS;
+	CHECK(h.other_active, "F14. one IDLE sample does not clear the verdict");
+	(void)st_pwr_hold_tick(&h, true, false, t); t += TICK_MS;
+	CHECK(!h.other_active, "F14. the SECOND agreeing IDLE sample clears it "
+	      "-- the release is not deferred");
+
+	/* And an alternating rail commits NOTHING, in either direction: the
+	 * candidate is discarded every time the reading disagrees with it. */
+	st_pwr_hold_reset(&h);
+	for (n = 0; n < 200; n++) {
+		(void)st_pwr_hold_tick(&h, true, (n & 1) != 0, t);
+		t += TICK_MS;
+	}
+	CHECK(!h.other_active,
+	      "F14. 200 alternating samples never commit a verdict");
+}
+
 int main(void)
 {
 	printf("power contract -- ON %d ms, OFF %d ms, settle %u passes, "
@@ -1071,6 +1221,9 @@ int main(void)
 	RUN(test_F9_the_rising_edge_forgets_everything);
 	RUN(test_F10_the_on_threshold_through_the_service);
 	RUN(test_F11_adc_failure_is_not_activity);
+	RUN(test_F12_ain1_resets_the_transaction_through_the_service);
+	RUN(test_F13_fader_readings_outside_a_transaction_are_ignored);
+	RUN(test_F14_the_settle_depth_is_exactly_two_passes);
 
 	printf("\n%d cases, %d checks, %d failures\n", g_cases, g_checks, g_failures);
 	return g_failures ? 1 : 0;
