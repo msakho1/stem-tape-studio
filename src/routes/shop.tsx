@@ -107,6 +107,9 @@ function ShopPage() {
             <Link to="/device" className="st-tab">
               uploader
             </Link>
+            <Link to="/firmware" className="st-tab">
+              firmware
+            </Link>
             <Link to="/about" className="st-tab">
               about
             </Link>

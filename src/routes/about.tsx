@@ -44,6 +44,9 @@ function AboutPage() {
               <Link to="/device" className="st-tab">
                 uploader
               </Link>
+              <Link to="/firmware" className="st-tab">
+                firmware
+              </Link>
               <span className="st-tab" data-on>
                 about
               </span>
@@ -68,6 +71,9 @@ function AboutPage() {
             </Link>
             <Link to="/device" className="st-tab">
               uploader
+            </Link>
+            <Link to="/firmware" className="st-tab">
+              firmware
             </Link>
             <span className="st-tab" data-on>
               about
