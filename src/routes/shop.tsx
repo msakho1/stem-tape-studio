@@ -113,9 +113,6 @@ function ShopPage() {
             <Link to="/about" className="st-tab">
               about
             </Link>
-            <span className="st-tab" data-on>
-              shop
-            </span>
           </nav>
         </div>
       </header>
