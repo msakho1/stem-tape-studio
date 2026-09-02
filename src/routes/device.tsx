@@ -769,6 +769,9 @@ function DevicePage() {
               <Link to="/shop" className="st-tab">
                 shop
               </Link>
+              <Link to="/firmware" className="st-tab">
+                firmware
+              </Link>
               <Link to="/about" className="st-tab">
                 about
               </Link>
