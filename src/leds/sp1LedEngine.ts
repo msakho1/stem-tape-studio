@@ -133,6 +133,12 @@ export interface Sp1LedTrackState {
   soloed: boolean;
   linked: boolean;
   pressed: boolean;
+  /** Per-lane tape reverse (universal lane layer), independent of Heads. */
+  reverse: boolean;
+  /** This lane's own capture loop. */
+  looping: boolean;
+  /** Scratch readiness — isolated stem scratch (fed by the scratch engine). */
+  scratching: boolean;
   head: { loaded: boolean; muted: boolean; reverse: boolean; latched: boolean };
 }
 
@@ -163,6 +169,16 @@ export interface AuthoritativeSp1LedState {
   fxScope: "global" | "stem";
   banks: Sp1LedBankState[];
   globalLoop: { active: boolean; latched: boolean; division: 1 | 2 | 4 | 8 };
+  /**
+   * Real loop-wrap anchor, 0..1 through the current global loop, derived from
+   * the audio engine's own position. `null` when the engine has no loop phase
+   * to offer — the accent then falls back to the app clock.
+   */
+  loopPhase: number | null;
+  /** Persistent slowed-tape state (musical rate below unity). */
+  slow: boolean;
+  /** Scratch readiness — master (all-stem) scratch, fed by the scratch engine. */
+  scratch: { master: boolean };
   scrub: { direction: 0 | 1 | -1; speedIndex: ScrubSpeedIndex; latched: boolean; inertia: boolean };
   heads: { active: boolean };
   song: number;
@@ -170,8 +186,19 @@ export interface AuthoritativeSp1LedState {
   /** Physical SP-1 recognized on the wire — finite greeting chase, or null. */
   connectGreeting: { startedAt: number } | null;
   /** Finite one-shots, expressed as absolute app-clock start times. */
-  flash: { kind: "fx-latch" | "fx-unlatch" | "heads-reject"; startedAt: number } | null;
+  flash: { kind: "fx-latch" | "fx-unlatch" | "heads-reject" | "pitch"; startedAt: number } | null;
 }
+
+/** Extra LED-only context the reducer does not carry. */
+export interface Sp1LedContext {
+  levels?: readonly number[];
+  /** 0..1 phase through the global loop, from the audio engine. */
+  loopPhase?: number | null;
+  scratch?: { master?: boolean; stems?: readonly boolean[] };
+  /** Momentary semitone/rate confirmation, app-clock start time. */
+  pitchFlashAt?: number | null;
+}
+
 
 /** Projects the reducer state onto the authoritative LED state. */
 export function sp1LedStateFrom(
