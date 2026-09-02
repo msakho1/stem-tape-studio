@@ -1219,7 +1219,49 @@ export class AudioEngine {
     }
     const landing = Math.max(0, dur ? Math.min(dur - 1e-3, audible + advance) : audible + advance);
 
+    // Release must not seek. When no wrap has been COMMITTED into the audio
+    // graph yet (no lane has a scheduled seam ahead of us), the currently
+    // audible voices are simply allowed to keep running: the window is closed,
+    // the shared clock is re-anchored onto the audible frame and nothing is
+    // respawned or crossfaded at all. Only when a wrap is already scheduled —
+    // its fade-out and replacement are in the graph and cannot be un-scheduled
+    // sample-accurately — does the release fall back to the audible-frame
+    // crossfade below.
+    const wrapCommitted = this.tracks.some((t) => t.loop.enabled && t.committedSeamAt != null && t.committedSeamAt > now);
+
     let lanes = 0;
+    if (!wrapCommitted) {
+      for (let i = 0 as TrackId; i < 4; i = (i + 1) as TrackId) {
+        const t = this.tracks[i];
+        if (!t) continue;
+        const wasLooping = t.loop.enabled;
+        t.loop = { ...t.loop, enabled: false };
+        this.pendingRelease[i] = null;
+        t.committedSeamAt = null;
+        if (!wasLooping) continue;
+        lanes++;
+        if (t.engineMode === "worklet" && t.worklet) {
+          // Worklet parity: drop the window WITHOUT moving the read pointer.
+          const frames = Math.round(t.sourceDurationS * ctx.sampleRate);
+          void t.worklet.post({
+            type: "setWindow",
+            start: 0,
+            end: frames,
+            enabled: false,
+            applyAtContextFrame: sharedApplyFrame(ctx),
+          });
+        }
+      }
+      // The audible frame IS the song position from here on.
+      this.timeline.anchor(now, audible);
+      this.invalidateSeams();
+      this.lastGlobalRelease = { at: now, position: audible, lanes };
+      return {
+        ok: true,
+        detail: `global loop released with no seek — ${lanes} lanes continue forward from the audible frame ${audible.toFixed(3)}s`,
+      };
+    }
+
     for (let i = 0 as TrackId; i < 4; i = (i + 1) as TrackId) {
       const t = this.tracks[i];
       if (!t) continue;
@@ -1246,6 +1288,7 @@ export class AudioEngine {
     }
     // The SONG itself was looping: the shared clock follows the audible frame.
     this.timeline.anchor(at, landing);
+
     this.invalidateSeams();
     this.lastGlobalRelease = { at, position: landing, lanes };
     return {
