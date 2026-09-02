@@ -583,6 +583,35 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Link closure (a call whose .c file is not in the build)
+        # THE SECOND ARM-ONLY FAILURE CLASS THIS JOB NOW CATCHES WITHOUT ARM,
+        # and the nastier of the two to diagnose. A call to a function nobody
+        # compiles does NOT fail like a missing function usually does: the
+        # compile succeeds (the prototype is in a header), the first link pass
+        # runs, and the build dies with no zephyr.elf. The surviving log tail
+        # says only "bin=NOT-PRODUCED (the build did not reach a final link)",
+        # which describes the symptom and names nothing.
+        #
+        # It has now happened TWICE: main.c's v1.2 read path called
+        # st_pl_group_block(), st_pl_validate() and st_pl_decode_frame() with
+        # src/st_planar.c never added to CMakeLists.txt; and st_ctl.c's scratch
+        # gesture called st_scratch_drive_from_fader() with src/st_scratch.c
+        # left out on the theory that "nothing calls it yet" -- which had
+        # stopped being true in the very commit that said it.
+        #
+        # AND THIS STEP RAN AFTER THE BUILD BOTH TIMES, which is why it caught
+        # neither. It is pure source analysis: no toolchain, no ELF, no
+        # artefacts, about a second to run. Downstream of the compile it could
+        # only ever confirm a diagnosis already paid for with a failed build.
+        # It now runs BEFORE the SDK is set up, where it turns a wasted compile
+        # into an error naming the file, the line, the function and the fix.
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/stemtape_player_link_closure.py \
+            firmware/stemtape_player/CMakeLists.txt \
+            firmware/stemtape_player/src
+
       - name: Start CI heartbeat (Set up Zephyr)
         # See the `build` job's identical step for why: this composite
         # action prints nothing while it downloads/unpacks the SDK, so a
@@ -2879,26 +2908,6 @@ jobs:
             cat audit/led-acceptance-matrix.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Link closure (a call whose .c file is not in the build)
-        # THE SECOND ARM-ONLY FAILURE CLASS THIS JOB NOW CATCHES WITHOUT ARM,
-        # and the nastier of the two to diagnose. A call to a function nobody
-        # compiles does NOT fail like a missing function usually does: the
-        # compile succeeds (the prototype is in a header), the first link pass
-        # runs, and the build dies with no zephyr.elf. The surviving log tail
-        # says only "bin=NOT-PRODUCED (the build did not reach a final link)",
-        # which describes the symptom and names nothing.
-        #
-        # It has already happened once: main.c's v1.2 read path called
-        # st_pl_group_block(), st_pl_validate() and st_pl_decode_frame() on
-        # every fetch and every frame, and src/st_planar.c was never added to
-        # CMakeLists.txt.
-        working-directory: ${{ github.workspace }}/project
-        run: |
-          set -euo pipefail
-          python3 .github/scripts/stemtape_player_link_closure.py \
-            firmware/stemtape_player/CMakeLists.txt \
-            firmware/stemtape_player/src
 
       - name: RAM ownership map has not gone stale (a renamed symbol reclassifies silently)
         # THE THIRD FAILURE CLASS THIS JOB CATCHES WITHOUT THE TOOLCHAIN, and

@@ -9836,6 +9836,21 @@ int main(void)
 			st_ctl_in_t ci;
 
 			memset(&ci, 0, sizeof(ci));
+			/*
+			 * NOT SAMPLED, said explicitly. memset leaves these 0,
+			 * which st_ctl reads as "this fader is at position 0"
+			 * -- a real reading, not an absent one. Four faders
+			 * reporting a constant 0 never move, so no gesture can
+			 * start and nothing breaks; but "did not report" and
+			 * "reported zero" are different facts and only one of
+			 * them is true here. The scratch wiring that fills
+			 * these in properly is the next commit; until it lands
+			 * this states the truth rather than relying on a
+			 * coincidence that a later edit could remove.
+			 */
+			for (uint32_t fk = 0; fk < ST_PL_STEMS; fk++) {
+				ci.fader_raw[fk] = -1;
+			}
 			ci.ladder_raw     = st_trk_raw;
 			ci.track_consumed_mask = s_fx_track_claim;
 			/* Only the master-volume pair maps to a loop division. The
