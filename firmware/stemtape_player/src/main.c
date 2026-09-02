@@ -157,9 +157,9 @@
 #define ST_RC_SWEEP_REPS 24u
 
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st54-VOLCAL"
+#define ST_BUILD_TAG "st55-VOLCAL"
 #else
-#define ST_BUILD_TAG "st54"
+#define ST_BUILD_TAG "st55"
 #endif
 #include "st_track_hold.h"
 
@@ -1737,6 +1737,43 @@ static atomic_t g_stem_loop_enter_req = ATOMIC_INIT(0);
  * exchange doing what its atomic_cas does.
  */
 static atomic_t g_stem_reverse_req = ATOMIC_INIT(0);
+
+/*
+ * THE SCRATCH GESTURE, CONTROL THREAD -> AUDIO THREAD, IN ONE WORD.
+ *
+ * The control thread publishes what the hand is asking -- a target and a
+ * signed drive -- and the audio thread owns the integrator that turns it into
+ * a rate. That split is deliberate on both sides.
+ *
+ * WHY THE AUDIO THREAD INTEGRATES. The rate has to change on block boundaries,
+ * because that is where the render reads it; integrating on the control thread
+ * would let it move mid-block and make the two disagree about what a block was
+ * rendered at. The audio thread also has the only exact clock -- one block is
+ * BLK_FRAMES/48000, a constant -- while the control loop's ~8 ms is nominal.
+ *
+ * WHY ONE WORD AND NOT TWO ATOMICS. Target and drive must be read as a pair. A
+ * torn read that took a new target with the old drive would push the wrong
+ * head for one block, which at 2x is about 11 ms of the wrong stem moving --
+ * audible, and exactly the kind of fault that is impossible to reproduce on
+ * demand. Packing removes the question rather than reasoning about how narrow
+ * the window is.
+ *
+ * Drive is +/-65536 and fits in 20 signed bits with room to spare; the target
+ * is 0..5. Bits 0..19 drive, 20..23 target.
+ */
+#define ST_SCR_T_MASTER 4u
+#define ST_SCR_T_NONE   5u
+#define ST_SCR_PACK(tgt, drive) \
+	((atomic_val_t)(((uint32_t)(tgt) << 20) | ((uint32_t)(drive) & 0xFFFFFu)))
+#define ST_SCR_TGT(v)   ((uint8_t)(((uint32_t)(v) >> 20) & 0xFu))
+/* Sign-extend the low 20 bits. */
+#define ST_SCR_DRIVE(v) ((int32_t)((uint32_t)(v) << 12) >> 12)
+
+static atomic_t g_stem_scratch_req =
+	ATOMIC_INIT((atomic_val_t)(((uint32_t)ST_SCR_T_NONE << 20)));
+
+/* One audio block, in microseconds -- the integrator's tick. */
+#define ST_SCR_BLOCK_US ((BLK_FRAMES * 1000000u) / ST11_SAMPLE_RATE_HZ)
 /* THE exit target: loop_end, the first frame after the looped section. */
 static atomic_t g_stem_loop_exit_req  = ATOMIC_INIT(0);
 /* Latched vs momentary, for the LED marker only -- never a decision input. */
@@ -3366,6 +3403,103 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 
 	for (uint32_t rk = 0; rk < ST_PL_STEMS; rk++) {
 		stem_rate_q16[rk] = rate_q16;
+	}
+
+	/*
+	 * ---- THE SCRATCH, APPLIED --------------------------------------
+	 *
+	 * ONCE PER BLOCK, for the same reason the reverse request is consumed
+	 * once per block: a head must not change speed or direction part-way
+	 * through a block it is already being rendered for.
+	 *
+	 * The integrator lives here rather than on the control thread because
+	 * the rate has to move on block boundaries -- that is where the render
+	 * reads it -- and because this thread has the only exact clock.
+	 */
+	{
+		static st_scratch_t s_scr;
+		/*
+		 * WHICH HEAD THE GESTURE OWNS, remembered across the coast:
+		 * by the time the hand is off, the published target is already
+		 * NONE, and the coast still has to be applied to the head that
+		 * was being moved rather than to all of them.
+		 */
+		static uint8_t s_scr_owner = ST_SCR_T_NONE;
+		const atomic_val_t sv = atomic_get(&g_stem_scratch_req);
+		const uint8_t tgt = ST_SCR_TGT(sv);
+		const bool live = (tgt != ST_SCR_T_NONE);
+
+		if (live && !s_scr.engaged) {
+			/*
+			 * THE GRAB. Start from the transport's CURRENT rate,
+			 * not from a standstill -- a hand landing on a spinning
+			 * record does not stop it dead, and starting at zero
+			 * would be a click on every FUNCTION press.
+			 *
+			 * Direction is folded in here: a head already running
+			 * backwards is grabbed at a NEGATIVE rate, so reversing
+			 * a reversed stem starts from where it actually is
+			 * rather than from its mirror image.
+			 */
+			const uint32_t k = (tgt == ST_SCR_T_MASTER) ? s_stem_transport : tgt;
+			const int32_t signed_now =
+				g_stem_stream[k].reverse ? -(int32_t)rate_q16
+							  : (int32_t)rate_q16;
+
+			st_scratch_begin(&s_scr, signed_now,
+					  (tgt == ST_SCR_T_MASTER)
+					   ? ST_SCRATCH_MAX_RATE_MASTER_Q16
+					   : ST_SCRATCH_MAX_RATE_STEM_Q16);
+		} else if (!live && s_scr.engaged) {
+			(void)st_scratch_release(&s_scr);   /* begins the coast */
+		}
+
+		if (live) {
+			st_scratch_set_drive(&s_scr, ST_SCR_DRIVE(sv));
+			st_scratch_tick(&s_scr, ST_SCR_BLOCK_US);
+		} else {
+			(void)st_scratch_coast(&s_scr, ST_SCR_BLOCK_US);
+		}
+
+		if (live) {
+			s_scr_owner = tgt;
+		}
+
+		if (s_scr.engaged || s_scr.coasting) {
+			const int32_t sr = st_scratch_rate_q16(&s_scr);
+			const bool want_rev = (sr < 0);
+			const uint32_t mag = st_rs_rate_clamp(
+				(uint32_t)(want_rev ? -sr : sr));
+			uint32_t sk;
+
+			/*
+			 * SPLIT THE SIGNED RATE. The transport carries speed
+			 * and direction separately -- magnitude in the rate
+			 * array, sign in each head's own `reverse` -- so this
+			 * is where one signed number becomes the two the engine
+			 * already understands. Nothing downstream learns a new
+			 * concept.
+			 *
+			 * st_stream_set_reverse() is the only way the sign is
+			 * allowed to change: it moves no head and lifts only
+			 * the terminal state the new direction frees, which is
+			 * what keeps a direction change from being a seek.
+			 */
+			for (sk = 0; sk < ST_PL_STEMS; sk++) {
+				/* MASTER moves all four; a stem gesture moves
+				 * exactly its own and the other three carry on
+				 * untouched, which is the whole point of it. */
+				if (s_scr_owner != ST_SCR_T_MASTER && sk != s_scr_owner) {
+					continue;
+				}
+				if (g_stem_stream[sk].reverse != want_rev) {
+					st_stream_set_reverse(&g_stem_stream[sk], want_rev);
+				}
+				stem_rate_q16[sk] = mag;
+			}
+		} else {
+			s_scr_owner = ST_SCR_T_NONE;
+		}
 	}
 
 	/* The seam's duck length converted from output frames into the tape
@@ -8868,6 +9002,28 @@ static void stem_ctl_apply(void)
 		 * here is exactly how a surface and an engine come to
 		 * disagree. */
 		atomic_set(&g_stem_reverse_req, (atomic_val_t)(o->reverse_track + 1u));
+	}
+
+	/*
+	 * THE SCRATCH, published as a LEVEL every pass -- not an edge.
+	 *
+	 * A scratch is a continuous manipulation, so the audio thread needs to
+	 * know what the hand is asking RIGHT NOW, including "nothing", which is
+	 * a real answer meaning the hand is resting and the head should slow.
+	 * Republishing every pass also means a missed pass costs one stale
+	 * block rather than a stuck gesture.
+	 *
+	 * Same division of labour as reverse above: this says what the player
+	 * did, never what any head is doing. The audio thread owns the heads.
+	 */
+	{
+		const uint8_t tgt = !o->scratch_active ? ST_SCR_T_NONE
+				     : (o->scratch_target == ST_CTL_SCRATCH_MASTER)
+					? ST_SCR_T_MASTER
+					: (uint8_t)o->scratch_target;
+
+		atomic_set(&g_stem_scratch_req,
+			    ST_SCR_PACK(tgt, o->scratch_drive_q16));
 	}
 	if (o->loop_latch) {
 		atomic_set(&g_stem_loop_latched, 1);

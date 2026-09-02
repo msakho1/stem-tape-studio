@@ -2427,6 +2427,55 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Stem Tape SCRATCH APPLIED -- main.c's own block, compiled on stubs
+        # THE ONE PIECE OF THE SCRATCH THAT LIVES ONLY IN main.c, and the piece
+        # that decides which heads move, in which direction, at what speed. A
+        # hand-written copy of it in a test would be a second implementation
+        # that goes stale silently the first time the real one changes -- so
+        # the harness EXTRACTS those exact lines at build time and compiles
+        # them against stubs for the two things a host cannot have: the atomics
+        # and the four playheads.
+        #
+        # The extractor fails loudly if the markers are gone, if the block is
+        # implausibly small, or if it no longer contains the calls that make it
+        # the real thing. An empty extract would let the test pass by testing
+        # nothing, which is the failure mode worth engineering against.
+        #
+        # WHAT THIS CANNOT PROVE: that the block sits in the right place in
+        # stem_audio_block(), or that it runs once per block. Those belong to
+        # the Zephyr build and the wiring gate. It proves the arithmetic --
+        # grab, drive, direction split, ownership, coast, handover -- which is
+        # where the mistakes are.
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/stemtape_player_extract_scratch_apply.py \
+            firmware/stemtape_player/src/main.c \
+            firmware/stemtape_player/tests/scratch_apply_block.inc
+          cc -std=c11 -Wall -Wextra -Werror \
+            -Ifirmware/stemtape_player/src -Ifirmware/stemtape_player/tests \
+            firmware/stemtape_player/src/st_stem_stream.c \
+            firmware/stemtape_player/src/st_scratch.c \
+            firmware/stemtape_player/tests/test_scratch_apply.c \
+            -o audit/test_scratch_apply
+          ./audit/test_scratch_apply | tee audit/scratch-apply-selftest.txt
+
+          # THE FOUR CLAIMS THE SPEC MAKES ABOUT WHAT SCRATCHING DOES.
+          grep -q 'locked' audit/scratch-apply-selftest.txt \
+            || { echo "master no longer moves all four heads together"; exit 1; }
+          grep -q 'the sign went to the head, not to the rate' audit/scratch-apply-selftest.txt \
+            || { echo "the signed rate is no longer split into magnitude + direction"; exit 1; }
+          grep -q 'is untouched -- still forward' audit/scratch-apply-selftest.txt \
+            || { echo "an isolated stem scratch is disturbing the other three"; exit 1; }
+          grep -q 'not from where it started and not resynced' audit/scratch-apply-selftest.txt \
+            || { echo "releasing a gesture is moving the head -- it must resume where it was left"; exit 1; }
+          {
+            echo '### Stem Tape scratch, applied'
+            echo '```text'
+            cat audit/scratch-apply-selftest.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Stem Tape v1.2 SONG-PLANAR addressing -- pure module AND the wired read path
         # THE FORMAT'S WHOLE JUSTIFICATION, as an executable claim. v1.1 weaves
         # all four stems into every frame, so a stem playing from a different
