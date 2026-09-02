@@ -2372,6 +2372,19 @@ jobs:
             firmware/stemtape_player/src/st_scratch.h \
             || { echo "the velocity clamp must be derived from the read-cost model"; exit 1; }
 
+          # AND IT MUST BE THE MINIMUM OF BOTH CEILINGS. The read-cost model
+          # answers "what can the storage feed"; st_resample.h's ST_RS_RATE_MAX
+          # answers "what can the reader span", and on an isolated stem the
+          # SECOND one binds -- the eMMC allows 7.62x where the interpolator
+          # allows 2x. Shipping the storage figure alone would drive the
+          # renderer four times past its stated span.
+          grep -q 'the effective clamp is the MINIMUM of the two ceilings' \
+            audit/scratch-clamp-selftest.txt \
+            || { echo "the renderer ceiling is no longer applied to the clamp"; exit 1; }
+          grep -q 'ST_SCRATCH_EFFECTIVE_MAX_Q16(moving)' \
+            firmware/stemtape_player/src/st_scratch.h \
+            || { echo "the effective clamp must take both ceilings, not just storage"; exit 1; }
+
           # THE TRANSPORT'S TWO LOAD-BEARING PROPERTIES.
           #
           # One integrator spanning both gestures is the whole design, so the

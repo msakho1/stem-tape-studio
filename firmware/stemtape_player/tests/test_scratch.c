@@ -97,13 +97,13 @@ static void test_clamp_matches_the_measured_fit(void)
 
 static void test_clamp_is_ordered_and_usable(void)
 {
-	const double master = (double)ST_SCRATCH_MAX_RATE_MASTER_Q16 / 65536.0;
-	const double stem   = (double)ST_SCRATCH_MAX_RATE_STEM_Q16 / 65536.0;
+	const double master = (double)ST_SCRATCH_EMMC_MAX_MASTER_Q16 / 65536.0;
+	const double stem   = (double)ST_SCRATCH_EMMC_MAX_STEM_Q16 / 65536.0;
 	unsigned m;
 
 	CHECK(stem > master,
-	      "moving ONE head (%.2fx) is cheaper than moving four (%.2fx) -- which is "
-	      "why an isolated stem scratch can be faster than a master one", stem, master);
+	      "in STORAGE terms, moving ONE head (%.2fx) is cheaper than moving four "
+	      "(%.2fx)", stem, master);
 
 	for (m = 2; m <= ST_PL_STEMS; m++) {
 		CHECK(ST_SCRATCH_MAX_RATE_Q16(m) < ST_SCRATCH_MAX_RATE_Q16(m - 1u),
@@ -115,8 +115,43 @@ static void test_clamp_is_ordered_and_usable(void)
 	 * limited. */
 	CHECK(master > 1.0, "the master clamp is above unity, so a shuttle can run");
 	CHECK(stem > 2.0,
-	      "and a single stem clears 2x, the region where reversed audio reads as a "
-	      "scratch rather than as slow reverse playback");
+	      "and a single stem clears 2x in storage terms");
+}
+
+/*
+ * THE RENDERER IS THE OTHER CEILING, and for the isolated stem it is the
+ * BINDING one -- which the storage derivation on its own could not know.
+ *
+ * st_resample.h caps a read at ST_RS_RATE_MAX because two source frames per
+ * output frame is the most the interpolator's carried previous-frame can span,
+ * and its run arithmetic is written against that. Asking for the storage
+ * figure would drive it four times past its stated span on an isolated stem.
+ * Not memory-unsafe -- stem_render_run() clamps its own reads to the run it
+ * was given -- but outside what the module claims, and audibly so.
+ */
+static void test_the_renderer_ceiling_binds_too(void)
+{
+	CHECK(ST_SCRATCH_RENDER_MAX_Q16 == ST_RS_RATE_MAX,
+	      "the renderer ceiling is st_resample.h's own ST_RS_RATE_MAX (%.2fx), "
+	      "not a second opinion about it", ST_SCRATCH_RENDER_MAX_Q16 / 65536.0);
+
+	CHECK(ST_SCRATCH_MAX_RATE_MASTER_Q16 <= ST_SCRATCH_RENDER_MAX_Q16 &&
+	      ST_SCRATCH_MAX_RATE_STEM_Q16 <= ST_SCRATCH_RENDER_MAX_Q16,
+	      "no gesture may ask the renderer for more than it can span");
+
+	CHECK(ST_SCRATCH_MAX_RATE_STEM_Q16 ==
+	      ((ST_SCRATCH_EMMC_MAX_STEM_Q16 < ST_SCRATCH_RENDER_MAX_Q16)
+	        ? ST_SCRATCH_EMMC_MAX_STEM_Q16 : ST_SCRATCH_RENDER_MAX_Q16),
+	      "the effective clamp is the MINIMUM of the two ceilings, not either alone");
+
+	/* And for the isolated stem the renderer is the one that actually bites,
+	 * which is the whole reason this case exists. */
+	CHECK(ST_SCRATCH_EMMC_MAX_STEM_Q16 > ST_SCRATCH_RENDER_MAX_Q16,
+	      "on one stem the eMMC would allow %.2fx and the renderer allows %.2fx, "
+	      "so the RENDERER is the binding limit -- the storage derivation alone "
+	      "would have shipped a rate the reader cannot serve",
+	      ST_SCRATCH_EMMC_MAX_STEM_Q16 / 65536.0,
+	      ST_SCRATCH_RENDER_MAX_Q16 / 65536.0);
 }
 
 static void test_the_budget_leaves_the_still_heads_room(void)
@@ -379,9 +414,9 @@ static void test_the_zero_crossing_is_continuous(void)
 	 * big a discontinuity the resampler can ever be handed.
 	 */
 	st_scratch_t s;
-	double max_step = 0.0;
+	int32_t max_step_q16 = 0;
+	int32_t prev_q16;
 	double closest_to_zero = 1e9;
-	double prev;
 	uint32_t t;
 	uint32_t ticks_to_cross = 0u;
 	bool crossed = false;
@@ -389,20 +424,23 @@ static void test_the_zero_crossing_is_continuous(void)
 	st_scratch_begin(&s, 0, ST_SCRATCH_MAX_RATE_MASTER_Q16);
 	(void)hold(&s, ST_SCRATCH_DRIVE_FULL, 400u);   /* settled forward */
 
-	prev = rate_of(&s);
+	prev_q16 = st_scratch_rate_q16(&s);
 	for (t = 0; t < 400u * 1000u; t += PASS_US) {
 		double now;
+		int32_t d_q16;
 
 		st_scratch_set_drive(&s, -ST_SCRATCH_DRIVE_FULL);
 		st_scratch_tick(&s, PASS_US);
 		now = rate_of(&s);
-		if (fabs(now - prev) > max_step) { max_step = fabs(now - prev); }
+		d_q16 = st_scratch_rate_q16(&s) - prev_q16;
+		if (d_q16 < 0) { d_q16 = -d_q16; }
+		if (d_q16 > max_step_q16) { max_step_q16 = d_q16; }
+		prev_q16 = st_scratch_rate_q16(&s);
 		if (fabs(now) < closest_to_zero) { closest_to_zero = fabs(now); }
 		if (!crossed) {
 			ticks_to_cross++;
 			if (now < 0.0) { crossed = true; }
 		}
-		prev = now;
 	}
 
 	/*
@@ -434,14 +472,24 @@ static void test_the_zero_crossing_is_continuous(void)
 	 * survive a change to either constant.
 	 */
 	{
-		const double legal =
-			(ST_SCRATCH_MAX_RATE_MASTER_Q16 / 65536.0) *
-			((double)PASS_US / 1000.0) / (double)ST_SCRATCH_DECEL_MS;
+		/*
+		 * BOUNDED IN Q16, THE WAY THE CODE COMPUTES IT. Expressing the
+		 * bound as a double and adding an epsilon was wrong in kind, not
+		 * just in size: the step is a CEILING of an integer division, so
+		 * it legitimately lands a fraction of an LSB above the ideal
+		 * ratio, and the epsilon needed is a property of the arithmetic
+		 * rather than a number to tune. Comparing in the same fixed
+		 * point removes the question.
+		 */
+		const int32_t legal_q16 =
+			(int32_t)(((int64_t)ST_SCRATCH_MAX_RATE_MASTER_Q16 * PASS_US +
+				    (int64_t)ST_SCRATCH_DECEL_MS * 1000 - 1) /
+				   ((int64_t)ST_SCRATCH_DECEL_MS * 1000));
 
-		CHECK(max_step <= legal + 1e-6,
-		      "and the largest single-tick change across the crossing is %.4fx, within "
-		      "the %.4fx one ramp step allows -- a walk, not a sign flip",
-		      max_step, legal);
+		CHECK(max_step_q16 <= legal_q16,
+		      "and the largest single-tick change across the crossing is %d q16, "
+		      "within the %d one ramp step allows -- a walk, not a sign flip",
+		      max_step_q16, legal_q16);
 	}
 	CHECK(rate_of(&s) < -1.0, "and it ends up genuinely reversed (%.2fx)", rate_of(&s));
 }
@@ -586,27 +634,32 @@ static void test_master_heads_cannot_drift(void)
 static void test_release_coasts_back_to_unity(void)
 {
 	st_scratch_t s;
-	double max_step = 0.0, prev;
+	int32_t max_step_q16 = 0, prev_q16;
 	uint32_t t, ticks = 0u;
 	bool crossed_zero = false;
 
 	st_scratch_begin(&s, ST_SCRATCH_UNITY_Q16, ST_SCRATCH_MAX_RATE_MASTER_Q16);
 	(void)hold(&s, -ST_SCRATCH_DRIVE_FULL, 400u);      /* full reverse shuttle */
-	CHECK(rate_of(&s) < -2.0, "R1. shuttling in reverse at %.2fx", rate_of(&s));
+	CHECK(st_scratch_rate_q16(&s) == -(int32_t)ST_SCRATCH_MAX_RATE_MASTER_Q16,
+	      "R1. shuttling in reverse at the clamp (%.2fx)", rate_of(&s));
 
-	prev = rate_of(&s);
+	prev_q16 = st_scratch_rate_q16(&s);
 	(void)st_scratch_release(&s);
 	CHECK(s.coasting, "R1. releasing FUNCTION starts a coast, it does not snap");
 
 	for (t = 0; t < 2000u * 1000u; t += PASS_US) {
 		double now;
 
+		int32_t d_q16;
+
 		ticks++;
 		if (!st_scratch_coast(&s, PASS_US)) { break; }
 		now = rate_of(&s);
-		if (fabs(now - prev) > max_step) { max_step = fabs(now - prev); }
+		d_q16 = st_scratch_rate_q16(&s) - prev_q16;
+		if (d_q16 < 0) { d_q16 = -d_q16; }
+		if (d_q16 > max_step_q16) { max_step_q16 = d_q16; }
+		prev_q16 = st_scratch_rate_q16(&s);
 		if (fabs(now) < 0.5) { crossed_zero = true; }
-		prev = now;
 	}
 
 	CHECK(rate_of(&s) == 1.0,
@@ -614,9 +667,11 @@ static void test_release_coasts_back_to_unity(void)
 	      "dropped with no step at the handover", rate_of(&s));
 	CHECK(crossed_zero,
 	      "R1. passing through the zero region on the way, not around it");
-	CHECK(max_step <= (ST_SCRATCH_MAX_RATE_MASTER_Q16 / 65536.0) *
-	      ((double)PASS_US / 1000.0) / (double)ST_SCRATCH_DECEL_MS + 1e-6,
-	      "R1. never moving more than one ramp step in a tick (%.4fx)", max_step);
+	CHECK(max_step_q16 <=
+	      (int32_t)(((int64_t)ST_SCRATCH_MAX_RATE_MASTER_Q16 * PASS_US +
+			  (int64_t)ST_SCRATCH_DECEL_MS * 1000 - 1) /
+			 ((int64_t)ST_SCRATCH_DECEL_MS * 1000)),
+	      "R1. never moving more than one ramp step in a tick (%d q16)", max_step_q16);
 	printf("       coast took %u ticks (%.0f ms)\n", ticks, ticks * PASS_US / 1000.0);
 
 	/* Releasing AT unity is not a coast at all -- there is nothing to walk. */
@@ -701,13 +756,18 @@ int main(void)
 	printf("budget %u%% of %u us; ring %u slots, free window %.1f ms\n",
 	       ST_SCRATCH_BUDGET_PCT, ST_SCRATCH_BATCH_COVER_US,
 	       ST_LAT_RING_SLOTS, ST_SCRATCH_FREE_WINDOW_US / 1000.0);
-	printf("CLAMP: master %.3fx, single stem %.3fx\n",
+	printf("eMMC allows: master %.3fx, single stem %.3fx\n",
+	       ST_SCRATCH_EMMC_MAX_MASTER_Q16 / 65536.0,
+	       ST_SCRATCH_EMMC_MAX_STEM_Q16 / 65536.0);
+	printf("renderer allows %.3fx; EFFECTIVE CLAMP: master %.3fx, stem %.3fx\n",
+	       ST_SCRATCH_RENDER_MAX_Q16 / 65536.0,
 	       ST_SCRATCH_MAX_RATE_MASTER_Q16 / 65536.0,
 	       ST_SCRATCH_MAX_RATE_STEM_Q16 / 65536.0);
 
 	RUN(test_clamp_matches_the_measured_fit);
 	RUN(test_clamp_is_ordered_and_usable);
 	RUN(test_the_budget_leaves_the_still_heads_room);
+	RUN(test_the_renderer_ceiling_binds_too);
 	RUN(test_the_free_window_is_stated_honestly);
 	RUN(test_oscillating_inside_the_ring_costs_nothing);
 	RUN(test_travelling_beyond_the_ring_costs_reads);

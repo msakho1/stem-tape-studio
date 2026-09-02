@@ -90,6 +90,7 @@
 
 #include "st_latency.h"
 #include "st_planar.h"
+#include "st_resample.h"
 #include "st_v11_format.h"
 
 /* ======================================================================
@@ -140,10 +141,47 @@
 	((uint32_t)(((uint64_t)(ST_SCRATCH_BUDGET_US - ST_SCRATCH_STILL_US(moving)) << 16) / \
 		     ((uint64_t)(moving) * ST_SCRATCH_BATCH_US)))
 
+/*
+ * ======================================================================
+ * THE SECOND CEILING, AND WHY THE FIRST ONE IS NOT THE ANSWER
+ * ======================================================================
+ * Everything above answers "how fast can the eMMC feed a head". There is a
+ * separate and lower limit on how fast the RENDERER can read one, and
+ * st_resample.h states it directly: ST_RS_RATE_MAX is 2x because two source
+ * frames per output frame is the most the interpolator's carried
+ * previous-frame can span in one step, and the run arithmetic is written
+ * against it. That header already names the principle -- "two separate
+ * ceilings for two separate reasons: this one says what the reader can do,
+ * that one says what the storage can feed" -- and the storage one is the only
+ * one the derivation above knew about.
+ *
+ * So the rate a gesture may actually ask for is the MINIMUM of the two. This
+ * matters most exactly where the eMMC is most generous: an isolated stem
+ * scratch is affordable at 7.62x and renderable at 2x, so 2x is what it gets.
+ * Shipping the storage figure would have driven the interpolator four times
+ * past its stated span -- not memory-unsafe, since stem_render_run() clamps
+ * its own reads to the run it was given, but well outside what the module
+ * claims to support and audibly so.
+ *
+ * Both numbers are kept rather than collapsed into one, because they answer
+ * different questions and will move for different reasons: a faster card
+ * raises the first, a better interpolator raises the second.
+ */
+#define ST_SCRATCH_RENDER_MAX_Q16 ((uint32_t)ST_RS_RATE_MAX)
+
+#define ST_SCRATCH_EFFECTIVE_MAX_Q16(moving) \
+	((ST_SCRATCH_MAX_RATE_Q16(moving) < ST_SCRATCH_RENDER_MAX_Q16) \
+	  ? ST_SCRATCH_MAX_RATE_Q16(moving) : ST_SCRATCH_RENDER_MAX_Q16)
+
 /* The two the firmware actually uses. MASTER moves all four; a stem scratch
- * moves one and leaves three at unity. */
-#define ST_SCRATCH_MAX_RATE_MASTER_Q16 ST_SCRATCH_MAX_RATE_Q16(ST_PL_STEMS)
-#define ST_SCRATCH_MAX_RATE_STEM_Q16   ST_SCRATCH_MAX_RATE_Q16(1u)
+ * moves one and leaves three at unity. Both are the effective figure -- the
+ * one a gesture may really reach -- not the storage figure alone. */
+#define ST_SCRATCH_MAX_RATE_MASTER_Q16 ST_SCRATCH_EFFECTIVE_MAX_Q16(ST_PL_STEMS)
+#define ST_SCRATCH_MAX_RATE_STEM_Q16   ST_SCRATCH_EFFECTIVE_MAX_Q16(1u)
+
+/* The storage figures on their own, for the report and the tests. */
+#define ST_SCRATCH_EMMC_MAX_MASTER_Q16 ST_SCRATCH_MAX_RATE_Q16(ST_PL_STEMS)
+#define ST_SCRATCH_EMMC_MAX_STEM_Q16   ST_SCRATCH_MAX_RATE_Q16(1u)
 
 /*
  * THE FREE WINDOW: audio a head may range over without a new read, because the
@@ -158,8 +196,11 @@ _Static_assert(ST_SCRATCH_BUDGET_US > ST_SCRATCH_STILL_US(1u),
 	       "the three still heads must not already exhaust the duty budget");
 _Static_assert(ST_SCRATCH_MAX_RATE_MASTER_Q16 > 65536u,
 	       "a master gesture must at least reach unity, or it cannot shuttle at all");
-_Static_assert(ST_SCRATCH_MAX_RATE_STEM_Q16 > ST_SCRATCH_MAX_RATE_MASTER_Q16,
+_Static_assert(ST_SCRATCH_EMMC_MAX_STEM_Q16 > ST_SCRATCH_EMMC_MAX_MASTER_Q16,
 	       "moving one head must be cheaper than moving four");
+_Static_assert(ST_SCRATCH_MAX_RATE_MASTER_Q16 <= ST_SCRATCH_RENDER_MAX_Q16 &&
+	       ST_SCRATCH_MAX_RATE_STEM_Q16 <= ST_SCRATCH_RENDER_MAX_Q16,
+	       "no gesture may ask the renderer for more than it can span");
 #endif
 
 /* ======================================================================
