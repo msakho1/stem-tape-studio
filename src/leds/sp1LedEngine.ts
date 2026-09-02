@@ -204,8 +204,12 @@ export interface Sp1LedContext {
 export function sp1LedStateFrom(
   state: SurfaceState,
   now: number,
-  levels: readonly number[] = [0, 0, 0, 0],
+  levelsOrContext: readonly number[] | Sp1LedContext = [0, 0, 0, 0],
 ): AuthoritativeSp1LedState {
+  const ctx: Sp1LedContext = Array.isArray(levelsOrContext)
+    ? { levels: levelsOrContext as readonly number[] }
+    : (levelsOrContext as Sp1LedContext);
+  const levels = ctx.levels ?? [0, 0, 0, 0];
   const perf = state.perf;
   const fx = fxStateOf(perf, fxTargetOf(perf));
   const banks: Sp1LedBankState[] = [0, 1, 2, 3].map((i) => {
@@ -228,6 +232,10 @@ export function sp1LedStateFrom(
       return { kind: "heads-reject" as const, startedAt: state.headsRejectFlashAt };
     if (state.fxFlashAt != null && now - state.fxFlashAt >= 0 && now - state.fxFlashAt < PERIOD.oneShotSingle)
       return { kind: "fx-latch" as const, startedAt: state.fxFlashAt };
+    // Momentary pitch/semitone confirmation. Purely finite: once it expires the
+    // LED returns to whatever the composite says, with no state of its own.
+    if (ctx.pitchFlashAt != null && now - ctx.pitchFlashAt >= 0 && now - ctx.pitchFlashAt < PERIOD.oneShotSingle)
+      return { kind: "pitch" as const, startedAt: ctx.pitchFlashAt };
     return null;
   })();
 
@@ -243,6 +251,9 @@ export function sp1LedStateFrom(
       soloed: perf.tracks[i]!.soloed,
       linked: perf.tracks[i]!.linked,
       pressed: state.pressed.includes(`track-button-${i + 1}` as never),
+      reverse: t.laneReverse,
+      looping: t.laneLoop.active,
+      scratching: ctx.scratch?.stems?.[i] === true,
       head: { loaded: t.content !== "empty", muted: t.headMuted, reverse: t.headReverse, latched: t.headLatched },
     })),
     activeStem: perf.activeStem,
@@ -251,6 +262,9 @@ export function sp1LedStateFrom(
     fxScope: perf.fxScope === "global" ? "global" : "stem",
     banks,
     globalLoop: { ...state.globalLoop },
+    loopPhase: ctx.loopPhase ?? null,
+    slow: state.speed < 0.995,
+    scratch: { master: ctx.scratch?.master === true },
     scrub: {
       direction: state.globalScrub,
       speedIndex: state.scrubSpeed,
@@ -269,6 +283,7 @@ export function sp1LedStateFrom(
     flash,
   };
 }
+
 
 // ------------------------------------------------------------ resolve ------
 
