@@ -185,6 +185,6 @@ describe("composable LED modifiers", () => {
     expect(applyModifiers(0, [{ kind: "solo" }], 0)).toBeGreaterThan(0);
     expect(applyModifiers(127, [{ kind: "non-solo" }], 0)).toBeLessThan(127);
     expect(applyModifiers(200, [{ kind: "fx" }], 0)).toBeLessThanOrEqual(127);
-    expect(applyModifiers(-5, [], 0)).toBe(-5); // no modifiers → untouched base
+    expect(applyModifiers(-5, [], 0)).toBe(0); // always clamped into 0..127
   });
 });
