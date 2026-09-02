@@ -1,51 +1,78 @@
 /*
- * st_pwr_hold.c -- see st_pwr_hold.h for why the escape hatch is its own
- * module and why its argument list is the safety property.
+ * st_pwr_hold.c -- see st_pwr_hold.h for what the timer means, why its
+ * argument list is the safety property, and why "every other physical
+ * control" is a map rather than a convenient subset.
  */
 
 #include "st_pwr_hold.h"
 
-bool st_pwr_hold_tick(st_pwr_hold_t *h, bool fn_down, bool other_down,
-		       int64_t now_ms)
+void st_pwr_hold_reset(st_pwr_hold_t *h)
+{
+	h->since_ms     = ST_PWR_HOLD_IDLE;
+	h->other_active = false;
+	h->cand         = false;
+	h->cand_n       = 0u;
+}
+
+int64_t st_pwr_hold_tick(st_pwr_hold_t *h, bool fn_down, bool other_raw,
+			  int64_t now_ms)
 {
 	/*
-	 * RESET, NEVER SUPPRESS. Both of these are facts about what is
-	 * PHYSICALLY down right now, so neither can outlive the finger that
-	 * caused it -- which is the entire difference between this and the
-	 * `combo_seen` / `function_consumed` latches it replaces. A player who
-	 * lets go of everything but FUNCTION is always at most ST_PWR_HOLD_MS
-	 * from off, from any state the firmware can be in.
+	 * ---- SETTLE THE OTHER CONTROLS, BOTH DIRECTIONS -------------------
 	 *
-	 * `other_down` resetting rather than pausing is deliberate too: pausing
-	 * would let a chord accumulate hold time across its own duration, so
-	 * releasing PLAY after a three-second FUNCTION+PLAY toggle would power
-	 * the device off instantly. Restarting the clock makes the shutdown
-	 * gesture always a full, deliberate, unambiguous 2.5 s.
+	 * A reading that agrees with the settled verdict clears the candidate:
+	 * evidence for what we already believe is not progress toward changing
+	 * it. A reading that disagrees builds a candidate, and only
+	 * ST_PWR_SETTLE_PASSES agreeing disagreements commit.
+	 *
+	 * Neither edge is single-sample, and that is deliberate in both
+	 * directions -- see the header. One noisy sample cannot reset a hold
+	 * that is 4.99 s along; one dropped sample cannot power the device off
+	 * under a finger that is still on a button.
 	 */
-	if (!fn_down || other_down) {
+	if (other_raw == h->other_active) {
+		h->cand_n = 0u;
+	} else if (other_raw == h->cand) {
+		if (++h->cand_n >= ST_PWR_SETTLE_PASSES) {
+			h->other_active = h->cand;
+			h->cand_n       = 0u;
+		}
+	} else {
+		h->cand   = other_raw;
+		h->cand_n = 1u;
+	}
+
+	/*
+	 * ---- THE TIMER MEANS ONE THING -----------------------------------
+	 *
+	 * ZERO, not paused. The instant FUNCTION comes up, or any other
+	 * control is (settled) active, the elapsed time is gone -- not banked,
+	 * not resumed. When the other control is released the count starts
+	 * again from zero and the full threshold must elapse afresh.
+	 *
+	 * That is what lets a player hold FUNCTION through PLAY, a Track, the
+	 * rocker, volume, FX, a grid clear or any future musical gesture for
+	 * as long as they like without the device shutting down underneath
+	 * them -- and it is also why no amount of prior gesture can shorten
+	 * the hold that does shut it down.
+	 */
+	if (!fn_down || h->other_active) {
 		h->since_ms = ST_PWR_HOLD_IDLE;
-		return false;
+		return 0;
 	}
 
 	if (h->since_ms == ST_PWR_HOLD_IDLE) {
 		h->since_ms = now_ms;
-		/* A hold that begins exactly at the threshold is still a hold
-		 * that has lasted zero milliseconds. Falling through to the
-		 * comparison below would be correct too -- 0 >= 2500 is false
-		 * -- and it is left to fall through rather than returning
-		 * early, so there is ONE exit that decides shutdown. */
 	}
 
 	/*
-	 * IDEMPOTENT PAST THE THRESHOLD, not edge-triggered. A caller that
-	 * misses a pass -- a long eMMC read, a USB transfer, anything -- shuts
-	 * down on the next one instead of requiring the player to release and
-	 * press again. The escape hatch does not get to be a one-shot.
-	 *
-	 * Subtraction of two monotonic int64 millisecond stamps, so there is no
-	 * wrap to reason about within any plausible uptime.
+	 * Subtraction of two monotonic int64 millisecond stamps: no wrap to
+	 * reason about within any plausible uptime. Clamped at zero so a
+	 * caller that passes a `now_ms` behind the stamp gets "no hold yet"
+	 * rather than a negative duration that would compare oddly against a
+	 * threshold.
 	 */
-	return (now_ms - h->since_ms) >= ST_PWR_HOLD_MS;
+	return (now_ms > h->since_ms) ? (now_ms - h->since_ms) : 0;
 }
 
 int64_t st_pwr_hold_elapsed_ms(const st_pwr_hold_t *h, int64_t now_ms)
@@ -53,5 +80,5 @@ int64_t st_pwr_hold_elapsed_ms(const st_pwr_hold_t *h, int64_t now_ms)
 	if (h->since_ms == ST_PWR_HOLD_IDLE) {
 		return 0;
 	}
-	return (now_ms >= h->since_ms) ? (now_ms - h->since_ms) : 0;
+	return (now_ms > h->since_ms) ? (now_ms - h->since_ms) : 0;
 }

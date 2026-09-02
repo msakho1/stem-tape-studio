@@ -1469,7 +1469,7 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Stem Tape ESCAPE HATCH -- a 2.5 s power hold, from every feature state
+      - name: Stem Tape POWER CONTRACT -- 2.000 s ON, 5.000 s OFF, FUNCTION-only
         # POSTMORTEM P1 AND P7. st55 made the device impossible to switch off,
         # and the mechanism was that the 2.5 s timer lived inside a branch a
         # feature flag guarded -- so the flag did not pause the countdown, it

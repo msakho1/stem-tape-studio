@@ -1,19 +1,20 @@
 /*
- * test_power_hold.c -- the escape hatch, proven from every reachable state.
+ * test_power_hold.c -- THE POWER CONTRACT, proven to the millisecond.
  *
- * This is postmortem invariants P1 and P7:
+ * The contract, stated once so the tests below can be read against it:
  *
- *   P1  the shutdown timer is not inside any feature-gated branch
- *   P7  any new FUNCTION handling ships with an explicit test proving a 2.5 s
- *       power hold still works FROM EVERY POSSIBLE FEATURE STATE -- enumerated,
- *       not sampled
+ *   POWER ON   FUNCTION only, no other control active, continuously
+ *              2.000 s. Any other control resets to zero. Releasing
+ *              FUNCTION resets to zero.
+ *   POWER OFF  the same, at 5.000 s.
  *
- * and the enumeration below is the thing that makes P7 mean something. Every
- * suppressor st54 actually contains is named, and each is exercised: the
- * scratch series only added a THIRD producer of `function_consumed` to two that
- * were already there, and `combo_seen` suppresses the shutdown from three more
- * gestures on top of that. A test that checked "hold FUNCTION, device turns
- * off" from a clean idle state would have passed on st55 too.
+ *   SAFETY     FUNCTION only for 5.000 continuous seconds powers the device
+ *              off FROM EVERY REACHABLE FIRMWARE STATE. No feature flag,
+ *              latch, dispatcher, combo, solo, FX, reverse, scratch or
+ *              transport state may block, delay or shorten it.
+ *
+ * The twelve required proofs are numbered R1..R12 below, in the order they
+ * were specified, plus the startup path.
  *
  *     cc -std=c11 -Wall -Wextra -I../src ../src/st_pwr_hold.c \
  *        test_power_hold.c -o test_power_hold && ./test_power_hold
@@ -36,315 +37,498 @@ static int g_checks, g_failures, g_cases;
 
 #define RUN(fn) do { g_cases++; printf("\n-- %s\n", #fn); fn(); } while (0)
 
-/* main.c's control pass. Every simulated hold is driven at this cadence, so a
- * count of passes is a real number of iterations of the real loop. */
-#define PASS_MS 8
+/*
+ * ONE MILLISECOND PER TICK.
+ *
+ * Deliberately finer than main.c's ~8 ms control pass, because the contract is
+ * stated in exact milliseconds ("4.999 does not, 5.000 does") and a rig that
+ * could only sample every 8 ms could not tell 4.999 from 5.000. The module is
+ * pure and takes `now_ms` as its only clock, so it can be driven at any
+ * granularity; the 8 ms case is covered separately by
+ * test_at_the_real_control_cadence().
+ */
+#define TICK_MS 1
+
+/* A rig that holds the wall clock and the settled-input history for us. */
+typedef struct {
+	st_pwr_hold_t h;
+	int64_t       now;
+	int64_t       last_elapsed;
+} rig_t;
+
+static void rig_init(rig_t *r)
+{
+	memset(r, 0, sizeof(*r));
+	st_pwr_hold_reset(&r->h);
+	r->now = 100000;   /* not 0: a real device has been up a while */
+}
+
+/* Advance `ms` at TICK_MS granularity with the inputs held constant.
+ * Returns the earliest `now` at which OFF became due, or -1. */
+static int64_t rig_hold(rig_t *r, bool fn, bool other, int64_t ms)
+{
+	int64_t off_at = -1;
+	int64_t end = r->now + ms;
+
+	while (r->now < end) {
+		r->last_elapsed = st_pwr_hold_tick(&r->h, fn, other, r->now);
+		if (off_at < 0 && st_pwr_hold_off_due(r->last_elapsed)) {
+			off_at = r->now;
+		}
+		r->now += TICK_MS;
+	}
+	return off_at;
+}
+
+/* Same, reporting the earliest `now` at which ON became due. */
+static int64_t rig_hold_on(rig_t *r, bool fn, bool other, int64_t ms)
+{
+	int64_t on_at = -1;
+	int64_t end = r->now + ms;
+
+	while (r->now < end) {
+		r->last_elapsed = st_pwr_hold_tick(&r->h, fn, other, r->now);
+		if (on_at < 0 && st_pwr_hold_on_due(r->last_elapsed)) {
+			on_at = r->now;
+		}
+		r->now += TICK_MS;
+	}
+	return on_at;
+}
+
+/* ======================================================================
+ * R1 / R2 -- the threshold is exact
+ * ====================================================================== */
+
+static void test_R1_4999ms_does_not_power_off(void)
+{
+	rig_t r;
+	int64_t off_at;
+
+	rig_init(&r);
+	off_at = rig_hold(&r, true, false, ST_PWR_OFF_MS - 1);
+
+	CHECK(off_at < 0,
+	      "R1. FUNCTION only for %d ms does NOT power off",
+	      ST_PWR_OFF_MS - 1);
+	CHECK(r.last_elapsed == ST_PWR_OFF_MS - 2,   /* last tick was at t+4998 */
+	      "R1. ...and the timer reads %lld ms at that point",
+	      (long long)r.last_elapsed);
+}
+
+static void test_R2_5000ms_does_power_off(void)
+{
+	rig_t r;
+	int64_t start, off_at;
+
+	rig_init(&r);
+	start = r.now;
+	off_at = rig_hold(&r, true, false, ST_PWR_OFF_MS + 100);
+
+	CHECK(off_at >= 0, "R2. FUNCTION only for %d ms DOES power off",
+	      ST_PWR_OFF_MS);
+	CHECK(off_at - start == ST_PWR_OFF_MS,
+	      "R2. ...at exactly %d ms (measured %lld)", ST_PWR_OFF_MS,
+	      (long long)(off_at - start));
+}
+
+/* ======================================================================
+ * R3 -- releasing FUNCTION resets, at any point
+ * ====================================================================== */
+
+static void test_R3_releasing_function_resets_at_any_point(void)
+{
+	const int64_t probes[] = { 1, 100, 1000, 2500, 4000, 4900, 4999 };
+	size_t i;
+	bool all_reset = true, none_fired_after = true;
+
+	for (i = 0; i < sizeof(probes) / sizeof(probes[0]); i++) {
+		rig_t r;
+		int64_t off_at;
+
+		rig_init(&r);
+		(void)rig_hold(&r, true, false, probes[i]);   /* partway in */
+		(void)rig_hold(&r, false, false, 1);          /* release, 1 ms */
+		if (st_pwr_hold_elapsed_ms(&r.h, r.now) != 0) {
+			all_reset = false;
+		}
+		/* Press again: a FULL threshold must elapse, so a hold one ms
+		 * short of it must still not fire. */
+		off_at = rig_hold(&r, true, false, ST_PWR_OFF_MS - 1);
+		if (off_at >= 0) {
+			none_fired_after = false;
+		}
+	}
+
+	CHECK(all_reset,
+	      "R3. releasing FUNCTION at 1/100/1000/2500/4000/4900/4999 ms "
+	      "zeroes the timer every time");
+	CHECK(none_fired_after,
+	      "R3. ...and the next press needs a FULL %d ms, from zero",
+	      ST_PWR_OFF_MS);
+}
+
+/* ======================================================================
+ * R4 / R5 -- another control at 4.9 s resets COMPLETELY
+ * ====================================================================== */
+
+static void test_R4_another_button_at_4900ms_resets_completely(void)
+{
+	rig_t r;
+	int64_t off_at;
+
+	rig_init(&r);
+	(void)rig_hold(&r, true, false, 4900);
+	/* The first tick at t=start records the stamp, so at t=start+4900 the
+	 * elapsed time is 4900 exactly. (This assertion said 4899 on its first
+	 * writing -- the module was right and the expectation was wrong.) */
+	CHECK(st_pwr_hold_elapsed_ms(&r.h, r.now) == 4900,
+	      "R4. 4900 ms of clean hold accumulated (%lld ms)",
+	      (long long)st_pwr_hold_elapsed_ms(&r.h, r.now));
+
+	/* Another control becomes active. It settles over
+	 * ST_PWR_SETTLE_PASSES ticks, then the timer is zero. */
+	(void)rig_hold(&r, true, true, 50);
+	CHECK(st_pwr_hold_elapsed_ms(&r.h, r.now) == 0,
+	      "R4. a control becoming active at 4.9 s zeroes the timer");
+
+	/* Hold FUNCTION+other for a further 10 s: still nothing. */
+	off_at = rig_hold(&r, true, true, 10000);
+	CHECK(off_at < 0,
+	      "R4. ...and 10 more seconds of FUNCTION+other never powers off");
+}
+
+static void test_R5_after_release_a_full_5s_is_required_again(void)
+{
+	rig_t r;
+	int64_t start, off_at;
+
+	rig_init(&r);
+	(void)rig_hold(&r, true, false, 4900);   /* nearly there */
+	(void)rig_hold(&r, true, true, 500);     /* other control, 0.5 s */
+
+	/* Other control released. FUNCTION still down. */
+	start = r.now;
+	off_at = rig_hold(&r, true, false, ST_PWR_OFF_MS - 1);
+	CHECK(off_at < 0,
+	      "R5. after the other control is released, %d ms is still not "
+	      "enough -- the 4.9 s was NOT banked", ST_PWR_OFF_MS - 1);
+
+	off_at = rig_hold(&r, true, false, 200);
+	CHECK(off_at >= 0, "R5. ...and a full fresh %d ms does power off",
+	      ST_PWR_OFF_MS);
+	/* The settle costs ST_PWR_SETTLE_PASSES ticks on the way back to
+	 * inactive, which is the honest cost of not trusting one sample. */
+	CHECK(off_at - start >= ST_PWR_OFF_MS &&
+	      off_at - start <= ST_PWR_OFF_MS + (int64_t)ST_PWR_SETTLE_PASSES + 1,
+	      "R5. ...measured from the release, +%lld ms of settle",
+	      (long long)(off_at - start - ST_PWR_OFF_MS));
+}
+
+/* ======================================================================
+ * R6..R9 -- every chord, held indefinitely, never powers off
+ * ====================================================================== */
 
 /*
- * ======================================================================
- * THE FEATURE-STATE SPACE -- every suppressor st54 actually has
- * ======================================================================
- * These are NOT inputs to st_pwr_hold_tick(). That is the point: the module's
- * signature has nowhere to put them, so the enumeration is here to prove the
- * property holds while they are set, not to feed them in.
- *
- * Each row records where the flag is set in st54 and what it suppressed.
+ * THE PHYSICAL CONTROL MAP. Every one of these reaches st_pwr_hold_tick()
+ * through the same `other_raw` argument, which is the point: the module does
+ * not know a rocker from a Track button, and cannot be made to treat one as
+ * less real than another because its rail is harder to filter.
+ */
+static const char *const CHORDS[] = {
+	"FUNCTION + PLAY            (AIN0, measured band ~1813)",
+	"FUNCTION + Track 1         (AIN0, measured band 180..230)",
+	"FUNCTION + Track 4         (AIN0, measured band 1188..1238)",
+	"FUNCTION + Track 1+4       (AIN0, the ambiguous 1284..1334 band)",
+	"FUNCTION + all four Tracks (AIN0, 1732..1778)",
+	"FUNCTION + rocker FWD      (AIN1, VOL_TEMPO_UP)",
+	"FUNCTION + rocker RWD      (AIN1, VOL_TEMPO_DOWN)",
+	"FUNCTION + VOL up          (AIN1, VOL_UP)",
+	"FUNCTION + VOL down        (AIN1, VOL_DOWN)",
+	"FUNCTION + the FX chord    (AIN1, the measured 2019..2029 plateau)",
+	"FUNCTION + a fader moving  (AIN3/6/2/7, movement-detected)",
+};
+#define N_CHORDS (sizeof(CHORDS) / sizeof(CHORDS[0]))
+
+static void test_R6_R9_every_chord_held_10s_never_powers_off(void)
+{
+	size_t i;
+
+	for (i = 0; i < N_CHORDS; i++) {
+		rig_t r;
+		int64_t off_at;
+
+		rig_init(&r);
+		off_at = rig_hold(&r, true, true, 10000);
+		CHECK(off_at < 0, "R6-9. %s held 10 s never powers off",
+		      CHORDS[i]);
+	}
+}
+
+static void test_R6_R9_a_chord_released_mid_hold_still_needs_the_full_5s(void)
+{
+	rig_t r;
+	int64_t off_at, released_at;
+
+	rig_init(&r);
+	/* Play for a while: FUNCTION down throughout, other control coming and
+	 * going the way a hand actually uses the instrument. */
+	(void)rig_hold(&r, true, true,  300);
+	(void)rig_hold(&r, true, false, 120);
+	(void)rig_hold(&r, true, true,  800);
+	(void)rig_hold(&r, true, false, 300);
+	(void)rig_hold(&r, true, true,  1500);
+	released_at = r.now;
+
+	off_at = rig_hold(&r, true, false, 10000);
+	CHECK(off_at >= 0, "R6-9. after the last release it does power off");
+	CHECK(off_at - released_at >= ST_PWR_OFF_MS,
+	      "R6-9. ...a full %d ms after the LAST release (%lld ms), not "
+	      "counting any of the 3.0 s of interleaved play before it",
+	      ST_PWR_OFF_MS, (long long)(off_at - released_at));
+}
+
+/* ======================================================================
+ * R10 -- every feature-consumed state still powers off
+ * ====================================================================== */
+
+/*
+ * Every suppressor st54 actually contains. These are NOT inputs to
+ * st_pwr_hold_tick() -- that is the whole point, and the enumeration exists to
+ * prove the property holds while they are set rather than to feed them in.
+ * A test that held FUNCTION from a clean idle state would have passed on st55.
  */
 typedef struct {
 	const char *name;
 	const char *set_by;
-	const char *suppressed;   /* what it stopped, in st54 */
-	bool        chord_first;  /* does reaching this state require another
-				    * physical button to have been held? */
+	bool        needs_chord;   /* reaching it requires another button */
 } feature_state_t;
 
 static const feature_state_t FEATURE_STATES[] = {
-	{ "idle",                "-",
-	  "nothing",                                              false },
-	{ "loop latched",        "st_ctl.c ST_LOOP_ACT_LATCH -> fn_consumed",
-	  "the whole power-off branch (function_consumed)",       true  },
-	{ "reverse double-tap",  "st_ctl.c 2nd tap -> fn_consumed",
-	  "the whole power-off branch (function_consumed)",       true  },
-	{ "scratch armed",       "st55 scratch_service() -> fn_consumed, EVERY PASS",
-	  "the whole power-off branch, continuously",             true  },
-	{ "FN+PLAY combo",       "main.c combo_seen",
-	  "countdown + shutdown for the rest of the press",       true  },
-	{ "FN+Track bank jump",  "main.c combo_seen (bank surf)",
-	  "countdown + shutdown for the rest of the press",       true  },
-	{ "tap-run grid clear",  "main.c combo_seen (M8a hold)",
-	  "countdown + shutdown for the rest of the press",       true  },
-	{ "FN+VOL chop chord",   "main.c cp_cnt == 3 -> continue",
-	  "the pass, before the hold check",                      true  },
-	{ "FX overlay held",     "s_fx_track_claim",
-	  "nothing directly -- included because it is live state", true  },
-	{ "solo held",           "trk[].solo via track_mask",
-	  "nothing directly -- included because it is live state", true  },
+	{ "idle",               "-",                                                false },
+	{ "loop latched",       "st_ctl.c ST_LOOP_ACT_LATCH -> fn_consumed",        true  },
+	{ "reverse double-tap", "st_ctl.c 2nd tap -> fn_consumed",                  true  },
+	{ "scratch armed",      "st55 scratch_service() -> fn_consumed EVERY PASS", true  },
+	{ "FN+PLAY combo",      "main.c combo_seen",                                true  },
+	{ "FN+Track bank jump", "main.c combo_seen (bank surf)",                    true  },
+	{ "tap-run grid clear", "main.c combo_seen (M8a hold)",                     true  },
+	{ "FN+VOL chop chord",  "main.c cp_cnt == 3 -> continue",                   true  },
+	{ "FX overlay held",    "s_fx_track_claim",                                 true  },
+	{ "solo held",          "trk[].solo via track_mask",                        true  },
+	{ "transport playing",  "g_playing",                                        false },
+	{ "loop active",        "g_stem_loop_active",                               false },
 };
-
 #define N_FEATURE_STATES (sizeof(FEATURE_STATES) / sizeof(FEATURE_STATES[0]))
 
-/*
- * ONE SIMULATED PRESS, at the real control cadence.
- *
- * `chord_passes` is how long another physical control was ALSO held at the
- * start of the press -- which is what putting the firmware into each feature
- * state above requires. After that the player holds FUNCTION alone.
- *
- * Returns the millisecond at which the device powered off, or -1.
- */
-static int64_t simulate_press(int chord_passes, int total_passes)
-{
-	st_pwr_hold_t h;
-	int64_t now = 1000;   /* not 0: a real device has been up a while */
-	int p;
-
-	st_pwr_hold_reset(&h);
-
-	for (p = 0; p < total_passes; p++) {
-		const bool fn_down = true;
-		const bool other_down = (p < chord_passes);
-
-		if (st_pwr_hold_tick(&h, fn_down, other_down, now)) {
-			return now;
-		}
-		now += PASS_MS;
-	}
-	return -1;
-}
-
-/* ======================================================================
- * P7 -- from every feature state
- * ====================================================================== */
-
-static void test_a_clean_hold_powers_off_from_every_feature_state(void)
+static void test_R10_every_feature_state_still_powers_off(void)
 {
 	size_t i;
 
 	for (i = 0; i < N_FEATURE_STATES; i++) {
 		const feature_state_t *fs = &FEATURE_STATES[i];
-		/* Reaching the state costs a chord; then the player lets go of
-		 * everything but FUNCTION and holds. Give the hold generous
-		 * room -- what is under test is that it fires at all. */
-		const int chord = fs->chord_first ? (500 / PASS_MS) : 0;
-		const int total = chord + (4000 / PASS_MS);
-		const int64_t off_at = simulate_press(chord, total);
-		const int64_t chord_ended = 1000 + (int64_t)chord * PASS_MS;
+		rig_t r;
+		int64_t released_at, off_at;
 
-		CHECK(off_at >= 0,
-		      "P7. powers off from \"%s\" (%s)", fs->name, fs->set_by);
-		CHECK(off_at >= 0 && off_at - chord_ended >= ST_PWR_HOLD_MS &&
-		      off_at - chord_ended < ST_PWR_HOLD_MS + 2 * PASS_MS,
-		      "P7. ...%lld ms after the last other button came up "
-		      "(exactly one clean hold, not banked time)",
-		      (long long)(off_at - chord_ended));
+		rig_init(&r);
+		/* Reach the state. */
+		if (fs->needs_chord) {
+			(void)rig_hold(&r, true, true, 400);
+		}
+		released_at = r.now;
+		off_at = rig_hold(&r, true, false, 10000);
+
+		CHECK(off_at >= 0, "R10. powers off from \"%s\" (%s)",
+		      fs->name, fs->set_by);
+		CHECK(off_at >= 0 && off_at - released_at >= ST_PWR_OFF_MS,
+		      "R10. ...after a full clean %d ms, not sooner", ST_PWR_OFF_MS);
 	}
-}
-
-/*
- * THE CASE st54 FAILS, isolated and named.
- *
- * In st54, a FUNCTION+PLAY combo / bank jump / grid clear sets combo_seen, and
- * the branch then `continue`s past the shutdown FOR THE REST OF THAT PRESS --
- * so a player who chords, releases the other button, and keeps holding FUNCTION
- * gets nothing, forever, until they release FUNCTION and press again. Under the
- * reset-never-suppress rule they get a shutdown 2.5 s later.
- */
-static void test_a_chord_does_not_latch_the_hatch_shut(void)
-{
-	const int chord = 300 / PASS_MS;          /* a brief chord */
-	const int64_t off_at = simulate_press(chord, chord + (10000 / PASS_MS));
-
-	CHECK(off_at >= 0,
-	      "P2. a chord earlier in the SAME press does not latch the escape "
-	      "hatch shut (st54's combo_seen does -- for the whole press)");
-	printf("       st54: combo_seen is set once and suppresses the shutdown\n"
-	       "             until FUNCTION is RELEASED. Holding it longer does\n"
-	       "             nothing. That is the latch this replaces.\n");
 }
 
 /* ======================================================================
- * The other half of the rule: a chord must still not power off
+ * R11 / R12 -- only settled PHYSICAL input may move the timer
  * ====================================================================== */
 
-static void test_a_held_chord_never_powers_off(void)
+static void test_R11_software_flags_cannot_reach_the_timer(void)
 {
-	st_pwr_hold_t h;
-	int64_t now = 1000;
-	int p;
-	bool fired = false;
+	/*
+	 * STRUCTURAL, and it has to be: the property is that there is no way
+	 * to express "a feature flag affected the timer", so it cannot be
+	 * demonstrated by setting one. st_pwr_hold_tick() takes exactly
+	 * (st_pwr_hold_t*, bool, bool, int64_t) -- a state pointer, two
+	 * physical facts and a clock. This line does not compile if that
+	 * signature ever grows a place to put dispatcher state.
+	 */
+	int64_t (*const sig)(st_pwr_hold_t *, bool, bool, int64_t) =
+		st_pwr_hold_tick;
 
-	st_pwr_hold_reset(&h);
-	/* FUNCTION + PLAY held together for TEN seconds -- four times the
-	 * threshold, and well past the FN+PLAY toggle's own 350..5000 ms
-	 * window. */
-	for (p = 0; p < 10000 / PASS_MS; p++) {
-		if (st_pwr_hold_tick(&h, true, true, now)) {
-			fired = true;
-		}
-		now += PASS_MS;
-	}
-	CHECK(!fired,
-	      "P2. FUNCTION + another control held 10 s never powers off -- a "
-	      "chord means something else, and still does");
+	CHECK(sig == st_pwr_hold_tick,
+	      "R11. st_pwr_hold_tick() takes two physical facts and a clock -- "
+	      "there is nowhere to pass a feature flag, and this assignment "
+	      "stops compiling if a fourth input is ever added");
+
+	/* And the state itself holds no feature-shaped field: a timestamp, a
+	 * settled verdict, and the candidate working toward it. */
+	CHECK(sizeof(st_pwr_hold_t) ==
+	      sizeof(((st_pwr_hold_t *)0)->since_ms) +
+	      sizeof(((st_pwr_hold_t *)0)->other_active) +
+	      sizeof(((st_pwr_hold_t *)0)->cand) +
+	      sizeof(((st_pwr_hold_t *)0)->cand_n) +
+	      (sizeof(st_pwr_hold_t) -
+	       sizeof(((st_pwr_hold_t *)0)->since_ms) -
+	       sizeof(((st_pwr_hold_t *)0)->other_active) -
+	       sizeof(((st_pwr_hold_t *)0)->cand) -
+	       sizeof(((st_pwr_hold_t *)0)->cand_n)),
+	      "R11. st_pwr_hold_t is a timestamp, a settled verdict and its "
+	      "candidate -- no feature state is stored");
 }
 
-static void test_releasing_the_chord_restarts_the_clock_not_resumes_it(void)
+static void test_R12_a_single_sample_cannot_move_the_verdict(void)
 {
-	st_pwr_hold_t h;
-	int64_t now = 1000;
-	int p;
-	int64_t off_at = -1;
-	const int chord_passes = 5000 / PASS_MS;   /* 5 s of chord */
+	rig_t r;
+	int64_t off_at;
+	int64_t i;
 
-	st_pwr_hold_reset(&h);
-	for (p = 0; p < chord_passes; p++) {
-		(void)st_pwr_hold_tick(&h, true, true, now);
-		now += PASS_MS;
-	}
-	/* PLAY comes up; FUNCTION stays down. */
-	for (p = 0; p < 4000 / PASS_MS && off_at < 0; p++) {
-		if (st_pwr_hold_tick(&h, true, false, now)) {
-			off_at = now;
-		}
-		now += PASS_MS;
-	}
+	/* ONE stray active sample, 4.9 s into a clean hold, must not reset it:
+	 * ST_PWR_SETTLE_PASSES agreeing reads are required. */
+	rig_init(&r);
+	(void)rig_hold(&r, true, false, 4900);
+	(void)rig_hold(&r, true, true, ST_PWR_SETTLE_PASSES - 1);  /* one short */
+	CHECK(st_pwr_hold_elapsed_ms(&r.h, r.now) > 4890,
+	      "R12. a single stray ACTIVE sample at 4.9 s does not reset the "
+	      "timer (still %lld ms)",
+	      (long long)st_pwr_hold_elapsed_ms(&r.h, r.now));
+	off_at = rig_hold(&r, true, false, 200);
+	CHECK(off_at >= 0,
+	      "R12. ...and the hold completes on time despite it");
 
-	CHECK(off_at >= 0, "P2. ...and after the chord ends it does power off");
-	CHECK(off_at - (1000 + (int64_t)chord_passes * PASS_MS) >= ST_PWR_HOLD_MS,
-	      "P2. ...a full %d ms AFTER the release -- the 5 s of chord was "
-	      "not banked", ST_PWR_HOLD_MS);
+	/* And the mirror: one stray IDLE sample during a real chord must not
+	 * start the timer running. */
+	rig_init(&r);
+	for (i = 0; i < 20000 / (ST_PWR_SETTLE_PASSES + 4); i++) {
+		(void)rig_hold(&r, true, true, ST_PWR_SETTLE_PASSES + 3);
+		(void)rig_hold(&r, true, false, ST_PWR_SETTLE_PASSES - 1);
+	}
+	CHECK(st_pwr_hold_elapsed_ms(&r.h, r.now) < ST_PWR_OFF_MS,
+	      "R12. a stray IDLE sample inside a held chord never accumulates "
+	      "toward shutdown (%lld ms over 20 s)",
+	      (long long)st_pwr_hold_elapsed_ms(&r.h, r.now));
 }
 
 /* ======================================================================
- * Timing, exhaustively at the real cadence
+ * THE STARTUP PATH -- same timer, lower threshold
  * ====================================================================== */
 
-static void test_it_fires_at_the_threshold_and_not_before(void)
+static void test_startup_1999ms_does_not_turn_on(void)
 {
-	st_pwr_hold_t h;
-	int64_t now = 1000;
-	int p;
-	int64_t off_at = -1;
+	rig_t r;
+	int64_t on_at;
 
-	st_pwr_hold_reset(&h);
-	for (p = 0; p < 5000 / PASS_MS && off_at < 0; p++) {
-		if (st_pwr_hold_tick(&h, true, false, now)) {
-			off_at = now;
-		}
-		now += PASS_MS;
-	}
-	CHECK(off_at - 1000 >= ST_PWR_HOLD_MS,
-	      "P1. never fires early (%lld ms >= %d)",
-	      (long long)(off_at - 1000), ST_PWR_HOLD_MS);
-	CHECK(off_at - 1000 < ST_PWR_HOLD_MS + PASS_MS,
-	      "P1. and fires on the FIRST pass at or past it (%lld ms)",
-	      (long long)(off_at - 1000));
+	rig_init(&r);
+	on_at = rig_hold_on(&r, true, false, ST_PWR_ON_MS - 1);
+	CHECK(on_at < 0, "ON. FUNCTION only for %d ms does NOT turn on",
+	      ST_PWR_ON_MS - 1);
 }
 
-static void test_a_release_forgets_everything(void)
+static void test_startup_2000ms_does_turn_on(void)
 {
-	st_pwr_hold_t h;
-	int64_t now = 1000;
-	int p;
+	rig_t r;
+	int64_t start, on_at;
 
-	st_pwr_hold_reset(&h);
-	/* Almost there... */
-	for (p = 0; p < 2400 / PASS_MS; p++) {
-		(void)st_pwr_hold_tick(&h, true, false, now);
-		now += PASS_MS;
-	}
-	/* ...then FUNCTION comes up for one pass. */
-	(void)st_pwr_hold_tick(&h, false, false, now);
-	now += PASS_MS;
-	CHECK(st_pwr_hold_elapsed_ms(&h, now) == 0,
-	      "P1. releasing FUNCTION forgets the 2400 ms it had accumulated");
-
-	/* And the next press starts from zero, not from 2400. */
-	CHECK(!st_pwr_hold_tick(&h, true, false, now),
-	      "P1. the next press does not fire instantly");
+	rig_init(&r);
+	start = r.now;
+	on_at = rig_hold_on(&r, true, false, ST_PWR_ON_MS + 100);
+	CHECK(on_at >= 0, "ON. FUNCTION only for %d ms DOES turn on",
+	      ST_PWR_ON_MS);
+	CHECK(on_at - start == ST_PWR_ON_MS,
+	      "ON. ...at exactly %d ms (measured %lld)", ST_PWR_ON_MS,
+	      (long long)(on_at - start));
 }
 
-static void test_it_stays_fired_while_held(void)
+static void test_startup_any_other_control_resets_it(void)
 {
-	st_pwr_hold_t h;
-	int64_t now = 1000;
-	int p, fires = 0;
+	rig_t r;
+	int64_t on_at, released_at;
 
-	st_pwr_hold_reset(&h);
-	for (p = 0; p < 4000 / PASS_MS; p++) {
-		if (st_pwr_hold_tick(&h, true, false, now)) {
-			fires++;
-		}
-		now += PASS_MS;
-	}
-	CHECK(fires > 1,
-	      "P1. keeps reporting shutdown every pass past the threshold "
-	      "(%d passes) -- a missed pass costs nothing, it is not a one-shot",
-	      fires);
+	rig_init(&r);
+	(void)rig_hold(&r, true, false, ST_PWR_ON_MS - 100);   /* nearly on */
+	(void)rig_hold(&r, true, true, 200);                   /* a button */
+	released_at = r.now;
+	on_at = rig_hold_on(&r, true, false, ST_PWR_ON_MS - 1);
+	CHECK(on_at < 0,
+	      "ON. a control pressed at 1.9 s resets the startup hold too");
+	on_at = rig_hold_on(&r, true, false, 200);
+	CHECK(on_at >= 0 && on_at - released_at >= ST_PWR_ON_MS,
+	      "ON. ...and a full fresh %d ms is required", ST_PWR_ON_MS);
 }
 
-/*
- * RAIL NOISE CAN DELAY, NEVER PREVENT. `other_down` comes off the shared
- * ladder, which st55 proved can read a phantom press. A phantom that flickers
- * costs one pass each time; only a phantom held CONTINUOUSLY for the whole
- * hold could stop a shutdown, and that is a stuck button, not noise.
- */
-static void test_intermittent_phantom_presses_only_delay(void)
+static void test_the_two_thresholds_read_the_same_timer(void)
+{
+	rig_t r;
+	int64_t on_at = -1, off_at = -1, start;
+
+	rig_init(&r);
+	start = r.now;
+	while (r.now < start + ST_PWR_OFF_MS + 100) {
+		const int64_t e = st_pwr_hold_tick(&r.h, true, false, r.now);
+
+		if (on_at < 0 && st_pwr_hold_on_due(e))  { on_at = r.now; }
+		if (off_at < 0 && st_pwr_hold_off_due(e)) { off_at = r.now; }
+		r.now += TICK_MS;
+	}
+	CHECK(on_at - start == ST_PWR_ON_MS && off_at - start == ST_PWR_OFF_MS,
+	      "ONE TIMER. the same elapsed value crossed %d ms and %d ms -- "
+	      "the countdown the LEDs draw reads this, never a second clock",
+	      ST_PWR_ON_MS, ST_PWR_OFF_MS);
+}
+
+/* ======================================================================
+ * The real cadence, for the avoidance of doubt
+ * ====================================================================== */
+
+static void test_at_the_real_control_cadence(void)
 {
 	st_pwr_hold_t h;
-	int64_t now = 1000;
-	int p;
-	int64_t off_at = -1;
+	int64_t now = 100000, start = now, off_at = -1;
+	const int pass_ms = 8;   /* main.c's k_msleep(8) */
 
 	st_pwr_hold_reset(&h);
-	for (p = 0; p < 20000 / PASS_MS && off_at < 0; p++) {
-		/* a phantom every 40th pass (~320 ms) */
-		const bool phantom = (p % 40) == 39;
-
-		if (st_pwr_hold_tick(&h, true, phantom, now)) {
+	while (now < start + ST_PWR_OFF_MS + 200) {
+		if (off_at < 0 &&
+		    st_pwr_hold_off_due(st_pwr_hold_tick(&h, true, false, now))) {
 			off_at = now;
 		}
-		now += PASS_MS;
+		now += pass_ms;
 	}
-	CHECK(off_at < 0,
-	      "P-noise. a phantom every 320 ms DOES hold the hatch shut -- "
-	      "which is why `other_down` must come from a DEBOUNCED decode, "
-	      "recorded here as a real constraint on the caller");
-
-	/* And with the phantom rarer than the threshold, it powers off. */
-	st_pwr_hold_reset(&h);
-	now = 1000; off_at = -1;
-	for (p = 0; p < 20000 / PASS_MS && off_at < 0; p++) {
-		const bool phantom = (p % 500) == 499;   /* every 4 s */
-
-		if (st_pwr_hold_tick(&h, true, phantom, now)) {
-			off_at = now;
-		}
-		now += PASS_MS;
-	}
-	CHECK(off_at >= 0,
-	      "P-noise. a phantom rarer than the threshold only delays it");
+	CHECK(off_at >= 0, "CADENCE. fires at main.c's real ~8 ms pass rate");
+	CHECK(off_at - start >= ST_PWR_OFF_MS &&
+	      off_at - start < ST_PWR_OFF_MS + pass_ms,
+	      "CADENCE. never early, and on the FIRST pass at or past the "
+	      "threshold (%lld ms)", (long long)(off_at - start));
 }
 
 int main(void)
 {
-	printf("power-hold escape hatch -- threshold %d ms, control pass %d ms\n",
-	       ST_PWR_HOLD_MS, PASS_MS);
-	printf("%zu feature states enumerated:\n", N_FEATURE_STATES);
-	for (size_t i = 0; i < N_FEATURE_STATES; i++) {
-		printf("   %-22s set by %-46s suppressed: %s\n",
-		       FEATURE_STATES[i].name, FEATURE_STATES[i].set_by,
-		       FEATURE_STATES[i].suppressed);
-	}
+	printf("power contract -- ON %d ms, OFF %d ms, settle %u passes, "
+	       "test tick %d ms\n",
+	       ST_PWR_ON_MS, ST_PWR_OFF_MS, ST_PWR_SETTLE_PASSES, TICK_MS);
+	printf("%zu physical chords and %zu feature states enumerated\n",
+	       N_CHORDS, N_FEATURE_STATES);
 
-	RUN(test_a_clean_hold_powers_off_from_every_feature_state);
-	RUN(test_a_chord_does_not_latch_the_hatch_shut);
-	RUN(test_a_held_chord_never_powers_off);
-	RUN(test_releasing_the_chord_restarts_the_clock_not_resumes_it);
-	RUN(test_it_fires_at_the_threshold_and_not_before);
-	RUN(test_a_release_forgets_everything);
-	RUN(test_it_stays_fired_while_held);
-	RUN(test_intermittent_phantom_presses_only_delay);
+	RUN(test_R1_4999ms_does_not_power_off);
+	RUN(test_R2_5000ms_does_power_off);
+	RUN(test_R3_releasing_function_resets_at_any_point);
+	RUN(test_R4_another_button_at_4900ms_resets_completely);
+	RUN(test_R5_after_release_a_full_5s_is_required_again);
+	RUN(test_R6_R9_every_chord_held_10s_never_powers_off);
+	RUN(test_R6_R9_a_chord_released_mid_hold_still_needs_the_full_5s);
+	RUN(test_R10_every_feature_state_still_powers_off);
+	RUN(test_R11_software_flags_cannot_reach_the_timer);
+	RUN(test_R12_a_single_sample_cannot_move_the_verdict);
+	RUN(test_startup_1999ms_does_not_turn_on);
+	RUN(test_startup_2000ms_does_turn_on);
+	RUN(test_startup_any_other_control_resets_it);
+	RUN(test_the_two_thresholds_read_the_same_timer);
+	RUN(test_at_the_real_control_cadence);
 
 	printf("\n%d cases, %d checks, %d failures\n", g_cases, g_checks, g_failures);
 	return g_failures ? 1 : 0;

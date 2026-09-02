@@ -465,8 +465,12 @@ REQUIRED_SUBSTRINGS = {
         # the FN+PLAY toggle) and those MAY be consumed. What it no longer
         # guards is the shutdown. That is asserted below, by absence.
         "if (pwr_pressed() && !g_stem_ctl_out.function_consumed) {",
-        # THE ESCAPE HATCH IS UNCONDITIONAL, ABOVE EVERY DISPATCHER.
-        "power_hold_service(st_ladder_mask(&fx_track_ladder) != 0u ||",
+        # THE POWER TIMER IS UNCONDITIONAL, ABOVE EVERY DISPATCHER, and it is
+        # handed the WHOLE physical control map -- AIN0 settled, AIN1 decoded,
+        # and (inside the service) fader movement. Not a convenient subset:
+        # FUNCTION + rocker is a real performance interaction, and a timer that
+        # could not see the rocker would shut the device down underneath one.
+        "(void)power_hold_service(st_ladder_mask(&fx_track_ladder) != 0u ||",
     ],
     "stem_ctl_apply": [
         # THE PUBLISHED MASK IS WHAT REACHES THE MIXER.

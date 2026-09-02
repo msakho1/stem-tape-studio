@@ -156,18 +156,21 @@
  * session's patience. */
 #define ST_RC_SWEEP_REPS 24u
 
-/* st56: STAGE 0 -- the escape hatch, and nothing else.
+/* st57: STAGE 0 -- the power contract, and nothing else.
  *
- * st55 (the scratch series) is burned and its tag is not reused. This build is
- * st54 plus one safety change: the power-off hold moved out of a feature-gated
- * branch into its own unconditional module. No head, no residency, no scratch
+ * st55 (the scratch series) is burned and its tag is not reused; st56 named a
+ * build whose power BEHAVIOUR was wrong (2.5 s, and a control map that omitted
+ * AIN1), so it is not reused either. This build is st54 plus one safety change:
+ * the power transitions moved out of feature-gated code into one authoritative
+ * timer -- FUNCTION-only for 2.000 s ON, 5.000 s OFF, zeroed the instant any
+ * other physical control is active. No head, no residency, no scratch
  * work is in it -- those are Stage 2 and later, and are deliberately NOT mixed
  * into a build whose job is to prove the device can always be switched off.
  * docs/postmortems/2026-09-scratch-series.md sections 3.0 and 4. */
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st56-VOLCAL"
+#define ST_BUILD_TAG "st57-VOLCAL"
 #else
-#define ST_BUILD_TAG "st56"
+#define ST_BUILD_TAG "st57"
 #endif
 #include "st_track_hold.h"
 
@@ -301,7 +304,7 @@ static bool charging(void);
  * and its threshold; this name survives only because the countdown LEDs and
  * several comments still read better with it. Two definitions of the one
  * number is exactly how a safety threshold drifts. */
-#define HOLD_MS_TO_OFF  ST_PWR_HOLD_MS
+#define HOLD_MS_TO_OFF  ST_PWR_OFF_MS
 
 /* ---- button ladders (Milestone 1: read + report the controls) ----
  * The PLAY/track and Vol/FWD/RWD buttons are resistor ladders read on the
@@ -8608,11 +8611,38 @@ static void led_seq_begin(st_led_seq_t seq)
 }
 
 
-/* THE ESCAPE HATCH'S ENTIRE STATE. Declared here because led_service() reads
- * it (the countdown is its top tier) and led_service() comes first in this
- * file; the rule and the wiring live in st_pwr_hold.h and in
- * power_hold_service() below, which is the ONLY writer. */
-static st_pwr_hold_t s_pwr_hold = { ST_PWR_HOLD_IDLE };
+/* THE POWER TIMER'S ENTIRE STATE. Declared here because the countdown reads
+ * it and this file's readers come first; the rule, both thresholds and the
+ * debounce live in st_pwr_hold.h, and power_hold_service() below is the ONLY
+ * writer. */
+static st_pwr_hold_t s_pwr_hold;
+
+/* A fader has moved this far from its slowly-tracking reference to count as
+ * "in use". UNMEASURED -- postmortem measurement M3, the one input on the
+ * power path whose noise floor has never been captured (AIN0 and AIN1 both
+ * have measured band tables behind them; the fader rails do not). Both failure
+ * directions are real: too small and rail noise resets the power timer
+ * forever, which is the st55 class of bug through a different door; too large
+ * and a slow deliberate fader move goes unseen. 32 counts is ~0.9% of the
+ * ~3700-count travel -- far above the few LSB a 12-bit rail with a 20 us
+ * acquisition jitters, and passed by any real hand movement within a sample or
+ * two. Raise it if a resting hand ever blocks a shutdown; settle it once M3
+ * exists. */
+#define ST_FADER_MOVE_COUNTS 32
+
+/* The reference chases the reading this fast, in counts per sample, so noise
+ * never accumulates displacement and a hand that stops is forgotten within
+ * (displacement / slew) samples rather than latching "in use" forever. */
+#define ST_FADER_REF_SLEW 4
+
+/* How long one seen movement keeps the faders counted as in use, so a hand
+ * moving between round-robin samples reads as continuous rather than as a
+ * train of separate touches. */
+#define ST_FADER_ACTIVE_MS 250
+
+static int     s_fader_ref[NTRK] = { -1, -1, -1, -1 };
+static int64_t s_fader_move_ms;
+static uint8_t s_fader_rr;
 
 static void led_service(void)
 {
@@ -9150,12 +9180,96 @@ static void power_off(void)
  * `g_stem_ctl_out` is not read here, and must never be. The CI wiring gate
  * asserts that about this call site.
  */
-static void power_hold_service(bool other_down)
+/*
+ * One fader, sampled round-robin. Returns true if any fader counts as IN USE
+ * right now -- movement, not position: a fader sitting anywhere is not an
+ * interaction, a hand moving one is.
+ *
+ * Costs exactly one ladder_read(), and only runs while FUNCTION is down. While
+ * FUNCTION is down the ordinary round-robin fader read never runs (the FUNCTION
+ * branch ends every path in `continue`), so the pass performs exactly three
+ * ladder_read() calls whether FUNCTION is held or not -- the same count the
+ * measured-good baseline performs during ordinary play, and a third of what
+ * st55 did. After st55 that is not a detail.
+ */
+static bool fader_activity_poll(void)
 {
-	if (st_pwr_hold_tick(&s_pwr_hold, pwr_pressed(), other_down,
-			      k_uptime_get())) {
+	const uint8_t fi = s_fader_rr;
+	const int fv = ladder_read(&adc_ladder[LAD_FADER0 + fi]);
+
+	s_fader_rr = (uint8_t)((fi + 1u) & (NTRK - 1u));
+
+	if (fv >= 0) {
+		if (s_fader_ref[fi] < 0) {
+			s_fader_ref[fi] = fv;          /* first sight is not movement */
+		} else {
+			int d = fv - s_fader_ref[fi];
+
+			if (d < 0) {
+				d = -d;
+			}
+			if (d > ST_FADER_MOVE_COUNTS) {
+				s_fader_move_ms = k_uptime_get();
+			}
+			if (fv > s_fader_ref[fi]) {
+				s_fader_ref[fi] += ST_FADER_REF_SLEW;
+			} else if (fv < s_fader_ref[fi]) {
+				s_fader_ref[fi] -= ST_FADER_REF_SLEW;
+			}
+		}
+	}
+
+	return s_fader_move_ms != 0 &&
+	       (k_uptime_get() - s_fader_move_ms) < ST_FADER_ACTIVE_MS;
+}
+
+/*
+ * ======================================================================
+ * THE POWER TIMER'S ONE CALLER
+ * ======================================================================
+ * st_pwr_hold.h owns the rule, both thresholds and the debounce. This is the
+ * only wiring, and its whole job is to answer one question honestly:
+ *
+ *     is any physical control other than FUNCTION being used right now?
+ *
+ * THE MAP, and it is a map rather than a convenient subset. An earlier version
+ * of this took settled AIN0 only and excluded AIN1 "because it is noisy". That
+ * defined a safety rule by what happened to be easy to sample, and FUNCTION +
+ * rocker is a real performance interaction -- a timer that could not see the
+ * rocker would shut the device down underneath one.
+ *
+ *   AIN0     PLAY + Track 1..4         st_ladder's SETTLED mask/play, already
+ *                                      debounced over three agreeing reads
+ *                                      against measured bands, ticked at the
+ *                                      top of this same pass. No extra read.
+ *   AIN1     VOL up/down, rocker       st_vol_decode() of the pass's own
+ *            FWD/RWD, the FX chord     reading. Raw here; st_pwr_hold_tick()
+ *                                      settles it. No extra read.
+ *   AIN3/6/2/7  four faders            MOVEMENT, above.
+ *
+ * CALLED UNCONDITIONALLY, ONCE PER PASS, ABOVE EVERY DISPATCHER. It is not
+ * inside the FUNCTION branch, not inside any `if`, and not
+ * reachable-only-when-some-flag-is-clear, which is precisely what st55 turned
+ * out to depend on.
+ *
+ * Returns the elapsed clean FUNCTION-only hold so the countdown reads the SAME
+ * value that decides the shutdown -- one timer, never a second clock.
+ *
+ * `g_stem_ctl_out` is not read here and must never be. CI asserts that about
+ * this function and about its call site.
+ */
+static int64_t power_hold_service(bool ain0_active, enum vol_btn ain1)
+{
+	const bool fn = pwr_pressed();
+	const bool other = ain0_active || (ain1 != VOL_NONE) ||
+			    (fn && fader_activity_poll());
+	const int64_t elapsed = st_pwr_hold_tick(&s_pwr_hold, fn, other,
+						  k_uptime_get());
+
+	if (st_pwr_hold_off_due(elapsed)) {
 		power_off();                 /* never returns */
 	}
+	return elapsed;
 }
 
 /* STEM TAPE: enter_dfu() -- the Tape Looper's in-firmware "hold Track1+Track4
@@ -9383,14 +9497,53 @@ int main(void)
 			 * well inside the 600 ms hold. */
 			if (g_meta_loaded)
 				g_led_dim = g_meta.led_full ? 0u : 1u;
-			if (pwr_pressed()) {
-				if (hold_t < 0) hold_t = k_uptime_get();
-				else if (k_uptime_get() - hold_t >= 600)
+			/* ---- POWER ON: THE SAME TIMER, THE LOWER THRESHOLD ----
+			 *
+			 * FUNCTION only, no other control active, continuously
+			 * ST_PWR_ON_MS. Any other control resets it to zero, and
+			 * releasing FUNCTION resets it to zero -- the identical
+			 * rule the shutdown uses, read from the identical
+			 * st_pwr_hold_t, at a lower threshold. Two thresholds,
+			 * one timer, so "on" and "off" can never drift apart.
+			 *
+			 * This replaces a bare 600 ms `pwr_pressed()` hold that
+			 * asked nothing about the other controls, so a finger
+			 * resting anywhere could not stop it.
+			 *
+			 * The two extra conversions per standby pass are free:
+			 * no audio is running here, which is the whole point of
+			 * standby. */
+			{
+				const int on_trk = ladder_read(&adc_ladder[LAD_TRACKS]);
+				const int on_vol = ladder_read(&adc_ladder[LAD_VOL]);
+				bool on_other;
+				int64_t on_ms;
+
+				st_ladder_update(&fx_track_ladder, on_trk);
+				on_other = st_ladder_mask(&fx_track_ladder) != 0u ||
+					    st_ladder_play(&fx_track_ladder) ||
+					    st_vol_decode(on_vol) != VOL_NONE;
+				on_ms = st_pwr_hold_tick(&s_pwr_hold, pwr_pressed(),
+							  on_other, k_uptime_get());
+				if (st_pwr_hold_on_due(on_ms)) {
+					/* THE TIMER IS RESET ON THE WAY OUT, and it
+					 * has to be: the player is still holding
+					 * FUNCTION as the device comes up, and a
+					 * timer carried into the main loop would
+					 * reach ST_PWR_OFF_MS a few seconds later
+					 * and switch off what it just switched on. */
+					st_pwr_hold_reset(&s_pwr_hold);
 					break;                    /* -> full power-on */
-				led_on(0);                        /* press feedback */
-			} else {
-				hold_t = -1;
-				if (!usb_present())
+				}
+				if (on_ms > 0) {
+					led_on(0);                /* press feedback */
+					hold_t = 0;               /* "a hold is running" */
+				} else {
+					hold_t = -1;
+				}
+			}
+			if (hold_t < 0) {
+				if (!usb_present() && !pwr_pressed())
 					power_off();              /* battery, idle -> off */
 				/* BATTERY GAUGE (plan §3.5): 1-4 LEDs = approximate
 				 * charge level. LEDs below the level are solid; the top
@@ -9718,8 +9871,9 @@ int main(void)
 		 * settled AIN0 state is already available from the tick just
 		 * above -- no extra conversion, and debounced, which
 		 * test_power_hold.c shows is required rather than merely tidy. */
-		power_hold_service(st_ladder_mask(&fx_track_ladder) != 0u ||
-				    st_ladder_play(&fx_track_ladder));
+		(void)power_hold_service(st_ladder_mask(&fx_track_ladder) != 0u ||
+					  st_ladder_play(&fx_track_ladder),
+					  st_vraw);
 #if ST_VOL_CAL
 		/* AIN1 CALIBRATION CAPTURE -- st20-VOLCAL images only. Temporary,
 		 * exactly like the st16-cal build that produced

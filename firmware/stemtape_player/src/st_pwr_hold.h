@@ -1,70 +1,99 @@
 /*
- * st_pwr_hold.h -- THE ESCAPE HATCH, and the only thing that decides it.
+ * st_pwr_hold.h -- THE ONE TIMER. Continuous FUNCTION-only hold duration.
  *
  * ======================================================================
- * WHY THIS MODULE EXISTS AT ALL
+ * WHAT THIS TIMER MEANS, AND IT MEANS ONLY THIS
  * ======================================================================
- * The st55 scratch build made the device's software power-off unreachable, and
- * the unit could not be switched off until its battery drained. The mechanism
- * was not that anything blocked power_off(). It was that the 2.5 s timer lived
- * INSIDE a branch a feature flag guarded:
  *
- *     if (pwr_pressed() && !g_stem_ctl_out.function_consumed) {
- *             if (press_start < 0) press_start = k_uptime_get();
- *             ...
- *             if (k_uptime_get() - press_start >= HOLD_MS_TO_OFF) power_off();
- *     }
- *     if (press_start >= 0) { ... press_start = -1; }   <-- timer destroyed
+ *     how long FUNCTION has been held with EVERY OTHER PHYSICAL CONTROL
+ *     INACTIVE, continuously, without interruption.
  *
- * so a flag going true mid-hold did not pause the countdown, it deleted the
- * variable the countdown was made of -- and then fell through to the "just
- * released" branch while the button was still physically down. See
- * docs/postmortems/2026-09-scratch-series.md, section 2.1.
+ * Not "how long FUNCTION has been down". Not "how long since the last
+ * blocker cleared". Not a count that pauses and resumes. The instant any
+ * other physical control becomes active the elapsed time is ZERO, and when
+ * that control is released the count starts again from ZERO.
  *
- * This module exists so that shape is unrepresentable. It owns the hold, it is
- * called unconditionally, and its signature has nowhere to put a feature flag.
+ * Two thresholds read the same timer:
  *
- * ======================================================================
- * RESET, NEVER SUPPRESS -- the whole correction, in one rule
- * ======================================================================
- * st54 already suppresses the hold in more places than the postmortem's
- * headline one. `combo_seen` is set by FUNCTION+PLAY, by the FUNCTION+Track
- * bank jump and by the tap-run grid clear, and its own comment calls that
- * "POWER-OFF SAFETY": once set, the branch `continue`s past the shutdown for
- * THE REST OF THAT PRESS. The intent is sound -- a chord means something else,
- * and should not also power the device off mid-gesture. The implementation is
- * not: it is a LATCH, so it keeps suppressing long after the other button has
- * been let go, and the player is left holding FUNCTION with nothing happening.
+ *     ST_PWR_ON_MS   2000    FUNCTION-only for 2.000 s  ->  ON
+ *     ST_PWR_OFF_MS  5000    FUNCTION-only for 5.000 s  ->  OFF
  *
- * The distinction this module draws instead:
- *
- *     another input is DOWN RIGHT NOW  ->  RESET the timer
- *     a feature "consumed" the press   ->  IRRELEVANT, not an input
- *
- * A chord therefore still cannot power the device off: while PLAY or a Track
- * or a VOLUME button is held, the timer is not merely paused, it is back at
- * zero. But the moment the player lets go of everything except FUNCTION, the
- * timer starts, and 2.5 s later the device is off. No latch, no flag and no
- * amount of feature state can extend that beyond 2.5 s from the last release.
- *
- * THAT is the guarantee: not "FUNCTION down for 2.5 s always powers off"
- * (which would shut the device down in the middle of a legitimate 3-second
- * FUNCTION+PLAY mode toggle), but "the device is never more than 2.5 s of a
- * clean FUNCTION hold away from off, from ANY state it can reach."
+ * ONE TIMER, TWO THRESHOLDS, and the countdown the LEDs draw reads the same
+ * elapsed value -- never a second clock that can disagree with the one that
+ * actually fires. st_pwr_hold_tick() returns the elapsed time rather than a
+ * verdict for exactly that reason.
  *
  * ======================================================================
- * THE INPUT IS NOT ON THE CONTESTED RAIL
+ * THE SAFETY INVARIANT
  * ======================================================================
- * FUNCTION is its own GPIO -- main.c's pwr_pressed() is a single register read
- * of PWR_PORT->IN, with no ADC, no BTN_COM, no conversion. That matters after
- * st55: the phantom Vocal solo came from converter traffic coupling into the
- * shared ladder rail, and the escape hatch is deliberately not reachable by
- * that class of fault. `other_down` IS derived from the ladder, but only ever
- * to RESET -- rail noise can therefore delay a shutdown by one pass, never
- * prevent one, because the noise would have to persist continuously.
+ *
+ *     FUNCTION only, for 5.000 continuous seconds, powers the device off
+ *     FROM EVERY REACHABLE FIRMWARE STATE.
+ *
+ * No feature flag, latch, dispatcher state, combo state, solo state, FX
+ * state, reverse state, scratch state or transport state may block it,
+ * delay it, or shorten it. This module cannot be handed any of those: its
+ * signature takes two physical facts and a clock, and there is no fourth
+ * parameter -- which is the structural half of the guarantee. The other
+ * half is that main.c calls it unconditionally, above every dispatcher,
+ * and CI asserts both.
+ *
+ * st55 made the device impossible to switch off, and the mechanism was not
+ * that anything blocked power_off(): the timer lived inside a branch a
+ * feature flag guarded, so the flag deleted the variable the countdown was
+ * made of and then fell through to the release path with the button still
+ * down. docs/postmortems/2026-09-scratch-series.md, section 2.1.
+ *
+ * ======================================================================
+ * "EVERY OTHER PHYSICAL CONTROL" IS A MAP, NOT A CONVENIENT SUBSET
+ * ======================================================================
+ * An earlier version of this module took "settled AIN0 only", excluding the
+ * AIN1 rail because it is noisy. That was the wrong kind of reasoning: it
+ * defined the safety rule by what was convenient to sample, which creates
+ * exactly the edge case the rule exists to remove -- FUNCTION + rocker is a
+ * real performance interaction, and a timer that cannot see the rocker would
+ * shut the device down underneath it.
+ *
+ * The semantic rule is: ANY INTENTIONAL PHYSICAL CONTROL INTERACTION BESIDES
+ * FUNCTION RESETS THE TIMER. The implementation may debounce and filter
+ * however each rail needs, but it may not omit a control because filtering it
+ * is awkward. The full map on this hardware:
+ *
+ *   FUNCTION      dedicated GPIO (PWR_PORT/PWR_PIN)     -- the timer's subject
+ *   AIN0 ladder   PLAY + Track 1..4, 15 chord masks     -- measured bands,
+ *                                                          settled by st_ladder
+ *   AIN1 ladder   VOL down/up + rocker FWD/RWD          -- measured bands,
+ *                                                          settled HERE
+ *   AIN3/6/2/7    four faders, continuous 0..~3700      -- movement-detected;
+ *                                                          see the caller
+ *   AIN4          battery divider                       -- not a control
+ *
+ * `other_raw` is the OR of everything in that map except FUNCTION. This module
+ * then settles it, so a single noisy sample on any rail cannot reset a hold
+ * that is nearly complete, and a real press resets it within
+ * ST_PWR_SETTLE_PASSES passes.
+ *
+ * ======================================================================
+ * WHY THE SETTLE IS SYMMETRIC, and what each direction costs
+ * ======================================================================
+ * Both failure directions are real and they pull opposite ways:
+ *
+ *   too eager to call a control ACTIVE  ->  noise resets the timer forever,
+ *                                            shutdown unreachable. This is
+ *                                            the st55 class of bug, arriving
+ *                                            through a different door.
+ *   too slow to call a control ACTIVE   ->  the device powers off in the
+ *                                            middle of a gesture.
+ *
+ * So neither edge is taken on one sample. ST_PWR_SETTLE_PASSES agreeing reads
+ * commit a change in either direction -- the same discipline st_ladder already
+ * applies to the Track rail, for the same reason. At main.c's ~8 ms pass that
+ * is ~16 ms: three orders of magnitude inside the 5 s threshold, and far
+ * shorter than any real button press.
  *
  * PURE: no Zephyr, no GPIO, no clock of its own. `now_ms` is the only time
- * source, which is what lets tests/test_power_hold.c drive it exhaustively.
+ * source, which is what lets tests/test_power_hold.c drive every case above
+ * exactly, to the millisecond.
  */
 
 #ifndef STEMTAPE_PLAYER_PWR_HOLD_H_
@@ -73,56 +102,74 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-/* Hold this long, cleanly, and the device powers off. THE one definition;
- * main.c's HOLD_MS_TO_OFF is taken from here so the two cannot drift. */
-#define ST_PWR_HOLD_MS 2500
+/* FUNCTION-only, continuously, for this long -> the device turns ON. */
+#define ST_PWR_ON_MS  2000
 
-/* since_ms when no clean hold is in progress. */
+/* FUNCTION-only, continuously, for this long -> the device turns OFF. */
+#define ST_PWR_OFF_MS 5000
+
+/* Agreeing passes that commit a change in the "any other control is active"
+ * verdict, in EITHER direction. See the header's own note on why neither edge
+ * is taken on a single sample. */
+#define ST_PWR_SETTLE_PASSES 2u
+
+/* since_ms when no clean FUNCTION-only hold is in progress. */
 #define ST_PWR_HOLD_IDLE ((int64_t)-1)
 
 typedef struct {
-	/* When the current CLEAN hold began, or ST_PWR_HOLD_IDLE. This is the
-	 * entire state of the escape hatch, and nothing outside this file's own
-	 * two functions may write it. */
+	/* When the current clean FUNCTION-only hold began, or ST_PWR_HOLD_IDLE.
+	 * The entire authoritative state of both power transitions. */
 	int64_t since_ms;
+
+	/* The settled verdict, and the candidate working toward changing it. */
+	bool    other_active;
+	bool    cand;
+	uint8_t cand_n;
 } st_pwr_hold_t;
 
-/* No hold in progress. Call once at boot; safe to call any time. */
-static inline void st_pwr_hold_reset(st_pwr_hold_t *h)
+/* No hold in progress, nothing settled. Call once at boot; safe any time. */
+void st_pwr_hold_reset(st_pwr_hold_t *h);
+
+/*
+ * ONE PASS. Returns the CONTINUOUS FUNCTION-ONLY HOLD DURATION in ms -- 0
+ * whenever FUNCTION is up or any other control is (settled) active.
+ *
+ * THE ARGUMENT LIST IS THE SAFETY PROPERTY. Read it as a contract:
+ *
+ *   fn_down    FUNCTION, straight off its own GPIO. Not a debounced view of
+ *              it, not a dispatcher's opinion of it, not a flag anything else
+ *              has had a chance to write.
+ *   other_raw  this pass's raw verdict for EVERY other physical control in
+ *              the map above. Settled here, not by the caller.
+ *   now_ms     monotonic milliseconds.
+ *
+ * There is deliberately no fourth parameter and there never may be. A feature
+ * that wants to influence the power transitions has nowhere to say so.
+ */
+int64_t st_pwr_hold_tick(st_pwr_hold_t *h, bool fn_down, bool other_raw,
+			  int64_t now_ms);
+
+/* The same elapsed value without advancing anything -- for the countdown the
+ * LEDs draw. An observation of the authoritative timer, never a second one. */
+int64_t st_pwr_hold_elapsed_ms(const st_pwr_hold_t *h, int64_t now_ms);
+
+/* The two verdicts, both read from the one timer. Written as helpers rather
+ * than left to each caller's own `>=`, so the thresholds are compared in
+ * exactly one place each. */
+static inline bool st_pwr_hold_off_due(int64_t elapsed_ms)
 {
-	h->since_ms = ST_PWR_HOLD_IDLE;
+	return elapsed_ms >= ST_PWR_OFF_MS;
 }
 
-/*
- * ONE PASS. Returns true exactly once the clean hold has reached
- * ST_PWR_HOLD_MS -- the caller's ONLY correct response to which is to power
- * the device off, immediately, without consulting anything else.
- *
- * THE ARGUMENT LIST IS THE SAFETY PROPERTY, so read it as a contract rather
- * than as parameters:
- *
- *   fn_down     the FUNCTION button, straight off its own GPIO. Not a
- *               debounced view, not a dispatcher's opinion of it, not a flag
- *               anything else has had a chance to write.
- *   other_down  whether ANY other physical control is down right now. Resets
- *               the timer; never suppresses it, never latches.
- *   now_ms      monotonic milliseconds.
- *
- * There is deliberately no fourth parameter, and there never may be. A feature
- * that wants to influence shutdown has nowhere to say so -- which is the point,
- * and is what CI asserts about the call site rather than trusting to review.
- *
- * Idempotent while held: it keeps returning true every pass past the
- * threshold, so a caller that somehow misses one pass still shuts down on the
- * next rather than needing the player to press again.
- */
-bool st_pwr_hold_tick(st_pwr_hold_t *h, bool fn_down, bool other_down,
-		       int64_t now_ms);
+static inline bool st_pwr_hold_on_due(int64_t elapsed_ms)
+{
+	return elapsed_ms >= ST_PWR_ON_MS;
+}
 
-/*
- * How long the current clean hold has run, in ms; 0 when none is. For the
- * countdown the LEDs draw -- an observation, never an input to the decision.
- */
-int64_t st_pwr_hold_elapsed_ms(const st_pwr_hold_t *h, int64_t now_ms);
+#if !defined(__cplusplus)
+_Static_assert(ST_PWR_ON_MS < ST_PWR_OFF_MS,
+	       "turning on must take less than turning off, or the on-hold "
+	       "would always reach the off threshold too");
+#endif
 
 #endif /* STEMTAPE_PLAYER_PWR_HOLD_H_ */
