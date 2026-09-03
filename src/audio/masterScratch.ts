@@ -75,18 +75,34 @@ export const SCRATCH_TUNING = {
   /** Ramp applied to each commanded velocity step, ms (click suppression). */
   velocityRampMs: 6,
   /**
-   * Hand speed, in SVG user units per second, at which SCRATCH reaches its
-   * maximum. Deliberately far above literal finger speed so an ordinary swipe
-   * lands well inside the range and the top is hard to reach.
+   * Hand speed, in SVG user units per second, that maps to FULL scratch
+   * velocity. Tuned so an ordinary performance stroke uses the whole expressive
+   * range instead of crawling along the bottom of the curve.
    */
-  handUnitsPerSecondAtMaxScratch: 900,
+  handUnitsPerSecondAtMaxScratch: 520,
   /** Hand speed below this is treated as a held-still hand (dead band). */
-  handDeadbandUnitsPerSecond: 20,
+  handDeadbandUnitsPerSecond: 6,
   /**
-   * Curve applied to normalised hand speed before scaling to the scratch
-   * maximum. >1 puts weight around zero: small movements stay slow and heavy.
+   * Slope of the response at very low hand speed. Small = fine resolution for a
+   * slow deliberate drag; the remaining gain comes from the mid-speed curve.
    */
-  scratchCurveExponent: 1.5,
+  scratchLowSpeedGain: 0.42,
+  /**
+   * Mid-speed curvature. >1 makes the middle of the range accelerate hard, so a
+   * flick is clearly brighter than a drag without lifting the ceiling.
+   */
+  scratchCurveExponent: 2.4,
+  /**
+   * Normalised output above which a SOFT KNEE compresses rather than clips, so
+   * the top of the range stays musical instead of slamming into a wall.
+   */
+  scratchKnee: 0.72,
+  /**
+   * Maximum change of commanded scratch velocity per millisecond. This is the
+   * DIRECTION-CHANGE ramp: a reversal is forced to travel audibly through zero,
+   * yet 1.0 → -1.0 still completes in ~57 ms, so the attack stays sharp.
+   */
+  scratchSlewPerMs: 0.035,
   /**
    * Legacy: the old "held still ⇒ zero" timeout. Superseded by the phase model.
    */
@@ -96,12 +112,40 @@ export const SCRATCH_TUNING = {
 } as const;
 
 /**
+ * Normalised hand speed (0..∞) → normalised scratch magnitude (0..1).
+ *
+ * S-curve, not a plain power law:
+ *   - low speed  : linear term `scratchLowSpeedGain` keeps fine resolution and
+ *                  stops the centre going dead;
+ *   - mid speed  : the `scratchCurveExponent` term accelerates hard, which is
+ *                  where the "whiek" of a flick comes from;
+ *   - near max   : a soft knee compresses instead of clipping.
+ */
+export function shapeHandSpeed(
+  mag: number,
+  tuning: {
+    scratchLowSpeedGain: number;
+    scratchCurveExponent: number;
+    scratchKnee: number;
+  } = SCRATCH_TUNING,
+): number {
+  if (!Number.isFinite(mag) || mag <= 0) return 0;
+  const m = Math.min(1.6, mag);
+  const g = tuning.scratchLowSpeedGain;
+  const raw = g * m + (1 - g) * Math.pow(m, tuning.scratchCurveExponent);
+  const knee = tuning.scratchKnee;
+  if (raw <= knee) return Math.min(1, raw);
+  const over = (raw - knee) / Math.max(1e-6, 1 - knee);
+  return Math.min(1, knee + (1 - knee) * Math.tanh(over));
+}
+
+/**
  * Pointer motion → signed SCRATCH velocity (the impulse, before decay).
  *
  * `dyUnits` is SVG-user-unit travel (positive = downward on screen) and `dtMs`
  * the interval it took. Upward motion pushes the tape forward, so the sign is
- * inverted. Hand speed is normalised then curved, so the response is heavy and
- * fine near zero and only saturates on a genuinely violent movement.
+ * inverted. Hand speed is normalised then S-curved, so a slow drag, a medium
+ * stroke and a quick flick are three audibly different velocities.
  */
 export function handVelocityToTapeVelocity(
   dyUnits: number,
@@ -110,7 +154,9 @@ export function handVelocityToTapeVelocity(
     handUnitsPerSecondAtMaxScratch: number;
     handDeadbandUnitsPerSecond: number;
     handMaxSampleMs: number;
+    scratchLowSpeedGain: number;
     scratchCurveExponent: number;
+    scratchKnee: number;
     scratchMaxVelocity: number;
   } = SCRATCH_TUNING,
 ): number {
@@ -119,9 +165,28 @@ export function handVelocityToTapeVelocity(
   const unitsPerSecond = (-dyUnits * 1000) / dt;
   if (Math.abs(unitsPerSecond) < tuning.handDeadbandUnitsPerSecond) return 0;
   const x = unitsPerSecond / tuning.handUnitsPerSecondAtMaxScratch;
-  const mag = Math.min(1, Math.abs(x));
-  const shaped = Math.pow(mag, tuning.scratchCurveExponent) * tuning.scratchMaxVelocity;
+  const shaped = shapeHandSpeed(Math.abs(x), tuning) * tuning.scratchMaxVelocity;
   return clampVelocity(x < 0 ? -shaped : shaped, tuning.scratchMaxVelocity);
+}
+
+/**
+ * Direction-change / anti-jump ramp. Limits how fast the COMMANDED velocity may
+ * move, in velocity units per millisecond, so a reversal is heard as
+ * "falling pitch → near stop → rising reverse pitch" rather than a hard flip.
+ */
+export function slewVelocity(
+  previous: number,
+  target: number,
+  dtMs: number,
+  perMs = SCRATCH_TUNING.scratchSlewPerMs,
+): number {
+  if (!Number.isFinite(target)) return previous;
+  if (!Number.isFinite(previous)) return target;
+  if (!Number.isFinite(dtMs) || dtMs <= 0 || perMs <= 0) return target;
+  const step = perMs * dtMs;
+  const delta = target - previous;
+  if (Math.abs(delta) <= step) return target;
+  return previous + Math.sign(delta) * step;
 }
 
 
