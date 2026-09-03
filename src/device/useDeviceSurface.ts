@@ -36,7 +36,7 @@ import { sp1Surface, type Sp1SurfaceEvent } from "@/audio/midi/sp1Surface";
 import type { StemMidiEvent } from "@/audio/midi/contract";
 import { FaderSessionManager, type FaderIndex } from "@/input/faderSessions";
 import {
-  HandVelocityTracker,
+  ScratchScrubController,
   displacementToVelocity,
   rockerDisplacement,
   rockerTransform,
@@ -155,9 +155,9 @@ export function useDeviceSurface() {
     legacy: boolean;
     /** Visual only. Audio velocity comes from `hand`, never from this. */
     displacement: number;
-    /** Hand speed → signed master velocity. */
-    hand: HandVelocityTracker;
-    /** Hand-stop poller: a held-still finger must stop the record. */
+    /** Hand speed + held position → blended signed master velocity. */
+    hand: ScratchScrubController;
+    /** Blend poller: decays the scratch transient into the sustained scrub. */
     stopTimer: number | null;
     /** Last velocity actually commanded, so a repeat is not re-sent. */
     commanded: number;
@@ -819,7 +819,7 @@ export function useDeviceSurface() {
           grabY: p.y,
           legacy: false,
           displacement: 0,
-          hand: new HandVelocityTracker(p.y, now),
+          hand: new ScratchScrubController(p.y, now),
           stopTimer: null as number | null,
           commanded: 0,
         };
@@ -827,12 +827,13 @@ export function useDeviceSurface() {
         consumedScratchPointersRef.current.add(e.pointerId);
         applyRockerVisual(0, true);
         // The browser stops delivering pointermove when the finger stops, so
-        // the stop is polled: no movement for handStopTimeoutMs ⇒ command 0 and
-        // the record settles under the hand instead of latching a velocity.
+        // the blend is polled: the scratch transient decays and the SUSTAINED
+        // held-position scrub takes over. Held at centre ⇒ the record stops;
+        // held off-centre ⇒ it keeps scrubbing in that direction.
         session.stopTimer = window.setInterval(() => {
           if (scratchRef.current !== session) return;
-          if (session.hand.stopIfIdle(performance.now())) commandScratchVelocity(session, 0);
-        }, Math.max(8, Math.round(SCRATCH_TUNING.handStopTimeoutMs / 3)));
+          commandScratchVelocity(session, session.hand.poll(performance.now()));
+        }, Math.max(8, Math.round(SCRATCH_TUNING.scratchDecayMs / 6)));
         void getAudioEngine()
           .beginMasterScratch()
           .then((r) => {
@@ -905,13 +906,13 @@ export function useDeviceSurface() {
         if (!pt) return;
         // VISUAL: bounded grab-relative travel, so the control follows the
         // finger and stops at its physical limit.
-        const d = rockerDisplacement(pt.y, scratch.grabY);
+        const v = scratch.hand.sample(pt.y, performance.now());
+        const d = scratch.hand.displacement;
         scratch.displacement = d;
         applyRockerVisual(d, true);
-        // AUDIO: hand SPEED, unbounded by the visual limit. Holding the finger
-        // at the end of its travel therefore stops the tape rather than pinning
-        // it at full speed.
-        commandScratchVelocity(scratch, scratch.hand.sample(pt.y, performance.now()));
+        // AUDIO: transient hand speed (scratch) blended with held displacement
+        // (scrub). One control, no mode switch.
+        commandScratchVelocity(scratch, v);
         return;
       }
       const session = faders.current.sessionForPointer(e.pointerId);
