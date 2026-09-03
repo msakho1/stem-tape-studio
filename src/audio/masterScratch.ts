@@ -32,6 +32,12 @@
  * S3 tuning surface. These are STARTING VALUES to be tuned by feel, not
  * product requirements — every gesture constant lives here so tuning is a
  * one-file change.
+ *
+ * HAND ON THE RECORD, NOT A SHUTTLE JOYSTICK
+ * ------------------------------------------
+ * Velocity is derived from the SPEED OF THE HAND (Δy/Δt), never from how far
+ * the control sits from a centre. A stationary finger is a stationary record,
+ * wherever it happens to be resting.
  */
 export const SCRATCH_TUNING = {
   /** Conservative first-pass ceiling on |velocity| (× musical rate). */
@@ -44,9 +50,49 @@ export const SCRATCH_TUNING = {
   neutralTimeoutMs: 90,
   /** Ramp applied to each commanded velocity step, ms (click suppression). */
   velocityRampMs: 6,
+  /**
+   * Hand speed, in SVG user units per second, that maps to 1.0× tape velocity.
+   * The rocker is ~66 units tall, so ~1.4 rocker-heights per second reads as
+   * normal tape speed and an ordinary flick reaches the ceiling.
+   */
+  handUnitsPerSecondAtUnitRate: 90,
+  /** Hand speed below this is treated as a held-still hand (dead band). */
+  handDeadbandUnitsPerSecond: 8,
+  /**
+   * Held but not moving for this long ⇒ command 0. Browsers stop delivering
+   * pointermove when the finger stops, so this is what makes the record stop
+   * under the hand instead of latching the last velocity.
+   */
+  handStopTimeoutMs: 60,
+  /** Longest Δt trusted for a hand-velocity sample (throttled frames). */
+  handMaxSampleMs: 120,
 } as const;
 
-export function clampVelocity(v: number, max = SCRATCH_TUNING.maxAbsVelocity): number {
+/**
+ * Pointer motion → signed master velocity.
+ *
+ * `dyUnits` is SVG-user-unit travel (positive = downward on screen) and `dtMs`
+ * the interval it took. Upward motion pushes the tape forward, so the sign is
+ * inverted. Below the dead band the hand counts as stopped.
+ */
+export function handVelocityToTapeVelocity(
+  dyUnits: number,
+  dtMs: number,
+  tuning: {
+    handUnitsPerSecondAtUnitRate: number;
+    handDeadbandUnitsPerSecond: number;
+    handMaxSampleMs: number;
+    maxAbsVelocity: number;
+  } = SCRATCH_TUNING,
+): number {
+  if (!Number.isFinite(dyUnits) || !Number.isFinite(dtMs)) return 0;
+  const dt = Math.min(Math.max(dtMs, 1), tuning.handMaxSampleMs);
+  const unitsPerSecond = (-dyUnits * 1000) / dt;
+  if (Math.abs(unitsPerSecond) < tuning.handDeadbandUnitsPerSecond) return 0;
+  return clampVelocity(unitsPerSecond / tuning.handUnitsPerSecondAtUnitRate, tuning.maxAbsVelocity);
+}
+
+export function clampVelocity(v: number, max: number = SCRATCH_TUNING.maxAbsVelocity): number {
   if (!Number.isFinite(v)) return 0;
   return v > max ? max : v < -max ? -max : v;
 }

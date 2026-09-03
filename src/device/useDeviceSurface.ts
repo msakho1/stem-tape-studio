@@ -36,10 +36,12 @@ import { sp1Surface, type Sp1SurfaceEvent } from "@/audio/midi/sp1Surface";
 import type { StemMidiEvent } from "@/audio/midi/contract";
 import { FaderSessionManager, type FaderIndex } from "@/input/faderSessions";
 import {
+  HandVelocityTracker,
   displacementToVelocity,
   rockerDisplacement,
   rockerTransform,
 } from "@/input/rockerScratch";
+import { SCRATCH_TUNING } from "@/audio/masterScratch";
 import { installDiagnostics, publishArbiter, publishSurface, publishTapLatency } from "@/lib/diagnostics";
 import { surfaceCommandTracer } from "@/diagnostics/commandTrace";
 import { trace } from "@/diagnostics/trace";
@@ -151,7 +153,14 @@ export function useDeviceSurface() {
     grabY: number;
     /** True when the signed master head refused (no stems): legacy shuttle. */
     legacy: boolean;
+    /** Visual only. Audio velocity comes from `hand`, never from this. */
     displacement: number;
+    /** Hand speed → signed master velocity. */
+    hand: HandVelocityTracker;
+    /** Hand-stop poller: a held-still finger must stop the record. */
+    stopTimer: number | null;
+    /** Last velocity actually commanded, so a repeat is not re-sent. */
+    commanded: number;
   } | null>(null);
   /** Remains claimed until that rocker pointer ends, even if FUNCTION lifts first. */
   const consumedScratchPointersRef = useRef<Set<number>>(new Set());
@@ -409,10 +418,15 @@ export function useDeviceSurface() {
       scrubPointersRef.current.clear();
       consumedScratchPointersRef.current.clear();
       if (scratchRef.current) {
-        const id = scratchRef.current.pointerId;
+        const s = scratchRef.current;
         scratchRef.current = null;
+        if (s.stopTimer != null) window.clearInterval(s.stopTimer);
+        const g = rockerRef.current;
+        if (g) {
+          g.style.transition = "";
+          g.style.transform = "";
+        }
         void getAudioEngine().endMasterScratch();
-        void id;
       }
       fnPointerRef.current = null;
       scrubUsedFnRef.current = false;
@@ -737,6 +751,7 @@ export function useDeviceSurface() {
       const s = scratchRef.current;
       if (!s || s.pointerId !== pointerId) return false;
       scratchRef.current = null;
+      if (s.stopTimer != null) window.clearInterval(s.stopTimer);
       applyRockerVisual(0, false);
       if (s.legacy) {
         scrubPointersRef.current.delete(pointerId);
@@ -748,6 +763,14 @@ export function useDeviceSurface() {
     },
     [applyRockerVisual],
   );
+
+  /** Command a signed master velocity once; repeats of the same value are dropped. */
+  const commandScratchVelocity = useCallback((session: { legacy: boolean; commanded: number }, v: number) => {
+    if (session.legacy) return;
+    if (v === session.commanded) return;
+    session.commanded = v;
+    getAudioEngine().setMasterScratchVelocity(v);
+  }, []);
 
 
   const onControlPointerDown = useCallback(
@@ -787,13 +810,29 @@ export function useDeviceSurface() {
           engine.cancel("function", fnPointerRef.current ?? "keyboard");
         }
         if (!p) return;
-        // A grab starts neutral wherever within the physical rocker it lands.
-        // Only movement after capture produces signed tape velocity.
-        const displacement = 0;
-        const session = { pointerId: e.pointerId, dir, grabY: p.y, legacy: false, displacement };
+        // A grab is a HAND LANDING ON THE RECORD: it commands zero, wherever in
+        // the physical rocker it lands. Only hand MOVEMENT produces velocity.
+        const now = performance.now();
+        const session = {
+          pointerId: e.pointerId,
+          dir,
+          grabY: p.y,
+          legacy: false,
+          displacement: 0,
+          hand: new HandVelocityTracker(p.y, now),
+          stopTimer: null as number | null,
+          commanded: 0,
+        };
         scratchRef.current = session;
         consumedScratchPointersRef.current.add(e.pointerId);
-        applyRockerVisual(displacement, true);
+        applyRockerVisual(0, true);
+        // The browser stops delivering pointermove when the finger stops, so
+        // the stop is polled: no movement for handStopTimeoutMs ⇒ command 0 and
+        // the record settles under the hand instead of latching a velocity.
+        session.stopTimer = window.setInterval(() => {
+          if (scratchRef.current !== session) return;
+          if (session.hand.stopIfIdle(performance.now())) commandScratchVelocity(session, 0);
+        }, Math.max(8, Math.round(SCRATCH_TUNING.handStopTimeoutMs / 3)));
         void getAudioEngine()
           .beginMasterScratch()
           .then((r) => {
@@ -806,7 +845,9 @@ export function useDeviceSurface() {
               dispatch({ type: "globalScrub", dir });
               return;
             }
-            getAudioEngine().setMasterScratchVelocity(displacementToVelocity(session.displacement));
+            // Engaged at rest under the hand.
+            getAudioEngine().setMasterScratchVelocity(session.hand.velocity);
+            session.commanded = session.hand.velocity;
           });
         return;
       }
@@ -852,7 +893,7 @@ export function useDeviceSurface() {
         });
       }
     },
-    [engine, resolveChannel, toUserSpace],
+    [commandScratchVelocity, engine, resolveChannel, toUserSpace],
   );
 
   const onControlPointerMove = useCallback(
@@ -862,10 +903,15 @@ export function useDeviceSurface() {
       if (scratch && scratch.pointerId === e.pointerId) {
         const pt = toUserSpace(e.clientX, e.clientY);
         if (!pt) return;
+        // VISUAL: bounded grab-relative travel, so the control follows the
+        // finger and stops at its physical limit.
         const d = rockerDisplacement(pt.y, scratch.grabY);
         scratch.displacement = d;
         applyRockerVisual(d, true);
-        if (!scratch.legacy) getAudioEngine().setMasterScratchVelocity(displacementToVelocity(d));
+        // AUDIO: hand SPEED, unbounded by the visual limit. Holding the finger
+        // at the end of its travel therefore stops the tape rather than pinning
+        // it at full speed.
+        commandScratchVelocity(scratch, scratch.hand.sample(pt.y, performance.now()));
         return;
       }
       const session = faders.current.sessionForPointer(e.pointerId);
@@ -895,7 +941,7 @@ export function useDeviceSurface() {
       }
       scheduleFlush();
     },
-    [applyRockerVisual, engine, scheduleFlush, toUserSpace],
+    [applyRockerVisual, commandScratchVelocity, engine, scheduleFlush, toUserSpace],
   );
 
   /**

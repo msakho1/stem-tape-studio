@@ -1547,6 +1547,13 @@ export class AudioEngine {
     if (!this.ctx) return { ok: false, detail: "audio not unlocked" };
     if (t.engineMode === "worklet") return { ok: true, detail: `track ${id + 1} already on the worklet engine` };
     if (!t.buffer) return { ok: false, detail: `track ${id + 1} has no decoded audio` };
+    // RE-ENTRANCY. engineMode stays "node" for the whole checking → adopting →
+    // handoff window, so a second gesture arriving inside it used to build a
+    // SECOND WorkletTrack for the same lane. Both connected their own gain to
+    // the same stemGate and only the last was tracked, so the first played the
+    // same PCM forever from a different position: the doubled/echoed audio.
+    if (t.migrationStatus === "checking" || t.migrationStatus === "adopting" || t.migrationStatus === "handoff")
+      return { ok: false, detail: `track ${id + 1} migration already in progress (${t.migrationStatus})` };
     // Engine swaps are refused while heads are audible or a PRINT is baking:
     // both read the source PCM and a handoff would move it under them.
     if (this.heads.active)
@@ -1599,11 +1606,18 @@ export class AudioEngine {
       : this.position();
     const sourceFrame = Math.round(posAtSwitch * sr);
 
-    const outgoing = t.sources[t.sources.length - 1];
+    // EXCLUSIVE TAKEOVER. Fading only the newest tracked source left older
+    // seam / loop / release voices connected to the same stemGate, so the
+    // worklet leg summed with a still-running node copy — the doubled "echo"
+    // heard under a scratch. Every live voice on this lane is retired on the
+    // same seam, and the protected release target is dropped first so the
+    // identity guard in fadeOutAndStop cannot spare one of them.
+    this.pendingRelease[id] = null;
+    const outgoing = [...t.sources];
     const result = await wt.handoff(
       sourceFrame,
       (fadeAt) => {
-        if (outgoing) this.fadeOutAndStop(t, outgoing, fadeAt);
+        for (const s of outgoing) this.fadeOutAndStop(t, s, fadeAt);
       },
       at,
     );
@@ -1662,12 +1676,33 @@ export class AudioEngine {
    * entry/exit semantics clean and gapless).
    */
   masterScratch: { engagedAtFrame: number; masterFrame: number; velocity: number } | null = null;
+  /**
+   * ONE entry at a time. `masterScratch` is only set AFTER migration finishes,
+   * so a fast press → flick → release → press could previously re-enter the
+   * whole takeover concurrently. Every caller now awaits the same promise.
+   */
+  private masterScratchEntry: Promise<{ ok: boolean; detail: string }> | null = null;
 
   /** Node playback → capture the exact master position → worklet takeover. */
-  async beginMasterScratch(): Promise<{ ok: boolean; detail: string }> {
+  beginMasterScratch(): Promise<{ ok: boolean; detail: string }> {
+    if (this.masterScratchEntry) return this.masterScratchEntry;
+    const p = this.enterMasterScratch().finally(() => {
+      if (this.masterScratchEntry === p) this.masterScratchEntry = null;
+    });
+    this.masterScratchEntry = p;
+    return p;
+  }
+
+  /** Live node voices still connected on this lane. Zero after a takeover. */
+  nodeVoiceCount(id: TrackId): number {
+    return this.tracks[id]?.sources.length ?? 0;
+  }
+
+  private async enterMasterScratch(): Promise<{ ok: boolean; detail: string }> {
     const ctx = this.ctx;
     if (!ctx) return { ok: false, detail: "audio not unlocked" };
     if (this.masterScratch) return { ok: true, detail: "master scratch already engaged" };
+
 
     const loaded = this.tracks.filter((t) => t.buffer || t.worklet);
     if (loaded.length === 0) return { ok: false, detail: "no stems loaded" };
@@ -1733,6 +1768,9 @@ export class AudioEngine {
    * already moving at exactly that rate in the forward direction.
    */
   async endMasterScratch(resumeRate = this.timeline.musicalRate()): Promise<{ ok: boolean; detail: string }> {
+    // A release that lands mid-entry must not no-op and leave the lane latched
+    // in master playback forever: wait for the entry it is releasing.
+    if (this.masterScratchEntry) await this.masterScratchEntry;
     const ctx = this.ctx;
     if (!ctx || !this.masterScratch) return { ok: false, detail: "master scratch is not engaged" };
     const sr = ctx.sampleRate;
