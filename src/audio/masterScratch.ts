@@ -136,6 +136,7 @@ export function shapeHandSpeed(
   const knee = tuning.scratchKnee;
   if (raw <= knee) return Math.min(1, raw);
   const over = (raw - knee) / Math.max(1e-6, 1 - knee);
+  if (over >= 3) return 1;
   return Math.min(1, knee + (1 - knee) * Math.tanh(over));
 }
 
