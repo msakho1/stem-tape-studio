@@ -859,16 +859,40 @@ export class AudioEngine {
   }
 
   /**
-   * READ-ONLY loop-wrap anchor for the LED compositor: 0..1 through the
-   * current global loop, derived from the same derived playhead. Returns null
-   * when there is no global loop. Touches no transport state.
+   * READ-ONLY loop-wrap anchor for the LED compositor: 0..1 through the loop
+   * the listener is ACTUALLY hearing. It is derived from the audible read
+   * pointer of a live looping source (its spawn offset advanced along the same
+   * integrated-rate timeline), NOT from the hidden song playhead — the hidden
+   * clock keeps running forward underneath a loop, so it would drift out of
+   * the window within one cycle. Touches no transport state.
    */
   loopPhase(): number | null {
     const l = this.globalLoop;
     if (!l || !(l.lengthS > 0)) return null;
-    const p = (this.position() - l.start) / l.lengthS;
+    const now = this.ctx ? this.ctx.currentTime : 0;
+    const audible = this.audibleLoopPosition(now);
+    const base = audible ?? this.position();
+    const p = (base - l.start) / l.lengthS;
     return ((p % 1) + 1) % 1;
   }
+
+  /**
+   * Media position of the newest live looping source, on the shared integrated
+   * timeline. This is the frame the wrap scheduler itself works from, so the
+   * LED chase and the audible wrap share one authority.
+   */
+  private audibleLoopPosition(now: number): number | null {
+    if (!this.requestedPlaying) return null;
+    for (const t of this.tracks) {
+      if (!t.buffer || !t.loop.enabled) continue;
+      const live = t.sources[t.sources.length - 1];
+      if (!live) continue;
+      const advanced = this.timeline.positionAt(now) - this.timeline.positionAt(live.startAt);
+      return live.startPos + Math.max(0, advanced);
+    }
+    return null;
+  }
+
 
 
 
