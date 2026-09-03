@@ -479,11 +479,20 @@ export function applyModifiers(base: number, mods: readonly LedModifier[], t: nu
         v = Math.round(v * NON_SOLO_SCALE);
         break;
       case "loop": {
-        // Wrap tick on the real loop phase when the engine offers one.
         const ph = cyclePhase(m, t, PERIOD.latchedBlink);
-        v = ph < LOOP_TICK ? Math.max(v, 104) : Math.round(v * 0.82);
+        if (m.lane != null) {
+          // 1 → 2 → 3 → 4 chase across the four track LEDs, derived from the
+          // real loop phase. The accented lane is LIFTED over its own stem
+          // meter, the others are gently attenuated: activity survives.
+          const q = loopChaseQuarter(ph);
+          v = q === m.lane ? Math.min(BRIGHT_FULL, Math.max(v, 84) + 34) : Math.round(v * 0.72);
+        } else {
+          // Side LED keeps the wrap tick on the real phase.
+          v = ph < LOOP_TICK ? Math.max(v, 104) : Math.round(v * 0.82);
+        }
         break;
       }
+
       case "reverse": {
         // Backwards stutter notch — unique to the reversed lane, and the
         // stem's own activity keeps modulating between notches.
