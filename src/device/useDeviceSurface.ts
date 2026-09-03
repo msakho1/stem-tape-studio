@@ -877,7 +877,7 @@ export function useDeviceSurface() {
       }
       scheduleFlush();
     },
-    [engine, scheduleFlush, toUserSpace],
+    [applyRockerVisual, engine, scheduleFlush, toUserSpace],
   );
 
   /**
