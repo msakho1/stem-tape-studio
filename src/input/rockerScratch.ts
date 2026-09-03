@@ -22,6 +22,7 @@ import {
   decayedScratch,
   displacementToScrubVelocity,
   handVelocityToTapeVelocity,
+  slewVelocity,
 } from "@/audio/masterScratch";
 
 
@@ -107,12 +108,15 @@ export class ScratchScrubController {
   phase: RockerPhase = "scratch";
   /** Last velocity produced. */
   velocity = 0;
+  /** When `velocity` was last produced, for the direction-change slew. */
+  private velocityT: number;
 
   constructor(grabY: number, t: number) {
     this.grabY = grabY;
     this.lastY = grabY;
     this.lastT = t;
     this.impulseT = t;
+    this.velocityT = t;
   }
 
   /** Milliseconds of uninterrupted qualifying hold so far. */
@@ -136,6 +140,18 @@ export class ScratchScrubController {
     this.scrubSinceT = null;
   }
 
+  /**
+   * Emit a velocity through the direction-change ramp. The ramp is fast enough
+   * to keep the reversal attack sharp, but it forces the signed head to travel
+   * audibly through zero instead of flipping instantaneously.
+   */
+  private emit(target: number, t: number): number {
+    const dt = t - this.velocityT;
+    this.velocity = slewVelocity(this.velocity, target, dt > 0 ? dt : 0);
+    this.velocityT = t;
+    return this.velocity;
+  }
+
   private compute(t: number): number {
     const motion = decayedScratch(this.impulse, t - this.impulseT);
     // Qualification is time-based, so it can complete while the finger is still.
@@ -150,16 +166,14 @@ export class ScratchScrubController {
     }
     if (this.phase !== "scrub") {
       // SCRATCH: hand motion only. Displacement is deliberately ignored.
-      this.velocity = clampVelocity(motion, SCRATCH_TUNING.scratchMaxVelocity);
-      return this.velocity;
+      return this.emit(clampVelocity(motion, SCRATCH_TUNING.scratchMaxVelocity), t);
     }
     const fade =
       this.scrubSinceT == null || SCRATCH_TUNING.scrubEnterFadeMs <= 0
         ? 1
         : Math.min(1, Math.max(0, (t - this.scrubSinceT) / SCRATCH_TUNING.scrubEnterFadeMs));
     const scrub = displacementToScrubVelocity(this.displacement) * fade;
-    this.velocity = blendScratchScrub(motion, scrub);
-    return this.velocity;
+    return this.emit(blendScratchScrub(motion, scrub), t);
   }
 
   /** New pointer position → signed master velocity for the current phase. */
