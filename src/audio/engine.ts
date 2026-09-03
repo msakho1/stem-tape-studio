@@ -1049,6 +1049,11 @@ export class AudioEngine {
       const rate = Math.abs(this.timeline.currentRate(now)) || 1;
       for (const v of this.headVoices) if (v) v.node.playbackRate.setTargetAtTime(rate, now, RAMP_TAU);
     }
+    // ONE authoritative wrap instant for the whole global loop. Each lane is
+    // still derived from its own read pointer, but the first lane that reaches
+    // the boundary publishes the seam time and every other lane splices at
+    // exactly that context time — no per-lane boundary detection, no flam.
+    let sharedSeamAt: number | null = null;
     for (let li = 0; li < this.tracks.length; li++) {
       const t = this.tracks[li]!;
       if (this.heads.active && this.heads.engine === "node" && this.heads.source === li) continue;
@@ -1079,11 +1084,16 @@ export class AudioEngine {
       // clock keeps advancing underneath a looping lane. That hidden value is
       // what the lane rejoins on release.
       const seamPos = this.timeline.positionAt(live.startAt) + (bounds.end - live.startPos);
-      const seamAt = this.timeline.timeAtPosition(now, seamPos);
-      if (seamAt == null) continue;
-      const fadeStart = seamAt - SEAM_FADE_S;
-      if (fadeStart > now + SEAM_LOOKAHEAD_S) continue;
-      const at = Math.max(fadeStart, now + 0.005);
+      const own = this.timeline.timeAtPosition(now, seamPos);
+      if (own == null) continue;
+      if (this.globalLoop && sharedSeamAt == null) sharedSeamAt = own;
+      const seamAt = this.globalLoop ? sharedSeamAt! : own;
+      if (seamAt > now + SEAM_LOOKAHEAD_S) continue;
+      // The splice happens ON the boundary, never before it: the incoming
+      // source starts reading loopStart exactly at `seamAt` and the outgoing
+      // one crossfades out over the 12 ms AFTER it, reading past the loop end.
+      // Starting the incoming early is what duplicated the downbeat transient.
+      const at = Math.max(seamAt, now + 0.005);
       // Never wrap a lane past a scheduled loop release — the release spawn
       // owns everything at and after its bar boundary.
       if (pendingRel && at >= pendingRel.at - 1e-6) continue;
@@ -1095,6 +1105,7 @@ export class AudioEngine {
       t.committedSeamAt = seamAt;
       t.seamCount++;
     }
+
     this.settlePendingReleases(now);
   }
 
