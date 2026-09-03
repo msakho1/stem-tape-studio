@@ -134,7 +134,22 @@ export function useDeviceSurface() {
   const [state, dispatch] = useReducer(reducer, undefined, initialSurfaceState);
   const svgRef = useRef<SVGSVGElement | null>(null);
   const capRefs = useRef<Record<number, SVGCircleElement | null>>({});
+  /** The rocker body group: written directly during a scratch drag (no React). */
+  const rockerRef = useRef<SVGGElement | null>(null);
+  /**
+   * S3 — ONE master-scratch gesture at a time. The pointer that started it owns
+   * the whole sequence: no rocker press ever reaches the gesture engine while
+   * this is non-null, so no semitone / step-scrub row can leak from it.
+   */
+  const scratchRef = useRef<{
+    pointerId: number;
+    dir: 1 | -1;
+    /** True when the signed master head refused (no stems): legacy shuttle. */
+    legacy: boolean;
+    displacement: number;
+  } | null>(null);
   const faderValuesRef = useRef<number[]>([0.78, 0.72, 0.65, 0.7]);
+
   /**
    * Workstream 1: one session per pointer. No singleton drag — a second finger
    * can never steal the first fader, and each pointerup ends only its own.
