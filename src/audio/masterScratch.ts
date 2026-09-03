@@ -52,7 +52,7 @@ export const SCRATCH_TUNING = {
   /** Ceiling on the combined command once scrub has been earned. */
   combinedMaxVelocity: 2.5,
   /** Exponential decay time constant of the scratch impulse, ms. */
-  scratchDecayMs: 90,
+  scratchDecayMs: 55,
   /**
    * Uninterrupted same-side directional hold required before SCRUB may begin.
    * Reset by crossing centre, reversing, returning to neutral, or release.
