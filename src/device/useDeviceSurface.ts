@@ -695,6 +695,47 @@ export function useDeviceSurface() {
     }
   }, [state.functionHeld, state.headsMode]);
 
+  /**
+   * S3 visual: the rocker tilts proportionally with the finger while grabbed,
+   * and eases back to its resting centre when the gesture ends. Written to the
+   * DOM directly — React never re-renders on a scratch drag.
+   */
+  const applyRockerVisual = useCallback((displacement: number, dragging: boolean) => {
+    const g = rockerRef.current;
+    if (!g) return;
+    if (dragging) {
+      g.style.transition = "none";
+      g.style.transform = rockerTransform(displacement);
+    } else {
+      g.style.transition = "";
+      g.style.transform = "";
+    }
+  }, []);
+
+  /**
+   * End the master-scratch gesture owned by this pointer. Master position is
+   * kept exactly where the tape was left: S2's release glides the signed
+   * velocity back to the musical rate and anchors the song clock on the frame
+   * actually reached — no jump back to where playback "would have been".
+   */
+  const endRockerScratch = useCallback(
+    (pointerId: number) => {
+      const s = scratchRef.current;
+      if (!s || s.pointerId !== pointerId) return false;
+      scratchRef.current = null;
+      applyRockerVisual(0, false);
+      if (s.legacy) {
+        scrubPointersRef.current.delete(pointerId);
+        dispatch({ type: "globalScrub", dir: null });
+      } else {
+        void getAudioEngine().endMasterScratch();
+      }
+      return true;
+    },
+    [applyRockerVisual],
+  );
+
+
   const onControlPointerDown = useCallback(
     (control: Control, e: React.PointerEvent) => {
       e.preventDefault();
