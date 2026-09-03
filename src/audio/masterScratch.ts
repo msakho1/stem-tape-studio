@@ -52,7 +52,7 @@ export const SCRATCH_TUNING = {
   /** Ceiling on the combined command once scrub has been earned. */
   combinedMaxVelocity: 2.5,
   /** Exponential decay time constant of the scratch impulse, ms. */
-  scratchDecayMs: 55,
+  scratchDecayMs: 90,
   /**
    * Uninterrupted same-side directional hold required before SCRUB may begin.
    * Reset by crossing centre, reversing, returning to neutral, or release.
@@ -79,19 +79,19 @@ export const SCRATCH_TUNING = {
    * velocity. Tuned so an ordinary performance stroke uses the whole expressive
    * range instead of crawling along the bottom of the curve.
    */
-  handUnitsPerSecondAtMaxScratch: 520,
+  handUnitsPerSecondAtMaxScratch: 760,
   /** Hand speed below this is treated as a held-still hand (dead band). */
   handDeadbandUnitsPerSecond: 6,
   /**
    * Slope of the response at very low hand speed. Small = fine resolution for a
    * slow deliberate drag; the remaining gain comes from the mid-speed curve.
    */
-  scratchLowSpeedGain: 0.42,
+  scratchLowSpeedGain: 0.55,
   /**
    * Mid-speed curvature. >1 makes the middle of the range accelerate hard, so a
    * flick is clearly brighter than a drag without lifting the ceiling.
    */
-  scratchCurveExponent: 2.4,
+  scratchCurveExponent: 2.0,
   /**
    * Normalised output above which a SOFT KNEE compresses rather than clips, so
    * the top of the range stays musical instead of slamming into a wall.
@@ -102,7 +102,7 @@ export const SCRATCH_TUNING = {
    * DIRECTION-CHANGE ramp: a reversal is forced to travel audibly through zero,
    * yet 1.0 → -1.0 still completes in ~57 ms, so the attack stays sharp.
    */
-  scratchSlewPerMs: 0.035,
+  scratchSlewPerMs: 0.02,
   /**
    * Legacy: the old "held still ⇒ zero" timeout. Superseded by the phase model.
    */
