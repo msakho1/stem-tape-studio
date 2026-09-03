@@ -35,7 +35,12 @@ import { nativeMidiBridge } from "@/audio/midi/nativeBridge";
 import { sp1Surface, type Sp1SurfaceEvent } from "@/audio/midi/sp1Surface";
 import type { StemMidiEvent } from "@/audio/midi/contract";
 import { FaderSessionManager, type FaderIndex } from "@/input/faderSessions";
-import { displacementToVelocity, rockerDisplacement, rockerTransform } from "@/input/rockerScratch";
+import {
+  ROCKER_CENTER_Y,
+  displacementToVelocity,
+  rockerDisplacement,
+  rockerTransform,
+} from "@/input/rockerScratch";
 import { installDiagnostics, publishArbiter, publishSurface, publishTapLatency } from "@/lib/diagnostics";
 import { surfaceCommandTracer } from "@/diagnostics/commandTrace";
 import { trace } from "@/diagnostics/trace";
@@ -400,6 +405,12 @@ export function useDeviceSurface() {
       heldKeysRef.current.clear();
       scrubKeysRef.current.clear();
       scrubPointersRef.current.clear();
+      if (scratchRef.current) {
+        const id = scratchRef.current.pointerId;
+        scratchRef.current = null;
+        void getAudioEngine().endMasterScratch();
+        void id;
+      }
       fnPointerRef.current = null;
       scrubUsedFnRef.current = false;
 
@@ -1078,6 +1089,7 @@ export function useDeviceSurface() {
     setPowerHoldMs,
     svgRef,
     capRefs,
+    rockerRef,
     faderValuesRef,
     rawLog,
     gestureLog,
