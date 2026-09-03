@@ -15,7 +15,15 @@
  * This module is pure: no React, no DOM, no audio engine, so both mappings are
  * unit-testable. Velocity constants live in `src/audio/masterScratch.ts`.
  */
-import { SCRATCH_TUNING, clampVelocity, handVelocityToTapeVelocity } from "@/audio/masterScratch";
+import {
+  SCRATCH_TUNING,
+  blendScratchScrub,
+  clampVelocity,
+  decayedScratch,
+  displacementToScrubVelocity,
+  handVelocityToTapeVelocity,
+} from "@/audio/masterScratch";
+
 
 /**
  * Finger travel from the grab point to full VISUAL deflection, in SVG user
