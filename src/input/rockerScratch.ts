@@ -15,7 +15,15 @@
  * This module is pure: no React, no DOM, no audio engine, so both mappings are
  * unit-testable. Velocity constants live in `src/audio/masterScratch.ts`.
  */
-import { SCRATCH_TUNING, clampVelocity, handVelocityToTapeVelocity } from "@/audio/masterScratch";
+import {
+  SCRATCH_TUNING,
+  blendScratchScrub,
+  clampVelocity,
+  decayedScratch,
+  displacementToScrubVelocity,
+  handVelocityToTapeVelocity,
+} from "@/audio/masterScratch";
+
 
 /**
  * Finger travel from the grab point to full VISUAL deflection, in SVG user
@@ -63,46 +71,66 @@ export function rockerTransform(d: number): string {
 }
 
 /**
- * Hand-velocity tracker.
+ * Hybrid scratch/scrub controller.
  *
- * One sample per pointer event. `sample()` returns the signed master velocity
- * the hand is currently commanding; `stopIfIdle()` is what the caller polls so
- * a held-but-motionless finger settles the record at zero, because the browser
- * simply stops delivering pointermove when the finger stops.
+ * One gesture, two blended components (see `masterScratch.ts`):
+ *  - MOTION: an impulse taken from hand speed, decaying with `scratchDecayMs`.
+ *  - POSITION: a sustained scrub from how far the rocker is held from the grab
+ *    point, through a squared curve.
+ *
+ * `sample()` on every pointermove, `poll()` on a timer so the decay and the
+ * sustained hold keep being commanded while the finger is motionless.
  */
-export class HandVelocityTracker {
+export class ScratchScrubController {
+  private grabY: number;
   private lastY: number;
   private lastT: number;
-  /** Last non-zero commanded velocity, kept only for diagnostics. */
+  /** Latest scratch impulse and when it was taken. */
+  private impulse = 0;
+  private impulseT: number;
+  /** Held displacement in [-1,+1] — visual travel AND the scrub component. */
+  displacement = 0;
+  /** Last blended velocity produced. */
   velocity = 0;
 
   constructor(grabY: number, t: number) {
+    this.grabY = grabY;
     this.lastY = grabY;
     this.lastT = t;
+    this.impulseT = t;
   }
 
-  /** New pointer position → signed master velocity. */
-  sample(userY: number, t: number): number {
-    if (!Number.isFinite(userY) || !Number.isFinite(t)) return this.velocity;
-    const dy = userY - this.lastY;
-    const dt = t - this.lastT;
-    if (dt <= 0) return this.velocity;
-    this.lastY = userY;
-    this.lastT = t;
-    this.velocity = handVelocityToTapeVelocity(dy, dt);
+  private blend(t: number): number {
+    const motion = decayedScratch(this.impulse, t - this.impulseT);
+    this.velocity = blendScratchScrub(motion, displacementToScrubVelocity(this.displacement));
     return this.velocity;
   }
 
+  /** New pointer position → blended signed master velocity. */
+  sample(userY: number, t: number): number {
+    if (!Number.isFinite(userY) || !Number.isFinite(t)) return this.velocity;
+    const dt = t - this.lastT;
+    if (dt <= 0) return this.velocity;
+    const dy = userY - this.lastY;
+    this.lastY = userY;
+    this.lastT = t;
+    this.displacement = rockerDisplacement(userY, this.grabY);
+    const next = handVelocityToTapeVelocity(dy, dt);
+    if (next !== 0) {
+      this.impulse = next;
+      this.impulseT = t;
+    }
+    return this.blend(t);
+  }
+
   /**
-   * True when the hand has produced no movement for `timeoutMs`: the caller
-   * must then command exactly 0. Returns false once it has already reported a
-   * stop, so the stop is commanded once per pause, not every poll.
+   * Time-only update: the scratch transient decays and the held position takes
+   * over. A hand held away from centre keeps scrubbing; near centre it settles
+   * to zero.
    */
-  stopIfIdle(t: number, timeoutMs = SCRATCH_TUNING.handStopTimeoutMs): boolean {
-    if (this.velocity === 0) return false;
-    if (t - this.lastT < timeoutMs) return false;
-    this.velocity = 0;
-    return true;
+  poll(t: number): number {
+    if (!Number.isFinite(t)) return this.velocity;
+    return this.blend(t);
   }
 
   /** Milliseconds since the last accepted sample. */
@@ -110,3 +138,4 @@ export class HandVelocityTracker {
     return t - this.lastT;
   }
 }
+
