@@ -713,30 +713,45 @@ export function useDeviceSurface() {
       }
       const p = toUserSpace(e.clientX, e.clientY);
 
-      // Touch parity for the keyboard F+Q/A shuttle: FUNCTION held (on-screen)
-      // + a rocker zone pressed = held four-stem shuttle. The rocker is never
-      // pressed into the gesture engine, so no varispeed / step-scrub row can
-      // fire underneath it, and FUNCTION is consumed exactly as on keyboard.
+      // S3 — FUNCTION + grab the rocker = hand on the tape. The rocker becomes a
+      // continuously draggable physical control that drives the S2 signed
+      // MASTER head directly. It is NEVER pressed into the gesture engine here,
+      // so no varispeed / semitone / step-scrub row can fire underneath, and
+      // FUNCTION is consumed exactly as on the keyboard shuttle.
       if (
         (control === "rocker-fwd" || control === "rocker-rwd") &&
-        (fnPointerRef.current != null || stateRef.current.functionHeld)
+        (fnPointerRef.current != null || stateRef.current.functionHeld) &&
+        scratchRef.current == null
       ) {
         const dir = control === "rocker-fwd" ? 1 : -1;
         // Mobile Safari only permits AudioContext creation/resume in the direct
-        // pointer event call stack. Starting the unlock here (before React's
-        // command effect runs) preserves that user activation; the ordered
-        // command stream remains the sole owner of the actual shuttle action.
+        // pointer event call stack.
         void getAudioEngine().unlock();
-        scrubPointersRef.current.set(e.pointerId, dir);
         if (!scrubUsedFnRef.current) {
           scrubUsedFnRef.current = true;
-          // FUNCTION is consumed by the shuttle: cancel it so neither its hold
-          // (power) nor its release (tap) row can fire underneath.
           engine.cancel("function", fnPointerRef.current ?? "keyboard");
         }
-        dispatch({ type: "globalScrub", dir });
+        const displacement = rockerDisplacement(p?.y ?? ROCKER_CENTER_Y);
+        const session = { pointerId: e.pointerId, dir, legacy: false, displacement };
+        scratchRef.current = session;
+        applyRockerVisual(displacement, true);
+        void getAudioEngine()
+          .beginMasterScratch()
+          .then((r) => {
+            if (scratchRef.current !== session) return;
+            if (!r.ok) {
+              // No signed master head available (nothing loaded): fall back to
+              // the legacy held shuttle so the control is never dead.
+              session.legacy = true;
+              scrubPointersRef.current.set(session.pointerId, dir);
+              dispatch({ type: "globalScrub", dir });
+              return;
+            }
+            getAudioEngine().setMasterScratchVelocity(displacementToVelocity(session.displacement));
+          });
         return;
       }
+
       if (control === "function") fnPointerRef.current = e.pointerId;
 
       engine.press(control, e.pointerId, performance.now(), p?.x, p?.y);
