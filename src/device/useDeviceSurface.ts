@@ -834,7 +834,13 @@ export function useDeviceSurface() {
         // held off-centre ⇒ it keeps scrubbing in that direction.
         session.stopTimer = window.setInterval(() => {
           if (scratchRef.current !== session) return;
-          commandScratchVelocity(session, session.hand.poll(performance.now()));
+          const now2 = performance.now();
+          // Lifting FUNCTION revokes any partially-earned scrub hold: the
+          // gesture drops straight back to scratch ownership.
+          if (fnPointerRef.current == null && !stateRef.current.functionHeld) {
+            session.hand.revokeQualification(now2);
+          }
+          commandScratchVelocity(session, session.hand.poll(now2));
         }, Math.max(8, Math.round(SCRATCH_TUNING.scratchDecayMs / 6)));
         void getAudioEngine()
           .beginMasterScratch()

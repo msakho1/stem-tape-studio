@@ -120,6 +120,14 @@ export class ScratchScrubController {
     return this.holdSinceT == null ? 0 : t - this.holdSinceT;
   }
 
+  /**
+   * Public reset: FUNCTION lifted, or any other event that must revoke a
+   * partially-earned hold. Returns the gesture to SCRATCH immediately.
+   */
+  revokeQualification(t: number): void {
+    this.resetQualification(0, t);
+  }
+
   /** Drop out of SCRUB and restart qualification from scratch. */
   private resetQualification(side: -1 | 0 | 1, t: number): void {
     this.holdSide = side;
