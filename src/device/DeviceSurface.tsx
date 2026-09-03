@@ -15,6 +15,8 @@ import type { LedFrame, LedId } from "@/machine/surface";
 export interface DeviceSurfaceProps {
   svgRef: React.RefObject<SVGSVGElement | null>;
   capRefs: React.MutableRefObject<Record<number, SVGCircleElement | null>>;
+  /** S3: the rocker body, tilted directly by the master-scratch drag. */
+  rockerRef?: React.RefObject<SVGGElement | null>;
   faderValues: readonly number[];
   pressed: readonly Control[];
   leds: LedFrame;
@@ -51,6 +53,7 @@ function ledClass(frame: LedFrame, id: LedId): string {
 export function DeviceSurface({
   svgRef,
   capRefs,
+  rockerRef,
   faderValues,
   pressed,
   leds,
@@ -114,6 +117,7 @@ export function DeviceSurface({
 
         {/* Left three-position rocker: one body, tilts by which half is held. */}
         <g
+          ref={rockerRef}
           className={`st-rocker${isPressed("rocker-fwd") ? " st-rocker--fwd" : ""}${
             isPressed("rocker-rwd") ? " st-rocker--rwd" : ""
           }`}
@@ -244,6 +248,7 @@ export function DeviceSurface({
             width={z.width}
             height={z.height}
             rx={6}
+            style={z.control.startsWith("rocker") ? { touchAction: "none" } : undefined}
             onPointerDown={(e) => onControlPointerDown(z.control, e)}
             onPointerMove={(e) => onControlPointerMove(z.control, e)}
             onPointerUp={(e) => onControlPointerUp(z.control, e)}

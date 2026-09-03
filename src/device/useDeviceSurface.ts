@@ -35,6 +35,12 @@ import { nativeMidiBridge } from "@/audio/midi/nativeBridge";
 import { sp1Surface, type Sp1SurfaceEvent } from "@/audio/midi/sp1Surface";
 import type { StemMidiEvent } from "@/audio/midi/contract";
 import { FaderSessionManager, type FaderIndex } from "@/input/faderSessions";
+import {
+  ROCKER_CENTER_Y,
+  displacementToVelocity,
+  rockerDisplacement,
+  rockerTransform,
+} from "@/input/rockerScratch";
 import { installDiagnostics, publishArbiter, publishSurface, publishTapLatency } from "@/lib/diagnostics";
 import { surfaceCommandTracer } from "@/diagnostics/commandTrace";
 import { trace } from "@/diagnostics/trace";
@@ -133,7 +139,22 @@ export function useDeviceSurface() {
   const [state, dispatch] = useReducer(reducer, undefined, initialSurfaceState);
   const svgRef = useRef<SVGSVGElement | null>(null);
   const capRefs = useRef<Record<number, SVGCircleElement | null>>({});
+  /** The rocker body group: written directly during a scratch drag (no React). */
+  const rockerRef = useRef<SVGGElement | null>(null);
+  /**
+   * S3 — ONE master-scratch gesture at a time. The pointer that started it owns
+   * the whole sequence: no rocker press ever reaches the gesture engine while
+   * this is non-null, so no semitone / step-scrub row can leak from it.
+   */
+  const scratchRef = useRef<{
+    pointerId: number;
+    dir: 1 | -1;
+    /** True when the signed master head refused (no stems): legacy shuttle. */
+    legacy: boolean;
+    displacement: number;
+  } | null>(null);
   const faderValuesRef = useRef<number[]>([0.78, 0.72, 0.65, 0.7]);
+
   /**
    * Workstream 1: one session per pointer. No singleton drag — a second finger
    * can never steal the first fader, and each pointerup ends only its own.
@@ -384,6 +405,12 @@ export function useDeviceSurface() {
       heldKeysRef.current.clear();
       scrubKeysRef.current.clear();
       scrubPointersRef.current.clear();
+      if (scratchRef.current) {
+        const id = scratchRef.current.pointerId;
+        scratchRef.current = null;
+        void getAudioEngine().endMasterScratch();
+        void id;
+      }
       fnPointerRef.current = null;
       scrubUsedFnRef.current = false;
 
@@ -679,6 +706,47 @@ export function useDeviceSurface() {
     }
   }, [state.functionHeld, state.headsMode]);
 
+  /**
+   * S3 visual: the rocker tilts proportionally with the finger while grabbed,
+   * and eases back to its resting centre when the gesture ends. Written to the
+   * DOM directly — React never re-renders on a scratch drag.
+   */
+  const applyRockerVisual = useCallback((displacement: number, dragging: boolean) => {
+    const g = rockerRef.current;
+    if (!g) return;
+    if (dragging) {
+      g.style.transition = "none";
+      g.style.transform = rockerTransform(displacement);
+    } else {
+      g.style.transition = "";
+      g.style.transform = "";
+    }
+  }, []);
+
+  /**
+   * End the master-scratch gesture owned by this pointer. Master position is
+   * kept exactly where the tape was left: S2's release glides the signed
+   * velocity back to the musical rate and anchors the song clock on the frame
+   * actually reached — no jump back to where playback "would have been".
+   */
+  const endRockerScratch = useCallback(
+    (pointerId: number) => {
+      const s = scratchRef.current;
+      if (!s || s.pointerId !== pointerId) return false;
+      scratchRef.current = null;
+      applyRockerVisual(0, false);
+      if (s.legacy) {
+        scrubPointersRef.current.delete(pointerId);
+        dispatch({ type: "globalScrub", dir: null });
+      } else {
+        void getAudioEngine().endMasterScratch();
+      }
+      return true;
+    },
+    [applyRockerVisual],
+  );
+
+
   const onControlPointerDown = useCallback(
     (control: Control, e: React.PointerEvent) => {
       e.preventDefault();
@@ -697,30 +765,45 @@ export function useDeviceSurface() {
       }
       const p = toUserSpace(e.clientX, e.clientY);
 
-      // Touch parity for the keyboard F+Q/A shuttle: FUNCTION held (on-screen)
-      // + a rocker zone pressed = held four-stem shuttle. The rocker is never
-      // pressed into the gesture engine, so no varispeed / step-scrub row can
-      // fire underneath it, and FUNCTION is consumed exactly as on keyboard.
+      // S3 — FUNCTION + grab the rocker = hand on the tape. The rocker becomes a
+      // continuously draggable physical control that drives the S2 signed
+      // MASTER head directly. It is NEVER pressed into the gesture engine here,
+      // so no varispeed / semitone / step-scrub row can fire underneath, and
+      // FUNCTION is consumed exactly as on the keyboard shuttle.
       if (
         (control === "rocker-fwd" || control === "rocker-rwd") &&
-        (fnPointerRef.current != null || stateRef.current.functionHeld)
+        (fnPointerRef.current != null || stateRef.current.functionHeld) &&
+        scratchRef.current == null
       ) {
-        const dir = control === "rocker-fwd" ? 1 : -1;
+        const dir: 1 | -1 = control === "rocker-fwd" ? 1 : -1;
         // Mobile Safari only permits AudioContext creation/resume in the direct
-        // pointer event call stack. Starting the unlock here (before React's
-        // command effect runs) preserves that user activation; the ordered
-        // command stream remains the sole owner of the actual shuttle action.
+        // pointer event call stack.
         void getAudioEngine().unlock();
-        scrubPointersRef.current.set(e.pointerId, dir);
         if (!scrubUsedFnRef.current) {
           scrubUsedFnRef.current = true;
-          // FUNCTION is consumed by the shuttle: cancel it so neither its hold
-          // (power) nor its release (tap) row can fire underneath.
           engine.cancel("function", fnPointerRef.current ?? "keyboard");
         }
-        dispatch({ type: "globalScrub", dir });
+        const displacement = rockerDisplacement(p?.y ?? ROCKER_CENTER_Y);
+        const session = { pointerId: e.pointerId, dir, legacy: false, displacement };
+        scratchRef.current = session;
+        applyRockerVisual(displacement, true);
+        void getAudioEngine()
+          .beginMasterScratch()
+          .then((r) => {
+            if (scratchRef.current !== session) return;
+            if (!r.ok) {
+              // No signed master head available (nothing loaded): fall back to
+              // the legacy held shuttle so the control is never dead.
+              session.legacy = true;
+              scrubPointersRef.current.set(session.pointerId, dir);
+              dispatch({ type: "globalScrub", dir });
+              return;
+            }
+            getAudioEngine().setMasterScratchVelocity(displacementToVelocity(session.displacement));
+          });
         return;
       }
+
       if (control === "function") fnPointerRef.current = e.pointerId;
 
       engine.press(control, e.pointerId, performance.now(), p?.x, p?.y);
@@ -767,8 +850,20 @@ export function useDeviceSurface() {
 
   const onControlPointerMove = useCallback(
     (control: Control, e: React.PointerEvent) => {
+      // S3 — the scratch gesture owns this pointer sequence outright.
+      const scratch = scratchRef.current;
+      if (scratch && scratch.pointerId === e.pointerId) {
+        const pt = toUserSpace(e.clientX, e.clientY);
+        if (!pt) return;
+        const d = rockerDisplacement(pt.y);
+        scratch.displacement = d;
+        applyRockerVisual(d, true);
+        if (!scratch.legacy) getAudioEngine().setMasterScratchVelocity(displacementToVelocity(d));
+        return;
+      }
       const session = faders.current.sessionForPointer(e.pointerId);
       if (!session) return;
+
       const p = toUserSpace(e.clientX, e.clientY);
       if (!p) return;
       engine.markMoved(control);
@@ -793,7 +888,7 @@ export function useDeviceSurface() {
       }
       scheduleFlush();
     },
-    [engine, scheduleFlush, toUserSpace],
+    [applyRockerVisual, engine, scheduleFlush, toUserSpace],
   );
 
   /**
@@ -883,9 +978,16 @@ export function useDeviceSurface() {
 
   const releaseControlPointer = useCallback(
     (control: Control, e: React.PointerEvent, cancelled: boolean) => {
+      // S3 ownership: a pointer consumed by master scratch produces NO tap,
+      // no semitone click and no step-scrub row on release.
+      if (endRockerScratch(e.pointerId)) return;
       if (endTouchScrub(e.pointerId)) return;
       if (control === "function") {
         fnPointerRef.current = null;
+        // FUNCTION released while the rocker is still grabbed: end the tape
+        // gesture cleanly at the MASTER position reached, and hand ordinary
+        // rocker ownership back.
+        if (scratchRef.current) endRockerScratch(scratchRef.current.pointerId);
         if (scrubPointersRef.current.size) {
           scrubPointersRef.current.clear();
           dispatch({ type: "globalScrub", dir: null });
@@ -905,7 +1007,7 @@ export function useDeviceSurface() {
         endDrag(e.pointerId);
       }
     },
-    [cancelDrag, endDrag, endTouchScrub, engine],
+    [cancelDrag, endDrag, endRockerScratch, endTouchScrub, engine],
   );
 
   const onControlPointerUp = useCallback(
@@ -987,6 +1089,7 @@ export function useDeviceSurface() {
     setPowerHoldMs,
     svgRef,
     capRefs,
+    rockerRef,
     faderValuesRef,
     rawLog,
     gestureLog,
