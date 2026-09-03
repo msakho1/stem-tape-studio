@@ -829,9 +829,9 @@ export function useDeviceSurface() {
         consumedScratchPointersRef.current.add(e.pointerId);
         applyRockerVisual(0, true);
         // The browser stops delivering pointermove when the finger stops, so
-        // the blend is polled: the scratch transient decays and the SUSTAINED
-        // held-position scrub takes over. Held at centre ⇒ the record stops;
-        // held off-centre ⇒ it keeps scrubbing in that direction.
+        // the controller is polled: in SCRATCH the transient decays to zero
+        // under a still hand (displacement is ignored), and only an
+        // uninterrupted 4 s directional hold promotes the gesture to SCRUB.
         session.stopTimer = window.setInterval(() => {
           if (scratchRef.current !== session) return;
           const now2 = performance.now();
