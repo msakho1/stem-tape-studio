@@ -839,8 +839,20 @@ export function useDeviceSurface() {
 
   const onControlPointerMove = useCallback(
     (control: Control, e: React.PointerEvent) => {
+      // S3 — the scratch gesture owns this pointer sequence outright.
+      const scratch = scratchRef.current;
+      if (scratch && scratch.pointerId === e.pointerId) {
+        const pt = toUserSpace(e.clientX, e.clientY);
+        if (!pt) return;
+        const d = rockerDisplacement(pt.y);
+        scratch.displacement = d;
+        applyRockerVisual(d, true);
+        if (!scratch.legacy) getAudioEngine().setMasterScratchVelocity(displacementToVelocity(d));
+        return;
+      }
       const session = faders.current.sessionForPointer(e.pointerId);
       if (!session) return;
+
       const p = toUserSpace(e.clientX, e.clientY);
       if (!p) return;
       engine.markMoved(control);
