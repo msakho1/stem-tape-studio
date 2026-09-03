@@ -36,7 +36,6 @@ import { sp1Surface, type Sp1SurfaceEvent } from "@/audio/midi/sp1Surface";
 import type { StemMidiEvent } from "@/audio/midi/contract";
 import { FaderSessionManager, type FaderIndex } from "@/input/faderSessions";
 import {
-  ROCKER_CENTER_Y,
   displacementToVelocity,
   rockerDisplacement,
   rockerTransform,
@@ -149,10 +148,13 @@ export function useDeviceSurface() {
   const scratchRef = useRef<{
     pointerId: number;
     dir: 1 | -1;
+    grabY: number;
     /** True when the signed master head refused (no stems): legacy shuttle. */
     legacy: boolean;
     displacement: number;
   } | null>(null);
+  /** Remains claimed until that rocker pointer ends, even if FUNCTION lifts first. */
+  const consumedScratchPointersRef = useRef<Set<number>>(new Set());
   const faderValuesRef = useRef<number[]>([0.78, 0.72, 0.65, 0.7]);
 
   /**
@@ -405,6 +407,7 @@ export function useDeviceSurface() {
       heldKeysRef.current.clear();
       scrubKeysRef.current.clear();
       scrubPointersRef.current.clear();
+      consumedScratchPointersRef.current.clear();
       if (scratchRef.current) {
         const id = scratchRef.current.pointerId;
         scratchRef.current = null;
@@ -783,9 +786,13 @@ export function useDeviceSurface() {
           scrubUsedFnRef.current = true;
           engine.cancel("function", fnPointerRef.current ?? "keyboard");
         }
-        const displacement = rockerDisplacement(p?.y ?? ROCKER_CENTER_Y);
-        const session = { pointerId: e.pointerId, dir, legacy: false, displacement };
+        if (!p) return;
+        // A grab starts neutral wherever within the physical rocker it lands.
+        // Only movement after capture produces signed tape velocity.
+        const displacement = 0;
+        const session = { pointerId: e.pointerId, dir, grabY: p.y, legacy: false, displacement };
         scratchRef.current = session;
+        consumedScratchPointersRef.current.add(e.pointerId);
         applyRockerVisual(displacement, true);
         void getAudioEngine()
           .beginMasterScratch()
@@ -855,7 +862,7 @@ export function useDeviceSurface() {
       if (scratch && scratch.pointerId === e.pointerId) {
         const pt = toUserSpace(e.clientX, e.clientY);
         if (!pt) return;
-        const d = rockerDisplacement(pt.y);
+        const d = rockerDisplacement(pt.y, scratch.grabY);
         scratch.displacement = d;
         applyRockerVisual(d, true);
         if (!scratch.legacy) getAudioEngine().setMasterScratchVelocity(displacementToVelocity(d));
@@ -980,7 +987,14 @@ export function useDeviceSurface() {
     (control: Control, e: React.PointerEvent, cancelled: boolean) => {
       // S3 ownership: a pointer consumed by master scratch produces NO tap,
       // no semitone click and no step-scrub row on release.
-      if (endRockerScratch(e.pointerId)) return;
+      if (endRockerScratch(e.pointerId)) {
+        consumedScratchPointersRef.current.delete(e.pointerId);
+        return;
+      }
+      // FUNCTION may have ended the audio gesture before this rocker pointer
+      // lifted. It still owns the complete pointer sequence and cannot become
+      // an ordinary rocker release halfway through.
+      if (consumedScratchPointersRef.current.delete(e.pointerId)) return;
       if (endTouchScrub(e.pointerId)) return;
       if (control === "function") {
         fnPointerRef.current = null;

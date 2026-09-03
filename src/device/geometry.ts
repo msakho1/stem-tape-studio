@@ -126,9 +126,11 @@ export const HIT_ZONES: HitZone[] = [
   { control: "volume-minus", x: 176.4 - H / 2, y: 78.5 - H / 2, width: H, height: H },
   { control: "volume-plus", x: 276.0 - H / 2, y: 78.5 - H / 2, width: H, height: H },
 
-  // Left rocker, split into two stacked zones over one visual body.
-  { control: "rocker-fwd", x: 80.4 - H / 2, y: 225 - H, width: H, height: H },
-  { control: "rocker-rwd", x: 80.4 - H / 2, y: 225, width: H, height: H },
+  // Left rocker: ONE minimum-size physical target, split internally so an
+  // ordinary tap still resolves to forward/reverse. Do not give each half its
+  // own 44 px target — that creates a misleading double-height drag region.
+  { control: "rocker-fwd", x: 80.4 - H / 2, y: 225 - H / 2, width: H, height: H / 2 },
+  { control: "rocker-rwd", x: 80.4 - H / 2, y: 225, width: H, height: H / 2 },
 
   // Right rail buttons (centre 637.2)
   { control: "play", x: 637.2 - H / 2, y: 180, width: H, height: 114 },

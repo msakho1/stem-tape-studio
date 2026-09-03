@@ -13,30 +13,27 @@
  */
 import { SCRATCH_TUNING, clampVelocity } from "@/audio/masterScratch";
 
-/** Resting visual centre of the rocker body, in viewBox user units. */
-export const ROCKER_CENTER_Y = 225;
-
 /**
- * Finite physical travel each way. 70 user units ≈ the rocker body plus a
- * little overshoot, so a full-scale scratch is a short thumb movement rather
- * than a page-length drag.
+ * Finger travel from the grab point to full velocity, in SVG user units.
+ * The grab point itself is always neutral: grabbing either half must not make
+ * the tape jump before the musician moves their finger.
  */
 export const ROCKER_DRAG_RANGE = 70;
 
-/** Full-deflection tilt. Slightly beyond the ±3.2° static press tilt. */
-export const ROCKER_MAX_TILT_DEG = 6.4;
+/** Visible rocker travel at full deflection, in SVG user units. */
+export const ROCKER_VISUAL_TRAVEL = 24;
 
 /**
- * Pointer Y (user units) → normalized displacement in [-1, +1].
- * ABOVE centre is positive (tape pushed forward), below is negative.
+ * Pointer Y delta from the initial grab → normalized displacement in [-1,+1].
+ * Moving above the grab point is positive; moving below it is negative.
  */
 export function rockerDisplacement(
   userY: number,
-  center = ROCKER_CENTER_Y,
+  grabY: number,
   range = ROCKER_DRAG_RANGE,
 ): number {
-  if (!Number.isFinite(userY) || range <= 0) return 0;
-  const d = (center - userY) / range;
+  if (!Number.isFinite(userY) || !Number.isFinite(grabY) || range <= 0) return 0;
+  const d = (grabY - userY) / range;
   return d > 1 ? 1 : d < -1 ? -1 : d;
 }
 
@@ -47,13 +44,13 @@ export function displacementToVelocity(d: number, max = SCRATCH_TUNING.maxAbsVel
   return clampVelocity(clamped * max, max);
 }
 
-/** Visual tilt for a displacement. Positive displacement tilts forward (up). */
-export function rockerTiltDeg(d: number, maxDeg = ROCKER_MAX_TILT_DEG): number {
+/** Visible Y offset. Positive tape velocity moves the rocker upward. */
+export function rockerVisualY(d: number, travel = ROCKER_VISUAL_TRAVEL): number {
   const clamped = d > 1 ? 1 : d < -1 ? -1 : d;
-  return -clamped * maxDeg;
+  return -clamped * travel;
 }
 
-/** The CSS transform written straight to the rocker group during a drag. */
+/** The CSS transform written directly to the rocker group during a drag. */
 export function rockerTransform(d: number): string {
-  return `rotate(${rockerTiltDeg(d).toFixed(3)}deg)`;
+  return `translateY(${rockerVisualY(d).toFixed(3)}px)`;
 }
