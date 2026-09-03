@@ -331,7 +331,21 @@ interface LedModifier {
   /** Loop accent uses the real audio wrap phase when one exists. */
   phase?: number | null;
   periodMs?: number;
+  /** Track index 0..3 — makes the loop accent a 1→2→3→4 quarter chase. */
+  lane?: number;
 }
+
+/**
+ * Which of the four track LEDs the loop chase accents: the loop is divided into
+ * four equal quarters of its ACTUAL length, so the chase speed follows BPM and
+ * the selected loop division with no animation logic of its own.
+ *   0.00–0.249 → 0, 0.25–0.499 → 1, 0.50–0.749 → 2, 0.75–0.999 → 3
+ */
+export function loopChaseQuarter(phase: number): number {
+  const p = ((phase % 1) + 1) % 1;
+  return Math.min(3, Math.floor(p * 4));
+}
+
 
 
 export interface ResolvedPhysicalLedFrame {
