@@ -775,7 +775,7 @@ export function useDeviceSurface() {
         (fnPointerRef.current != null || stateRef.current.functionHeld) &&
         scratchRef.current == null
       ) {
-        const dir = control === "rocker-fwd" ? 1 : -1;
+        const dir: 1 | -1 = control === "rocker-fwd" ? 1 : -1;
         // Mobile Safari only permits AudioContext creation/resume in the direct
         // pointer event call stack.
         void getAudioEngine().unlock();
