@@ -270,7 +270,7 @@ describe("expressive scratch contour", () => {
       y -= step;
       seen.push(c.sample(y, t));
     }
-    expect(seen[0]).toBeGreaterThan(seen[seen.length - 1]);
+    expect(seen[0]!).toBeGreaterThan(seen[seen.length - 1]!);
     expect(new Set(seen.map((v) => v.toFixed(3))).size).toBeGreaterThan(3);
   });
 });
