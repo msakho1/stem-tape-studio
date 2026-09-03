@@ -33,33 +33,36 @@
  * product requirements — every gesture constant lives here so tuning is a
  * one-file change.
  *
- * HYBRID PHYSICAL ROCKER: SCRATCH + SCRUB, ONE GESTURE
- * ----------------------------------------------------
- * Two components are summed, never switched between:
- *
- *   MOTION  (scratch)  transient, from hand SPEED (Δy/Δt), decays with
- *                      `scratchDecayMs` so a flick is an impulse, not a latch.
- *   POSITION (scrub)   sustained, from how far the rocker is HELD from the
- *                      grab point, through a squared curve so the centre has
- *                      fine control and the extremes shuttle.
- *
- *   v = clamp(motion·exp(-Δt/τ) + scrub(d), ±combinedMaxVelocity)
- *
- * A held-still hand therefore does NOT force zero: it settles onto the scrub
- * velocity its position implies, and only reads zero near the centre.
+ * SCRATCH IS THE DEFAULT; SCRUB IS EARNED
+ * ---------------------------------------
+ * FUNCTION + rocker enters SCRATCH and stays there. In SCRATCH, velocity comes
+ * from HAND MOTION ONLY — a stationary finger stops the record even while the
+ * rocker is physically displaced. Sustained displacement contributes NOTHING
+ * until the musician has deliberately held the rocker on ONE side of centre,
+ * without reversing or re-crossing, for `scrubQualifyMs`. Only then does SCRUB
+ * fade in over `scrubEnterFadeMs`, so the transition is smooth, not a jump.
  */
 export const SCRATCH_TUNING = {
   /** Absolute engine ceiling on |velocity| (× musical rate). */
   maxAbsVelocity: 3.5,
-  /** Ceiling on the TRANSIENT hand-motion (scratch) component. */
-  scratchMaxVelocity: 1.75,
-  /** Ceiling on the SUSTAINED held-position (scrub) component. */
+  /** Ceiling on the SCRATCH (hand-motion) velocity. Turntable, not shuttle. */
+  scratchMaxVelocity: 1.0,
+  /** Ceiling on the SUSTAINED held-position (scrub) velocity. */
   scrubMaxVelocity: 2.0,
-  /** Ceiling on the blended command. */
+  /** Ceiling on the combined command once scrub has been earned. */
   combinedMaxVelocity: 2.5,
   /** Exponential decay time constant of the scratch impulse, ms. */
-  scratchDecayMs: 110,
-  /** Held displacement below this |d| is the centre: no scrub. */
+  scratchDecayMs: 90,
+  /**
+   * Uninterrupted same-side directional hold required before SCRUB may begin.
+   * Reset by crossing centre, reversing, returning to neutral, or release.
+   */
+  scrubQualifyMs: 4000,
+  /** Smooth fade-in of the sustained scrub component once qualified, ms. */
+  scrubEnterFadeMs: 500,
+  /** |displacement| at or below this counts as neutral/centre. */
+  scrubNeutralBand: 0.12,
+  /** Held displacement below this |d| produces no scrub even in SCRUB phase. */
   scrubDeadband: 0.08,
   /** Curve exponent of the held-position response (2 = squared). */
   scrubCurveExponent: 2,
@@ -72,16 +75,20 @@ export const SCRATCH_TUNING = {
   /** Ramp applied to each commanded velocity step, ms (click suppression). */
   velocityRampMs: 6,
   /**
-   * Hand speed, in SVG user units per second, that maps to 1.0× tape velocity.
-   * Deliberately far coarser than literal finger speed: an ordinary swipe is
-   * hundreds of units/second and must NOT read as multiples of tape speed.
+   * Hand speed, in SVG user units per second, at which SCRATCH reaches its
+   * maximum. Deliberately far above literal finger speed so an ordinary swipe
+   * lands well inside the range and the top is hard to reach.
    */
-  handUnitsPerSecondAtUnitRate: 420,
+  handUnitsPerSecondAtMaxScratch: 900,
   /** Hand speed below this is treated as a held-still hand (dead band). */
-  handDeadbandUnitsPerSecond: 30,
+  handDeadbandUnitsPerSecond: 20,
   /**
-   * Legacy: the old "held still ⇒ zero" timeout. The hybrid controller does not
-   * use it; a still hand now settles onto its held scrub velocity.
+   * Curve applied to normalised hand speed before scaling to the scratch
+   * maximum. >1 puts weight around zero: small movements stay slow and heavy.
+   */
+  scratchCurveExponent: 1.5,
+  /**
+   * Legacy: the old "held still ⇒ zero" timeout. Superseded by the phase model.
    */
   handStopTimeoutMs: 60,
   /** Longest Δt trusted for a hand-velocity sample (throttled frames). */
@@ -89,19 +96,21 @@ export const SCRATCH_TUNING = {
 } as const;
 
 /**
- * Pointer motion → signed TRANSIENT scratch velocity (the impulse, before decay).
+ * Pointer motion → signed SCRATCH velocity (the impulse, before decay).
  *
  * `dyUnits` is SVG-user-unit travel (positive = downward on screen) and `dtMs`
  * the interval it took. Upward motion pushes the tape forward, so the sign is
- * inverted. Below the dead band the hand counts as stopped.
+ * inverted. Hand speed is normalised then curved, so the response is heavy and
+ * fine near zero and only saturates on a genuinely violent movement.
  */
 export function handVelocityToTapeVelocity(
   dyUnits: number,
   dtMs: number,
   tuning: {
-    handUnitsPerSecondAtUnitRate: number;
+    handUnitsPerSecondAtMaxScratch: number;
     handDeadbandUnitsPerSecond: number;
     handMaxSampleMs: number;
+    scratchCurveExponent: number;
     scratchMaxVelocity: number;
   } = SCRATCH_TUNING,
 ): number {
@@ -109,8 +118,12 @@ export function handVelocityToTapeVelocity(
   const dt = Math.min(Math.max(dtMs, 1), tuning.handMaxSampleMs);
   const unitsPerSecond = (-dyUnits * 1000) / dt;
   if (Math.abs(unitsPerSecond) < tuning.handDeadbandUnitsPerSecond) return 0;
-  return clampVelocity(unitsPerSecond / tuning.handUnitsPerSecondAtUnitRate, tuning.scratchMaxVelocity);
+  const x = unitsPerSecond / tuning.handUnitsPerSecondAtMaxScratch;
+  const mag = Math.min(1, Math.abs(x));
+  const shaped = Math.pow(mag, tuning.scratchCurveExponent) * tuning.scratchMaxVelocity;
+  return clampVelocity(x < 0 ? -shaped : shaped, tuning.scratchMaxVelocity);
 }
+
 
 /**
  * Held rocker displacement d ∈ [-1,+1] → SUSTAINED scrub velocity.
