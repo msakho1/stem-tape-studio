@@ -48,6 +48,8 @@ import {
 import { estimateMigration } from "./workletBudget";
 import { pairwiseDrift, sharedApplyFrame, type WorkletAck } from "./workletProtocol";
 import { preflightWorklet, WorkletTrack, type MigrationStatus, type PreflightResult } from "./workletTrack";
+import { clampVelocity, msToFrames, SCRATCH_TUNING } from "./masterScratch";
+
 import { FxRack, type FxRackSnapshot } from "./fx/rack";
 import { BankRack, type BankStageSnapshot } from "./fx/banks";
 import type { AlgorithmIndex, BankIndex } from "@/machine/fx12";
@@ -1649,6 +1651,133 @@ export class AudioEngine {
     }
     return { ok, detail: `shared context frame ${at}\n${results.join("\n")}\n${gate.statement}` };
   }
+
+  // ------------------------------------------------- S2: signed master head
+  /**
+   * Master scratch state. ONE position, ONE signed velocity, four lanes that
+   * merely MAP it (see src/audio/masterScratch.ts). Normal playback is not
+   * migrated permanently by S2: the worklet is engaged when a gesture begins
+   * and LEFT ACTIVE afterwards (migrating back on every gesture would add a
+   * second handoff per release for no benefit; staying on the worklet keeps
+   * entry/exit semantics clean and gapless).
+   */
+  masterScratch: { engagedAtFrame: number; masterFrame: number; velocity: number } | null = null;
+
+  /** Node playback → capture the exact master position → worklet takeover. */
+  async beginMasterScratch(): Promise<{ ok: boolean; detail: string }> {
+    const ctx = this.ctx;
+    if (!ctx) return { ok: false, detail: "audio not unlocked" };
+    if (this.masterScratch) return { ok: true, detail: "master scratch already engaged" };
+
+    const loaded = this.tracks.filter((t) => t.buffer || t.worklet);
+    if (loaded.length === 0) return { ok: false, detail: "no stems loaded" };
+    if (this.tracks.some((t) => (t.buffer || t.worklet) && t.engineMode === "node")) {
+      const m = await this.migrateAll();
+      if (!m.ok) return { ok: false, detail: `master scratch refused — ${m.detail}` };
+    }
+    const lanes = this.tracks.filter((t) => t.engineMode === "worklet" && t.worklet);
+    if (lanes.length === 0) return { ok: false, detail: "no worklet lanes available" };
+
+    const sr = ctx.sampleRate;
+    const at = sharedApplyFrame(ctx);
+    // The audible master position AT the shared apply frame — no jump.
+    const posS = this.timeline.positionAt(at / sr);
+    const masterFrame = posS * sr;
+    const velocity = clampVelocity(this.timeline.currentRate(at / sr) || 1);
+    const loop = this.globalLoop;
+    for (const t of lanes) {
+      void t.worklet!.post({
+        type: "masterScratch",
+        phase: "engage",
+        applyAtContextFrame: at,
+        masterFrame,
+        velocity,
+        loopEnabled: loop != null && loop.lengthS > 0,
+        loopStartMaster: loop ? loop.start * sr : 0,
+        loopEndMaster: loop ? (loop.start + loop.lengthS) * sr : 0,
+        songFramesMaster: this.duration * sr,
+      });
+    }
+    this.masterScratch = { engagedAtFrame: at, masterFrame, velocity };
+    this.note(`master scratch engaged at master frame ${Math.round(masterFrame)} (ctx frame ${at}), v=${velocity.toFixed(3)}`);
+    return { ok: true, detail: `engaged at master frame ${Math.round(masterFrame)} on ${lanes.length} lanes` };
+  }
+
+  /** Signed velocity in master frames per output frame. Ramped, never stepped. */
+  setMasterScratchVelocity(v: number, rampMs = SCRATCH_TUNING.velocityRampMs): { ok: boolean; detail: string } {
+    const ctx = this.ctx;
+    if (!ctx || !this.masterScratch) return { ok: false, detail: "master scratch is not engaged" };
+    const velocity = clampVelocity(v);
+    const at = sharedApplyFrame(ctx);
+    for (const t of this.tracks) {
+      if (t.engineMode !== "worklet" || !t.worklet) continue;
+      void t.worklet.post({
+        type: "masterScratch",
+        phase: "velocity",
+        applyAtContextFrame: at,
+        velocity,
+        rampFrames: msToFrames(rampMs, ctx.sampleRate),
+      });
+    }
+    this.masterScratch.velocity = velocity;
+    return { ok: true, detail: `master velocity ${velocity.toFixed(3)} at ctx frame ${at}` };
+  }
+
+  /**
+   * Worklet master position → normal forward transport from that exact frame.
+   *
+   * Two scheduled steps, both at shared context frames, so there is no jump,
+   * no duplicate voice and no silence: the signed master velocity is first
+   * glided back to the musical rate INSIDE the master domain, and only then is
+   * the master head released onto the ordinary transport, which is by then
+   * already moving at exactly that rate in the forward direction.
+   */
+  async endMasterScratch(resumeRate = this.timeline.musicalRate()): Promise<{ ok: boolean; detail: string }> {
+    const ctx = this.ctx;
+    if (!ctx || !this.masterScratch) return { ok: false, detail: "master scratch is not engaged" };
+    const sr = ctx.sampleRate;
+    const at = sharedApplyFrame(ctx);
+    const rampFrames = msToFrames(SCRATCH_TUNING.releaseMs, sr);
+    const lanes = this.tracks.filter((t) => t.engineMode === "worklet" && t.worklet);
+    for (const t of lanes) {
+      void t.worklet!.post({
+        type: "masterScratch",
+        phase: "velocity",
+        applyAtContextFrame: at,
+        velocity: resumeRate,
+        rampFrames,
+      });
+      void t.worklet!.post({
+        type: "masterScratch",
+        phase: "release",
+        applyAtContextFrame: at + rampFrames,
+        resumeRate,
+        rampFrames: 0,
+      });
+    }
+    // Read back the landed position from each lane after the release frame,
+    // then anchor the hidden song clock onto it. Every lane reports the SAME
+    // master position by construction; the drift figure is a proof, not a fix.
+    const waitS = (at + rampFrames) / sr - ctx.currentTime + 0.02;
+    if (waitS > 0) await new Promise((r) => setTimeout(r, Math.ceil(waitS * 1000)));
+    const acks: (number | null)[] = [];
+    for (const t of lanes) {
+      const ack = await t.worklet!.post({ type: "poll" });
+      acks.push(typeof ack?.masterFrame === "number" ? ack.masterFrame : null);
+    }
+    const resulting = acks.find((a) => a != null) ?? this.masterScratch.masterFrame;
+    const drift = pairwiseDrift(acks);
+    this.timeline.anchor(ctx.currentTime, resulting / sr);
+    this.masterScratch = null;
+    this.note(`master scratch released at master frame ${Math.round(resulting)} — max inter-stem drift ${drift.maxDrift} frames`);
+    return {
+      ok: true,
+      detail: `released at master frame ${Math.round(resulting)} (${(resulting / sr).toFixed(3)}s), max drift ${drift.maxDrift} frames`,
+    };
+  }
+
+
+
 
   /** Push current window/chop/direction/rate state into a processor. */
   private async pushStructure(t: TrackRuntime, at: number) {

@@ -46,6 +46,29 @@ class TapeProcessor extends AudioWorkletProcessor {
     this.direction = 1;
     this.playing = false;
 
+    /**
+     * S2 — SIGNED MASTER HEAD.
+     *
+     * While `master` is non-null this processor stops integrating its own
+     * transport. Instead it integrates ONE authoritative master position
+     * expressed in MASTER frames (context-sample-rate frames of song time),
+     * from an identical program (same integer engage frame, same signed
+     * velocity, same ramp length, same loop geometry) delivered to all four
+     * processors. Every arithmetic step is therefore bit-identical across the
+     * four instances, and each lane's read pointer is a pure MAPPING of that
+     * one position:
+     *
+     *     readPosition = masterPos * rateScale        (rateScale = srcSR/ctxSR)
+     *
+     * No lane owns a master-scratch accumulator of its own, so inter-stem
+     * drift cannot accumulate no matter how long the gesture runs.
+     * @type {null | {pos:number, vel:number, target:number, rampLeft:number,
+     *   step:number, loopEnabled:boolean, loopStart:number, loopEnd:number,
+     *   songFrames:number, clamped:boolean}}
+     */
+    this.master = null;
+
+
     this.windowStart = 0;
     this.windowEnd = 0;
     this.chopDiv = 1;
@@ -119,6 +142,12 @@ class TapeProcessor extends AudioWorkletProcessor {
 
   // ------------------------------------------------------------- protocol
 
+  /** Authoritative master position (master frames) this lane is reading from. */
+  masterFrame() {
+    if (this.master) return this.master.pos;
+    return this.rateScale !== 0 ? this.readPosition / this.rateScale : this.readPosition;
+  }
+
   reply(seq, status, detail, appliedAtContextFrame, resultingSourceFrame) {
     this.port.postMessage({
       seq,
@@ -132,8 +161,11 @@ class TapeProcessor extends AudioWorkletProcessor {
       rate: this.rate,
       direction: this.direction,
       playing: this.playing,
+      masterFrame: this.masterFrame(),
+      masterVelocity: this.master ? this.master.vel : this.rate * this.direction,
     });
   }
+
 
   onMessage(msg) {
     if (!msg || typeof msg.type !== "string") return;
@@ -414,6 +446,70 @@ class TapeProcessor extends AudioWorkletProcessor {
       case "setDirection":
         this.direction = m.direction < 0 ? -1 : 1;
         break;
+      case "masterScratch": {
+        const phase = m.phase;
+        if (phase === "engage") {
+          const pos = Number(m.masterFrame) || 0;
+          this.master = {
+            pos,
+            vel: Number(m.velocity) || 0,
+            target: Number(m.velocity) || 0,
+            rampLeft: 0,
+            step: 0,
+            loopEnabled: m.loopEnabled === true,
+            loopStart: Number(m.loopStartMaster) || 0,
+            loopEnd: Number(m.loopEndMaster) || 0,
+            songFrames: Number(m.songFramesMaster) || 0,
+            clamped: false,
+          };
+          this.readPosition = pos * this.rateScale;
+          this.playing = true;
+          break;
+        }
+        if (!this.master) break;
+        if (phase === "velocity") {
+          const target = Number(m.velocity) || 0;
+          const frames = m.rampFrames | 0;
+          this.master.target = target;
+          if (frames > 0) {
+            this.master.rampLeft = frames;
+            this.master.step = (target - this.master.vel) / frames;
+          } else {
+            this.master.vel = target;
+            this.master.rampLeft = 0;
+            this.master.step = 0;
+          }
+          break;
+        }
+        if (phase === "geometry") {
+          this.master.loopEnabled = m.loopEnabled === true;
+          this.master.loopStart = Number(m.loopStartMaster) || 0;
+          this.master.loopEnd = Number(m.loopEndMaster) || 0;
+          break;
+        }
+        if (phase === "release") {
+          // Hand the resulting master position back to the ordinary transport
+          // with NO jump: the pointer is already exactly there.
+          const v = this.master.vel;
+          this.readPosition = this.master.pos * this.rateScale;
+          this.direction = v < 0 ? -1 : 1;
+          const resume = Number.isFinite(m.resumeRate) ? Number(m.resumeRate) : Math.abs(v);
+          this.rate = Math.abs(v);
+          this.targetRate = resume;
+          const frames = m.rampFrames | 0;
+          if (frames > 0 && resume !== this.rate) {
+            this.rampFramesLeft = frames;
+            this.rateStep = (resume - this.rate) / frames;
+          } else {
+            this.rate = resume;
+            this.rampFramesLeft = 0;
+            this.rateStep = 0;
+          }
+          this.master = null;
+        }
+        break;
+      }
+
       default:
         break;
     }
@@ -477,7 +573,7 @@ class TapeProcessor extends AudioWorkletProcessor {
 
     let xf = this.crossfadeFrames;
     let loopLen = this.loopEnd - this.loopStart;
-    let looping = this.loopEnabled && loopLen > 2;
+    let looping = this.loopEnabled && loopLen > 2 && this.master == null;
     this.geometryDirty = false;
 
     for (let i = 0; i < blockFrames; i++) {
@@ -490,7 +586,7 @@ class TapeProcessor extends AudioWorkletProcessor {
         // on THIS frame, not on the next block.
         xf = this.crossfadeFrames;
         loopLen = this.loopEnd - this.loopStart;
-        looping = this.loopEnabled && loopLen > 2;
+        looping = this.loopEnabled && loopLen > 2 && this.master == null;
         this.geometryDirty = false;
       }
 
@@ -611,17 +707,63 @@ class TapeProcessor extends AudioWorkletProcessor {
 
 
 
-      this.readPosition += this.rate * this.rateScale * this.direction;
+      if (this.master) {
+        // ---- signed master head: one position, four identical evaluations --
+        const M = this.master;
+        if (M.rampLeft > 0) {
+          M.vel += M.step;
+          M.rampLeft--;
+          if (M.rampLeft === 0) M.vel = M.target;
+        } else {
+          M.vel = M.target;
+        }
+        M.pos += M.vel;
+        const mLen = M.loopEnd - M.loopStart;
+        if (M.loopEnabled && mLen > 2) {
+          // Loop-aware wrap in BOTH signed directions.
+          while (M.pos >= M.loopEnd) {
+            M.pos -= mLen;
+            this.wrapCount++;
+          }
+          while (M.pos < M.loopStart) {
+            M.pos += mLen;
+            this.wrapCount++;
+          }
+          M.clamped = false;
+        } else {
+          // No loop: hard clamp at song start/end, never a wrap.
+          const end = M.songFrames > 0 ? M.songFrames : this.sourceFrames / (this.rateScale || 1);
+          if (M.pos < 0) {
+            M.pos = 0;
+            M.vel = 0;
+            M.target = 0;
+            M.rampLeft = 0;
+            M.clamped = true;
+          } else if (M.pos > end) {
+            M.pos = end;
+            M.vel = 0;
+            M.target = 0;
+            M.rampLeft = 0;
+            M.clamped = true;
+          } else {
+            M.clamped = false;
+          }
+        }
+        this.readPosition = M.pos * this.rateScale;
+      } else {
+        this.readPosition += this.rate * this.rateScale * this.direction;
 
-      if (looping) {
-        if (this.direction > 0 && this.readPosition >= this.loopEnd) {
-          this.readPosition -= loopLen;
-          this.wrapCount++;
-        } else if (this.direction < 0 && this.readPosition < this.loopStart) {
-          this.readPosition += loopLen;
-          this.wrapCount++;
+        if (looping) {
+          if (this.direction > 0 && this.readPosition >= this.loopEnd) {
+            this.readPosition -= loopLen;
+            this.wrapCount++;
+          } else if (this.direction < 0 && this.readPosition < this.loopStart) {
+            this.readPosition += loopLen;
+            this.wrapCount++;
+          }
         }
       }
+
     }
 
     // Scrub telemetry: only while a scrub is live, ~every 8 quanta. Nothing is
