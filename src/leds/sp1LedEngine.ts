@@ -550,7 +550,14 @@ function trackModifiers(s: AuthoritativeSp1LedState, i: number): LedModifier[] {
   else if (s.anySolo) mods.push({ kind: "non-solo" });
 
   const looping = s.globalLoop.active || s.globalLoop.latched || t.looping;
-  if (looping) mods.push({ kind: "loop", phase: s.loopPhase ?? null, periodMs: loopPeriodFor(s.globalLoop.division) });
+  if (looping)
+    mods.push({
+      kind: "loop",
+      phase: s.loopPhase ?? null,
+      periodMs: loopPeriodFor(s.globalLoop.division),
+      lane: i,
+    });
+
   if (t.reverse) mods.push({ kind: "reverse" });
   // Authoritative FX state, overlay open or not. Stem-scoped FX only accents
   // the stem it is actually applied to.
