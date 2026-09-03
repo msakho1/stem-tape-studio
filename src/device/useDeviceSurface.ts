@@ -38,7 +38,6 @@ import { FaderSessionManager, type FaderIndex } from "@/input/faderSessions";
 import {
   ScratchScrubController,
   displacementToVelocity,
-  rockerDisplacement,
   rockerTransform,
 } from "@/input/rockerScratch";
 import { SCRATCH_TUNING } from "@/audio/masterScratch";
