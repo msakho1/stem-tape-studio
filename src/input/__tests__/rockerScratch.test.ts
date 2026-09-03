@@ -92,12 +92,12 @@ describe("S3 — scratch is the default; scrub is earned by a 4 s directional ho
   it("the same direction at 4.0 s enters SCRUB smoothly, no jump", () => {
     const { c } = pullAndHold(0.7, 3990);
     expect(c.phase).toBe("scratch");
-    const atEntry = c.poll(4100);
+    expect(c.poll(4100)).toBe(0); // the fade begins at exactly zero: no jump
     expect(c.phase).toBe("scrub");
-    // Faded in, not snapped to the full sustained value.
-    expect(atEntry).toBeGreaterThan(0);
-    expect(atEntry).toBeLessThan(displacementToScrubVelocity(0.7));
-    const settled = c.poll(4060 + T.scrubEnterFadeMs + 100);
+    const mid = c.poll(4100 + T.scrubEnterFadeMs / 2);
+    expect(mid).toBeGreaterThan(0);
+    expect(mid).toBeLessThan(displacementToScrubVelocity(0.7));
+    const settled = c.poll(4100 + T.scrubEnterFadeMs + 100);
     expect(settled).toBeCloseTo(displacementToScrubVelocity(0.7), 6);
     expect(Math.abs(settled)).toBeLessThanOrEqual(T.scrubMaxVelocity);
   });
