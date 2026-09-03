@@ -35,6 +35,7 @@ import { nativeMidiBridge } from "@/audio/midi/nativeBridge";
 import { sp1Surface, type Sp1SurfaceEvent } from "@/audio/midi/sp1Surface";
 import type { StemMidiEvent } from "@/audio/midi/contract";
 import { FaderSessionManager, type FaderIndex } from "@/input/faderSessions";
+import { displacementToVelocity, rockerDisplacement, rockerTransform } from "@/input/rockerScratch";
 import { installDiagnostics, publishArbiter, publishSurface, publishTapLatency } from "@/lib/diagnostics";
 import { surfaceCommandTracer } from "@/diagnostics/commandTrace";
 import { trace } from "@/diagnostics/trace";
