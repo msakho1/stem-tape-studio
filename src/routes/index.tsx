@@ -86,6 +86,7 @@ function LabPage() {
     setPowerHoldMs,
     svgRef,
     capRefs,
+    rockerRef,
     faderValuesRef,
     rawLog,
     gestureLog,
@@ -319,6 +320,7 @@ function LabPage() {
             <DeviceSurface
               svgRef={svgRef}
               capRefs={capRefs}
+              rockerRef={rockerRef}
               faderValues={state.tracks.map((t) => t.volume)}
               pressed={state.pressed}
               leds={leds}
