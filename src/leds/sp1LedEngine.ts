@@ -331,7 +331,21 @@ interface LedModifier {
   /** Loop accent uses the real audio wrap phase when one exists. */
   phase?: number | null;
   periodMs?: number;
+  /** Track index 0..3 — makes the loop accent a 1→2→3→4 quarter chase. */
+  lane?: number;
 }
+
+/**
+ * Which of the four track LEDs the loop chase accents: the loop is divided into
+ * four equal quarters of its ACTUAL length, so the chase speed follows BPM and
+ * the selected loop division with no animation logic of its own.
+ *   0.00–0.249 → 0, 0.25–0.499 → 1, 0.50–0.749 → 2, 0.75–0.999 → 3
+ */
+export function loopChaseQuarter(phase: number): number {
+  const p = ((phase % 1) + 1) % 1;
+  return Math.min(3, Math.floor(p * 4));
+}
+
 
 
 export interface ResolvedPhysicalLedFrame {
@@ -465,11 +479,20 @@ export function applyModifiers(base: number, mods: readonly LedModifier[], t: nu
         v = Math.round(v * NON_SOLO_SCALE);
         break;
       case "loop": {
-        // Wrap tick on the real loop phase when the engine offers one.
         const ph = cyclePhase(m, t, PERIOD.latchedBlink);
-        v = ph < LOOP_TICK ? Math.max(v, 104) : Math.round(v * 0.82);
+        if (m.lane != null) {
+          // 1 → 2 → 3 → 4 chase across the four track LEDs, derived from the
+          // real loop phase. The accented lane is LIFTED over its own stem
+          // meter, the others are gently attenuated: activity survives.
+          const q = loopChaseQuarter(ph);
+          v = q === m.lane ? Math.min(BRIGHT_FULL, Math.max(v, 84) + 34) : Math.round(v * 0.72);
+        } else {
+          // Side LED keeps the wrap tick on the real phase.
+          v = ph < LOOP_TICK ? Math.max(v, 104) : Math.round(v * 0.82);
+        }
         break;
       }
+
       case "reverse": {
         // Backwards stutter notch — unique to the reversed lane, and the
         // stem's own activity keeps modulating between notches.
@@ -527,7 +550,14 @@ function trackModifiers(s: AuthoritativeSp1LedState, i: number): LedModifier[] {
   else if (s.anySolo) mods.push({ kind: "non-solo" });
 
   const looping = s.globalLoop.active || s.globalLoop.latched || t.looping;
-  if (looping) mods.push({ kind: "loop", phase: s.loopPhase ?? null, periodMs: loopPeriodFor(s.globalLoop.division) });
+  if (looping)
+    mods.push({
+      kind: "loop",
+      phase: s.loopPhase ?? null,
+      periodMs: loopPeriodFor(s.globalLoop.division),
+      lane: i,
+    });
+
   if (t.reverse) mods.push({ kind: "reverse" });
   // Authoritative FX state, overlay open or not. Stem-scoped FX only accents
   // the stem it is actually applied to.

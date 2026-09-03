@@ -859,16 +859,40 @@ export class AudioEngine {
   }
 
   /**
-   * READ-ONLY loop-wrap anchor for the LED compositor: 0..1 through the
-   * current global loop, derived from the same derived playhead. Returns null
-   * when there is no global loop. Touches no transport state.
+   * READ-ONLY loop-wrap anchor for the LED compositor: 0..1 through the loop
+   * the listener is ACTUALLY hearing. It is derived from the audible read
+   * pointer of a live looping source (its spawn offset advanced along the same
+   * integrated-rate timeline), NOT from the hidden song playhead — the hidden
+   * clock keeps running forward underneath a loop, so it would drift out of
+   * the window within one cycle. Touches no transport state.
    */
   loopPhase(): number | null {
     const l = this.globalLoop;
     if (!l || !(l.lengthS > 0)) return null;
-    const p = (this.position() - l.start) / l.lengthS;
+    const now = this.ctx ? this.ctx.currentTime : 0;
+    const audible = this.audibleLoopPosition(now);
+    const base = audible ?? this.position();
+    const p = (base - l.start) / l.lengthS;
     return ((p % 1) + 1) % 1;
   }
+
+  /**
+   * Media position of the newest live looping source, on the shared integrated
+   * timeline. This is the frame the wrap scheduler itself works from, so the
+   * LED chase and the audible wrap share one authority.
+   */
+  private audibleLoopPosition(now: number): number | null {
+    if (!this.requestedPlaying) return null;
+    for (const t of this.tracks) {
+      if (!t.buffer || !t.loop.enabled) continue;
+      const live = t.sources[t.sources.length - 1];
+      if (!live) continue;
+      const advanced = this.timeline.positionAt(now) - this.timeline.positionAt(live.startAt);
+      return live.startPos + Math.max(0, advanced);
+    }
+    return null;
+  }
+
 
 
 
@@ -1049,6 +1073,11 @@ export class AudioEngine {
       const rate = Math.abs(this.timeline.currentRate(now)) || 1;
       for (const v of this.headVoices) if (v) v.node.playbackRate.setTargetAtTime(rate, now, RAMP_TAU);
     }
+    // ONE authoritative wrap instant for the whole global loop. Each lane is
+    // still derived from its own read pointer, but the first lane that reaches
+    // the boundary publishes the seam time and every other lane splices at
+    // exactly that context time — no per-lane boundary detection, no flam.
+    let sharedSeamAt: number | null = null;
     for (let li = 0; li < this.tracks.length; li++) {
       const t = this.tracks[li]!;
       if (this.heads.active && this.heads.engine === "node" && this.heads.source === li) continue;
@@ -1079,11 +1108,16 @@ export class AudioEngine {
       // clock keeps advancing underneath a looping lane. That hidden value is
       // what the lane rejoins on release.
       const seamPos = this.timeline.positionAt(live.startAt) + (bounds.end - live.startPos);
-      const seamAt = this.timeline.timeAtPosition(now, seamPos);
-      if (seamAt == null) continue;
-      const fadeStart = seamAt - SEAM_FADE_S;
-      if (fadeStart > now + SEAM_LOOKAHEAD_S) continue;
-      const at = Math.max(fadeStart, now + 0.005);
+      const own = this.timeline.timeAtPosition(now, seamPos);
+      if (own == null) continue;
+      if (this.globalLoop && sharedSeamAt == null) sharedSeamAt = own;
+      const seamAt = this.globalLoop ? sharedSeamAt! : own;
+      if (seamAt > now + SEAM_LOOKAHEAD_S) continue;
+      // The splice happens ON the boundary, never before it: the incoming
+      // source starts reading loopStart exactly at `seamAt` and the outgoing
+      // one crossfades out over the 12 ms AFTER it, reading past the loop end.
+      // Starting the incoming early is what duplicated the downbeat transient.
+      const at = Math.max(seamAt, now + 0.005);
       // Never wrap a lane past a scheduled loop release — the release spawn
       // owns everything at and after its bar boundary.
       if (pendingRel && at >= pendingRel.at - 1e-6) continue;
@@ -1095,6 +1129,7 @@ export class AudioEngine {
       t.committedSeamAt = seamAt;
       t.seamCount++;
     }
+
     this.settlePendingReleases(now);
   }
 

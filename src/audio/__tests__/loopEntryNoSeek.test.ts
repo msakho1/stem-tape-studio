@@ -143,3 +143,27 @@ describe("loop release", () => {
     }
   });
 });
+
+describe("authoritative loop phase", () => {
+  it("stays inside the audible loop window across many cycles, wrapping 1 -> 0", async () => {
+    const { engine, advance, tick } = await rig();
+    engine.execute(cmd("transport.play"));
+    advance(3.0);
+    engine.execute(cmd("loop.global.start", { division: 1 }));
+    let wraps = 0;
+    let prev = engine.loopPhase()!;
+    expect(prev).toBeGreaterThanOrEqual(0);
+    for (let i = 0; i < 400; i++) {
+      advance(0.02);
+      tick();
+      const p = engine.loopPhase()!;
+      expect(p).toBeGreaterThanOrEqual(0);
+      expect(p).toBeLessThan(1);
+      if (p < prev) wraps++;
+      prev = p;
+    }
+    // 8 s of a 2 s loop -> four wraps, no drift out of the window.
+    expect(wraps).toBeGreaterThanOrEqual(3);
+    expect(engine.loopPhase()).toBeLessThan(1);
+  });
+});
