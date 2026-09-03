@@ -71,16 +71,23 @@ export function rockerTransform(d: number): string {
 }
 
 /**
- * Hybrid scratch/scrub controller.
+ * Scratch-first rocker controller.
  *
- * One gesture, two blended components (see `masterScratch.ts`):
- *  - MOTION: an impulse taken from hand speed, decaying with `scratchDecayMs`.
- *  - POSITION: a sustained scrub from how far the rocker is held from the grab
- *    point, through a squared curve.
+ * PHASE "scratch" (always the entry phase)
+ *   velocity = decayed hand-motion impulse ONLY. A stationary finger stops the
+ *   record even while the rocker is physically displaced. Sustained
+ *   displacement contributes nothing.
  *
- * `sample()` on every pointermove, `poll()` on a timer so the decay and the
- * sustained hold keep being commanded while the finger is motionless.
+ * PHASE "scrub" (earned, never assumed)
+ *   Entered only after an uninterrupted `scrubQualifyMs` hold on ONE side of
+ *   centre with no reversal and no centre crossing. Displacement then fades in
+ *   over `scrubEnterFadeMs` and sustains, with hand motion still layered on top.
+ *
+ * The qualification timer resets on: centre crossing, side change, return to
+ * neutral, or a significant direction reversal of the hand.
  */
+export type RockerPhase = "scratch" | "scrub";
+
 export class ScratchScrubController {
   private grabY: number;
   private lastY: number;
@@ -88,9 +95,17 @@ export class ScratchScrubController {
   /** Latest scratch impulse and when it was taken. */
   private impulse = 0;
   private impulseT: number;
-  /** Held displacement in [-1,+1] — visual travel AND the scrub component. */
+  /** Which side of centre the hold currently qualifies on (0 = neutral). */
+  private holdSide: -1 | 0 | 1 = 0;
+  /** When the current uninterrupted same-side hold began. */
+  private holdSinceT: number | null = null;
+  /** When SCRUB was entered, for the smooth fade-in. */
+  private scrubSinceT: number | null = null;
+  /** Held displacement in [-1,+1] — visual travel, and scrub once qualified. */
   displacement = 0;
-  /** Last blended velocity produced. */
+  /** Current phase. Internal only: there is no UI mode. */
+  phase: RockerPhase = "scratch";
+  /** Last velocity produced. */
   velocity = 0;
 
   constructor(grabY: number, t: number) {
@@ -100,13 +115,54 @@ export class ScratchScrubController {
     this.impulseT = t;
   }
 
-  private blend(t: number): number {
+  /** Milliseconds of uninterrupted qualifying hold so far. */
+  holdMs(t: number): number {
+    return this.holdSinceT == null ? 0 : t - this.holdSinceT;
+  }
+
+  /**
+   * Public reset: FUNCTION lifted, or any other event that must revoke a
+   * partially-earned hold. Returns the gesture to SCRATCH immediately.
+   */
+  revokeQualification(t: number): void {
+    this.resetQualification(0, t);
+  }
+
+  /** Drop out of SCRUB and restart qualification from scratch. */
+  private resetQualification(side: -1 | 0 | 1, t: number): void {
+    this.holdSide = side;
+    this.holdSinceT = side === 0 ? null : t;
+    this.phase = "scratch";
+    this.scrubSinceT = null;
+  }
+
+  private compute(t: number): number {
     const motion = decayedScratch(this.impulse, t - this.impulseT);
-    this.velocity = blendScratchScrub(motion, displacementToScrubVelocity(this.displacement));
+    // Qualification is time-based, so it can complete while the finger is still.
+    if (
+      this.phase === "scratch" &&
+      this.holdSinceT != null &&
+      this.holdSide !== 0 &&
+      t - this.holdSinceT >= SCRATCH_TUNING.scrubQualifyMs
+    ) {
+      this.phase = "scrub";
+      this.scrubSinceT = t;
+    }
+    if (this.phase !== "scrub") {
+      // SCRATCH: hand motion only. Displacement is deliberately ignored.
+      this.velocity = clampVelocity(motion, SCRATCH_TUNING.scratchMaxVelocity);
+      return this.velocity;
+    }
+    const fade =
+      this.scrubSinceT == null || SCRATCH_TUNING.scrubEnterFadeMs <= 0
+        ? 1
+        : Math.min(1, Math.max(0, (t - this.scrubSinceT) / SCRATCH_TUNING.scrubEnterFadeMs));
+    const scrub = displacementToScrubVelocity(this.displacement) * fade;
+    this.velocity = blendScratchScrub(motion, scrub);
     return this.velocity;
   }
 
-  /** New pointer position → blended signed master velocity. */
+  /** New pointer position → signed master velocity for the current phase. */
   sample(userY: number, t: number): number {
     if (!Number.isFinite(userY) || !Number.isFinite(t)) return this.velocity;
     const dt = t - this.lastT;
@@ -115,22 +171,33 @@ export class ScratchScrubController {
     this.lastY = userY;
     this.lastT = t;
     this.displacement = rockerDisplacement(userY, this.grabY);
+
     const next = handVelocityToTapeVelocity(dy, dt);
     if (next !== 0) {
+      // A significant reversal of the HAND restarts qualification: back-and-forth
+      // scratching can therefore continue forever without becoming scrub.
+      if (this.impulse !== 0 && Math.sign(next) !== Math.sign(this.impulse)) {
+        this.resetQualification(this.holdSide, t);
+      }
       this.impulse = next;
       this.impulseT = t;
     }
-    return this.blend(t);
+
+    const band = SCRATCH_TUNING.scrubNeutralBand;
+    const side: -1 | 0 | 1 = this.displacement > band ? 1 : this.displacement < -band ? -1 : 0;
+    if (side !== this.holdSide) this.resetQualification(side, t);
+    else if (side !== 0 && this.holdSinceT == null) this.holdSinceT = t;
+
+    return this.compute(t);
   }
 
   /**
-   * Time-only update: the scratch transient decays and the held position takes
-   * over. A hand held away from centre keeps scrubbing; near centre it settles
-   * to zero.
+   * Time-only update: the scratch transient decays toward zero, and — only once
+   * the deliberate hold has been earned — the sustained scrub fades in.
    */
   poll(t: number): number {
     if (!Number.isFinite(t)) return this.velocity;
-    return this.blend(t);
+    return this.compute(t);
   }
 
   /** Milliseconds since the last accepted sample. */
@@ -138,4 +205,5 @@ export class ScratchScrubController {
     return t - this.lastT;
   }
 }
+
 

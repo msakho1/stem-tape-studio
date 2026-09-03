@@ -16,31 +16,37 @@ import {
 
 const T = SCRATCH_TUNING;
 /** SVG units travelled in `ms` at `rate`× tape speed. */
-const travelFor = (rate: number, ms: number) => (rate * T.handUnitsPerSecondAtUnitRate * ms) / 1000;
+/** SVG units travelled in `ms` at a hand speed of `ups` units/second. */
+const travel = (ups: number, ms: number) => (ups * ms) / 1000;
+/** Units travelled in `ms` for a hand speed that yields `rate`× scratch velocity. */
+const travelFor = (rate: number, ms: number) =>
+  travel(Math.pow(rate / T.scratchMaxVelocity, 1 / T.scratchCurveExponent) * T.handUnitsPerSecondAtMaxScratch, ms);
 
-describe("S3 — audio velocity comes from HAND SPEED, not position", () => {
+describe("S3 — scratch velocity: heavy, curved, hard to saturate", () => {
   it("maps upward hand speed to forward tape and downward to reverse", () => {
-    expect(handVelocityToTapeVelocity(-travelFor(1, 20), 20)).toBeCloseTo(1, 9);
-    expect(handVelocityToTapeVelocity(travelFor(1, 20), 20)).toBeCloseTo(-1, 9);
+    expect(handVelocityToTapeVelocity(-travelFor(0.5, 20), 20)).toBeCloseTo(0.5, 9);
+    expect(handVelocityToTapeVelocity(travelFor(0.5, 20), 20)).toBeCloseTo(-0.5, 9);
   });
 
-  it("is proportional to hand speed: faster hand, faster tape", () => {
-    const slow = handVelocityToTapeVelocity(-travelFor(0.5, 16), 16);
-    const fast = handVelocityToTapeVelocity(-travelFor(1.5, 16), 16);
-    expect(slow).toBeCloseTo(0.5, 9);
-    expect(fast).toBeCloseTo(1.5, 9);
-    expect(fast).toBeGreaterThan(slow);
+  it("is nonlinear: ordinary finger motion stays slow and does not saturate", () => {
+    // A brisk 300 units/second swipe is ordinary on a touch screen.
+    const ordinary = handVelocityToTapeVelocity(-travel(300, 16), 16);
+    expect(ordinary).toBeGreaterThan(0);
+    expect(ordinary).toBeLessThan(0.25 * T.scratchMaxVelocity);
+    const half = handVelocityToTapeVelocity(-travel(450, 16), 16);
+    expect(half).toBeLessThan(0.5 * T.scratchMaxVelocity); // curved, not linear
+    expect(half).toBeGreaterThan(ordinary);
+  });
+
+  it("never exceeds scratchMaxAbsVelocity, and that ceiling is turntable-slow", () => {
+    expect(T.scratchMaxVelocity).toBeLessThanOrEqual(1.0);
+    expect(handVelocityToTapeVelocity(-5000, 8)).toBe(T.scratchMaxVelocity);
+    expect(handVelocityToTapeVelocity(5000, 8)).toBe(-T.scratchMaxVelocity);
   });
 
   it("a stationary hand is a stationary record, at ANY position", () => {
     expect(handVelocityToTapeVelocity(0, 16)).toBe(0);
-    // Below the dead band = held still, not a crawl.
     expect(handVelocityToTapeVelocity(-0.05, 100)).toBe(0);
-  });
-
-  it("clamps at the centralized ceiling in both directions", () => {
-    expect(handVelocityToTapeVelocity(-5000, 8)).toBe(T.scratchMaxVelocity);
-    expect(handVelocityToTapeVelocity(5000, 8)).toBe(-T.scratchMaxVelocity);
   });
 
   it("reverses through zero continuously as the hand reverses", () => {
@@ -57,73 +63,122 @@ describe("S3 — audio velocity comes from HAND SPEED, not position", () => {
   });
 });
 
-describe("S3 — hybrid: scratch transient blends into sustained scrub", () => {
+describe("S3 — scratch is the default; scrub is earned by a 4 s directional hold", () => {
   const grab = 225;
   const held = (d: number) => grab - d * ROCKER_DRAG_RANGE;
 
-  it("held-position scrub is nonlinear and fine near the centre", () => {
+  /** Pull to `d` and then hold motionless, polling, until `untilMs`. */
+  function pullAndHold(d: number, untilMs: number) {
+    const c = new ScratchScrubController(grab, 0);
+    c.sample(held(d), 60);
+    let v = c.velocity;
+    for (let t = 76; t <= untilMs; t += 16) v = c.poll(t);
+    return { c, v };
+  }
+
+  it("stationary away from centre for 1 s ⇒ velocity 0, still SCRATCH", () => {
+    const { c, v } = pullAndHold(0.7, 1000);
+    expect(c.phase).toBe("scratch");
+    expect(v).toBe(0);
+  });
+
+  it("stationary away from centre for 3.9 s ⇒ velocity 0, still SCRATCH", () => {
+    const { c, v } = pullAndHold(0.7, 3900);
+    expect(c.phase).toBe("scratch");
+    expect(v).toBe(0);
+    expect(c.holdMs(3900)).toBeGreaterThan(3800);
+  });
+
+  it("the same direction at 4.0 s enters SCRUB smoothly, no jump", () => {
+    const { c } = pullAndHold(0.7, 3990);
+    expect(c.phase).toBe("scratch");
+    expect(c.poll(4100)).toBe(0); // the fade begins at exactly zero: no jump
+    expect(c.phase).toBe("scrub");
+    const mid = c.poll(4100 + T.scrubEnterFadeMs / 2);
+    expect(mid).toBeGreaterThan(0);
+    expect(mid).toBeLessThan(displacementToScrubVelocity(0.7));
+    const settled = c.poll(4100 + T.scrubEnterFadeMs + 100);
+    expect(settled).toBeCloseTo(displacementToScrubVelocity(0.7), 6);
+    expect(Math.abs(settled)).toBeLessThanOrEqual(T.scrubMaxVelocity);
+  });
+
+  it("holding below centre for 4 s sustains REVERSE scrub", () => {
+    const { c } = pullAndHold(-0.7, 4600);
+    expect(c.phase).toBe("scrub");
+    const settled = c.poll(4600 + T.scrubEnterFadeMs);
+    expect(settled).toBeLessThan(0);
+    expect(Math.abs(settled)).toBeLessThanOrEqual(T.scrubMaxVelocity);
+  });
+
+  it("crossing centre at 3.9 s resets the qualification timer", () => {
+    const c = new ScratchScrubController(grab, 0);
+    c.sample(held(0.7), 60);
+    for (let t = 76; t <= 3900; t += 16) c.poll(t);
+    c.sample(held(-0.7), 3916); // crossed centre
+    expect(c.holdMs(3916)).toBe(0);
+    for (let t = 3932; t <= 3932 + 3000; t += 16) c.poll(t);
+    expect(c.phase).toBe("scratch");
+  });
+
+  it("a direction reversal at 3.9 s resets the qualification timer", () => {
+    const c = new ScratchScrubController(grab, 0);
+    c.sample(held(0.9), 60);
+    for (let t = 76; t <= 3900; t += 16) c.poll(t);
+    // Same side of centre, but the hand yanked back: qualification restarts.
+    c.sample(held(0.5), 3916);
+    expect(c.holdMs(3916)).toBe(0);
+    for (let t = 3932; t <= 3932 + 3000; t += 16) c.poll(t);
+    expect(c.phase).toBe("scratch");
+  });
+
+  it("returning to neutral resets qualification", () => {
+    const c = new ScratchScrubController(grab, 0);
+    c.sample(held(0.6), 60);
+    for (let t = 76; t <= 2000; t += 16) c.poll(t);
+    c.sample(grab, 2016);
+    expect(c.holdMs(2016)).toBe(0);
+    expect(c.phase).toBe("scratch");
+  });
+
+  it("10+ s of back-and-forth scratching NEVER becomes scrub", () => {
+    const c = new ScratchScrubController(grab, 0);
+    let t = 0;
+    let up = true;
+    for (let cycle = 0; cycle < 30; cycle++) {
+      const span = up ? 400 : 350;
+      const from = up ? -0.5 : 0.5;
+      const to = up ? 0.5 : -0.5;
+      for (let k = 1; k <= 10; k++) {
+        t += span / 10;
+        c.sample(held(from + ((to - from) * k) / 10), t);
+        expect(c.phase).toBe("scratch");
+        expect(Math.abs(c.velocity)).toBeLessThanOrEqual(T.scratchMaxVelocity);
+      }
+      up = !up;
+    }
+    expect(t).toBeGreaterThan(10_000);
+    expect(c.phase).toBe("scratch");
+  });
+
+  it("stopping mid-scratch settles to zero even while displaced", () => {
+    const c = new ScratchScrubController(grab, 0);
+    c.sample(held(0.8), 40);
+    expect(Math.abs(c.velocity)).toBeGreaterThan(0);
+    expect(c.poll(40 + 10 * T.scratchDecayMs)).toBe(0);
+  });
+
+  it("held-position scrub is nonlinear and bounded by scrubMaxAbsVelocity", () => {
     expect(displacementToScrubVelocity(0)).toBe(0);
-    expect(displacementToScrubVelocity(T.scrubDeadband)).toBe(0);
     expect(displacementToScrubVelocity(1)).toBeCloseTo(T.scrubMaxVelocity, 12);
     expect(displacementToScrubVelocity(-1)).toBeCloseTo(-T.scrubMaxVelocity, 12);
     const quarter = displacementToScrubVelocity(0.25);
-    const half = displacementToScrubVelocity(0.5);
-    expect(quarter).toBeGreaterThan(0);
-    expect(quarter).toBeLessThan(0.25 * T.scrubMaxVelocity); // squared, not linear
-    expect(half / quarter).toBeGreaterThan(2);
+    expect(quarter).toBeLessThan(0.25 * T.scrubMaxVelocity);
+    expect(displacementToScrubVelocity(0.5) / quarter).toBeGreaterThan(2);
   });
 
-  it("a flick decays into the sustained scrub the hold implies", () => {
+  it("a fresh grab starts at zero in SCRATCH", () => {
     const c = new ScratchScrubController(grab, 0);
-    const v0 = c.sample(held(0.6), 16); // quick pull upward
-    expect(v0).toBeGreaterThan(displacementToScrubVelocity(0.6));
-    // Finger now still, still held upward: the transient decays away.
-    const settled = c.poll(16 + 8 * T.scratchDecayMs);
-    expect(settled).toBeCloseTo(displacementToScrubVelocity(0.6), 9);
-    expect(settled).toBeGreaterThan(0); // NOT zero — this is the scrub
-  });
-
-  it("held at centre, a motionless hand settles to a stopped record", () => {
-    const c = new ScratchScrubController(grab, 0);
-    c.sample(grab - 4, 16);
-    expect(c.poll(16 + 8 * T.scratchDecayMs)).toBe(0);
-  });
-
-  it("held below centre sustains reverse scrub", () => {
-    const c = new ScratchScrubController(grab, 0);
-    c.sample(held(-0.7), 20);
-    expect(c.poll(20 + 8 * T.scratchDecayMs)).toBeCloseTo(displacementToScrubVelocity(-0.7), 9);
-  });
-
-  it("rapid back-and-forth motion reverses sign continuously", () => {
-    const c = new ScratchScrubController(grab, 0);
-    const out: number[] = [];
-    let y = grab;
-    let t = 0;
-    for (let i = 0; i < 8; i++) {
-      y += i % 2 === 0 ? -travelFor(1, 12) : travelFor(1, 12);
-      t += 12;
-      out.push(c.sample(y, t));
-    }
-    expect(out.some((v) => v > 0)).toBe(true);
-    expect(out.some((v) => v < 0)).toBe(true);
-  });
-
-  it("never reaches dog-whistle territory", () => {
-    const c = new ScratchScrubController(grab, 0);
-    let y = grab;
-    let t = 0;
-    for (let i = 0; i < 12; i++) {
-      y -= 400; // absurd fling, well past the visual travel
-      t += 8;
-      expect(Math.abs(c.sample(y, t))).toBeLessThanOrEqual(T.combinedMaxVelocity);
-    }
-    expect(T.combinedMaxVelocity).toBeLessThanOrEqual(2.5);
-    expect(T.scratchMaxVelocity).toBeLessThanOrEqual(1.75);
-  });
-
-  it("a fresh grab starts at zero before any movement", () => {
-    const c = new ScratchScrubController(grab, 0);
+    expect(c.phase).toBe("scratch");
     expect(c.velocity).toBe(0);
     expect(c.sample(grab, 16)).toBe(0);
   });
