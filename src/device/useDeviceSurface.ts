@@ -967,9 +967,16 @@ export function useDeviceSurface() {
 
   const releaseControlPointer = useCallback(
     (control: Control, e: React.PointerEvent, cancelled: boolean) => {
+      // S3 ownership: a pointer consumed by master scratch produces NO tap,
+      // no semitone click and no step-scrub row on release.
+      if (endRockerScratch(e.pointerId)) return;
       if (endTouchScrub(e.pointerId)) return;
       if (control === "function") {
         fnPointerRef.current = null;
+        // FUNCTION released while the rocker is still grabbed: end the tape
+        // gesture cleanly at the MASTER position reached, and hand ordinary
+        // rocker ownership back.
+        if (scratchRef.current) endRockerScratch(scratchRef.current.pointerId);
         if (scrubPointersRef.current.size) {
           scrubPointersRef.current.clear();
           dispatch({ type: "globalScrub", dir: null });
@@ -989,7 +996,7 @@ export function useDeviceSurface() {
         endDrag(e.pointerId);
       }
     },
-    [cancelDrag, endDrag, endTouchScrub, engine],
+    [cancelDrag, endDrag, endRockerScratch, endTouchScrub, engine],
   );
 
   const onControlPointerUp = useCallback(
