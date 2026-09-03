@@ -212,3 +212,60 @@ describe("S3 — visual rocker travel (decoupled from audio)", () => {
     expect(displacementToVelocity(Number.NaN)).toBe(0);
   });
 });
+
+describe("expressive scratch contour", () => {
+  it("separates slow drag, medium stroke and quick flick", () => {
+    const slow = Math.abs(handVelocityToTapeVelocity(-6, 100)); // 60 u/s
+    const medium = Math.abs(handVelocityToTapeVelocity(-25, 100)); // 250 u/s
+    const flick = Math.abs(handVelocityToTapeVelocity(-60, 100)); // 600 u/s
+    expect(slow).toBeGreaterThan(0);
+    expect(medium).toBeGreaterThan(slow * 2);
+    expect(flick).toBeGreaterThan(medium * 1.4);
+    expect(flick).toBeLessThanOrEqual(SCRATCH_TUNING.scratchMaxVelocity);
+  });
+
+  it("soft-knees near the maximum instead of hard clipping", () => {
+    const a = shapeHandSpeed(0.9);
+    const b = shapeHandSpeed(1.0);
+    const c = shapeHandSpeed(1.3);
+    expect(b).toBeGreaterThan(a);
+    expect(c).toBeGreaterThanOrEqual(b);
+    expect(c).toBeLessThanOrEqual(1);
+  });
+
+  it("ramps a reversal audibly through zero rather than flipping", () => {
+    const c = new ScratchScrubController(100, 0);
+    let t = 0;
+    for (let i = 0; i < 6; i++) {
+      t += 16;
+      c.sample(100 - (i + 1) * 8, t); // upward = forward
+    }
+    expect(c.velocity).toBeGreaterThan(0);
+    const before = c.velocity;
+    t += 16;
+    const after = c.sample(100 - 48 + 40, t); // violent reversal in one sample
+    expect(after).toBeGreaterThan(-before); // did not jump straight to full reverse
+    let crossedZero = false;
+    for (let i = 0; i < 12; i++) {
+      t += 8;
+      const v = c.poll(t);
+      if (Math.abs(v) < 0.2) crossedZero = true;
+    }
+    expect(crossedZero).toBe(true);
+  });
+
+  it("tracks deceleration inside a stroke instead of holding one speed", () => {
+    const c = new ScratchScrubController(200, 0);
+    let t = 0;
+    const travel = [30, 22, 14, 8, 4, 2];
+    let y = 200;
+    const seen: number[] = [];
+    for (const step of travel) {
+      t += 16;
+      y -= step;
+      seen.push(c.sample(y, t));
+    }
+    expect(seen[0]).toBeGreaterThan(seen[seen.length - 1]);
+    expect(new Set(seen.map((v) => v.toFixed(3))).size).toBeGreaterThan(3);
+  });
+});
