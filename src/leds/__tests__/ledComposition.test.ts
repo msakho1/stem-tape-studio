@@ -9,6 +9,7 @@ import {
   applyModifiers,
   resolveSp1LedFrame,
   type AuthoritativeSp1LedState,
+  loopChaseQuarter,
   type LedModifierKind,
 } from "../sp1LedEngine";
 
@@ -186,5 +187,78 @@ describe("composable LED modifiers", () => {
     expect(applyModifiers(127, [{ kind: "non-solo" }], 0)).toBeLessThan(127);
     expect(applyModifiers(200, [{ kind: "fx" }], 0)).toBeLessThanOrEqual(127);
     expect(applyModifiers(-5, [], 0)).toBe(0); // always clamped into 0..127
+  });
+});
+
+/**
+ * Loop chase — the accented LED is a pure function of the normalized loop
+ * phase, so BPM and loop division need no animation logic of their own.
+ */
+describe("loop LED chase 1 -> 2 -> 3 -> 4", () => {
+  const quarters: Array<[number, number]> = [
+    [0.0, 0],
+    [0.249, 0],
+    [0.25, 1],
+    [0.499, 1],
+    [0.5, 2],
+    [0.749, 2],
+    [0.75, 3],
+    [0.999, 3],
+  ];
+  for (const [phase, led] of quarters) {
+    it(`phase ${phase} accents LED ${led + 1}`, () => {
+      expect(loopChaseQuarter(phase)).toBe(led);
+      const f = resolveSp1LedFrame(state({ ...loopOn, loopPhase: phase }), 12345);
+      const vals = f.leds.slice(0, 4).map((l) => l.brightness);
+      for (let i = 0; i < 4; i++) if (i !== led) expect(vals[led]!).toBeGreaterThan(vals[i]!);
+      expect(f.leds[led]!.phaseAnchor).toBe("loop-wrap");
+    });
+  }
+
+  it("wraps 4 -> 1 exactly at the audio wrap and never drifts with the app clock", () => {
+    const at = (phase: number, t: number) =>
+      resolveSp1LedFrame(state({ ...loopOn, loopPhase: phase }), t).leds.slice(0, 4).map((l) => l.brightness);
+    const last = at(0.999, 0);
+    const first = at(0.0, 999999);
+    expect(last.indexOf(Math.max(...last))).toBe(3);
+    expect(first.indexOf(Math.max(...first))).toBe(0);
+    // Same phase, wildly different app-clock times -> identical chase output.
+    expect(at(0.6, 0)).toEqual(at(0.6, 8_000_000));
+  });
+
+  it("is independent of BPM and loop division because it uses normalized phase", () => {
+    for (const division of [1, 2, 4, 8] as const) {
+      const f = resolveSp1LedFrame(
+        state({ globalLoop: { active: true, latched: true, division }, loopPhase: 0.55 }),
+        7777,
+      );
+      const vals = f.leds.slice(0, 4).map((l) => l.brightness);
+      expect(vals.indexOf(Math.max(...vals))).toBe(2);
+    }
+  });
+
+  it("preserves per-stem activity underneath the accent", () => {
+    const f = resolveSp1LedFrame(
+      state({ ...loopOn, loopPhase: 0.1, levels: [0.9, 0.9, 0.05, 0.0] }),
+      0,
+    );
+    const v = f.leds.slice(0, 4).map((l) => l.brightness);
+    expect(v[1]!).toBeGreaterThan(v[2]!);
+    expect(v[2]!).toBeGreaterThanOrEqual(v[3]!);
+    expect(f.leds[0]!.modifiers).toContain("loop");
+  });
+
+  it("keeps loop + reverse + FX composable on the chase", () => {
+    const s = state({ ...loopOn, loopPhase: 0.3 });
+    const f = resolveSp1LedFrame(
+      state({
+        ...loopOn,
+        loopPhase: 0.3,
+        banks: s.banks.map((b, i) => (i === 0 ? { ...b, latched: true } : b)),
+        tracks: s.tracks.map((t, i) => (i === 1 ? { ...t, reverse: true } : t)),
+      }),
+      0,
+    );
+    expect(f.leds[1]!.modifiers).toEqual(expect.arrayContaining(["loop", "reverse", "fx"]));
   });
 });
