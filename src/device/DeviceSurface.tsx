@@ -115,7 +115,7 @@ export function DeviceSurface({
           <rect x={620.4} y={653} width={7.2} height={100} rx={3} fill="#ffffff" opacity={0.52} />
         </g>
 
-        {/* Left three-position rocker: one body, tilts by which half is held. */}
+        {/* Left three-position rocker: taps tilt; FUNCTION-drag moves the body. */}
         <g
           ref={rockerRef}
           className={`st-rocker${isPressed("rocker-fwd") ? " st-rocker--fwd" : ""}${
@@ -237,7 +237,7 @@ export function DeviceSurface({
         ))}
       </g>
 
-      {/* ---- invisible hit zones: these own every pointer event ---- */}
+      {/* ---- invisible hit zones: rocker halves share one physical target ---- */}
       <g className={`st-zones${showHitZones ? " st-zones--visible" : ""}`}>
         {HIT_ZONES.map((z) => (
           <rect
