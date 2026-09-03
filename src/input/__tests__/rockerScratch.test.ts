@@ -3,6 +3,7 @@ import {
   SCRATCH_TUNING,
   displacementToScrubVelocity,
   handVelocityToTapeVelocity,
+  shapeHandSpeed,
 } from "@/audio/masterScratch";
 import {
   ScratchScrubController,
