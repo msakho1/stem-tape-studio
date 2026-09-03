@@ -766,9 +766,12 @@ export function useDeviceSurface() {
   /** Command a signed master velocity once; repeats of the same value are dropped. */
   const commandScratchVelocity = useCallback((session: { legacy: boolean; commanded: number }, v: number) => {
     if (session.legacy) return;
-    if (v === session.commanded) return;
-    session.commanded = v;
-    getAudioEngine().setMasterScratchVelocity(v);
+    // Quantised: the decaying blend changes every poll, but sub-0.1% steps are
+    // inaudible and would only spam the worklet port.
+    const q = Math.round(v * 1000) / 1000;
+    if (q === session.commanded) return;
+    session.commanded = q;
+    getAudioEngine().setMasterScratchVelocity(q);
   }, []);
 
 

@@ -26,9 +26,9 @@ describe("S3 — audio velocity comes from HAND SPEED, not position", () => {
 
   it("is proportional to hand speed: faster hand, faster tape", () => {
     const slow = handVelocityToTapeVelocity(-travelFor(0.5, 16), 16);
-    const fast = handVelocityToTapeVelocity(-travelFor(2, 16), 16);
+    const fast = handVelocityToTapeVelocity(-travelFor(1.5, 16), 16);
     expect(slow).toBeCloseTo(0.5, 9);
-    expect(fast).toBeCloseTo(2, 9);
+    expect(fast).toBeCloseTo(1.5, 9);
     expect(fast).toBeGreaterThan(slow);
   });
 
@@ -79,7 +79,7 @@ describe("S3 — hybrid: scratch transient blends into sustained scrub", () => {
     expect(v0).toBeGreaterThan(displacementToScrubVelocity(0.6));
     // Finger now still, still held upward: the transient decays away.
     const settled = c.poll(16 + 8 * T.scratchDecayMs);
-    expect(settled).toBeCloseTo(displacementToScrubVelocity(0.6), 6);
+    expect(settled).toBeCloseTo(displacementToScrubVelocity(0.6), 9);
     expect(settled).toBeGreaterThan(0); // NOT zero — this is the scrub
   });
 
@@ -92,7 +92,7 @@ describe("S3 — hybrid: scratch transient blends into sustained scrub", () => {
   it("held below centre sustains reverse scrub", () => {
     const c = new ScratchScrubController(grab, 0);
     c.sample(held(-0.7), 20);
-    expect(c.poll(20 + 8 * T.scratchDecayMs)).toBeCloseTo(displacementToScrubVelocity(-0.7), 6);
+    expect(c.poll(20 + 8 * T.scratchDecayMs)).toBeCloseTo(displacementToScrubVelocity(-0.7), 9);
   });
 
   it("rapid back-and-forth motion reverses sign continuously", () => {

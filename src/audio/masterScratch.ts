@@ -137,7 +137,10 @@ export function displacementToScrubVelocity(
 export function decayedScratch(impulse: number, ageMs: number, tauMs = SCRATCH_TUNING.scratchDecayMs): number {
   if (!Number.isFinite(impulse) || !Number.isFinite(ageMs) || ageMs <= 0) return impulse || 0;
   if (tauMs <= 0) return 0;
-  return impulse * Math.exp(-ageMs / tauMs);
+  const decayed = impulse * Math.exp(-ageMs / tauMs);
+  // Snap the tail to exactly zero: a spent transient must not leave a residual
+  // creep under a hand held at the centre.
+  return Math.abs(decayed) < 1e-3 ? 0 : decayed;
 }
 
 /**
