@@ -41,6 +41,52 @@ export type WorkletMessage =
       applyAtContextFrame: number;
     }
   | { type: "setChop"; seq: number; division: number; index: number; applyAtContextFrame: number }
+  /**
+   * S2 — signed master head. ONE authoritative master position (master frames
+   * at the context sample rate) is integrated identically by every processor;
+   * each lane's read pointer is a pure mapping of it, so master scratch cannot
+   * accumulate inter-stem drift however long it runs.
+   */
+  | {
+      type: "masterScratch";
+      seq: number;
+      phase: "engage";
+      applyAtContextFrame: number;
+      masterFrame: number;
+      velocity: number;
+      loopEnabled: boolean;
+      loopStartMaster: number;
+      loopEndMaster: number;
+      songFramesMaster: number;
+    }
+  | {
+      type: "masterScratch";
+      seq: number;
+      phase: "velocity";
+      applyAtContextFrame: number;
+      /** Signed frames of master time per output frame. Negative = backwards. */
+      velocity: number;
+      rampFrames: number;
+    }
+  | {
+      type: "masterScratch";
+      seq: number;
+      phase: "geometry";
+      applyAtContextFrame: number;
+      loopEnabled: boolean;
+      loopStartMaster: number;
+      loopEndMaster: number;
+    }
+  | {
+      type: "masterScratch";
+      seq: number;
+      phase: "release";
+      applyAtContextFrame: number;
+      /** Rate normal transport resumes at (usually the musical rate). */
+      resumeRate: number;
+      rampFrames: number;
+    }
+
   | { type: "setLoopMode"; seq: number; mode: "fixed" | "variable"; applyAtContextFrame: number }
   | { type: "setDirection"; seq: number; direction: 1 | -1; applyAtContextFrame: number }
   | { type: "poll"; seq: number }
@@ -105,6 +151,11 @@ export interface WorkletAck {
   contextFrame?: number;
   /** Output RMS measured by the kernel while a scrub is live. */
   rms?: number;
+  /** Authoritative master position (master frames) this lane is reading from. */
+  masterFrame?: number;
+  /** Signed master velocity in master frames per output frame. */
+  masterVelocity?: number;
+
 }
 
 
