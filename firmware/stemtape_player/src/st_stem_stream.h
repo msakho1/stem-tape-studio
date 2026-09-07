@@ -82,8 +82,27 @@
  *                    false; song_frame frozen at `frames` (one past the
  *                    last valid index); advance_frame() is a no-op,
  *                    matching STOPPED's own "stop at end" behavior
- *                    exactly, until st_stream_play() or a fresh
- *                    st_stream_init() is called.
+ *                    exactly.
+ *
+ *                    IT IS STICKY, AND st_stream_play() DOES NOT LIFT IT.
+ *                    play() promotes STOPPED -> PLAYING and nothing else,
+ *                    so a head parked here stays parked however many
+ *                    times a caller re-asserts PLAY. That is deliberate
+ *                    and is what makes "the song ended" survive a
+ *                    transport layer that re-asserts play every block:
+ *                    only an explicit position change -- st_stream_seek()
+ *                    (which lifts it to PLAYING), st_stream_set_reverse()
+ *                    (true, which pulls the head back onto `frames - 1`),
+ *                    st_stream_stop(), or a fresh st_stream_init() --
+ *                    gets a head out of it. main.c's replay-from-EOF path
+ *                    uses seek(0) for exactly that reason.
+ *
+ *                    WHILE A HEAD IS HERE, st_stream_required_sector() is
+ *                    NOT guaranteed in range: song_frame == frames, so a
+ *                    song whose length is an exact multiple of
+ *                    ST11_FRAMES_PER_SECTOR yields sector_count. Nothing
+ *                    may ask a parked head for a sector; main.c's audio
+ *                    branch is gated off before it can.
  *   START_OF_SONG -- END_OF_SONG's mirror, reachable only while
  *                    `reverse` is set: a backward head consumed frame 0
  *                    and there is nothing before it. song_frame frozen
@@ -267,6 +286,32 @@ void st_stream_sector_ready(st_stream_t *st, uint32_t sector_index);
  */
 void st_stream_play(st_stream_t *st);
 void st_stream_stop(st_stream_t *st);
+
+/*
+ * PARK THIS HEAD AT THE END OF THE SONG, unconditionally.
+ *
+ * st_stream_advance_frames() already produces END_OF_SONG for the head that
+ * actually ran out of tape. This exists for the OTHER heads: end-of-song is a
+ * fact about the SONG, so when one head reaches it every head must be put in
+ * the same place, in one pass, before any further audio is rendered. Four
+ * independent end-of-song decisions -- one per lane, each arriving on its own
+ * frame -- is precisely the incoherent stop this function exists to make
+ * unrepresentable, and it is the same argument stem_streams_init()/_play()/
+ * _stop() already make for load, PLAY and STOP.
+ *
+ * The head is left at exactly `frames` (one past the last real index, which is
+ * what the state's own documentation above promises and what a forward run
+ * clamped to the song end lands on anyway), with residency INVALIDATED for the
+ * same reason st_stream_seek() invalidates it: the buffer that was ready holds
+ * frames this head is no longer on.
+ *
+ * It is a position command, not a transport command, and it deliberately does
+ * NOT touch `reverse`: turning a track around is a user-facing feature whose
+ * state a song ending has no business clearing.
+ *
+ * Audio-thread-only, like every other mutator of this struct.
+ */
+void st_stream_end_of_song(st_stream_t *st);
 
 /*
  * Moves the playhead to an ARBITRARY frame inside the song, forward or

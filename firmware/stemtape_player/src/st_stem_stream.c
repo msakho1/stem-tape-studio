@@ -145,6 +145,28 @@ void st_stream_stop(st_stream_t *st)
 	st->state = ST_STREAM_STOPPED;
 }
 
+void st_stream_end_of_song(st_stream_t *st)
+{
+	/* EXACTLY `frames`, not "wherever this head happened to stop".
+	 *
+	 * A forward run is already clamped to the song end by its caller, so
+	 * the head that actually ran out lands here anyway; the other three are
+	 * BEHIND, and leaving each of them on its own last position would be
+	 * four different ideas of where the song ended. One value, for all
+	 * four, is what makes "the song is over" a single fact -- and it is the
+	 * one the state's own documentation already promises.
+	 */
+	st->song_frame = st->frames;
+
+	/* Same reasoning as st_stream_seek(): the position changed, so the
+	 * sector that was ready is no longer this head's sector. Residency is a
+	 * fact about the buffer and only a real acquire may assert it. */
+	st->ready_sector = ST_STREAM_NO_SECTOR;
+	st->state = ST_STREAM_END_OF_SONG;
+
+	/* `reverse` is untouched: see the header. */
+}
+
 bool st_stream_seek(st_stream_t *st, uint32_t frame)
 {
 	if (frame >= st->frames) {

@@ -156,7 +156,40 @@
  * session's patience. */
 #define ST_RC_SWEEP_REPS 24u
 
-/* st61: STAGE 0 -- the escape hatch reaches EVERY iteration, proven by
+/* st62: STAGE 2A-i -- a song that reaches its end STOPS.
+ *
+ * ONE DEFECT, AND NOTHING ELSE IN THIS BUILD. Every playback stream was
+ * initialised with loop_enabled = true, so the streaming state machine answered
+ * "the last frame was consumed" by setting song_frame = 0 and reporting
+ * TICK_LOOPED. main.c had no handler for TICK_ENDED at all -- it could not be
+ * produced. On hardware the song reached its end and started again with nobody
+ * pressing PLAY: g_playing still set, the reel still turning, four heads
+ * jumping to zero with residency invalidated and four asynchronous re-primes
+ * racing the streamer, which is also a fresh chance for the heads to come back
+ * displaced.
+ *
+ * st62 turns that wrap off and handles the end of the song as ONE TRANSPORT
+ * EVENT: the first head to report TICK_ENDED in a block is authoritative, all
+ * four are parked at `frames` together before another output frame is
+ * rendered, the reel is stopped in that same block, and the control thread
+ * clears g_playing. A PLAY afterwards rewinds all four to frame 0 together.
+ * g_stem_eof_req's comment above stem_streams_init() states the rule exactly
+ * and says why the first head wins rather than the transport head.
+ *
+ * WHAT IT IS NOT. st_stream_t::loop_enabled is the WHOLE-SONG wrap inside the
+ * streaming module. The Stem Tape loop -- latch, window, division, entry, wrap,
+ * release -- is st_loop.c plus this file's own window code, and it wraps by
+ * seeking inside an explicit [loop_start, loop_end) window. st_loop.c/.h never
+ * mention loop_enabled, gate F-3 asserts that, and a latched window is exempt
+ * from the end-of-song rule so a loop sitting on the song end still wraps.
+ * Loop entry, loop wrap and loop release are unchanged.
+ *
+ * Unchanged from st61 and deliberately untouched: the power architecture (A/B/
+ * C/D), reverse and its release resync, pitch/semitone, FX, stutter/GATE,
+ * scratch and the head layer. Baseline four-stem sync (2A-ii) is NOT in this
+ * build.
+ *
+ * ---- st61: STAGE 0 -- the escape hatch reaches EVERY iteration, proven by
  * control flow.
  *
  * Retired, none re-cut: st55 (burned), st56 (2.5 s, no AIN1), st57 (the 24.7 s
@@ -200,9 +233,9 @@
  * proof matrix and the hardware acceptance list this build has NOT been run
  * against. */
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st61-VOLCAL"
+#define ST_BUILD_TAG "st62-VOLCAL"
 #else
-#define ST_BUILD_TAG "st61"
+#define ST_BUILD_TAG "st62"
 #endif
 #include "st_pwr_idle.h"
 #include "st_track_hold.h"
@@ -1857,6 +1890,76 @@ static st_stream_t g_stem_stream[ST_PL_STEMS];
 static uint8_t s_stem_transport;
 
 /*
+ * ======================================================================
+ * THE END OF THE SONG IS A TRANSPORT EVENT (st62)
+ * ======================================================================
+ *
+ * WHAT WAS WRONG. Every playback stream was initialised with
+ * loop_enabled = true, so st_stream_advance_frames() answered "the last frame
+ * was consumed" by setting song_frame = 0 and returning ST_STREAM_TICK_LOOPED.
+ * Nothing in this file has ever handled TICK_ENDED, and nothing had to: it
+ * could not be produced. The result on hardware was an UNSOLICITED RESTART --
+ * the song reached its end and began again with no PLAY press, g_playing still
+ * set, the reel still turning, all four heads jumping to 0 with residency
+ * invalidated and four asynchronous re-primes racing the streamer, which is
+ * also a fresh opportunity for the heads to come back displaced.
+ *
+ * THAT FLAG IS NOT THE USER-FACING LOOP. st_stream_t::loop_enabled is the
+ * whole-song wrap inside the streaming state machine. The Stem Tape loop --
+ * FUNCTION-held latch, window, division, entry, wrap, release -- is st_loop.c
+ * plus this file's own window code, and it wraps by calling st_stream_seek()
+ * on an explicit [loop_start, loop_end) window. st_loop.c and st_loop.h do not
+ * contain the string "loop_enabled" at all. Turning the whole-song wrap off
+ * therefore cannot reach loop entry, loop wrap or loop release, and CI asserts
+ * that separation (gate F-1/F-2 in the wiring check).
+ *
+ * THE AUTHORITATIVE EVENT, stated exactly:
+ *
+ *     Within ONE audio block, after all four heads have been advanced and
+ *     after the loop-window backstop has run, the transport is at end of song
+ *     if and only if
+ *         (a) no user loop window is latched for this block (lp_on == false),
+ *     and (b) at least one of the four heads returned ST_STREAM_TICK_ENDED
+ *             from its advance in this block.
+ *
+ *     The FIRST such head, whichever lane it is, is the authoritative event.
+ *
+ * WHY THE FIRST HEAD AND NOT THE TRANSPORT HEAD. The transport head can be the
+ * starved one: a head that is not resident does not advance, so a lane that is
+ * ahead can reach the end while the transport is still short of it. Waiting
+ * for the transport would leave that lane parked at END_OF_SONG while the
+ * others played on -- one stem stopping while the rest continue, which is the
+ * exact failure this rule exists to prevent. Taking the first is at worst
+ * slightly early, and slightly early is the preferred error here.
+ *
+ * WHY IT CANNOT BE FOUR DECISIONS. The event is only OBSERVED per lane; it is
+ * APPLIED by stem_streams_end_of_song(), which puts all four heads at exactly
+ * `frames`, invalidates all four residencies and drops all four resamplers in
+ * one pass, in the same block, before a single further output frame is
+ * rendered -- the remainder of the block is filled with silence and the run
+ * loop breaks. So there is no window in which three lanes have ended and one
+ * has not, no lane seeks to zero early, and no partial reset.
+ *
+ * WHY IT CANNOT RACE THE RE-PRIME. Nothing seeks and nothing re-primes: the
+ * heads are parked, residency is dropped, and the audio branch is gated off
+ * (see g_stem_eof_req's use in looper_audio_block()) until a deliberate PLAY.
+ * The old wrap's four asynchronous re-acquires simply do not happen.
+ *
+ * WHY A LATCHED LOOP IS EXEMPT. A window whose end sits exactly on the song
+ * end can produce TICK_ENDED before the backstop wraps the head. Under the old
+ * flag that head wrapped to frame 0 -- outside the window, a real bug. Now the
+ * backstop's own st_stream_seek(hd, lp_lo) lifts END_OF_SONG straight back to
+ * PLAYING at loop_start, which is where the window says it belongs, and
+ * condition (a) makes sure the transport is not stopped underneath it. A
+ * latched loop never ends the song; that is the point of latching it.
+ *
+ * THE HANDOFF. This flag is set by the AUDIO thread and consumed by the
+ * CONTROL thread, which is the same direction and the same discipline every
+ * other g_stem_*_req uses. The audio thread never writes g_playing.
+ */
+static atomic_t g_stem_eof_req = ATOMIC_INIT(0);
+
+/*
  * THE FOUR HEADS ARE INITIALISED, PLAYED AND STOPPED TOGETHER, ALWAYS.
  *
  * Not because they must stay together -- the whole point of the array is that
@@ -1889,7 +1992,36 @@ static bool stem_streams_init(uint32_t song_start_block, uint32_t song_block_cou
 	}
 	s_stem_transport = 0u;
 	atomic_set(&g_stem_reverse_req, 0);
+	/* A NEW SONG HAS NOT ENDED. A latch left over from the previous song
+	 * would gate the audio branch off against a transport that is nowhere
+	 * near its end -- so it is cleared HERE, in the one function that owns
+	 * "all four heads, from scratch", rather than at each of the two call
+	 * sites where forgetting it once would be silent. */
+	atomic_set(&g_stem_eof_req, 0);
 	return ok;
+}
+
+/*
+ * TRUE WHEN THE TRANSPORT IS PARKED AT THE END OF THE SONG.
+ *
+ * song_frame >= frames is reachable in exactly one way: the end-of-song park
+ * above. st_stream_seek() refuses any frame >= frames, and a forward run is
+ * clamped to the song end, so no other path can leave a head there. That makes
+ * this a POSITION test rather than a STATE test, which matters: the ordinary
+ * "no stem song playing" path in looper_audio_block() calls stem_streams_stop()
+ * and so replaces END_OF_SONG with STOPPED within a block or two of the song
+ * ending. The position survives; the state does not.
+ */
+static bool stem_streams_at_song_end(void)
+{
+	uint32_t k;
+
+	for (k = 0; k < ST_PL_STEMS; k++) {
+		if (g_stem_stream[k].song_frame >= g_stem_stream[k].frames) {
+			return true;
+		}
+	}
+	return false;
 }
 
 static void stem_streams_play(void)
@@ -2647,6 +2779,83 @@ static uint32_t  s_stem_jump_to;     /* song frame to land on */
 static uint32_t  s_stem_seam_lo;     /* window latched at arm time... */
 static uint32_t  s_stem_seam_hi;     /* ...so a release can duck inside it */
 static uint8_t   s_stem_jump_pend;   /* 0 none, else ST_SEAM_JUMP_* */
+
+/*
+ * ---- THE END OF THE SONG, APPLIED TO ALL FOUR HEADS AT ONCE -----------
+ *
+ * The observation is per lane; the decision is not. See g_stem_eof_req's own
+ * comment above stem_streams_init() for the exact authoritative rule and why
+ * the first lane to report it wins. This function is the whole application of
+ * it, and it is one pass so that no partial end-of-song state is ever
+ * observable by the next output frame:
+ *
+ *   - every head parked at exactly `frames`, so all four agree on where the
+ *     song ended and stem_streams_at_song_end() has one answer, not four;
+ *   - every residency invalidated, so nothing decodes a buffer belonging to a
+ *     position no head is on any more;
+ *   - every resampler's carried frame dropped, for the same reason a seek and
+ *     a loop wrap drop it -- stem_rs_drop() is THE place that happens;
+ *   - a pending seam jump cancelled, because a duck armed against a boundary
+ *     the transport will never now reach would fire into a stopped transport;
+ *   - THE REEL PUT AT REST IN THIS SAME BLOCK, not left to the branch above;
+ *   - the control thread told, once, by a flag it consumes.
+ *
+ * WHY THE REEL IS STOPPED HERE AND NOT ONLY BY g_stem_eof_req's branch. The
+ * flag is set by this thread and cleared by the control thread, so this thread
+ * is not guaranteed to observe it set even once: the control thread can clear
+ * it between this block and the next. If the reel were still RUNNING at full
+ * envelope when that happened, the next block would see g_playing false, call
+ * st_inertia_stop(), and start a six-hundred-millisecond spin-down -- during
+ * which st_inertia_moving() is true, the stem branch is entered anyway, the
+ * heads are found parked at the song end and the replay rewind fires. That is
+ * the unsolicited restart, rebuilt out of the spin-down. The host gate caught
+ * exactly that; resetting here closes it, and the three-way branch above
+ * closes the mirror case where the control thread is slow instead of fast.
+ *
+ * `reverse` is deliberately NOT cleared: an ordinary STOP does not clear it,
+ * and a song ending is not a reverse gesture.
+ */
+static void stem_streams_end_of_song(void)
+{
+	uint32_t k;
+
+	for (k = 0; k < ST_PL_STEMS; k++) {
+		st_stream_end_of_song(&g_stem_stream[k]);
+	}
+	stem_rs_drop();
+	s_stem_jump_pend = 0u;
+	st_seam_reset(&s_stem_seam);
+	st_inertia_reset(&s_stem_inertia);
+	atomic_set(&g_stem_eof_req, 1);
+}
+
+/*
+ * ---- A DELIBERATE PLAY AFTER THE SONG ENDED --------------------------
+ *
+ * Rewinds all four heads to frame 0 TOGETHER, with the same coherence the
+ * end-of-song park had: one seek primitive per head (st_stream_seek(), which
+ * refuses nothing at frame 0, invalidates residency and lifts END_OF_SONG back
+ * to PLAYING), one stem_rs_drop() for all four fractional cursors and carried
+ * frames, one seam reset. So the four are eligible to start on the same block,
+ * from the same frame, with the same interpolation state -- which is exactly
+ * what "all four initialised coherently" has to mean here.
+ *
+ * It is NOT a general restart and adds no synchronisation architecture: it
+ * does not touch reverse, does not touch s_stem_transport, does not touch the
+ * loop window, and is only ever reached from the one place a PLAY can find the
+ * transport parked at the song end.
+ */
+static void stem_streams_rewind_to_start(void)
+{
+	uint32_t k;
+
+	for (k = 0; k < ST_PL_STEMS; k++) {
+		(void)st_stream_seek(&g_stem_stream[k], 0u);
+	}
+	stem_rs_drop();
+	s_stem_jump_pend = 0u;
+	st_seam_reset(&s_stem_seam);
+}
 
 /* noclone for the same reason as stem_audio_block()'s own attribute: the
  * symbol gate requires this name exactly, and an anchored nm grep does not
@@ -4199,9 +4408,21 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 		 * episode once and leaves song_frame exactly where it is --
 		 * which is the same accounting a whole-block underrun gets, and
 		 * needs no separate case here. */
+		bool eof_seen = false;
+
 		for (sk = 0; sk < ST_PL_STEMS; sk++) {
 			st_stream_tick_t tk =
 				st_stream_advance_frames(&g_stem_stream[sk], stem_used[sk]);
+
+			/* THE END OF THE SONG, OBSERVED. Recorded, not acted on:
+			 * one lane noticing is not four lanes agreeing, and
+			 * acting here would stop this head while the three
+			 * below it kept going. The decision is applied once,
+			 * below the loop-window backstop, to all four at once.
+			 * See g_stem_eof_req's comment for the exact rule. */
+			if (tk == ST_STREAM_TICK_ENDED) {
+				eof_seen = true;
+			}
 
 			/* A REVERSED HEAD THAT REACHED THE FRONT OF THE SONG
 			 * parks there, and its resampler's carried "frame
@@ -4286,6 +4507,35 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 			}
 		}
 
+		/* ---- THE END OF THE SONG, DECIDED ONCE, FOR ALL FOUR ------
+		 *
+		 * Below the backstop deliberately. A latched loop owns the
+		 * boundary it latched: a window whose end sits exactly on the
+		 * song end makes a head report ENDED, and the backstop above
+		 * has just seeked it to loop_start (which lifts END_OF_SONG
+		 * straight back to PLAYING). lp_on is therefore the exemption,
+		 * and it is checked here rather than in the observation loop so
+		 * that the wrap has already happened when it is read.
+		 *
+		 * Everything after this point in the block would be rendered
+		 * from a transport that has run out of tape, so the block ends
+		 * here: the remaining output frames are silence -- the same
+		 * treatment, in the same shape, the whole-block underrun above
+		 * gives -- and the seam is ticked through them so the duck's
+		 * clock does not stall on a block it did not render.
+		 *
+		 * This is the ONLY place a natural end of song stops the
+		 * transport, and it stops the SONG, not a lane. */
+		if (eof_seen && !lp_on) {
+			stem_streams_end_of_song();
+			st_seam_advance(&s_stem_seam, BLK_FRAMES - f);
+			for (; f < BLK_FRAMES; f++) {
+				s[2 * f]     = 0;
+				s[2 * f + 1] = 0;
+			}
+			break;
+		}
+
 		/* Mirror the (audio-thread-exclusive) underrun episode
 		 * counter into its atomic diagnostic twin, but only on
 		 * the rare pass it actually changed -- atomic counters
@@ -4352,7 +4602,11 @@ static void looper_audio_block(int16_t *s)
 
 		if (stem_streams_init(g_stem_reload_pending.song_start_block,
 				       g_stem_reload_pending.song_block_count, g_stem_reload_pending.frames,
-				       g_stem_reload_pending.sector_count, /*loop_enabled=*/true)) {
+				       g_stem_reload_pending.sector_count,
+				       /* THE WHOLE-SONG WRAP IS OFF. Not the
+					* Stem Tape loop -- see g_stem_eof_req.
+					* A song that reaches its end STOPS. */
+				       /*loop_enabled=*/false)) {
 			/* Group 0 of all four stems was read AND validated by the
 			 * streamer before it published the reload (see stem_song_
 			 * post_commit_reload()), against the stem and span each
@@ -4406,16 +4660,61 @@ static void looper_audio_block(int16_t *s)
 	 * false -- that spin-down is audible, pitched, and read from the tape
 	 * like any other audio. Cutting the branch on g_playing alone, as this
 	 * did before, is precisely what would turn a tape stop into a mute.
+	 *
+	 * THE END OF THE TAPE IS THE ONE STOP WITH NO SPIN-DOWN, and that is a
+	 * statement about the tape rather than a shortcut. A spin-down is
+	 * audible, pitched audio READ FROM THE TAPE; past the last frame there
+	 * is no tape to read it from, so a ramp here would be several hundred
+	 * milliseconds of a transport asking for frames that do not exist.
+	 * st_inertia_reset() puts the reel at rest immediately and, because the
+	 * idle timer's transport_active is `g_playing || st_inertia_moving()`,
+	 * makes the 300 s clock start where the song actually ended.
+	 *
+	 * It is held at rest for the one or two blocks it takes the control
+	 * thread to see the request and clear g_playing, which is why this is a
+	 * three-way branch and not a reset bolted onto the STOP arm: the audio
+	 * thread never writes g_playing, and until the control thread has, the
+	 * PLAY arm above would otherwise spin the reel straight back up.
 	 */
-	if (g_playing) {
+	if (atomic_get(&g_stem_eof_req) != 0) {
+		st_inertia_reset(&s_stem_inertia);
+	} else if (g_playing) {
 		st_inertia_play(&s_stem_inertia, I2S_TRUE_HZ);
 	} else {
 		st_inertia_stop(&s_stem_inertia, I2S_TRUE_HZ);
 	}
 
+	/* g_stem_eof_req GATES THE WHOLE STEM BRANCH, for the same window and
+	 * the same reason. With the heads parked past the last frame, every
+	 * pass through the branch would ask a mailbox for a sector beyond the
+	 * song, find nothing resident, and charge the difference to the dropout
+	 * counters -- reporting an underrun for a song that simply finished.
+	 * Falling through instead reaches the ordinary "no stem song playing"
+	 * tail below, which is exactly the coherent four-head stop wanted here:
+	 * stem_streams_stop(), st_inertia_reset(), stem_rs_drop(), meters dark. */
 	if (atomic_get(&g_stem_song_selected) != 0 &&
+	    atomic_get(&g_stem_eof_req) == 0 &&
 	    (g_playing || st_inertia_moving(&s_stem_inertia))) {
 		int32_t m0, md, mv;
+
+		/* ---- A PLAY THAT FOLLOWS THE END OF THE SONG IS A RESTART --
+		 *
+		 * The transport can only be parked at the song end by the
+		 * end-of-song park, and the branch can only be entered with it
+		 * parked there if something asked to play again: the control
+		 * thread has already cleared g_playing and g_stem_eof_req by
+		 * then, and neither the reel nor anything else moves a parked
+		 * head on its own. So reaching here in that position IS the
+		 * deliberate PLAY press, whether it came from the button, the
+		 * FUNCTION-qualified path or MIDI -- one rewind covers all
+		 * three, with no new request flag and no edge detector.
+		 *
+		 * Before stem_streams_play(), so the four heads are already at
+		 * frame 0 with residency invalidated and their resamplers clear
+		 * when the transport is re-asserted on them. */
+		if (stem_streams_at_song_end()) {
+			stem_streams_rewind_to_start();
+		}
 
 		/* Idempotent transport sync -- and it must stay called through
 		 * the spin-down, or the stream would refuse to advance the
@@ -5531,7 +5830,12 @@ static void stem_song_post_commit_reload(void)
 	st_stream_t local_check;
 
 	if (!st_stream_init(&local_check, lib.active.song_start_block, lib.active.song_block_count,
-			     lib.active.frames, lib.active.sector_count, /*loop_enabled=*/true)) {
+			     lib.active.frames, lib.active.sector_count,
+			     /* A VALIDATION OBJECT, never played -- the flag
+			      * cannot matter here. Held at the same value as
+			      * the two real playback streams so a future grep
+			      * for the whole-song wrap finds no `true` left. */
+			     /*loop_enabled=*/false)) {
 		return;
 	}
 	/* GROUP 0 OF ALL FOUR STEMS, and that IS the validation now.
@@ -6830,7 +7134,12 @@ static void streamer_thread(void *a, void *b, void *c)
 				if (lib.active.flags & ST11_IX_FLAG_SONG_PRESENT) {
 					if (stem_streams_init(lib.active.song_start_block,
 							       lib.active.song_block_count, lib.active.frames,
-							       lib.active.sector_count, /*loop_enabled=*/true)) {
+							       lib.active.sector_count,
+							       /* THE WHOLE-SONG WRAP IS OFF.
+								* Not the Stem Tape loop -- see
+								* g_stem_eof_req. A song that
+								* reaches its end STOPS. */
+							       /*loop_enabled=*/false)) {
 						if (stem_prime_group0(lib.active.song_start_block,
 								       lib.active.sector_count)) {
 							{
@@ -9959,6 +10268,35 @@ int main(void)
 		(void)power_hold_service(st_ladder_mask(&fx_track_ladder) != 0u ||
 					  st_ladder_play(&fx_track_ladder),
 					  st_vraw);
+
+#if SP1_XFER_ENABLE
+		/*
+		 * ---- THE SONG ENDED: CLEAR THE TRANSPORT REQUEST -----------
+		 *
+		 * The audio thread parked all four heads and asked for this;
+		 * only the control thread writes g_playing, so only the control
+		 * thread can finish the stop. Two properties of the placement:
+		 *
+		 * ABOVE `if (g_xfer_mode) { ...; continue; }`, so a song that
+		 * ends as an upload starts is not left with the request latched
+		 * and the audio branch gated off for the whole transfer.
+		 *
+		 * ABOVE stem_ctl_apply(), so a PLAY press decoded in this very
+		 * pass wins: the press is a deliberate restart and must not be
+		 * cancelled by an end-of-song the player has already answered.
+		 *
+		 * ORDER INSIDE THE BLOCK MATTERS. g_playing is written BEFORE
+		 * the flag is cleared. The audio branch is gated on the flag,
+		 * so while it is set nothing can spin the reel back up, and by
+		 * the time it clears the transport request is already false.
+		 * Clearing first would open exactly that window.
+		 */
+		if (atomic_get(&g_stem_eof_req) != 0) {
+			g_playing = 0;
+			g_midi_stop_pending = 1;
+			atomic_set(&g_stem_eof_req, 0);
+		}
+#endif
 
 
 		/* USB block-transfer in progress: audio is paused and the streamer is

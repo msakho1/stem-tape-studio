@@ -1079,6 +1079,91 @@ def main() -> int:
         fail = True
     report.append("")
 
+    # ==================================================================
+    # F. THE END OF THE SONG, AND THE LOOP IT MUST NOT BE CONFUSED WITH
+    # ==================================================================
+    #
+    # tests/test_song_end_gate.c proves the BEHAVIOUR against a model of this
+    # wiring, and its own doc comment says plainly that a model can agree with
+    # a main.c that has drifted from it. These two checks read the production
+    # file, and they exist because the failure mode here is not a wrong
+    # algorithm -- it is somebody deciding that `loop_enabled` is "the loop
+    # flag" and turning it back on, or deleting the one handler that stops the
+    # transport, and both of those are textual.
+    report.append("## F. The end of the song is a transport event")
+    report.append("")
+
+    src = "\n".join(l for _, l in code_lines)
+
+    # F-1. The whole-song wrap is OFF at every st_stream_init() call site.
+    #      Counted rather than pattern-matched on one line: three call sites
+    #      exist and a change that flipped only one would be exactly the
+    #      "three of four" defect this file is full of.
+    # BOTH spellings. The two real PLAYBACK sites call the four-head wrapper
+    # stem_streams_init(); only the validation object calls st_stream_init()
+    # directly. A first draft of this check matched the direct name alone and
+    # cheerfully reported "all 1 call site(s)" while asserting nothing about
+    # either stream the device actually plays.
+    inits = re.findall(
+        r"\b(?:stem_streams_init|st_stream_init)\s*\((?:[^;]*?)loop_enabled=\*/\s*(true|false)",
+        text, flags=re.S)
+    if len(inits) >= 3 and all(v == "false" for v in inits):
+        report.append(f"- present: all {len(inits)} `st_stream_init()`/"
+                       f"`stem_streams_init()` call site(s) pass "
+                       f"`loop_enabled = false`. The whole-song wrap -- which silently "
+                       f"restarted a finished song with nobody pressing PLAY -- cannot "
+                       f"be produced")
+    else:
+        report.append(f"- **MISSING/BAD**: st_stream_init() call sites pass "
+                       f"{inits or '<none found>'}. `loop_enabled = true` is the "
+                       f"unsolicited-restart defect; it is NOT the Stem Tape loop, which "
+                       f"lives in st_loop.c and wraps by seeking inside its own window")
+        fail = True
+
+    # F-2. The handler exists, is reached from the advance loop, and the
+    #      control thread finishes the stop. Each of the four is separately
+    #      load-bearing, so each is separately asserted.
+    for needle, why in (
+        ("ST_STREAM_TICK_ENDED",
+         "the end-of-song tick is observed at all"),
+        ("stem_streams_end_of_song();",
+         "the shared four-head park is applied"),
+        ("if (eof_seen && !lp_on) {",
+         "it is applied once per block, and a latched loop is exempt so the "
+         "real loop feature keeps its own boundary"),
+        ("stem_streams_rewind_to_start();",
+         "a PLAY after the end of the song rewinds all four heads together"),
+    ):
+        if needle in src:
+            report.append(f"- present: `{needle}` -- {why}")
+        else:
+            report.append(f"- **MISSING**: `{needle}` is gone. Without it, {why} "
+                           f"no longer happens")
+            fail = True
+
+    # F-3. THE SEPARATION ITSELF. The user-facing loop engine must not read the
+    #      whole-song wrap flag. This is what makes "turning that flag off
+    #      cannot reach loop entry, wrap or release" a checkable statement
+    #      rather than an assurance.
+    for name in ("st_loop.c", "st_loop.h"):
+        p = Path(main_c_path).with_name(name)
+        try:
+            body = open(str(p), errors="ignore").read()
+        except OSError:
+            report.append(f"- **MISSING**: could not read {name}. Fails closed")
+            fail = True
+            continue
+        if "loop_enabled" in body:
+            report.append(f"- **BAD**: {name} mentions `loop_enabled`. The Stem Tape loop "
+                           f"and the streaming module's whole-song wrap are different "
+                           f"mechanisms; coupling them is how a change to one silently "
+                           f"becomes a change to the other")
+            fail = True
+        else:
+            report.append(f"- present: {name} never mentions `loop_enabled` -- the user "
+                           f"loop is independent of the whole-song wrap")
+    report.append("")
+
     report.append("## Result")
     report.append("")
     if fail:
