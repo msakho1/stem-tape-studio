@@ -142,8 +142,81 @@ it, which is why the replay path seeks.
 
 **What none of it proves.** The gate's transport is a *model* — `main.c` cannot
 be linked on the host — so it can agree with a `main.c` that has drifted from
-it. That is the reason F-1/F-2/F-3 read the production file directly, and it is
-the reason the checkpoint is not complete until the hardware run:
+it. That is the reason F-1/F-2/F-3 read the production file directly.
+
+---
+
+## 7. OPEN — st62 did NOT stop on hardware
+
+**Status: known, open, deliberately deferred.** Do not treat §1–§6 as a shipped
+fix; treat them as the design, one path of which is still missing.
+
+Hardware, st62, `44fad34`:
+
+| | |
+|---|---|
+| ordinary playback synchronised | yes |
+| song end audible click / pop / glitch | **none** |
+| song stopped at its natural end | **NO — it still restarted automatically** |
+| the unsolicited second pass | **synchronised** (it was not, before st62) |
+
+Two of those are new information and both matter.
+
+**The restart still happens**, so `ST_STREAM_TICK_ENDED` is reaching
+`stem_streams_end_of_song()` on at least some runs — or never. The whole-song
+wrap is provably off (gate F-1 reads all three call sites), so the head is
+reaching `END_OF_SONG` and something downstream is restarting it. The only code
+that can produce a frame-0 restart in st62 is `stem_streams_rewind_to_start()`,
+reached from the replay-on-PLAY branch when `stem_streams_at_song_end()` is true
+and `g_playing` is still set.
+
+**The second pass is now synchronised**, which is corroborating evidence for
+exactly that: the old whole-song wrap was four independent `song_frame = 0`
+assignments with four independent residency invalidations, and it produced an
+audibly displaced second pass. The st62 rewind is one coherent pass — four seeks
+to frame 0, one `stem_rs_drop()`, one seam reset. The second pass being clean is
+what that path would sound like.
+
+### Leading hypothesis — NOT verified, no capture taken
+
+`main.c`'s whole-block underrun path discards the tick result:
+
+```c
+for (sk = 0; sk < ST_PL_STEMS; sk++) {
+        (void)st_stream_advance_frames(&g_stem_stream[sk], 1u);   /* main.c */
+}
+```
+
+A head sitting on `frames - 1` that advances through **this** call returns
+`ST_STREAM_TICK_ENDED` into a `(void)` cast. No `eof_seen`, no shared park, no
+`g_stem_eof_req`, no `g_playing = 0` — but the head *is* now at `frames` in
+`END_OF_SONG`, so the next block finds `stem_streams_at_song_end()` true with
+`g_playing` still 1, and rewinds. A silent restart, through the new coherent
+path. That matches both observations.
+
+Why this path is likelier at the song end than anywhere else: read-ahead is
+deliberately disabled there (`ahead = ST_STEM_GEOM.loop_enabled ? 0u :
+needed[sk]` — with the wrap now off, the head re-publishes its current sector
+and the ring stops filling forward), so residency is at its most fragile
+precisely over the last sector. And during a starvation episode this path
+advances *every* head by exactly one frame per block, so a starved run-out
+arrives at `frames` through here rather than through the normal advance loop.
+
+The obvious repair is to collect the tick here as well as in the main advance
+loop. **It is not being made now, by instruction.** When it is, it needs the
+same treatment as everything above — the model's underrun path must gain the
+same hole first, so the mutation proves the gate would have caught it.
+
+### What would settle it in one run
+
+A serial capture over the last ~10 s of a song, printing per block: the four
+`song_frame`s, `g_stem_eof_req`, `g_playing`, and
+`g_stem_underrun_frames`. If the underrun counter climbs over the final sector
+and the heads crawl to `frames` a frame at a time, the hypothesis is confirmed
+and the fix is one line. If they arrive in a single 256-frame step and
+`g_stem_eof_req` never rises, it is somewhere else and the hypothesis is wrong.
+
+### The acceptance test, still unmet
 
 > fresh boot → PLAY → let the song reach its natural end → it stops and stays
 > stopped → press PLAY → it restarts deliberately, from the beginning.
