@@ -2166,22 +2166,28 @@ jobs:
           NSEEK="$(grep -vE '^[[:space:]]*\*|^[[:space:]]*/\*|^[[:space:]]*//' "$M" \
                    | grep -c 'st_stream_seek(' || true)"
           echo "st_stream_seek call sites in the audio path: ${NSEEK}"
-          # FOUR since st62. Three are the loop's: the ducked wrap and its
+          # FIVE since st63. Three are the loop's: the ducked wrap and its
           # containment backstop in each of the two directions a head can
-          # travel. The fourth is stem_streams_rewind_to_start() -- the
-          # deliberate PLAY that follows the natural end of the song, which is
-          # a TRANSPORT move and not a loop one. It is counted here rather than
-          # exempted so that adding a fifth still has to be argued for.
-          if [ "$NSEEK" -ne 4 ]; then
-            echo "FAIL: expected exactly 4 (the ducked wrap and its backstop in"
-            echo "      each direction, plus the end-of-song replay rewind),"
-            echo "      found ${NSEEK}"
+          # travel. The fourth is stem_streams_rewind_to_start(), the
+          # deliberate PLAY after the natural end of the song. The fifth is the
+          # reverse-release rejoin -- a stem leaving reverse returns to the
+          # captured MASTER position. Both extras are TRANSPORT moves, not loop
+          # ones, and they are counted here rather than exempted so that adding
+          # a sixth still has to be argued for.
+          if [ "$NSEEK" -ne 5 ]; then
+            echo "FAIL: expected exactly 5 (the ducked wrap and its backstop in"
+            echo "      each direction, the end-of-song replay rewind, and the"
+            echo "      reverse-release rejoin), found ${NSEEK}"
             grep -n 'st_stream_seek' "$M" || true
             exit 1
           fi
-          # And the fourth must be THAT one, by name, in that function.
+          # And the two non-loop seeks must be THOSE, by name.
           if ! grep -q 'stem_streams_rewind_to_start' "$M"; then
             echo "FAIL: the fourth seek is not the end-of-song replay rewind"
+            exit 1
+          fi
+          if ! grep -q 'st_stream_seek(&g_stem_stream\[j\],' "$M"; then
+            echo "FAIL: the fifth seek is not the reverse-release rejoin"
             exit 1
           fi
           echo "loop transport: no entry seek, no exit seek, wrap is the only move"
@@ -2236,6 +2242,51 @@ jobs:
             cat audit/song-end-gate.txt
             echo '```'
             cat audit/song-end-mutations.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Stem Tape REVERSE RESYNC gate -- leaving reverse rejoins the master
+        # REVERSE IS A TEMPORARY DEPARTURE FROM THE SHARED TIMELINE. A stem
+        # that stops being reversed must not stay displaced by the excursion it
+        # just made -- whether reverse was released on it, or switched straight
+        # to another stem, which releases the outgoing one as a side effect.
+        #
+        # THE LOAD-BEARING PROPERTY IS AN ORDERING. The master is
+        # g_stem_stream[s_stem_transport].song_frame, and s_stem_transport is
+        # reassigned by a search for the LOWEST-INDEX FORWARD head that has no
+        # idea which head was just displaced. Read the master after that search
+        # and, whenever the head leaving reverse has a lower index than the
+        # transport -- stem 0, or a switch away from it -- the master IS the
+        # displaced head and the rejoin is a no-op. Capturing it first is the
+        # whole fix, and it is what the gate's R-1 mutation removes.
+        #
+        # TWO STEPS. The gate proves the BEHAVIOUR against a model of main.c's
+        # reverse-consume block; the mutation run proves the gate can go RED.
+        # Eleven mutations, each removing one property, each required to fail
+        # it -- ten on the model, one (R-11) on production st_stem_stream.c.
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          cc -std=c11 -Wall -Wextra -Werror -Ifirmware/stemtape_player/src \
+            firmware/stemtape_player/src/st_stem_stream.c \
+            firmware/stemtape_player/tests/test_reverse_resync_gate.c \
+            -o audit/test_reverse_resync_gate
+          ./audit/test_reverse_resync_gate | tee audit/reverse-resync.txt
+          grep -q 'REVERSE RESYNC GATE PASSED' audit/reverse-resync.txt
+          # The gate must keep asking the questions, not merely exit 0.
+          grep -q 'explicit reverse release on stem 0' audit/reverse-resync.txt
+          grep -q 'switching reverse from stem 0 to stem 2' audit/reverse-resync.txt
+          grep -q 'reverse release while a loop is latched' audit/reverse-resync.txt
+          grep -q 'switching reverse while a loop is latched' audit/reverse-resync.txt
+          grep -q 'the rejoin target is not the head being released' audit/reverse-resync.txt
+          grep -q 'loop release still preserves the audible position' audit/reverse-resync.txt
+          python3 .github/scripts/stemtape_player_reverse_resync_mutations.py \
+            audit/reverse-resync-mutations.md | tee audit/reverse-resync-mut.txt
+          {
+            echo '### Stem Tape reverse-resync gate'
+            echo '```text'
+            cat audit/reverse-resync.txt
+            echo '```'
+            cat audit/reverse-resync-mutations.md
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Stem Tape ROCKER SEMITONES -- the Tape Looper's own pitch grid, reused

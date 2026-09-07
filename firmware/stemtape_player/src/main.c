@@ -156,7 +156,45 @@
  * session's patience. */
 #define ST_RC_SWEEP_REPS 24u
 
-/* st62: STAGE 2A-i -- a song that reaches its end STOPS.
+/* st63: STAGE 2B -- leaving reverse rejoins the shared timeline.
+ *
+ * ONE CHANGE, AND NOTHING ELSE IN THIS BUILD. Reverse is a TEMPORARY per-stem
+ * departure from the master transport, and a stem that stops being reversed
+ * must not stay displaced by the excursion it just made. Both ways out are the
+ * same event: an explicit release of that stem, and the implicit release of the
+ * previously-reversed stem when reverse is switched straight to another one.
+ * Before this, neither resynced -- the outgoing lane simply carried on forward
+ * from wherever it had backed up to, permanently offset from the other three.
+ *
+ * THE LOAD-BEARING PROPERTY IS AN ORDERING, not an algorithm. The master is
+ * g_stem_stream[s_stem_transport].song_frame -- the same single position the
+ * loop window, the seam duck, the beat phase and g_stem_song_frame_pub already
+ * read, and there is deliberately no second clock. But s_stem_transport is
+ * reassigned by a search for the LOWEST-INDEX FORWARD head that cannot know
+ * which head was just displaced, so reading the master AFTER it makes the
+ * master BE the released head whenever that head has a lower index than the
+ * transport -- stem 0, or a switch away from it. The capture therefore happens
+ * FIRST, before anything moves. See the reverse-consume block for the full
+ * argument and for what the mutation run proved is NOT load-bearing.
+ *
+ * That mis-ordering was also a live defect in st62 on its own account: the
+ * published song clock, the beat phase and the frame a PLAY-down captures for
+ * loop_start all jumped backwards by the excursion, and the co-location guard's
+ * reference moved onto the displaced head, so the other three stopped counting
+ * as co-located and could then starve -- and drift -- independently.
+ *
+ * ONLY THE OUTGOING STEM MOVES, and only its carried resampler state is
+ * dropped. stem_rs_drop() is deliberately NOT used: it clears all four, which
+ * would quantise the fractional cursors of three stems that did not move.
+ *
+ * WHILE A LOOP IS LATCHED the transport head is inside [loop_start, loop_end),
+ * so the captured master IS the current loop master and the rejoin lands inside
+ * the window. Loop entry, loop wrap and loop release are untouched.
+ *
+ * STILL OPEN, DEFERRED BY INSTRUCTION: the natural end of a song does not stop
+ * the transport on hardware. See docs/stem-tape-song-end-contract.md section 7.
+ *
+ * ---- st62: STAGE 2A-i -- a song that reaches its end STOPS.
  *
  * ONE DEFECT, AND NOTHING ELSE IN THIS BUILD. Every playback stream was
  * initialised with loop_enabled = true, so the streaming state machine answered
@@ -233,9 +271,9 @@
  * proof matrix and the hardware acceptance list this build has NOT been run
  * against. */
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st62-VOLCAL"
+#define ST_BUILD_TAG "st63-VOLCAL"
 #else
-#define ST_BUILD_TAG "st62"
+#define ST_BUILD_TAG "st63"
 #endif
 #include "st_pwr_idle.h"
 #include "st_track_hold.h"
@@ -3647,31 +3685,133 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 			if (k < ST_PL_STEMS) {
 				uint32_t j;
 				const bool turning_on = !g_stem_stream[k].reverse;
+				/*
+				 * ---- MASTER, CAPTURED BEFORE ANYTHING MOVES ----
+				 *
+				 * REVERSE IS A TEMPORARY DEPARTURE FROM THE SHARED
+				 * TIMELINE, so a head that stops being reversed must
+				 * not stay displaced by the excursion it just made.
+				 * The position it rejoins is read HERE, first, and
+				 * that ordering is the whole correctness argument.
+				 *
+				 * WHY HERE AND NOT AFTER. s_stem_transport is
+				 * reassigned by the search at the bottom of this
+				 * block, and that search picks the LOWEST-INDEX
+				 * FORWARD head with no idea which head was just
+				 * displaced. Read the master after it and, whenever
+				 * the head leaving reverse has a lower index than the
+				 * current transport -- reversing stem 0, or switching
+				 * away from it -- the master IS the displaced head
+				 * and the rejoin seeks it to where it already is.
+				 * That was a live defect in st62 in its own right: the
+				 * published song clock, the beat phase and the frame a
+				 * PLAY-down captures for loop_start all jumped
+				 * backwards by the excursion, and the co-location
+				 * guard's reference moved onto the displaced head, so
+				 * the other three stopped counting as co-located and
+				 * could then starve -- and drift -- independently.
+				 *
+				 * WHY THIS VALUE IS THE RIGHT ONE. It is the same
+				 * single authoritative position the loop window, the
+				 * seam duck, the beat phase and g_stem_song_frame_pub
+				 * are already read from; there is deliberately no
+				 * second clock (st_beat_phase.h says so directly).
+				 * g_stem_stream[s_stem_transport] is provably a
+				 * FORWARD head here: st_stream_init()/
+				 * stem_streams_init() start every head forward with
+				 * the transport at 0, the loop below forces at most
+				 * one head reversed, and the search at the bottom only
+				 * ever assigns a head whose `reverse` is false.
+				 *
+				 * WHILE A LOOP IS LATCHED this needs no special case:
+				 * the transport head is inside [loop_start, loop_end),
+				 * so `master` IS the current loop master and the seek
+				 * lands inside the window. lp_on is not even read until
+				 * further down, inside the run loop, so a loop release
+				 * arriving in the same pass cannot reach this: the
+				 * rejoin targets a POSITION, never a window, and there
+				 * is no path from here to a frame outside the loop.
+				 */
+				const uint32_t master =
+					g_stem_stream[s_stem_transport].song_frame;
 
-				/* ONE TRACK AT A TIME, and the spec says what
-				 * happens to the outgoing one: "track 2 resumes
-				 * forward from wherever it is". Not from where
-				 * it started, and not re-synced -- turning a
-				 * head forward moves nothing, which is exactly
-				 * what st_stream_set_reverse() guarantees. */
+				/*
+				 * ---- PASS 1: EVERY HEAD LEAVING REVERSE REJOINS ----
+				 *
+				 * Both ways out are the same event and get the same
+				 * treatment: an explicit release of this head, and the
+				 * implicit release of the previously-reversed head
+				 * when reverse is switched straight to another one.
+				 * The invariant is "if a stem is no longer reversed it
+				 * must not remain displaced by its prior excursion",
+				 * and a switch that left the outgoing lane behind
+				 * would violate it exactly as a release would.
+				 *
+				 * This runs BEFORE the head entering reverse is
+				 * touched and before the transport search, so the
+				 * outgoing head is back on master before anything can
+				 * observe it or point the song's clock at it.
+				 */
 				for (j = 0; j < ST_PL_STEMS; j++) {
 					const bool want = turning_on && (j == k);
 
-					if (g_stem_stream[j].reverse == want) {
+					if (want || !g_stem_stream[j].reverse) {
 						continue;
 					}
-					st_stream_set_reverse(&g_stem_stream[j], want);
-					/* THE CARRIED "FRAME BEHIND" IS ON THE
-					 * WRONG SIDE NOW. Its position did not
-					 * move, but the direction of travel did,
-					 * so the frame behind the cursor is the
-					 * one at the other neighbour. Dropping it
-					 * makes the first blend after the turn
-					 * start clean; it is not a position
-					 * change, and only this head's state is
-					 * touched -- the others did not turn. */
+					st_stream_set_reverse(&g_stem_stream[j], false);
+					/* Also lifts START_OF_SONG, so a head that
+					 * had backed up to frame 0 and parked is
+					 * moving again before it is seeked. */
+					if (g_stem_stream[j].song_frame != master) {
+						/* st_stream_seek() invalidates this
+						 * head's residency, which is what
+						 * makes stale audio from the old
+						 * position structurally impossible --
+						 * it cannot decode the group it was
+						 * holding. It can only fail for a frame
+						 * outside the song, and `master` is a
+						 * live forward head's position, so the
+						 * only value that would fail is `frames`
+						 * itself, which needs the transport
+						 * parked at the end of the song -- and the
+						 * end of the song gates this whole branch
+						 * off before a reverse request can be
+						 * consumed, so it cannot be observed here.
+						 * If it ever were, the head would stay
+						 * where it is, which is the pre-2B
+						 * behaviour and no worse. Skipped when the
+						 * head is already on master, so an
+						 * excursion that ended where it started
+						 * does not pay a needless re-prime. */
+						(void)st_stream_seek(&g_stem_stream[j],
+								      master);
+					}
+					/* ONLY THIS HEAD'S CARRIED STATE. The frame
+					 * behind the cursor belongs to the position
+					 * this head has just left; blending it into
+					 * the first frame at master is exactly the
+					 * "old-position tail" the rejoin must not
+					 * produce. stem_rs_drop() would be WRONG here
+					 * -- it clears all four, quantising the
+					 * fractional cursors of three stems that did
+					 * not move, which at any non-unity rate
+					 * injects the very displacement this stage
+					 * exists to remove. */
 					s_rs_prev_valid[j]  = false;
 					s_stem_rate_frac[j] = 0u;
+				}
+
+				/* ---- PASS 2: THE HEAD ENTERING REVERSE -----------
+				 * Unchanged from st61: turning a head around does not
+				 * move it and does not invalidate its residency (see
+				 * st_stream_set_reverse()'s own note); only the
+				 * carried "frame behind", which is now on the wrong
+				 * side of the cursor, is dropped -- and only for this
+				 * head, because only this head turned. */
+				if (turning_on && !g_stem_stream[k].reverse) {
+					st_stream_set_reverse(&g_stem_stream[k], true);
+					s_rs_prev_valid[k]  = false;
+					s_stem_rate_frac[k] = 0u;
 				}
 
 				/* THE SONG'S CLOCK MOVES TO A FORWARD HEAD.
@@ -3680,7 +3820,25 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 				 * claim that stops being true one refactor
 				 * later, so the search falls back to leaving the
 				 * transport where it is rather than pointing it
-				 * at a head running backwards. */
+				 * at a head running backwards.
+				 *
+				 * LAST, to match the stated sequence. By the time it
+				 * runs, every head that left reverse is standing on
+				 * `master`, so it no longer matters which forward head
+				 * it picks -- they are all on the same frame.
+				 *
+				 * AND THAT IS EXACTLY WHY ITS POSITION IS NOT LOAD-
+				 * BEARING, which is worth writing down because the
+				 * first draft of this comment claimed the opposite.
+				 * Mutation coverage (R-6/R-7 in the gate's own
+				 * mutation run) moved this search above Pass 1, and
+				 * moved Pass 2 above Pass 1, and every assertion
+				 * stayed green -- because the capture is first, and
+				 * the captured value is what all three depend on. The
+				 * CAPTURE is the whole of the ordering that matters.
+				 * Do not read the three-pass layout as three separate
+				 * correctness constraints; it is one constraint and
+				 * two orderings kept for auditability. */
 				for (j = 0; j < ST_PL_STEMS; j++) {
 					if (!g_stem_stream[j].reverse) {
 						s_stem_transport = (uint8_t)j;

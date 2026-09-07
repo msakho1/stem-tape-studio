@@ -1164,6 +1164,129 @@ def main() -> int:
                            f"loop is independent of the whole-song wrap")
     report.append("")
 
+    # ==================================================================
+    # G. REVERSE IS A TEMPORARY DEPARTURE FROM THE SHARED TIMELINE
+    # ==================================================================
+    #
+    # tests/test_reverse_resync_gate.c proves the BEHAVIOUR against a model of
+    # this wiring, and its own doc comment says a model can agree with a main.c
+    # that has drifted from it. These checks read the production file, and they
+    # exist because the load-bearing property here is an ORDERING -- the kind of
+    # thing that survives a careless edit looking perfectly reasonable.
+    report.append("## G. Reverse release rejoins the shared timeline")
+    report.append("")
+
+    rev_body = substrings_in_function(lines, func_of_line, "stem_audio_block")
+
+    # G-1. The master is captured from the transport head, and the capture
+    #      textually PRECEDES the transport search. That order is the entire
+    #      correctness argument: the search picks the lowest-index forward head
+    #      with no idea which head was just displaced, so a capture below it
+    #      would read the released head's own displaced position.
+    cap = "const uint32_t master =\n\t\t\t\t\tg_stem_stream[s_stem_transport].song_frame;"
+    search = "if (!g_stem_stream[j].reverse) {\n\t\t\t\t\t\ts_stem_transport = (uint8_t)j;"
+    if cap in src and search in src and src.index(cap) < src.index(search):
+        report.append("- present: the rejoin target is "
+                       "`g_stem_stream[s_stem_transport].song_frame`, captured "
+                       "BEFORE the transport search reassigns s_stem_transport. "
+                       "That ordering is the whole fix: the search selects the "
+                       "lowest-index FORWARD head and cannot know which head was "
+                       "just displaced, so a capture below it reads the released "
+                       "head's own excursion position")
+    elif cap not in src:
+        report.append("- **MISSING**: the master capture "
+                       "`const uint32_t master = "
+                       "g_stem_stream[s_stem_transport].song_frame;` is gone. "
+                       "Reverse release has no shared timeline to rejoin")
+        fail = True
+    elif search not in src:
+        report.append("- **MISSING**: the transport search is gone; the song "
+                       "clock could be left pointing at a backward head")
+        fail = True
+    else:
+        report.append("- **BAD**: the master is captured AFTER the transport "
+                       "search. When the head leaving reverse has a lower index "
+                       "than the transport -- stem 0, or a switch away from it "
+                       "-- `master` becomes that head's own displaced position "
+                       "and the rejoin is a no-op")
+        fail = True
+
+    # G-2. The rejoin exists and is a seek to that captured value.
+    # Whitespace-tolerant: the call is wrapped across lines at this indent
+    # depth and an exact-text anchor would fail on a reflow rather than on a
+    # real change, which is the kind of brittle check that gets deleted.
+    if re.search(r"st_stream_seek\s*\(\s*&g_stem_stream\[j\]\s*,\s*master\s*\)",
+                 src):
+        report.append("- present: a head leaving reverse is seeked to `master` "
+                       "-- st_stream_seek() also invalidates that head's "
+                       "residency, which is what makes stale audio from the old "
+                       "position structurally impossible")
+    else:
+        report.append("- **MISSING**: nothing seeks a head leaving reverse to "
+                       "`master`. The stem stays displaced by its excursion, "
+                       "which is the pre-2B behaviour")
+        fail = True
+
+    # G-3. BOTH ways out of reverse. The Pass-1 predicate must select every
+    #      head that is reversed and not wanted reversed -- an explicit release
+    #      AND the implicit release of the outgoing head on a switch. A
+    #      predicate written against `k` alone would silently cover only one.
+    if "if (want || !g_stem_stream[j].reverse) {" in src:
+        report.append("- present: the rejoin pass selects every head that is "
+                       "reversed and not wanted reversed, so an explicit release "
+                       "and the implicit release of the outgoing head on a "
+                       "switch are the same event")
+    else:
+        report.append("- **MISSING/BAD**: the rejoin pass no longer selects by "
+                       "\"reversed and not wanted reversed\". Switching reverse "
+                       "straight to another stem would leave the outgoing lane "
+                       "displaced for the rest of the song")
+        fail = True
+
+    # G-4. ONLY the outgoing head's carried state. stem_rs_drop() clears all
+    #      four; using it here would quantise three stems that did not move.
+    if "stem_rs_drop" in rev_body:
+        # It is legitimate elsewhere in the function (the reload path, the
+        # end-of-song park); what must not happen is it landing in the reverse
+        # consume. Locate the block and check that span only.
+        # ANCHORED ON CODE, NOT ON A COMMENT. `src` here is the
+        # comment-stripped join, so a comment banner as the span's start marker
+        # silently never matches and the check passes for free -- which is
+        # exactly what the first draft of this did, and its mutation survived.
+        # The CONSUME, not the clear. stem_streams_init() also contains a bare
+        # `atomic_set(&g_stem_reverse_req, 0)` ~1700 lines earlier, and
+        # anchoring on that swallowed the whole file into the span -- the check
+        # then failed on legitimate stem_rs_drop() calls that are nowhere near
+        # the reverse block. The assignment form appears exactly once.
+        marker = "req = atomic_set(&g_stem_reverse_req, 0)"
+        start = src.find(marker)
+        end = src.find("while (f < BLK_FRAMES)", start if start >= 0 else 0)
+        if start < 0 or src.count(marker) != 1 or end <= start:
+            report.append("- **MISSING**: could not uniquely locate the "
+                           "reverse-consume block (`req = "
+                           "atomic_set(&g_stem_reverse_req, 0)` followed by the "
+                           "run loop). Fails closed")
+            fail = True
+            span = ""
+        else:
+            span = src[start:end]
+        if "stem_rs_drop" in span:
+            report.append("- **BAD**: `stem_rs_drop()` appears inside the "
+                           "reverse-consume block. It clears all four carried "
+                           "cursors; the three stems that did not move must keep "
+                           "theirs, or their fractional position is quantised at "
+                           "any non-unity rate")
+            fail = True
+        else:
+            report.append("- present: `stem_rs_drop()` is not used in the "
+                           "reverse-consume block -- only the per-stem "
+                           "`s_rs_prev_valid[j]`/`s_stem_rate_frac[j]` form, so "
+                           "the three stems that did not move are untouched")
+    else:
+        report.append("- present: `stem_rs_drop()` is not used in the "
+                       "reverse-consume block")
+    report.append("")
+
     report.append("## Result")
     report.append("")
     if fail:
