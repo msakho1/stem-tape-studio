@@ -215,7 +215,32 @@ so the surviving `src_avail` condition masks it. The lock gate catches it only
 because case 2 deliberately equalises the run bound to isolate `dirs`. A
 randomized sweep is not a substitute for a constructed one.
 
-## 10. Status
+## 10. What it cost
+
+| | Commit 1 `c410598` | st65 `dafc7d2` | delta |
+|---|---|---|---|
+| FLASH (bin) | 116,848 B | 117,344 B | **+496 B** |
+| RAM (linker) | 203,486 B | 203,486 B | **0** |
+| RAM free | 58,658 B | 58,658 B | 0 |
+| new statics | none | **none** | 0 |
+| `st_rs_cursor_*` out-of-line copies | none | **none** | fully inlined |
+| `stem_render_run()` frame | `sub sp, #188` | `sub sp, #196` | **+8 B** |
+
+sha256 `bde7f62c…210e` → `58931dfb…aecb`. Build tag `st64` → **`st65`**.
+
+**The stack grew by 8 bytes, and that is reported rather than rounded to
+zero.** The shared branch introduces two locals — `f0` and `c0`, the lane-0
+fraction and cursor — and GCC gave them stack slots rather than keeping them in
+registers across the walk. Two words out of the audio thread's 3072-byte stack
+(`main.c:939`), which carries a deliberate +1 KiB margin over the historical
+2048. It is not free, it is small, and the `STACK` runtime diagnostic reports
+the real high-water mark on hardware if it ever matters.
+
+FLASH +496 B is the locked branches themselves: five helpers each carrying a
+second code path. That is the price of the fallback being a real path rather
+than a reinterpretation of the shared one.
+
+## 11. Status
 
 Commit 1 is CI-proven and **hardware-unproven**, which for a no-op extraction
 means: the audio is proven identical on the host, and nothing has been flashed.
