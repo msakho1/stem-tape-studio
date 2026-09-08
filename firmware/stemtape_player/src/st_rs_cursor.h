@@ -75,6 +75,74 @@
 #endif
 
 /*
+ * ======================================================================
+ * LOCKED: WHEN THE FOUR CURSORS ARE PROVABLY ONE CURSOR
+ * ======================================================================
+ * Ordinary four-forward playback off unity runs four bit-for-bit identical
+ * cursor walks and throws three of them away. This predicate says when that is
+ * demonstrably what is happening, so the bookkeeping can be done once on lane 0
+ * and broadcast -- with the per-stem AUDIO work (the blend, `prev`, the
+ * decodes) left entirely alone, because those genuinely differ per stem.
+ *
+ * IT IS DELIBERATELY STRONGER THAN `together`. main.c's `together` checks only
+ * that no lane is reversed and that all four frame_in_group agree. Three more
+ * things can differ underneath that, and each of them makes a shared cursor
+ * silently wrong:
+ *
+ *   frac[]        st63's reverse release clears ONLY the rejoining lane's
+ *                 s_stem_rate_frac[j] and seeks it to MASTER. One block later
+ *                 all four are co-located and forward -- `together` is TRUE --
+ *                 while that lane carries fraction 0 and three carry a
+ *                 fraction. A shared fraction renders it at the other three's
+ *                 sub-sample phase: audible only off centre pitch, only just
+ *                 after a reverse release. The hardest kind of defect to
+ *                 attribute, which is why it is a precondition and not a
+ *                 comment.
+ *   src_avail[]   a starved lane borrows the transport's offset and a forward
+ *                 direction (main.c's silent-group path), so `together` stays
+ *                 true while its run bound differs -- and the bound is what the
+ *                 floored corner of st_rs_out_frames() clamps against.
+ *   prev_valid[]  cleared per lane at the same sites as frac[]. Today they are
+ *                 always cleared together; requiring it explicitly costs three
+ *                 compares per RUN and removes a coupling assumption that a
+ *                 future change could break without noticing.
+ *
+ * Under all five conditions every cursor-domain quantity -- c, idx, frac, cur,
+ * the walk's step count, its pc/pidx and its branch -- is identical across the
+ * four lanes at every iteration, by induction on the loop. So the shared form
+ * computes the same values, not merely equivalent ones, and the output is
+ * bit-identical rather than "indistinguishable".
+ *
+ * ANY condition failing means the existing independent per-stem path runs
+ * unchanged. There is no partial sharing and no separate divergence detector to
+ * keep in sync: the predicate IS the fallback.
+ */
+ST_RS_CURSOR_INLINE bool st_rs_cursor_locked(const uint32_t frame_in_group[ST_PL_STEMS],
+					      const int8_t dirs[ST_PL_STEMS],
+					      const uint32_t src_avail[ST_PL_STEMS],
+					      const uint32_t frac[ST_PL_STEMS],
+					      const bool prev_valid[ST_PL_STEMS])
+{
+	uint32_t sp;
+
+	/* Lane 0 must itself be forward: every other lane is compared against
+	 * it, so "all equal to a reversed lane 0" must not pass. */
+	if (dirs[0] <= 0) {
+		return false;
+	}
+	for (sp = 1; sp < ST_PL_STEMS; sp++) {
+		if (dirs[sp] <= 0 ||
+		    frame_in_group[sp] != frame_in_group[0] ||
+		    src_avail[sp]      != src_avail[0]      ||
+		    frac[sp]           != frac[0]           ||
+		    prev_valid[sp]     != prev_valid[0]) {
+			return false;
+		}
+	}
+	return true;
+}
+
+/*
  * THE HARD BOUND. st_rs_out_frames() floors at one output frame, and above 1x
  * that single forced frame can ask for a source frame the run does not
  * contain. Holding the last available frame is a degenerate corner measured in
@@ -88,15 +156,31 @@
  * per stem, in that stem's OWN direction: dirs[] is +1 for a head reading
  * forward and -1 for one reading back, so a reversed head's "further along"
  * is a LOWER index and its "behind" is a higher one.
+ *
+ * LOCKED: one index, broadcast. Downstream -- the decode dispatch and the
+ * walk's `pidx == idx[sp]` test -- keeps reading idx[] per lane and never
+ * learns that it was computed once.
  */
 ST_RS_CURSOR_INLINE void st_rs_cursor_index(const uint32_t frame_in_group[ST_PL_STEMS],
 					     const int8_t dirs[ST_PL_STEMS],
 					     const uint32_t src_avail[ST_PL_STEMS],
 					     const uint32_t cur[ST_PL_STEMS],
-					     uint32_t idx[ST_PL_STEMS])
+					     uint32_t idx[ST_PL_STEMS],
+					     bool locked)
 {
 	uint32_t sp;
 
+	if (locked) {
+		const uint32_t c = (cur[0] >= src_avail[0])
+				   ? (src_avail[0] - 1u) : cur[0];
+		const uint32_t i0 = (uint32_t)((int32_t)frame_in_group[0] +
+						dirs[0] * (int32_t)c);
+
+		for (sp = 0; sp < ST_PL_STEMS; sp++) {
+			idx[sp] = i0;
+		}
+		return;
+	}
 	for (sp = 0; sp < ST_PL_STEMS; sp++) {
 		const uint32_t c = (cur[sp] >= src_avail[sp])
 				   ? (src_avail[sp] - 1u) : cur[sp];
@@ -126,8 +210,16 @@ ST_RS_CURSOR_INLINE void st_rs_cursor_index(const uint32_t frame_in_group[ST_PL_
  */
 ST_RS_CURSOR_INLINE void st_rs_cursor_fetch(const uint8_t *const grp[ST_PL_STEMS],
 					     const uint32_t idx[ST_PL_STEMS],
-					     st11_audio_frame_t *nxt)
+					     st11_audio_frame_t *nxt,
+					     bool locked)
 {
+	/* LOCKED: the three compares are statically true. Skipping them is a
+	 * saving, not a different path -- the branch taken is the same one, and
+	 * the decode is byte-for-byte the same call. */
+	if (locked) {
+		st_pl_decode_frame_shared(grp, idx[0], nxt);
+		return;
+	}
 	if (idx[0] == idx[1] && idx[1] == idx[2] &&
 	    idx[2] == idx[3]) {
 		st_pl_decode_frame_shared(grp, idx[0], nxt);
@@ -149,10 +241,24 @@ ST_RS_CURSOR_INLINE void st_rs_cursor_fetch(const uint8_t *const grp[ST_PL_STEMS
  */
 ST_RS_CURSOR_INLINE void st_rs_cursor_prime(const st11_audio_frame_t *nxt,
 					     st11_audio_frame_t *prev,
-					     bool prev_valid[ST_PL_STEMS])
+					     bool prev_valid[ST_PL_STEMS],
+					     bool locked)
 {
 	uint32_t sp;
 
+	/* LOCKED: one flag test instead of four, because the predicate has
+	 * already established that all four agree. The COPY is still per stem
+	 * -- it is audio, and every stem's samples differ. */
+	if (locked) {
+		if (!prev_valid[0]) {
+			for (sp = 0; sp < ST_PL_STEMS; sp++) {
+				prev->stem_l[sp] = nxt->stem_l[sp];
+				prev->stem_r[sp] = nxt->stem_r[sp];
+				prev_valid[sp] = true;
+			}
+		}
+		return;
+	}
 	for (sp = 0; sp < ST_PL_STEMS; sp++) {
 		if (!prev_valid[sp]) {
 			prev->stem_l[sp] = nxt->stem_l[sp];
@@ -178,9 +284,80 @@ ST_RS_CURSOR_INLINE void st_rs_cursor_advance(const uint8_t *const grp[ST_PL_STE
 					       uint32_t rate_q16,
 					       uint32_t frac[ST_PL_STEMS],
 					       uint32_t cur[ST_PL_STEMS],
-					       st11_audio_frame_t *prev)
+					       st11_audio_frame_t *prev,
+					       bool locked)
 {
 	uint32_t sp;
+
+	/*
+	 * LOCKED: ONE WALK, THEN BROADCAST.
+	 *
+	 * The scalar half -- the fraction accumulate, the step count, the
+	 * cursor, pc, pidx and the `pidx == idx` test -- is done once on lane 0.
+	 * The AUDIO half stays per stem inside it: `prev` is four different
+	 * pairs of samples and st_pl_decode_stem_inline() reads four different
+	 * groups, so those loops run for all four lanes exactly as before.
+	 *
+	 * THE BROADCAST IS THE LAST THING THIS FUNCTION DOES, and that
+	 * placement is load-bearing rather than tidy. Everything downstream in
+	 * the caller's frame loop -- st_fx_process()'s clock offset
+	 * `cur[s_fx_target]`, the per-stem meter's `g_stem_zero_at[sp]`
+	 * (song_frame + cur[sp]), and the global rack's `cur[fx_clock_stem]` --
+	 * reads cur[] AFTER this call, per lane, and must never see a lane that
+	 * still holds the previous output frame's cursor. Publishing all four
+	 * before returning is what makes every one of those readers correct
+	 * without any of them knowing the cursor was shared.
+	 */
+	if (locked) {
+		uint32_t f0 = frac[0] + rate_q16;
+		uint32_t c0 = cur[0];
+
+		while (f0 >= ST_RS_ONE) {
+			f0 -= ST_RS_ONE;
+			c0++;
+			if (c0 >= src_avail[0]) {
+				/* OUT OF RUN -- see the unlocked path below for
+				 * why the whole frames are dropped and the
+				 * sub-frame phase is kept. */
+				c0 = src_avail[0];
+				for (sp = 0; sp < ST_PL_STEMS; sp++) {
+					prev->stem_l[sp] = nxt->stem_l[sp];
+					prev->stem_r[sp] = nxt->stem_r[sp];
+				}
+				f0 &= (ST_RS_ONE - 1u);
+				break;
+			}
+			{
+				uint32_t pc = c0 - 1u;
+				uint32_t pidx;
+
+				if (pc >= src_avail[0]) {
+					pc = src_avail[0] - 1u;
+				}
+				pidx = (uint32_t)((int32_t)frame_in_group[0] +
+						   dirs[0] * (int32_t)pc);
+				if (pidx == idx[0]) {
+					for (sp = 0; sp < ST_PL_STEMS; sp++) {
+						prev->stem_l[sp] = nxt->stem_l[sp];
+						prev->stem_r[sp] = nxt->stem_r[sp];
+					}
+				} else {
+					for (sp = 0; sp < ST_PL_STEMS; sp++) {
+						st_pl_decode_stem_inline(
+							grp[sp], pidx,
+							&prev->stem_l[sp],
+							&prev->stem_r[sp]);
+					}
+				}
+			}
+		}
+		/* PUBLISH BEFORE RETURNING. See above. */
+		for (sp = 0; sp < ST_PL_STEMS; sp++) {
+			frac[sp] = f0;
+			cur[sp]  = c0;
+		}
+		return;
+	}
 
 	for (sp = 0; sp < ST_PL_STEMS; sp++) {
 		frac[sp] += rate_q16;
@@ -276,10 +453,22 @@ ST_RS_CURSOR_INLINE void st_rs_cursor_finish(const uint32_t frac[ST_PL_STEMS],
 					      const uint32_t cur[ST_PL_STEMS],
 					      const uint32_t src_avail[ST_PL_STEMS],
 					      uint32_t frac_io[ST_PL_STEMS],
-					      uint32_t used_out[ST_PL_STEMS])
+					      uint32_t used_out[ST_PL_STEMS],
+					      bool locked)
 {
 	uint32_t sp;
 
+	/* LOCKED: one bound test instead of four. cur[] and frac[] were already
+	 * broadcast by the walk, so this is the same four values either way. */
+	if (locked) {
+		const uint32_t u0 = (cur[0] > src_avail[0]) ? src_avail[0] : cur[0];
+
+		for (sp = 0; sp < ST_PL_STEMS; sp++) {
+			frac_io[sp]  = frac[0];
+			used_out[sp] = u0;
+		}
+		return;
+	}
 	for (sp = 0; sp < ST_PL_STEMS; sp++) {
 		frac_io[sp] = frac[sp];
 		/* Never report more than the run held, whatever the arithmetic

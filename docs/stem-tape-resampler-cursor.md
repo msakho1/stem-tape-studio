@@ -144,9 +144,94 @@ existing arrays by pointer, add no locals, and are proven fully inlined by the
 symbol assertion, so they reuse the caller's frame — but that is reasoning, not
 measurement, and it is written down as such.
 
-## 6. Status
+---
+
+# Commit 2 — the shared lane (st65)
+
+**What it does.** Off unity, ordinary four-forward playback ran four
+bit-for-bit identical cursor walks and threw three away. When the four cursors
+are *provably* one cursor, the bookkeeping is now done once on lane 0 and
+broadcast. Every per-stem audio operation — the blend, `prev`, the decodes —
+stays per stem, untouched.
+
+## 7. The predicate, and why `together` is not enough
+
+```c
+const bool locked = !unity &&
+		     st_rs_cursor_locked(frame_in_group, dirs, src_avail,
+					  frac, s_rs_prev_valid);
+```
+
+Five conditions, all required: every direction forward, every
+`frame_in_group[]` equal, every `src_avail[]` equal, every carried fraction
+equal, every `prev_valid[]` equal. Any one failing runs the existing
+independent path verbatim — the predicate *is* the fallback, so there is no
+second divergence detector to keep in sync.
+
+`together` (`main.c:3011`) checks only the first two. The other three can differ
+with `together` true:
+
+| | how it happens | what sharing would do |
+|---|---|---|
+| `frac[]` | st63's reverse release clears **one** lane's `s_stem_rate_frac[j]` and seeks it to MASTER (`main.c:3839`, `3852`). One block later all four are co-located and forward. | renders that stem at the other three's sub-sample phase — audible only off centre pitch, only just after a reverse release |
+| `src_avail[]` | a starved lane borrows the transport's offset and a forward direction (`main.c:4489`) | shares lane 0's run bound, so a short lane is advanced past source it never had resident |
+| `prev_valid[]` | cleared per lane at the same sites as `frac[]` | reads lane 0's flag: either leaves the rejoining lane interpolating from a position it no longer occupies, or flattens three lanes' first output frame |
+
+Under all five, every cursor-domain quantity is identical across lanes at every
+iteration by induction, so the shared form computes the *same values* — the
+output is bit-identical, not merely equivalent.
+
+## 8. The broadcast, and the two readers it exists for
+
+`st_rs_cursor_advance()` publishes `frac[]` and `cur[]` to all four lanes as the
+last thing it does. That placement is load-bearing, not tidiness. Three things
+downstream read `cur[]` **per lane, after the walk**, in the same frame
+iteration:
+
+* `st_fx_process(…, heads[s_fx_target].song_frame + dirs[…] * cur[s_fx_target])` — the echo's time index
+* `g_stem_zero_at[sp] = song_frame + cur[sp]` — where the dropout detector says a silence began
+* `st_fx_process(…, song_frame + cur[fx_clock_stem])` — the global rack's clock
+
+A shared walk that forgets lanes 1–3 is **inaudible** — the blend reads `prev`
+and `nxt`, not `cur` — and still wrong in all three. `test_resample_lock_gate.c`
+models the first two directly, and mutation L-6 removes the broadcast to prove
+the gate sees it.
+
+## 9. What proves Commit 2
+
+| | |
+|---|---|
+| `test_rs_cursor_gate.c` | unchanged in shape, now with **half the 200,000-run sweep deliberately locked-shaped** (100,294 locked / 100,318 unlocked). Still compared against the frozen pre-extraction `main.c` text, so this is bit-identity of the *shared lane* against the original. 6 cases, 47 checks, 0 failures. |
+| pinned non-unity hash | **`0xbd69ac9c`, unchanged** — and now produced *through* the shared lane, since the scripted playback is four-forward at every rate. |
+| unity hash | `0x2a737e00`, unchanged. |
+| `test_resample_lock_gate.c` | 8 cases, 165 checks, 0 failures. Soundness (five divergences, each isolated so exactly one condition differs), non-vacuity at +0.5/+1/+1.5/+2/+2.5 and −2.0, the two downstream readers, and 60,000 randomized locked runs. |
+| `resample_lock_mutations.py` | **L-1…L-8, all red on the lock gate**, all against the production header, all compiling. |
+| wiring **I-3** | production `main.c` computes the predicate, passes it to all five helpers, and does not derive it from `together`. Mutation-proven. |
+
+**A finding worth recording.** L-4 (predicate degenerates to `together`) is red
+on the lock gate and **green on the differential**. In the differential's
+generator, a reversed or displaced lane always *also* has a different run bound,
+so the surviving `src_avail` condition masks it. The lock gate catches it only
+because case 2 deliberately equalises the run bound to isolate `dirs`. A
+randomized sweep is not a substitute for a constructed one.
+
+## 10. Status
 
 Commit 1 is CI-proven and **hardware-unproven**, which for a no-op extraction
 means: the audio is proven identical on the host, and nothing has been flashed.
 **st64 `c0bac9681efdabbf10e296fde36e9e602269a545` remains the hardware-confirmed
-rollback baseline.** Commit 2 is not started and requires explicit approval.
+rollback baseline.**
+
+Commit 2 (**st65**) is CI-proven and hardware-unproven. Acceptance is by ear,
+**console detached**, 1× → +0.5 → +1 → +1.5 → +2 → +2.5, and the reading is
+fixed in advance so the result cannot be reinterpreted afterwards:
+
+| result | conclusion |
+|---|---|
+| the whole range clean | the CPU-deadline model is confirmed and the pitch defect is closed |
+| the threshold moves up but still crackles below +2.5 | partially confirmed; report the remaining gap before any further change |
+| the threshold does not move at all | **the deadline model is rejected as the primary cause.** Keep the change only because it is bit-identical and cost-neutral, and move the investigation to the storage/read path |
+
+Pitch limits are untouched. Reverse, loop, EOF, FX, power, scratch, heads,
+MIDI, master-clock behaviour, storage geometry, buffer sizes and audio quality
+are untouched.

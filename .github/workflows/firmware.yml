@@ -2431,6 +2431,12 @@ jobs:
           grep -q 'st63 reverse-release' audit/rs-cursor.txt
           grep -q 'one reversed lane among three forward' audit/rs-cursor.txt
           grep -q 'rate extremes' audit/rs-cursor.txt
+          # HALF THE SWEEP MUST BE LOCKED-SHAPED. The differential is the
+          # bit-identity proof, and it only proves it for the SHARED lane
+          # if the shared lane is what it ran.
+          grep -qE 'shared-lane path: locked_runs=[0-9]{5,}' audit/rs-cursor.txt || {
+            echo "::error::the differential sweep barely exercised the shared lane"
+            grep 'shared-lane path' audit/rs-cursor.txt || true; exit 1; }
           # THE PINNED NON-UNITY HASH. Both arms must produce it. This is the
           # number the shared-lane commit has to reproduce.
           grep -q 'non-unity playback hash (pre-extraction reference): 0xbd69ac9c' audit/rs-cursor.txt || {
@@ -2445,6 +2451,83 @@ jobs:
             cat audit/rs-cursor.txt
             echo '```'
             cat audit/rs-cursor-mutations.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Stem Tape SHARED-LANE CURSOR -- one walk when four are provably one
+        # WHAT THIS BUYS, AND WHAT IT COSTS. Off unity, ordinary four-forward
+        # playback ran four bit-for-bit identical cursor walks and discarded
+        # three. The shared lane does the bookkeeping once and broadcasts it,
+        # leaving every per-stem AUDIO operation -- the blend, `prev`, the
+        # decodes -- exactly where it was. The saving is index and cursor
+        # arithmetic; the audio is not touched, and the gate next door proves
+        # that sample for sample against the pre-extraction main.c text.
+        #
+        # THE PREDICATE IS THE WHOLE SAFETY ARGUMENT, and it is deliberately
+        # STRONGER than main.c's own `together`. `together` checks direction and
+        # position only. Three more things can differ underneath it: the carried
+        # fraction (st63's reverse release clears ONE lane's), the run bound (a
+        # starved lane borrows the transport's offset), and interpolator
+        # validity. Each makes a shared cursor silently wrong, and each is a
+        # separate mutation below.
+        #
+        # THREE PARTS:
+        #   the gate         soundness (five divergences, each isolated so that
+        #                    exactly one condition differs), NON-VACUITY (the
+        #                    lock must actually fire at +0.5/+1/+1.5/+2/+2.5 --
+        #                    a predicate that never fires is bit-identical, free,
+        #                    and useless), and the two downstream readers: the FX
+        #                    rack's time index and the per-stem meter's reported
+        #                    position, both of which read cur[] per lane AFTER
+        #                    the walk.
+        #   the mutations    L-1..L-8, all against the PRODUCTION header, all
+        #                    required to turn the lock gate red. The run also
+        #                    reports which of them change the AUDIO and which
+        #                    corrupt only state no sample carries -- L-6, the
+        #                    missing broadcast, is inaudible and still wrong.
+        #   the wiring       I-3, in the playback wiring check, reads production
+        #                    main.c: the predicate is computed there, passed to
+        #                    all five helpers, and NOT derived from `together`.
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          cc -std=c11 -O2 -Wall -Wextra -Werror -Ifirmware/stemtape_player/src \
+            firmware/stemtape_player/src/st_planar.c \
+            firmware/stemtape_player/src/st_pitch.c \
+            firmware/stemtape_player/src/st_sector_v11.c \
+            firmware/stemtape_player/tests/test_resample_lock_gate.c \
+            -o audit/test_resample_lock_gate
+          ./audit/test_resample_lock_gate | tee audit/resample-lock.txt
+          grep -q 'RESAMPLE LOCK GATE PASSED' audit/resample-lock.txt
+          # The gate must keep asking the questions, not merely exit 0.
+          grep -q 'ACTIVATES for ordinary four-forward playback' audit/resample-lock.txt
+          grep -q 'a reversed lane is refused' audit/resample-lock.txt
+          grep -q 'different frame_in_group is refused' audit/resample-lock.txt
+          grep -q 'THE st63 STATE' audit/resample-lock.txt
+          grep -q 'different run bound is refused' audit/resample-lock.txt
+          grep -q 'different interpolator validity is refused' audit/resample-lock.txt
+          grep -q 'published before the FX clock and the meter' audit/resample-lock.txt
+          grep -q 'randomized locked-shaped runs' audit/resample-lock.txt
+          # AND THE FAST PATH MUST ACTUALLY BE TAKEN. A predicate that never
+          # fires passes every soundness case above and buys nothing.
+          LK="$(sed -n 's/.*predicate: locked=\([0-9]*\) refused=\([0-9]*\).*/\1/p' audit/resample-lock.txt)"
+          RF="$(sed -n 's/.*predicate: locked=\([0-9]*\) refused=\([0-9]*\).*/\2/p' audit/resample-lock.txt)"
+          [ -n "$LK" ] && [ -n "$RF" ] || {
+            echo "::error::the lock gate did not report predicate activation"; exit 1; }
+          echo "shared lane taken ${LK} times, refused ${RF} times"
+          [ "$LK" -ge 10000 ] || {
+            echo "::error::the shared lane fired only ${LK} times -- the optimisation is close to dead code"
+            exit 1; }
+          [ "$RF" -ge 20 ] || {
+            echo "::error::the predicate refused only ${RF} states -- the divergence cases are not being exercised"
+            exit 1; }
+          python3 .github/scripts/stemtape_player_resample_lock_mutations.py \
+            audit/resample-lock-mutations.md | tee audit/resample-lock-mut.txt
+          {
+            echo '### Stem Tape shared-lane cursor gate'
+            echo '```text'
+            cat audit/resample-lock.txt
+            echo '```'
+            cat audit/resample-lock-mutations.md
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Stem Tape ROCKER SEMITONES -- the Tape Looper's own pitch grid, reused

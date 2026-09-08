@@ -146,6 +146,11 @@ typedef struct {
 	int32_t  prev_r[ST_PL_STEMS];
 	bool     prev_valid[ST_PL_STEMS];
 	uint32_t idx_hash;                    /* every read index formed, in order */
+	/* EVERY LANE'S CURSOR AFTER EACH WALK -- what st_fx_process()'s clock
+	 * offset and the per-stem meter's g_stem_zero_at[sp] actually read in
+	 * main.c. A shared cursor that forgets to publish lanes 1-3 is invisible
+	 * in the samples and visible here. */
+	uint32_t cur_hash;
 } result_t;
 
 static uint32_t hmix(uint32_t h, uint32_t v)
@@ -165,6 +170,8 @@ static struct {
 	uint32_t out_of_run;       /* the floored corner */
 	uint32_t primed;           /* a lane with prev_valid false */
 	uint32_t reversed_lane;
+	uint32_t locked_runs;      /* the shared-lane path was taken */
+	uint32_t unlocked_runs;
 } s_cov;
 
 /* ===================================================================== */
@@ -188,6 +195,7 @@ static void run_ref(const groups_t *g, const spec_t *s, result_t *out)
 	memset(out, 0, sizeof(*out));
 	out->hash = 2166136261u;
 	out->idx_hash = 2166136261u;
+	out->cur_hash = 2166136261u;
 	for (sp = 0; sp < ST_PL_STEMS; sp++) {
 		grp[sp] = g->b[sp];
 		frac[sp] = s->frac_in[sp];
@@ -287,6 +295,7 @@ static void run_ref(const groups_t *g, const spec_t *s, result_t *out)
 			out->hash = hmix(out->hash, (uint32_t)frame.stem_l[sp]);
 			out->hash = hmix(out->hash, (uint32_t)frame.stem_r[sp]);
 			out->idx_hash = hmix(out->idx_hash, idx[sp]);
+			out->cur_hash = hmix(out->cur_hash, cur[sp]);
 		}
 	}
 
@@ -313,12 +322,14 @@ static void run_new(const groups_t *g, const spec_t *s, result_t *out)
 	uint32_t cur[ST_PL_STEMS];
 	uint32_t idx[ST_PL_STEMS];
 	uint32_t sp, k;
+	bool locked;
 	st11_audio_frame_t s_rs_prev;
 	bool s_rs_prev_valid[ST_PL_STEMS];
 
 	memset(out, 0, sizeof(*out));
 	out->hash = 2166136261u;
 	out->idx_hash = 2166136261u;
+	out->cur_hash = 2166136261u;
 	for (sp = 0; sp < ST_PL_STEMS; sp++) {
 		grp[sp] = g->b[sp];
 		frac[sp] = s->frac_in[sp];
@@ -328,13 +339,26 @@ static void run_new(const groups_t *g, const spec_t *s, result_t *out)
 		s_rs_prev.stem_r[sp] = s->prev_r_in[sp];
 	}
 
+	/* THE PRODUCTION PREDICATE, on the production entry state -- exactly as
+	 * main.c computes it once per run. When it holds, everything below
+	 * takes the SHARED-LANE path, so this differential is not "the header
+	 * still works" but "the shared lane renders what the pre-extraction
+	 * main.c rendered". */
+	locked = st_rs_cursor_locked(s->frame_in_group, s->dirs, s->src_avail,
+				      frac, s_rs_prev_valid);
+	if (locked) {
+		s_cov.locked_runs++;
+	} else {
+		s_cov.unlocked_runs++;
+	}
+
 	for (k = 0; k < s->n; k++) {
 		st11_audio_frame_t frame;
 		st11_audio_frame_t nxt;
 
-		st_rs_cursor_index(s->frame_in_group, s->dirs, s->src_avail, cur, idx);
-		st_rs_cursor_fetch(grp, idx, &nxt);
-		st_rs_cursor_prime(&nxt, &s_rs_prev, s_rs_prev_valid);
+		st_rs_cursor_index(s->frame_in_group, s->dirs, s->src_avail, cur, idx, locked);
+		st_rs_cursor_fetch(grp, idx, &nxt, locked);
+		st_rs_cursor_prime(&nxt, &s_rs_prev, s_rs_prev_valid, locked);
 		/* THE BLEND, transcribed from main.c exactly as the reference
 		 * arm transcribes it -- see this file's own comment. */
 		for (sp = 0; sp < ST11_STEM_COUNT; sp++) {
@@ -349,16 +373,17 @@ static void run_new(const groups_t *g, const spec_t *s, result_t *out)
 					    (int32_t)frac[sp]) >> 16);
 		}
 		st_rs_cursor_advance(grp, s->frame_in_group, s->dirs, s->src_avail, idx,
-				      &nxt, s->rate_q16, frac, cur, &s_rs_prev);
+				      &nxt, s->rate_q16, frac, cur, &s_rs_prev, locked);
 
 		for (sp = 0; sp < ST_PL_STEMS; sp++) {
 			out->hash = hmix(out->hash, (uint32_t)frame.stem_l[sp]);
 			out->hash = hmix(out->hash, (uint32_t)frame.stem_r[sp]);
 			out->idx_hash = hmix(out->idx_hash, idx[sp]);
+			out->cur_hash = hmix(out->cur_hash, cur[sp]);
 		}
 	}
 
-	st_rs_cursor_finish(frac, cur, s->src_avail, out->frac_io, out->used_out);
+	st_rs_cursor_finish(frac, cur, s->src_avail, out->frac_io, out->used_out, locked);
 	for (sp = 0; sp < ST_PL_STEMS; sp++) {
 		out->prev_l[sp] = s_rs_prev.stem_l[sp];
 		out->prev_r[sp] = s_rs_prev.stem_r[sp];
@@ -379,6 +404,12 @@ static bool same(const result_t *a, const result_t *b, const char *what)
 	if (a->idx_hash != b->idx_hash) {
 		ok = false;
 		printf("  %s: INDEX HASH 0x%08x vs 0x%08x\n", what, a->idx_hash, b->idx_hash);
+	}
+	if (a->cur_hash != b->cur_hash) {
+		ok = false;
+		printf("  %s: POST-WALK CURSOR HASH 0x%08x vs 0x%08x -- a lane was "
+		       "left stale for the FX clock / meter to read\n", what,
+		       a->cur_hash, b->cur_hash);
 	}
 	for (sp = 0; sp < ST_PL_STEMS; sp++) {
 		if (a->frac_io[sp] != b->frac_io[sp]) {
@@ -428,6 +459,27 @@ static void random_spec(spec_t *s, bool allow_reverse, bool allow_divergent)
 	const uint32_t base_fig = rnd_range(0u, ST_PL_FRAMES_PER_GROUP - 1u);
 	const uint32_t base_frac = rnd() & (ST_RS_ONE - 1u);
 	const bool valid = (rnd() & 3u) != 0u;
+	/*
+	 * HALF THE SWEEP IS DELIBERATELY LOCKED-SHAPED.
+	 *
+	 * Left to chance, four independently randomized lanes almost never come
+	 * out identical: the first version of this generator produced 943
+	 * locked runs in 200,000, so the arm carrying the bit-identity proof
+	 * for the SHARED path was exercising it 0.5% of the time. Ordinary
+	 * four-forward playback is the case the optimisation exists for and the
+	 * case that must be proven identical, so it gets half the sweep --
+	 * still with the rate, position, run bound, carried fraction and
+	 * interpolator validity all randomized, just randomized ONCE and
+	 * applied to every lane.
+	 */
+	const bool want_locked = (rnd() & 1u) != 0u;
+	const uint32_t short_all = ((rnd() & 1u) != 0u)
+				   ? rnd_range(1u, ST_PL_FRAMES_PER_GROUP) : 0u;
+
+	if (want_locked) {
+		allow_reverse = false;
+		allow_divergent = false;
+	}
 
 	s->rate_q16 = rnd_range(ST_RS_ONE / 4u, ST_RS_RATE_MAX);
 	s->n = rnd_range(1u, MAX_OUT);
@@ -449,12 +501,21 @@ static void random_spec(spec_t *s, bool allow_reverse, bool allow_divergent)
 		 * what a song end, a loop edge or a starved lane does. */
 		s->src_avail[k] = (d < 0) ? (fig + 1u)
 					  : (ST_PL_FRAMES_PER_GROUP - fig);
-		if ((rnd() & 1u) != 0u) {
+		if (want_locked) {
+			/* Same shortening for every lane, so the run bound
+			 * stays equal -- a song end, a loop edge or a starved
+			 * lane is what makes it differ, and that is the
+			 * UNLOCKED half's job. */
+			if (short_all != 0u && short_all < s->src_avail[k]) {
+				s->src_avail[k] = short_all;
+			}
+		} else if ((rnd() & 1u) != 0u) {
 			s->src_avail[k] = rnd_range(1u, s->src_avail[k]);
 		}
-		s->frac_in[k] = ((rnd() & 3u) == 0u) ? (rnd() & (ST_RS_ONE - 1u))
-						      : base_frac;
-		s->prev_valid_in[k] = valid || ((rnd() & 1u) != 0u);
+		s->frac_in[k] = (!want_locked && (rnd() & 3u) == 0u)
+				? (rnd() & (ST_RS_ONE - 1u)) : base_frac;
+		s->prev_valid_in[k] = want_locked ? valid
+						  : (valid || ((rnd() & 1u) != 0u));
 		s->prev_l_in[k] = (int32_t)(rnd() % 60000u) - 30000;
 		s->prev_r_in[k] = (int32_t)(rnd() % 60000u) - 30000;
 	}
@@ -741,6 +802,8 @@ int main(void)
 	       s_cov.shared_decode, s_cov.array_decode, s_cov.real_prev_decode,
 	       s_cov.out_of_run, s_cov.clamped_cursor, s_cov.primed,
 	       s_cov.reversed_lane);
+	printf("shared-lane path: locked_runs=%u unlocked_runs=%u\n",
+	       s_cov.locked_runs, s_cov.unlocked_runs);
 	printf("\n%d cases, %d checks, %d failures\n", g_cases, g_checks, g_failures);
 	return g_failures ? 1 : 0;
 }

@@ -310,9 +310,9 @@
  * proof matrix and the hardware acceptance list this build has NOT been run
  * against. */
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st64-VOLCAL"
+#define ST_BUILD_TAG "st65-VOLCAL"
 #else
-#define ST_BUILD_TAG "st64"
+#define ST_BUILD_TAG "st65"
 #endif
 #include "st_pwr_idle.h"
 #include "st_track_hold.h"
@@ -3020,6 +3020,22 @@ static void stem_render_run(const uint8_t *const grp[ST_PL_STEMS],
 	}
 
 	const bool unity = (rate_q16 == ST_RS_ONE) && stem_rs_all_aligned() && together;
+	/*
+	 * AND THE VARIABLE-RATE EQUIVALENT: four cursors that are provably one
+	 * cursor, so the bookkeeping is done once and broadcast while every
+	 * per-stem audio operation stays per stem. STRICTLY STRONGER THAN
+	 * `together`, which does not look at the carried fraction, the run
+	 * bound or the interpolator validity -- all three of which can differ
+	 * with `together` true, and each of which makes a shared cursor
+	 * silently wrong. st_rs_cursor.h states the five conditions and why
+	 * each one is load-bearing.
+	 *
+	 * Computed once per run, and only when it can be used: the unity fast
+	 * path never consults it, so ordinary 1x playback pays nothing for it.
+	 */
+	const bool locked = !unity &&
+			     st_rs_cursor_locked(frame_in_group, dirs, src_avail,
+						  frac, s_rs_prev_valid);
 
 	for (uint32_t k = 0; k < n; k++) {
 		const uint32_t f = f0 + k;
@@ -3057,9 +3073,9 @@ static void stem_render_run(const uint8_t *const grp[ST_PL_STEMS],
 			 * it; see that file's own comment for why bit-identity
 			 * needed a testable boundary. Four independent cursors,
 			 * exactly as before. */
-			st_rs_cursor_index(frame_in_group, dirs, src_avail, cur, idx);
-			st_rs_cursor_fetch(grp, idx, &nxt);
-			st_rs_cursor_prime(&nxt, &s_rs_prev, s_rs_prev_valid);
+			st_rs_cursor_index(frame_in_group, dirs, src_avail, cur, idx, locked);
+			st_rs_cursor_fetch(grp, idx, &nxt, locked);
+			st_rs_cursor_prime(&nxt, &s_rs_prev, s_rs_prev_valid, locked);
 			for (sp = 0; sp < ST11_STEM_COUNT; sp++) {
 				const int32_t pl = s_rs_prev.stem_l[sp];
 				const int32_t pr = s_rs_prev.stem_r[sp];
@@ -3076,7 +3092,7 @@ static void stem_render_run(const uint8_t *const grp[ST_PL_STEMS],
 			 * direction, carrying `prev` to the frame behind its own new
 			 * cursor. Moved unchanged; still four independent walks. */
 			st_rs_cursor_advance(grp, frame_in_group, dirs, src_avail, idx,
-					      &nxt, rate_q16, frac, cur, &s_rs_prev);
+					      &nxt, rate_q16, frac, cur, &s_rs_prev, locked);
 		}
 
 		/* ---- THE FX RACK, STEM SCOPE ------------------------------
@@ -3253,7 +3269,7 @@ static void stem_render_run(const uint8_t *const grp[ST_PL_STEMS],
 		}
 		return;
 	}
-	st_rs_cursor_finish(frac, cur, src_avail, frac_io, used_out);
+	st_rs_cursor_finish(frac, cur, src_avail, frac_io, used_out, locked);
 }
 #endif /* SP1_XFER_ENABLE */
 

@@ -1395,6 +1395,55 @@ def main() -> int:
         report.append("- present: main.c retains NO second copy of the cursor walk. "
                        "The header is the only implementation, so the host gate's "
                        "sample-for-sample proof is a proof about the shipping audio")
+    # I-3. The shared-lane predicate is COMPUTED IN main.c AND PASSED TO ALL
+    #      FIVE helpers. A `locked` that is never computed, or computed and
+    #      passed to only some of them, leaves the host gates perfectly green:
+    #      they call the helpers themselves and would never notice.
+    lock_call = re.search(r"const\s+bool\s+locked\s*=", src)
+    if lock_call and re.search(r"st_rs_cursor_locked\s*\(", src):
+        report.append("- present: `stem_render_run()` computes the shared-lane "
+                       "predicate with `st_rs_cursor_locked()`, once per run")
+    else:
+        report.append("- **MISSING/BAD**: main.c does not compute `locked` from "
+                       "`st_rs_cursor_locked()`. The shared-lane path would then "
+                       "be unreachable dead code, or -- worse -- reached from "
+                       "some other, weaker condition")
+        fail = True
+
+    unpassed = [n for n in ("st_rs_cursor_index", "st_rs_cursor_fetch",
+                            "st_rs_cursor_prime", "st_rs_cursor_advance",
+                            "st_rs_cursor_finish")
+                if not re.search(re.escape(n) + r"\([^;]*\blocked\b[^;]*\);", src,
+                                  re.S)]
+    if not unpassed:
+        report.append("- present: all five cursor helpers are passed `locked`. "
+                       "Sharing the index but not the walk, or the walk but not "
+                       "the writeback, would publish a cursor that disagrees "
+                       "with the fraction it was computed from")
+    else:
+        report.append("- **MISSING/BAD**: " +
+                       ", ".join("`%s()`" % m for m in unpassed) +
+                       " is not passed `locked`. A partially shared cursor is "
+                       "worse than an unshared one: the halves disagree, and no "
+                       "host gate can see it because they pass the flag "
+                       "themselves")
+        fail = True
+
+    # And the predicate must be the STRONG one. main.c's own `together` checks
+    # direction and position only; three more conditions are what make sharing
+    # safe, and they live in the header's predicate rather than here -- so what
+    # this check can assert is that main.c does not substitute `together`.
+    if re.search(r"const\s+bool\s+locked\s*=[^;]*\btogether\b", src, re.S):
+        report.append("- **MISSING/BAD**: `locked` is derived from `together`. "
+                       "`together` does not look at the carried fraction, the "
+                       "run bound or the interpolator validity -- all three can "
+                       "differ with `together` true, and the reverse-release "
+                       "path (st63) produces exactly that state")
+        fail = True
+    else:
+        report.append("- present: `locked` is not derived from `together`. The "
+                       "five conditions are the header's, and its own gate "
+                       "(L-1..L-4) proves each one load-bearing")
     report.append("")
 
     report.append("## Result")
