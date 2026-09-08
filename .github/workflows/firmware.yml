@@ -940,7 +940,14 @@ jobs:
           fi
           echo "st_rs_cursor_* : no out-of-line copies in the linked image (fully inlined)"
           # The render function's own stack frame, from the linked image.
-          awk '/<stem_render_run>:/{f=1} f&&/sub[ \t]+sp/{print "stem_render_run stack: " $0; n++; if(n>=2) exit}' \
+          # ONLY THIS FUNCTION'S OWN FRAME. The first draft had no end
+          # condition, so it kept matching past the end of stem_render_run()
+          # and reported the NEXT function's prologue as a second figure --
+          # a number that looks like part of the audio frame and is not.
+          # Stop at the next symbol label.
+          awk '/<stem_render_run>:/{f=1; next}
+               f && /^[0-9a-f]+ </{exit}
+               f && /sub[ \t]+sp,/{print "stem_render_run frame: " $0; exit}' \
             audit/objdump-d.txt | tee audit/rs-cursor-stack.txt
           {
             echo '### Resampler-cursor codegen'
