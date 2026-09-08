@@ -4223,6 +4223,15 @@ jobs:
           else
             echo "RELEASE commit=${{ github.event.pull_request.head.sha || github.sha }} bin=NOT-PRODUCED (the build did not reach a final link)"
           fi
+          # THE AUDIO RENDER FRAME, RESTATED HERE FOR THE SAME REASON. It is
+          # measured ~50 steps earlier, where a log tail never reaches it, and
+          # it is the one number that says whether a change to
+          # stem_render_run() cost stack on the thread that has the least to
+          # spare. Commit-to-commit comparison is the whole point, so it has to
+          # be somewhere both commits' logs actually show.
+          if [ -f audit/rs-cursor-stack.txt ]; then
+            echo "RENDERFRAME $(tr '\n' ' ' < audit/rs-cursor-stack.txt)"
+          fi
           # THE CALIBRATION IMAGE'S IDENTITY, RESTATED HERE FOR THE SAME
           # REASON. It is printed once by the AIN1 CALIBRATION IMAGE step near
           # the TOP of this job, which is far outside the log tail the API
