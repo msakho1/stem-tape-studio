@@ -138,9 +138,20 @@ linked on the host — so it can agree with a `main.c` that has drifted from it.
 H-1/H-2 mitigate that but are textual. And nothing here measures actual audio
 thread cost on the device; the CPU argument is read from source, not profiled.
 
-### Hardware acceptance
+### Hardware acceptance — **PASSED**
 
 > PLAY → reverse one stem until it reaches frame 0 → the other stems continue
 > normally, BPM stays stable, no crackling, controls stay responsive → release
 > reverse → the parked stem rejoins MASTER cleanly. Then the same starting very
 > near the beginning of the song.
+
+**st64 · `c0bac9681efdabbf10e296fde36e9e602269a545` · sha256
+`abac6ef88c86fc935270d039d4e54d49d2c92f5c9594311049c751b894ae4ad9` · 116,864 B**
+is the **hardware-confirmed reverse checkpoint.** Validated on a physical SP-1:
+the reversed stem reaches frame 0 cleanly and parks without crackling, there is
+no BPM or transport slowdown, the other stems continue normally, controls stay
+responsive, and reverse release rejoins MASTER correctly.
+
+Stage 2B (reverse-release resynchronisation, st63) is hardware accepted as part
+of the same run. **Do not modify the reverse implementation further unless a new
+hardware defect specifically requires it.**
