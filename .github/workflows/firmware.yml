@@ -2530,6 +2530,84 @@ jobs:
             cat audit/resample-lock-mutations.md
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Stem Tape LOOP AT PITCH -- one authoritative wrap, all four ordinary stems
+        # THE DEFECT. The authoritative loop wrap chose which heads to move by
+        # POSITION -- `song_frame != tr->song_frame -> continue` -- which is the
+        # same category error the co-location guard made before st64: a position
+        # standing in for an INTENT.
+        #
+        # At unity it was invisible. The run clamp lands all four heads on
+        # loop_end together and the duck's target is where the backstop already
+        # put them, so all four move. Off unity the transport waits for the duck
+        # while the other three wrap immediately, so by the time the duck fires
+        # they no longer match and ONLY THE TRANSPORT MOVES. Measured on the
+        # host: 4.00 heads per duck at unity, 1.00 at +2.0 st. The leftover is
+        # d * (1 - 1/rate) per wrap -- permanent, cumulative across resizes --
+        # and it is all three reported hardware symptoms at once: the stem flam,
+        # the collapse of the shared-lane predicate (100% -> 10%) that produced
+        # the crackle and the apparent BPM drop, and the starved stem that never
+        # came back because every later wrap rejected it too.
+        #
+        # THE GATE RUNS BOTH GUARDS. A gate that only shows the new code working
+        # proves the code runs, not that the change mattered -- so the old
+        # positional rule is compiled alongside and REQUIRED TO FAIL: non-zero
+        # spread off unity, heads/duck collapsing toward 1, shared-lane
+        # eligibility under 25%. If the pre-fix arm ever stops failing, this
+        # gate has stopped testing anything and says so.
+        #
+        # AND IT COVERS THE TWO THINGS A SPREAD NUMBER CANNOT SEE: a stem
+        # starved for 40 blocks must re-converge with NO separate recovery
+        # mechanism, and a reversed stem must never be touched by the wrap --
+        # asserted as a count of reversed-lane seeks rather than a position
+        # check, because a dragged reversed head resumes travelling backward at
+        # once and a position comparison a few blocks later cannot see it.
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          cc -std=c11 -O2 -Wall -Wextra -Werror -Ifirmware/stemtape_player/src \
+            firmware/stemtape_player/src/st_stem_stream.c \
+            firmware/stemtape_player/src/st_pitch.c \
+            firmware/stemtape_player/src/st_planar.c \
+            firmware/stemtape_player/src/st_sector_v11.c \
+            firmware/stemtape_player/src/st_crc32.c \
+            firmware/stemtape_player/src/st_checksum32.c \
+            firmware/stemtape_player/tests/test_loop_pitch_gate.c \
+            -o audit/test_loop_pitch_gate
+          ./audit/test_loop_pitch_gate | tee audit/loop-pitch.txt
+          grep -q 'LOOP PITCH GATE PASSED' audit/loop-pitch.txt
+          # The gate must keep asking the questions, not merely exit 0.
+          grep -q 'PRODUCTION GUARD' audit/loop-pitch.txt
+          grep -q 'PRE-FIX GUARD' audit/loop-pitch.txt
+          grep -q 'THE DISAPPEARING STEM' audit/loop-pitch.txt
+          grep -q 'REVERSE inside a +2.5 pitched loop' audit/loop-pitch.txt
+          grep -q 'parked at START_OF_SONG or END_OF_SONG' audit/loop-pitch.txt
+          # Every rate must be reported, and every one of them at spread 0 with
+          # four heads per duck and full shared-lane eligibility.
+          for R in unity '+1.0 st' '+1.5 st' '+2.0 st' '+2.5 st'; do
+            grep -qF "$R" audit/loop-pitch.txt || {
+              echo "::error::the loop-pitch gate did not report rate $R"; exit 1; }
+          done
+          # `run0=`/`silent=` are printed only by the PRODUCTION-guard arm, so
+          # this cannot be satisfied by the pre-fix arm's (legitimately clean)
+          # unity line.
+          grep -cE 'worst_spread=0 after_release=0 heads/duck=4\.00 locked=100\.0% run0=0 silent=0' \
+            audit/loop-pitch.txt | grep -qx 5 || {
+            echo "::error::not all five rates reached spread 0 / 4.00 heads per duck / 100% locked"
+            grep 'worst_spread' audit/loop-pitch.txt; exit 1; }
+          # And the PRE-FIX arm must still be able to fail.
+          grep -qE 'heads/duck=1\.[0-9][0-9]' audit/loop-pitch.txt || {
+            echo "::error::the pre-fix positional guard no longer collapses to ~1 head per duck -- this gate has stopped proving the patch matters"
+            exit 1; }
+          python3 .github/scripts/stemtape_player_loop_pitch_mutations.py \
+            audit/loop-pitch-mutations.md | tee audit/loop-pitch-mut.txt
+          {
+            echo '### Stem Tape loop-at-pitch gate'
+            echo '```text'
+            cat audit/loop-pitch.txt
+            echo '```'
+            cat audit/loop-pitch-mutations.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Stem Tape ROCKER SEMITONES -- the Tape Looper's own pitch grid, reused
         # THE BRIEF: expose the semitone capability the Tape Looper already
         # has, rather than building a second pitch engine.

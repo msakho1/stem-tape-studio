@@ -1446,6 +1446,79 @@ def main() -> int:
                        "(L-1..L-4) proves each one load-bearing")
     report.append("")
 
+    # -- J. The authoritative loop wrap selects heads by EXPLICIT STATE ----
+    #
+    # The host gate models the loop block; it cannot see which rule main.c
+    # actually uses. This section can, and it is the half that would have
+    # caught the original defect: a POSITION standing in for an INTENT.
+    report.append("## J. The authoritative loop wrap moves every ordinary forward stem")
+    report.append("")
+
+    jump_blk = re.search(
+        r"if\s*\(s_stem_jump_pend\s*&&\s*st_seam_jump_due\([^)]*\)\)\s*\{(.*?)\n\t\t\}",
+        src, re.S)
+    blk = jump_blk.group(1) if jump_blk else ""
+
+    # J-1. The positional proxy must be GONE from the jump block.
+    if jump_blk is None:
+        report.append("- **MISSING/BAD**: the authoritative "
+                       "`ST_SEAM_JUMP_WRAP` block was not found at all")
+        fail = True
+    elif re.search(r"song_frame\s*!=\s*tr->song_frame", blk):
+        report.append("- **MISSING/BAD**: the authoritative wrap still selects "
+                       "heads with `song_frame != tr->song_frame`. Off unity the "
+                       "backstop wraps the three non-transport heads before the "
+                       "duck fires, so they no longer match and ONLY THE "
+                       "TRANSPORT MOVES -- d*(1-1/rate) of permanent, cumulative "
+                       "offset per wrap. That is the flam, the shared-lane "
+                       "collapse behind the crackle, and the starved stem that "
+                       "never came back")
+        fail = True
+    else:
+        report.append("- present: the authoritative wrap no longer selects heads "
+                       "by position. A head that wrapped one run early, or was "
+                       "starved, still takes part in the one authoritative jump")
+
+    # J-2. And it excludes exactly the three explicit states, no more.
+    if (re.search(r"if\s*\(g_stem_stream\[sk\]\.reverse\)\s*\{\s*continue;", blk) and
+            re.search(r"ST_STREAM_START_OF_SONG", blk) and
+            re.search(r"ST_STREAM_END_OF_SONG", blk)):
+        report.append("- present: independence is read from EXPLICIT STATE -- a "
+                       "reversed head stays independent (the case this guard "
+                       "exists for), and a head parked at either end of the song "
+                       "consumes no source so it is not seeked either (st64's "
+                       "rule). Everything else is an ordinary forward stem the "
+                       "transport owns")
+    else:
+        missing = []
+        if not re.search(r"if\s*\(g_stem_stream\[sk\]\.reverse\)\s*\{\s*continue;", blk):
+            missing.append("the `reverse` exclusion -- per-track reverse inside "
+                            "a loop would be dragged to loop_start every wrap")
+        if not re.search(r"ST_STREAM_START_OF_SONG", blk):
+            missing.append("the `ST_STREAM_START_OF_SONG` exclusion")
+        if not re.search(r"ST_STREAM_END_OF_SONG", blk):
+            missing.append("the `ST_STREAM_END_OF_SONG` exclusion")
+        report.append("- **MISSING/BAD**: the authoritative wrap is missing " +
+                       "; ".join(missing))
+        fail = True
+
+    # J-3. And nothing else re-seeks the heads: no generic post-wrap resync.
+    if re.search(r"stem_streams_resync|resync_all_heads|for\s*\([^)]*\)\s*\{\s*"
+                  r"\(void\)st_stream_seek\(&g_stem_stream\[\w+\],\s*tr->song_frame\)",
+                  src):
+        report.append("- **MISSING/BAD**: main.c contains a generic post-wrap "
+                       "resynchronisation. The fix is that ONE authoritative "
+                       "event moves the stems, to the frame the loop was already "
+                       "going to -- a blanket resync would flatten per-track "
+                       "reverse and hide the next divergence instead of "
+                       "preventing it")
+        fail = True
+    else:
+        report.append("- present: no generic post-wrap resynchronisation. The "
+                       "only place a loop moves a head is the single "
+                       "authoritative jump")
+    report.append("")
+
     report.append("## Result")
     report.append("")
     if fail:

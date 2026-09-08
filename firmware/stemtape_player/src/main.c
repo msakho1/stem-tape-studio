@@ -310,9 +310,9 @@
  * proof matrix and the hardware acceptance list this build has NOT been run
  * against. */
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st65-VOLCAL"
+#define ST_BUILD_TAG "st66-VOLCAL"
 #else
-#define ST_BUILD_TAG "st65"
+#define ST_BUILD_TAG "st66"
 #endif
 #include "st_pwr_idle.h"
 #include "st_track_hold.h"
@@ -3943,19 +3943,54 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 			 * else in the song, and blending across that join is
 			 * the discontinuity the duck exists to prevent. */
 			stem_rs_drop();
-			/* EVERY HEAD THAT IS WHERE THE TRANSPORT IS. The duck
-			 * was armed off the transport's approach to loop_end,
-			 * and every head standing on that same frame is
-			 * crossing the same boundary at the same instant, so
-			 * they wrap together and the one duck covers all of
-			 * them. A head that has DRIFTED is somewhere else and
-			 * has not reached the boundary yet -- moving it here
-			 * would be a jump it did not earn, and would re-sync
-			 * exactly the divergence per-track reverse exists to
-			 * create. It wraps on its own crossing, in the
-			 * backstop below. */
+			/*
+			 * EVERY ORDINARY FORWARD HEAD, BY EXPLICIT STATE --
+			 * not by standing on the transport's frame.
+			 *
+			 * THE OLD RULE WAS `song_frame != tr->song_frame ->
+			 * continue`, and it was the same category error the
+			 * co-location guard made before st64: a POSITION used
+			 * as a proxy for INTENT. It cannot tell "somewhere else
+			 * because I am deliberately independent" from
+			 * "somewhere else because I wrapped one run early" or
+			 * "somewhere else because I was starved for 40 blocks".
+			 *
+			 * Off unity it rejected the ordinary stems every time.
+			 * The run clamp lands all four on loop_end together;
+			 * the backstop then wraps the three non-transport heads
+			 * immediately while the transport waits for the duck --
+			 * so by the time the duck fires the three are already at
+			 * loop_start and no longer match, and only the transport
+			 * was moved. Measured on the host: 4.00 heads moved per
+			 * duck at unity, 1.00 at +2.0. The leftover offset is
+			 * d * (1 - 1/rate) per wrap, PERMANENT, CUMULATIVE
+			 * across resizes, and it is all three hardware symptoms
+			 * at once -- the flam, the collapse of the shared-lane
+			 * predicate (100% -> 10%) that produced the crackle and
+			 * the apparent BPM drop, and the starved stem that never
+			 * came back because every later wrap rejected it too.
+			 *
+			 * INDEPENDENCE IS A STATE, SO IT IS READ FROM THE STATE.
+			 * A reversed head is genuinely independent and must not
+			 * be dragged -- that is what this guard exists for and
+			 * it still does it. A head parked at either end of the
+			 * song consumes no source and must not be moved either
+			 * (st64's rule, restated). Everything else is an
+			 * ordinary forward stem the transport owns, and it
+			 * participates in the ONE authoritative wrap however far
+			 * a temporary starvation or an early backstop wrap has
+			 * pushed it -- which is what re-converges it.
+			 *
+			 * This is NOT a generic post-wrap resync: nothing is
+			 * seeked anywhere except at this single authoritative
+			 * jump, to the frame the loop was already going to.
+			 */
 			for (sk = 0; sk < ST_PL_STEMS; sk++) {
-				if (g_stem_stream[sk].song_frame != tr->song_frame) {
+				if (g_stem_stream[sk].reverse) {
+					continue;
+				}
+				if (g_stem_stream[sk].state == ST_STREAM_START_OF_SONG ||
+				    g_stem_stream[sk].state == ST_STREAM_END_OF_SONG) {
 					continue;
 				}
 				if (st_stream_seek(&g_stem_stream[sk], s_stem_jump_to) &&

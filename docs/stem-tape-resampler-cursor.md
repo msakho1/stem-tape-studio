@@ -260,3 +260,78 @@ fixed in advance so the result cannot be reinterpreted afterwards:
 Pitch limits are untouched. Reverse, loop, EOF, FX, power, scratch, heads,
 MIDI, master-clock behaviour, storage geometry, buffer sizes and audio quality
 are untouched.
+
+---
+
+# st66 — the loop wrap chose heads by position
+
+**One `if`, at one site.** The authoritative `ST_SEAM_JUMP_WRAP` participation
+guard now selects heads by explicit state instead of by position.
+
+## 12. The defect
+
+```c
+if (g_stem_stream[sk].song_frame != tr->song_frame) { continue; }   /* was */
+```
+
+Same category error the co-location guard made before st64: a **position**
+standing in for an **intent**. It cannot tell "somewhere else because I am
+deliberately reversed" from "somewhere else because I wrapped one run early" or
+"somewhere else because I was starved".
+
+At unity it was invisible — the run clamp lands all four heads on `lp_end`
+together and the duck's target is where the backstop already put them, so all
+four move. Off unity the transport waits for the duck while the other three
+wrap immediately, so by the time the duck fires they no longer match and **only
+the transport moves**. Measured: **4.00 heads per duck at unity, 1.00 at
++2.0 st**. The leftover is `d × (1 − 1/rate)` per wrap — permanent, cumulative
+across resizes.
+
+**One cause, all three reported symptoms:** the stem flam; the collapse of the
+shared-lane predicate (100% → ~10%) that produced the crackle and the apparent
+BPM slowdown; and the starved stem that never came back, because every later
+wrap rejected it too.
+
+## 13. Two hypotheses this audit killed
+
+Recorded because both were mine and both were wrong.
+
+**The seam units.** `st_seam_begin_in(&s_stem_seam, lp_end - tr->song_frame)`
+genuinely passes a **source**-frame count to a counter ticked once per **output**
+frame — identity at unity, `rate`× wrong otherwise. Correcting it *alone* made
+the spread **worse** (+1.0: 129 → 286; +2.0: 186 → 409). It is a real latent
+inconsistency, it is **not** the cause, and it is deliberately left unchanged.
+
+**"Hold forward heads while a duck is pending" (the approved Option 1).**
+Measured, it **regressed even unity** (spread 0 → 349). Dropped. With it gone
+the whole boundary-bound question is moot: no head is ever held, and the gate
+records `run0 = 0`, `silent = 0` at every rate.
+
+## 14. What proves it
+
+| | |
+|---|---|
+| `tests/test_loop_pitch_gate.c` | 5 cases, 59 checks, 0 failures. Links real `st_stem_stream.c`/`st_seam.h`/`st_resample.h`/`st_pitch.c`/`st_rs_cursor.h`; models the loop block. Runs **both guards** and requires the old one to fail. |
+| `loop_pitch_mutations.py` | M-1…M-6, all red. |
+| wiring **J-1/J-2/J-3** | reads production `main.c`: the positional rule is gone, the three explicit exclusions are present, and there is no generic post-wrap resync. Mutation-proven. |
+
+### Before / after, full lifecycle, forward spread in frames
+
+| rate | pre-fix | **st66** | heads/duck pre → post | locked pre → post |
+|---|---|---|---|---|
+| unity | 0 | **0** | 4.00 → 4.00 | 100% → 100% |
+| +1.0 | 129 | **0** | 1.11 → **4.00** | 13.6% → **100%** |
+| +1.5 | 205 | **0** | 1.11 → **4.00** | 13.2% → **100%** |
+| +2.0 | 186 | **0** | 1.00 → **4.00** | 9.6% → **100%** |
+| +2.5 | 266 | **0** | 1.10 → **4.00** | 12.4% → **100%** |
+
+Starved stem (40 blocks at +2.0), 900 blocks after recovery: **10,802 → 0**.
+No separate recovery mechanism was added; the authoritative wrap re-converges it.
+
+Reverse inside a +2.5 loop: forward spread **0** throughout, **0 reversed-lane
+seeks**, st63 rejoin clean, later loop release clean.
+
+**M-3/M-4 are defence in depth.** A head parked at either end of the song with
+`reverse` already cleared is not reachable through today's control flow; the
+gate constructs the state so the mutations are killed rather than surviving as
+equivalent mutants. A red M-3 is not evidence the state is reachable.
