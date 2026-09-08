@@ -913,6 +913,43 @@ jobs:
           "$NM" -n -S "$B/zephyr.elf"            > audit/nm.txt
           "$READELF" -W -S -l -h "$B/zephyr.elf" > audit/readelf.txt
 
+      - name: RESAMPLER CURSOR codegen -- the helpers are inlined, and the render frame did not grow
+        # THE EXTRACTION IS ONLY A NO-OP IF IT COSTS NOTHING AT RUNTIME.
+        # st_rs_cursor.h's five helpers are always_inline for a reason: they
+        # run once per output frame, 48,000 times a second, inside a function
+        # carrying __attribute__((optimize("O2"), noinline, noclone)) on the
+        # priority-0 audio thread. If GCC ever declines to inline them -- a
+        # known hazard when the caller carries its own `optimize` attribute --
+        # the change would have added a call per frame per helper while still
+        # being described as costing nothing. That would be false, so it is
+        # asserted rather than assumed.
+        #
+        # AND THE STACK. The helpers take their arrays by pointer, so a
+        # non-inlined call would also add a frame. Inlined, they reuse the
+        # caller's locals and stem_render_run()'s own frame must not grow --
+        # the audio thread's stack is a fixed budget shared with the FX rack.
+        # The prologue's `sub sp, #N` is printed either way so the number is on
+        # the record rather than argued.
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          if grep -qE '^[0-9a-f]+ .* [Tt] st_rs_cursor_' audit/nm.txt; then
+            echo "::error::st_rs_cursor helpers were emitted as real functions -- not inlined"
+            grep -E '^[0-9a-f]+ .* [Tt] st_rs_cursor_' audit/nm.txt
+            exit 1
+          fi
+          echo "st_rs_cursor_* : no out-of-line copies in the linked image (fully inlined)"
+          # The render function's own stack frame, from the linked image.
+          awk '/<stem_render_run>:/{f=1} f&&/sub[ \t]+sp/{print "stem_render_run stack: " $0; n++; if(n>=2) exit}' \
+            audit/objdump-d.txt | tee audit/rs-cursor-stack.txt
+          {
+            echo '### Resampler-cursor codegen'
+            echo '```text'
+            echo 'st_rs_cursor_* out-of-line copies in the image: none (fully inlined)'
+            cat audit/rs-cursor-stack.txt || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Stem Tape Player host tests (no Zephyr/nRF toolchain)
         working-directory: ${{ github.workspace }}/project
         run: |
@@ -2335,6 +2372,72 @@ jobs:
             cat audit/reverse-start.txt
             echo '```'
             cat audit/reverse-start-mutations.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Stem Tape RESAMPLER CURSOR extraction -- sample-identical, against the real header
+        # THE CLAIM THIS STEP EXISTS TO CHECK is the strongest one made in this
+        # repository so far: moving the four per-stem resampler cursors out of
+        # stem_render_run() and into src/st_rs_cursor.h changed NOTHING about
+        # the audio -- not a sample, not a carried fraction, not a consumed
+        # source count.
+        #
+        # WHY IT CAN BE CHECKED AT ALL. Every other audio gate here says the
+        # same thing in its own report: main.c cannot be linked on the host, so
+        # the gate checks a MODEL and can agree with a main.c that has drifted.
+        # That is survivable for a behavioural change and worthless for a
+        # bit-identity claim. The cursors now live in a header, so this gate
+        # links the REAL implementation and compares it, sample for sample,
+        # against a frozen transcription of the pre-extraction main.c text.
+        #
+        # THREE PARTS, and none of them is redundant:
+        #   the gate         200,000 randomized runs plus the st63
+        #                    reverse-release state, a reversed lane at both
+        #                    group edges, and the rate extremes -- and it FAILS
+        #                    if the sweep did not actually reach the clamp, the
+        #                    four-index decode, the real re-decode and the
+        #                    floored out-of-run corner.
+        #   the mutations    eleven, all against the PRODUCTION header. Two of
+        #                    them (X-2, X-5) are exactly what the planned
+        #                    shared-lane optimisation does, pinned RED here so
+        #                    the gate that must catch a wrong Commit 2 is
+        #                    proven capable of it before Commit 2 is written.
+        #   the codegen      the helpers must be ALWAYS INLINED. A per-output-
+        #                    -frame function call at 48 kHz on the priority-0
+        #                    thread is the cost st45/st57 removed from this
+        #                    loop, and re-introducing it while calling the
+        #                    change a no-op would be false. Asserted below,
+        #                    from the linked ELF, in the image-assertions step.
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          cc -std=c11 -O2 -Wall -Wextra -Werror -Ifirmware/stemtape_player/src \
+            firmware/stemtape_player/src/st_planar.c \
+            firmware/stemtape_player/src/st_pitch.c \
+            firmware/stemtape_player/src/st_sector_v11.c \
+            firmware/stemtape_player/tests/test_rs_cursor_gate.c \
+            -o audit/test_rs_cursor_gate
+          ./audit/test_rs_cursor_gate | tee audit/rs-cursor.txt
+          grep -q '0 failures' audit/rs-cursor.txt
+          # The gate must keep asking the questions, not merely exit 0.
+          grep -q '200,000 randomized runs' audit/rs-cursor.txt
+          grep -q 'actually entered every branch' audit/rs-cursor.txt
+          grep -q 'st63 reverse-release' audit/rs-cursor.txt
+          grep -q 'one reversed lane among three forward' audit/rs-cursor.txt
+          grep -q 'rate extremes' audit/rs-cursor.txt
+          # THE PINNED NON-UNITY HASH. Both arms must produce it. This is the
+          # number the shared-lane commit has to reproduce.
+          grep -q 'non-unity playback hash (pre-extraction reference): 0xbd69ac9c' audit/rs-cursor.txt || {
+            echo "::error::the pre-extraction reference no longer renders 0xbd69ac9c"; exit 1; }
+          grep -q 'non-unity playback hash (st_rs_cursor.h production): 0xbd69ac9c' audit/rs-cursor.txt || {
+            echo "::error::st_rs_cursor.h no longer renders the pinned non-unity hash 0xbd69ac9c"; exit 1; }
+          python3 .github/scripts/stemtape_player_rs_cursor_mutations.py \
+            audit/rs-cursor-mutations.md | tee audit/rs-cursor-mut.txt
+          {
+            echo '### Stem Tape resampler-cursor extraction gate'
+            echo '```text'
+            cat audit/rs-cursor.txt
+            echo '```'
+            cat audit/rs-cursor-mutations.md
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Stem Tape ROCKER SEMITONES -- the Tape Looper's own pitch grid, reused

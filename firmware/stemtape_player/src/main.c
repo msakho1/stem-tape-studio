@@ -356,6 +356,7 @@ static volatile uint32_t g_diag_window_ms = 500u;
 #include "st_stem_meter.h"
 #include "st_inertia.h"
 #include "st_resample.h"
+#include "st_rs_cursor.h"
 #include "st_fx.h"
 #include "st_fx_ctl.h"
 #include "st_ctl.h"
@@ -3049,54 +3050,16 @@ static void stem_render_run(const uint8_t *const grp[ST_PL_STEMS],
 			 */
 			st11_audio_frame_t nxt;
 
-			/* THE HARD BOUND. st_rs_out_frames() floors at one
-			 * output frame, and above 1x that single forced frame
-			 * can ask for a source frame the run does not contain.
-			 * Holding the last available frame is a degenerate
-			 * corner measured in single frames; reading past the
-			 * group buffer is memory corruption in a real-time
-			 * thread. */
-			for (sp = 0; sp < ST_PL_STEMS; sp++) {
-				const uint32_t c = (cur[sp] >= src_avail[sp])
-						   ? (src_avail[sp] - 1u) : cur[sp];
-
-				idx[sp] = (uint32_t)((int32_t)frame_in_group[sp] +
-						      dirs[sp] * (int32_t)c);
-			}
-			/* THE ARRAY FORM, one index per stem -- but only when the
-			 * four indices actually differ, which today they never
-			 * do.
-			 *
-			 * st_pl_decode_frame() lives in st_planar.c, so this was
-			 * a call across a translation unit once per output frame
-			 * at 48 kHz, on the deadline thread, for the ENTIRE
-			 * variable-rate path. Unity playback stopped paying it in
-			 * st45 and this path kept paying it, which is exactly
-			 * what the hardware reported: ordinary playback clean,
-			 * the pitch rocker off centre crackling again.
-			 *
-			 * One rate and one direction means all four cursors are
-			 * the same number, so the equal case is 100% of today's
-			 * traffic and takes the inline decode. The array call
-			 * REMAINS, reached the moment a stem's cursor genuinely
-			 * diverges -- which is per-track reverse, and is why the
-			 * array form exists at all. Three compares per frame buy
-			 * back a call plus a four-element array construction, and
-			 * tests/test_planar.c already asserts the two forms agree
-			 * when the indices are equal. */
-			if (idx[0] == idx[1] && idx[1] == idx[2] &&
-			    idx[2] == idx[3]) {
-				st_pl_decode_frame_shared(grp, idx[0], &nxt);
-			} else {
-				st_pl_decode_frame(grp, idx, &nxt);
-			}
-			for (sp = 0; sp < ST_PL_STEMS; sp++) {
-				if (!s_rs_prev_valid[sp]) {
-					s_rs_prev.stem_l[sp] = nxt.stem_l[sp];
-					s_rs_prev.stem_r[sp] = nxt.stem_r[sp];
-					s_rs_prev_valid[sp] = true;
-				}
-			}
+			/* THE CURSORS ARE IN st_rs_cursor.h -- clamp and index,
+			 * decode at the cursors, prime a dropped lane, and (after
+			 * the blend) walk. Moved there UNCHANGED so a host gate
+			 * can link the real implementation instead of a model of
+			 * it; see that file's own comment for why bit-identity
+			 * needed a testable boundary. Four independent cursors,
+			 * exactly as before. */
+			st_rs_cursor_index(frame_in_group, dirs, src_avail, cur, idx);
+			st_rs_cursor_fetch(grp, idx, &nxt);
+			st_rs_cursor_prime(&nxt, &s_rs_prev, s_rs_prev_valid);
 			for (sp = 0; sp < ST11_STEM_COUNT; sp++) {
 				const int32_t pl = s_rs_prev.stem_l[sp];
 				const int32_t pr = s_rs_prev.stem_r[sp];
@@ -3108,115 +3071,12 @@ static void stem_render_run(const uint8_t *const grp[ST_PL_STEMS],
 					(int32_t)(((int64_t)(nxt.stem_r[sp] - pr) *
 						    (int32_t)frac[sp]) >> 16);
 			}
-			/*
-			 * Advance the cursor by one output frame's worth of
-			 * source. ABOVE 1x this can cross more than one frame,
-			 * so it WALKS them rather than jumping: `prev` must end
-			 * up holding the frame immediately behind the new
-			 * cursor, or the next output frame would blend across a
-			 * gap it never looked at. Below 1x the loop runs at
-			 * most once and this is what it always was.
-			 */
-			for (sp = 0; sp < ST_PL_STEMS; sp++) {
-				frac[sp] += rate_q16;
-				while (frac[sp] >= ST_RS_ONE) {
-					frac[sp] -= ST_RS_ONE;
-					cur[sp]++;
-					if (cur[sp] >= src_avail[sp]) {
-						/*
-						 * OUT OF RUN. Reachable only
-						 * from the floored corner in
-						 * st_rs_out_frames() -- one
-						 * forced output frame that at a
-						 * rate above 1x wants more
-						 * source than the run holds.
-						 *
-						 * The whole frames the rate
-						 * asked for beyond the run are
-						 * not there, so they are
-						 * dropped; the SUB-FRAME phase
-						 * is kept, because throwing it
-						 * away would be a position step
-						 * and leaving frac above 1.0
-						 * would make the next blend
-						 * extrapolate past both its
-						 * samples. ST_RS_ONE is a power
-						 * of two, so the mask is
-						 * exactly "the fractional
-						 * part".
-						 */
-						cur[sp] = src_avail[sp];
-						s_rs_prev.stem_l[sp] = nxt.stem_l[sp];
-						s_rs_prev.stem_r[sp] = nxt.stem_r[sp];
-						frac[sp] &= (ST_RS_ONE - 1u);
-						break;
-					}
-					{
-						/* ONE STEM'S frame behind its
-						 * OWN new cursor. Decoding all
-						 * four here would be three
-						 * stems' work thrown away and,
-						 * once directions differ, three
-						 * stems read at a position that
-						 * is not theirs. */
-						uint32_t pc = cur[sp] - 1u;
-						uint32_t pidx;
-
-						if (pc >= src_avail[sp]) {
-							pc = src_avail[sp] - 1u;
-						}
-						/* BEHIND IN THE DIRECTION OF
-						 * TRAVEL: one step back along
-						 * this head's own path, which
-						 * for a reversed head is a
-						 * HIGHER index in the group. */
-						pidx = (uint32_t)((int32_t)frame_in_group[sp] +
-								   dirs[sp] * (int32_t)pc);
-						/*
-						 * THE FRAME BEHIND THE NEW CURSOR
-						 * IS USUALLY THE ONE ALREADY IN
-						 * HAND.
-						 *
-						 * On the first step of this walk
-						 * the cursor moves from c to c+1,
-						 * so the frame behind it is c --
-						 * which is exactly where `nxt`
-						 * was just decoded. Re-reading it
-						 * from the group was four decodes
-						 * per output frame thrown away,
-						 * and at any rate at or above 1x
-						 * that is EVERY frame: it roughly
-						 * doubled the cost of the
-						 * variable-rate render against
-						 * the unity one, which is why the
-						 * pitch rocker pushed the audio
-						 * block past its 5.333 ms
-						 * deadline while unity playback
-						 * sat comfortably inside it.
-						 *
-						 * The compare is against the index
-						 * `nxt` was actually decoded at,
-						 * including the clamp, so it is
-						 * correct rather than merely
-						 * usually correct -- and a second
-						 * or later step of the walk (rates
-						 * above 2x) still decodes for
-						 * real. Identical bytes either
-						 * way: it is the same frame of
-						 * the same group.
-						 */
-						if (pidx == idx[sp]) {
-							s_rs_prev.stem_l[sp] = nxt.stem_l[sp];
-							s_rs_prev.stem_r[sp] = nxt.stem_r[sp];
-						} else {
-							st_pl_decode_stem_inline(
-								grp[sp], pidx,
-								&s_rs_prev.stem_l[sp],
-								&s_rs_prev.stem_r[sp]);
-						}
-					}
-				}
-			}
+			/* AND WALK, in st_rs_cursor.h with the other three -- one
+			 * output frame's worth of source per lane, each in its own
+			 * direction, carrying `prev` to the frame behind its own new
+			 * cursor. Moved unchanged; still four independent walks. */
+			st_rs_cursor_advance(grp, frame_in_group, dirs, src_avail, idx,
+					      &nxt, rate_q16, frac, cur, &s_rs_prev);
 		}
 
 		/* ---- THE FX RACK, STEM SCOPE ------------------------------
@@ -3393,12 +3253,7 @@ static void stem_render_run(const uint8_t *const grp[ST_PL_STEMS],
 		}
 		return;
 	}
-	for (sp = 0; sp < ST_PL_STEMS; sp++) {
-		frac_io[sp] = frac[sp];
-		/* Never report more than the run held, whatever the arithmetic
-		 * did. */
-		used_out[sp] = (cur[sp] > src_avail[sp]) ? src_avail[sp] : cur[sp];
-	}
+	st_rs_cursor_finish(frac, cur, src_avail, frac_io, used_out);
 }
 #endif /* SP1_XFER_ENABLE */
 

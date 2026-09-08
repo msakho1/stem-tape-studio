@@ -1339,6 +1339,64 @@ def main() -> int:
         fail = True
     report.append("")
 
+    # -- I. The resampler cursors live in st_rs_cursor.h, and main.c CALLS
+    #       them, in order -----------------------------------------------
+    #
+    # The host gate (test_rs_cursor_gate.c) proves the EXTRACTED code is
+    # sample-identical to the code it replaced. It cannot prove main.c uses it:
+    # a main.c that kept its own private copy, or that called the helpers in
+    # the wrong order, would leave that gate perfectly green. This section is
+    # the other half, and it reads the production file.
+    report.append("## I. The four resampler cursors are the shared implementation")
+    report.append("")
+
+    # I-1. All five helpers are called, and in the one order the contract
+    #      allows: index -> fetch -> prime -> (the caller's blend) -> advance,
+    #      then finish once per run.
+    order = ["st_rs_cursor_index", "st_rs_cursor_fetch", "st_rs_cursor_prime",
+             "st_rs_cursor_advance", "st_rs_cursor_finish"]
+    pos = [src.find(name + "(") for name in order]
+    if all(p >= 0 for p in pos) and pos == sorted(pos):
+        report.append("- present: `stem_render_run()` calls all five cursor helpers "
+                       "from `st_rs_cursor.h`, in the contract order "
+                       "index -> fetch -> prime -> advance -> finish. The blend sits "
+                       "between prime and advance, where it reads `prev`, `nxt` and "
+                       "the fraction the advance has not yet moved")
+    else:
+        missing = [n for n, p in zip(order, pos) if p < 0]
+        if missing:
+            report.append("- **MISSING/BAD**: main.c does not call " +
+                           ", ".join("`%s()`" % m for m in missing) +
+                           ". The variable-rate cursors would then be a private copy "
+                           "in main.c that no host gate links, which is exactly the "
+                           "situation the extraction exists to end")
+        else:
+            report.append("- **MISSING/BAD**: the cursor helpers are called OUT OF "
+                           "ORDER. `advance` before the blend renders every output "
+                           "frame one source frame ahead of its own fraction; "
+                           "`prime` after the blend leaves the first frame after a "
+                           "drop interpolating from a position the head no longer "
+                           "occupies")
+        fail = True
+
+    # I-2. And main.c does NOT still carry its own copy of the walk. A stale
+    #      duplicate left behind is how the extracted module and the shipping
+    #      code drift apart while every gate stays green.
+    if re.search(r"while\s*\(\s*frac\[sp\]\s*>=\s*ST_RS_ONE\s*\)", src) or \
+       re.search(r"st_pl_decode_stem_inline\s*\(\s*grp\[sp\]", src):
+        report.append("- **MISSING/BAD**: main.c still contains its own cursor walk "
+                       "(`while (frac[sp] >= ST_RS_ONE)` or a per-stem "
+                       "`st_pl_decode_stem_inline(grp[sp], ...)`). Two copies of the "
+                       "resampler cursor is the drift the extraction exists to "
+                       "prevent: the host gate would keep proving the header correct "
+                       "while the shipped audio came from the copy")
+        fail = True
+    else:
+        report.append("- present: main.c retains NO second copy of the cursor walk. "
+                       "The header is the only implementation, so the host gate's "
+                       "sample-for-sample proof is a proof about the shipping audio")
+    report.append("")
+
     report.append("## Result")
     report.append("")
     if fail:
