@@ -156,7 +156,46 @@
  * session's patience. */
 #define ST_RC_SWEEP_REPS 24u
 
-/* st63: STAGE 2B -- leaving reverse rejoins the shared timeline.
+/* st64: a reversed stem that reaches the FRONT OF THE SONG parks quietly.
+ *
+ * ONE DEFECT, AND NOTHING ELSE IN THIS BUILD. The per-head source-bound loop
+ * excluded a head only on `!resident`; it never looked at state. A reversed
+ * head parked at frame 0 is still sitting on a validated sector 0, so fis = 0
+ * gave rk = fis + 1 = 1 -- the `rk > pos_k + 1` clamp is 1 > 1 and does not
+ * catch it -- and `run` was pinned to ONE frame. That is 256 full run-loop
+ * passes per block where ordinary playback takes one or two. The read path is
+ * CPU-bound here, so the streamer starved beneath the priority-0 audio thread,
+ * the forward heads missed residency, the co-location guard froze every head
+ * for whole blocks, and the song clock and beat phase audibly slowed. On
+ * hardware: heavy crackling, a dramatic BPM slowdown, and a device that could
+ * no longer decode a PLAY tap or a 450 ms reverse double-tap because MAIN had
+ * stopped getting passes. Slow Playback still worked, because it is entered on
+ * a LEVEL and then runs its own 25 ms sampling loop -- which is what showed
+ * this was scheduling rather than a hang.
+ *
+ * It also sounded wrong on its own account: rendering fis = 0 on all 256 passes
+ * emitted frame 0 forty-eight thousand times a second, a constant, not audio.
+ *
+ * THE FIX IS TWO CONDITIONS. A parked head is not counted resident, at the one
+ * place residency is computed, because three consumers depend on it -- the
+ * source bound, the silent-group choice (the ONLY thing that makes a head
+ * silent) and the underrun accounting. And BECAUSE that makes it non-resident,
+ * the co-location guard must exclude it too, by explicit state rather than by
+ * positional coincidence, or the fix would introduce its own whole-mix stall.
+ * The guard is narrowed, not disarmed: a starved FORWARD head co-located with
+ * MASTER still stalls the mix, which is the case it exists for.
+ *
+ * PRE-EXISTING, not introduced by st62 or st63. git log -S on both anchors
+ * returns st52, where per-track reverse landed; it simply needed a reversed
+ * stem to travel all the way back to frame 0 to be reached.
+ *
+ * NOT the END_OF_SONG mirror -- same root, different pathology (`run` collapses
+ * to 0 and the block is abandoned as silence) -- deliberately left alone so
+ * this checkpoint's hardware validation stays clean.
+ *
+ * docs/stem-tape-reverse-start-of-song.md is the full account.
+ *
+ * ---- st63: STAGE 2B -- leaving reverse rejoins the shared timeline.
  *
  * ONE CHANGE, AND NOTHING ELSE IN THIS BUILD. Reverse is a TEMPORARY per-stem
  * departure from the master transport, and a stem that stops being reversed
@@ -271,9 +310,9 @@
  * proof matrix and the hardware acceptance list this build has NOT been run
  * against. */
 #if ST_VOL_CAL
-#define ST_BUILD_TAG "st63-VOLCAL"
+#define ST_BUILD_TAG "st64-VOLCAL"
 #else
-#define ST_BUILD_TAG "st63"
+#define ST_BUILD_TAG "st64"
 #endif
 #include "st_pwr_idle.h"
 #include "st_track_hold.h"
@@ -4109,7 +4148,70 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 						(void)atomic_add(&g_stem_miss[sk], 1);
 					}
 				}
-				resident[sk] = (g_stem_stream[sk].ready_sector == needed[sk]);
+				/*
+				 * ---- A PARKED HEAD IS NOT READING (st64) ------
+				 *
+				 * ST_STREAM_START_OF_SONG is TERMINAL FOR SOURCE
+				 * CONSUMPTION. st_stream_advance_frames() returns
+				 * TICK_NOT_PLAYING for it before touching anything,
+				 * so a head parked there -- a reversed head that ran
+				 * out of tape at the front of the song -- will not
+				 * take a single frame of this block however long the
+				 * run is. It may still be sitting on a validated
+				 * sector 0, but it is not READING it, and residency
+				 * is the flag every consumer below asks about.
+				 *
+				 * WHY THIS ONE LINE, AND NOT A TEST AT EACH USE.
+				 * Three separate consumers ask `resident[sk]`, and a
+				 * parked head has to be excluded from ALL of them:
+				 *
+				 *   the source-bound loop -- otherwise fis = 0 gives
+				 *   rk = fis + 1 = 1 (the `rk > pos_k + 1` clamp is
+				 *   1 > 1, so it does not catch it) and `run` is
+				 *   pinned to ONE frame;
+				 *
+				 *   the buffer choice -- `!resident ? silent_group`
+				 *   is the only thing that makes a head silent, so a
+				 *   head excluded from the bound but left resident
+				 *   would render its real sector-0 bytes at the
+				 *   TRANSPORT's offset, which is worse than the
+				 *   defect being fixed;
+				 *
+				 *   the underrun accounting -- a head that is not
+				 *   reading has not starved.
+				 *
+				 * WHAT THE PINNED RUN COST. One source frame per run
+				 * means one OUTPUT frame per run (st_rs_out_frames()
+				 * floors at 1), so a block took 256 full passes --
+				 * four pin lookups, four mailbox acquires, four
+				 * request publishes, four divisions, the whole bounds
+				 * computation, the seam checks and a stem_render_run()
+				 * call each -- where ordinary playback takes one or
+				 * two. The read path is CPU-bound on this part, so
+				 * that starves the streamer (priority 1) beneath the
+				 * audio thread (priority 0, whose only yield is a slab
+				 * alloc that stops blocking the moment it falls
+				 * behind); the forward heads then miss residency, the
+				 * co-location guard freezes every head for whole
+				 * blocks, and the song clock -- with it the beat phase
+				 * -- audibly slows. Hardware reported heavy crackling,
+				 * a dramatic BPM slowdown, and a device that could no
+				 * longer decode a PLAY tap or a reverse double-tap
+				 * because MAIN had stopped getting passes. It sounded
+				 * wrong on its own account too: rendering fis = 0 on
+				 * all 256 passes emitted frame 0 forty-eight thousand
+				 * times a second, a constant rather than audio.
+				 *
+				 * NOT THE END_OF_SONG MIRROR, deliberately. A resident
+				 * forward head parked at `frames` computes
+				 * left_in_song = 0 and collapses `run` to 0 instead,
+				 * abandoning the block -- same root, different
+				 * pathology, left alone so this checkpoint's hardware
+				 * validation stays clean. See
+				 * docs/stem-tape-reverse-start-of-song.md.
+				 */
+				resident[sk] = (g_stem_stream[sk].ready_sector == needed[sk]) &&
+					       (g_stem_stream[sk].state != ST_STREAM_START_OF_SONG);
 				if (resident[sk]) {
 					got++;
 				}
@@ -4248,8 +4350,35 @@ st_fx_prepare(&g_stem_fx, g_stem_beat_timing.frames_per_beat,
 		{
 			bool block_underrun = false;
 
+			/*
+			 * ---- AND A PARKED HEAD IS NOT PART OF THE SET (st64) ----
+			 *
+			 * The rule above is about heads that are TRAVELLING
+			 * TOGETHER, and it identifies them by position because,
+			 * until a track is reversed, position is what they share.
+			 * A head parked at ST_STREAM_START_OF_SONG is not
+			 * travelling at all: it is a reversed head that ran out of
+			 * tape at the front of the song, it consumes no source
+			 * frames, and it is INTENTIONALLY independent -- that is
+			 * what reverse made it.
+			 *
+			 * Without this test it can still satisfy the positional
+			 * condition by coincidence, and the coincidence is not
+			 * exotic: park it at frame 0 while the transport is also
+			 * near the song start -- reverse engaged early, which is
+			 * exactly the reported reproduction -- and the moment that
+			 * parked head loses residency the WHOLE MIX stops
+			 * advancing. An independent stem that has merely reached a
+			 * boundary must never stall MASTER.
+			 *
+			 * EXPLICIT STATE, NOT POSITIONAL COINCIDENCE. The guard's
+			 * position test cannot tell "the same frame because we are
+			 * synchronised" from "the same frame because I ran out of
+			 * tape where you happen to be"; the state can.
+			 */
 			for (sk = 0; sk < ST_PL_STEMS; sk++) {
 				if (!resident[sk] &&
+				    g_stem_stream[sk].state != ST_STREAM_START_OF_SONG &&
 				    g_stem_stream[sk].song_frame == tr->song_frame) {
 					block_underrun = true;
 					break;

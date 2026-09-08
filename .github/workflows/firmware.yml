@@ -2289,6 +2289,54 @@ jobs:
             cat audit/reverse-resync-mutations.md
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Stem Tape REVERSE START gate -- a stem parked at frame 0 is boring
+        # THE HARDWARE FAILURE. Reverse a stem all the way back to frame 0 and
+        # the device degraded badly: heavy crackling, a dramatic BPM slowdown,
+        # no pause, no reverse release -- effectively wedged. Slow Playback
+        # still responded, which is what showed it was scheduling rather than a
+        # hang.
+        #
+        # ONE ARITHMETIC STEP. The source-bound loop excluded a head only on
+        # !resident. A head parked at frame 0 is still sitting on a validated
+        # sector 0, so fis = 0 gives rk = fis + 1 = 1 (the `rk > pos_k + 1`
+        # clamp is 1 > 1 and does not catch it) and `run` was pinned to ONE
+        # frame -- 256 full run-loop passes per block instead of one or two.
+        # The read path is CPU-bound, so that starved the streamer beneath the
+        # priority-0 audio thread, the co-location guard then froze every head,
+        # and MAIN stopped getting passes often enough to decode a PLAY tap or
+        # a 450 ms reverse double-tap.
+        #
+        # TWO STEPS. The gate proves the behaviour against a model of
+        # stem_audio_block(); the mutation run proves the gate can go RED --
+        # five mutations, three of which break the fix's three CONSUMERS
+        # independently (the source bound, the silent-group choice, the guard).
+        working-directory: ${{ github.workspace }}/project
+        run: |
+          set -euo pipefail
+          cc -std=c11 -Wall -Wextra -Werror -Ifirmware/stemtape_player/src \
+            firmware/stemtape_player/src/st_stem_stream.c \
+            firmware/stemtape_player/tests/test_reverse_start_gate.c \
+            -o audit/test_reverse_start_gate
+          ./audit/test_reverse_start_gate | tee audit/reverse-start.txt
+          grep -q 'REVERSE START GATE PASSED' audit/reverse-start.txt
+          # The gate must keep asking the questions, not merely exit 0.
+          grep -q 'stem 0 parked at frame 0' audit/reverse-start.txt
+          grep -q 'stem 3 parked at frame 0' audit/reverse-start.txt
+          grep -q 'reverse engaged at the very start' audit/reverse-start.txt
+          grep -q 'must not stall the mix' audit/reverse-start.txt
+          grep -q 'narrowed, not disarmed' audit/reverse-start.txt
+          grep -q 'release from frame 0 rejoins' audit/reverse-start.txt
+          grep -q 'switching reverse away from a parked stem' audit/reverse-start.txt
+          python3 .github/scripts/stemtape_player_reverse_start_mutations.py \
+            audit/reverse-start-mutations.md | tee audit/reverse-start-mut.txt
+          {
+            echo '### Stem Tape reverse start-of-song gate'
+            echo '```text'
+            cat audit/reverse-start.txt
+            echo '```'
+            cat audit/reverse-start-mutations.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Stem Tape ROCKER SEMITONES -- the Tape Looper's own pitch grid, reused
         # THE BRIEF: expose the semitone capability the Tape Looper already
         # has, rather than building a second pitch engine.

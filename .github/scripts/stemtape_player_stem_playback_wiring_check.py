@@ -1287,6 +1287,58 @@ def main() -> int:
                        "reverse-consume block")
     report.append("")
 
+    # ==================================================================
+    # H. A HEAD PARKED AT THE FRONT OF THE SONG IS BORING
+    # ==================================================================
+    #
+    # tests/test_reverse_start_gate.c proves the behaviour against a model. These
+    # two read the production file, because what went wrong on hardware was a
+    # MISSING CONDITION -- and a missing condition is exactly what a model can
+    # be written around without noticing.
+    report.append("## H. A reversed head parked at frame 0 consumes nothing")
+    report.append("")
+
+    # H-1. Residency is the one place a parked head is excluded, and all three
+    #      of its consumers (the source bound, the silent-group choice, the
+    #      underrun accounting) depend on it.
+    if re.search(r"resident\[sk\]\s*=\s*\(g_stem_stream\[sk\]\.ready_sector\s*==\s*needed\[sk\]\)"
+                 r"\s*&&\s*\n?\s*\(g_stem_stream\[sk\]\.state\s*!=\s*ST_STREAM_START_OF_SONG\)",
+                 src):
+        report.append("- present: a head in `ST_STREAM_START_OF_SONG` is not counted "
+                       "resident. It is terminal for source consumption, so it bounds "
+                       "no run (`fis = 0` would give `rk = 1` and pin the block to "
+                       "ONE frame), renders the all-zero group instead of frame 0 "
+                       "over and over, and is not charged an underrun for a read it "
+                       "never made")
+    else:
+        report.append("- **MISSING/BAD**: `resident[sk]` no longer excludes "
+                       "`ST_STREAM_START_OF_SONG`. A reversed head parked at frame 0 "
+                       "then pins the source run to one frame -- 256 run-loop passes "
+                       "per block instead of one or two -- which starves the streamer "
+                       "under the priority-0 audio thread, freezes the transport "
+                       "through the co-location guard, and stops MAIN decoding a PLAY "
+                       "tap or a reverse double-tap. Observed on hardware")
+        fail = True
+
+    # H-2. And, because H-1 makes a parked head non-resident, the co-location
+    #      guard must exclude it too or the fix introduces its own stall.
+    if re.search(r"if\s*\(!resident\[sk\]\s*&&\s*\n?\s*"
+                 r"g_stem_stream\[sk\]\.state\s*!=\s*ST_STREAM_START_OF_SONG\s*&&", src):
+        report.append("- present: the co-location underrun guard excludes a parked "
+                       "head by EXPLICIT STATE. Its position test cannot tell \"the "
+                       "same frame because we are synchronised\" from \"the same frame "
+                       "because I ran out of tape where you happen to be\", and an "
+                       "intentionally independent stem that has merely reached a "
+                       "boundary must never stall the whole mix")
+    else:
+        report.append("- **MISSING/BAD**: the co-location guard does not exclude "
+                       "`ST_STREAM_START_OF_SONG`. Since a parked head is (correctly) "
+                       "no longer resident, it now satisfies `!resident[sk]`, so "
+                       "wherever the transport shares its frame the whole mix stalls "
+                       "-- a fresh defect introduced by the residency fix itself")
+        fail = True
+    report.append("")
+
     report.append("## Result")
     report.append("")
     if fail:
