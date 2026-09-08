@@ -118,7 +118,33 @@ mutation X-10 removed that bound and survived, correctly. The line stays — thi
 is firmware with no MMU and it costs one compare per run — but nothing claims to
 test it, and X-10 now mutates something observable.
 
-## 5. Status
+## 5. What it cost
+
+| | st64 `c0bac96` | this extraction | delta |
+|---|---|---|---|
+| FLASH (bin) | 116,864 B | 116,848 B | **−16 B** |
+| RAM (linker) | 203,486 B | 203,486 B | **0** |
+| RAM free | 58,658 B | 58,658 B | 0 |
+| new statics | — | none | 0 |
+| `st_rs_cursor_*` out-of-line copies in the image | — | **none** | fully inlined |
+| `stem_render_run()` frame | *not measured* | `sub sp, #188` | **unknown** |
+
+The image is **not** byte-identical: 116,848 vs 116,864, and a different SHA-256
+(`bde7f62c…210e` vs `abac6ef8…4ad9`). Sixteen bytes is four Thumb-2
+instructions. The build tag was deliberately left at st64 so that a byte-identical
+image would have been available as proof; it was not available, so the proof of
+no behavioural change rests entirely on the differential gate in §4 — which is
+where it should rest, since that gate compares audio rather than encoding.
+
+**The stack delta is not measured, and is reported as unknown rather than
+zero.** The measuring step did not exist at st64, so there is no like-for-like
+prior number; 188 B is the extracted build's frame, and it becomes the baseline
+Commit 2 is compared against. The *expectation* is no growth — the helpers take
+existing arrays by pointer, add no locals, and are proven fully inlined by the
+symbol assertion, so they reuse the caller's frame — but that is reasoning, not
+measurement, and it is written down as such.
+
+## 6. Status
 
 Commit 1 is CI-proven and **hardware-unproven**, which for a no-op extraction
 means: the audio is proven identical on the host, and nothing has been flashed.
